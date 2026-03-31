@@ -50,26 +50,26 @@ BEGIN
   Terminal.Clear;
   FOR k := 0 TO 16 DO
 			 FOR i := 0 TO 61 DO
-						m[k, i] := " "
+						m[k][i] := " "
 			 END
   END;
   FOR i := 1 TO 61 DO
-			 m[1, i] := "#"
+			 m[1][i] := "#"
 	END;
   FOR i := 2 TO 16 DO
-			 m[i, 1] := "#"
+			 m[i][1] := "#"
 	END;
   FOR i := 2 TO 61 DO
-			 m[16, i] := "#"
+			 m[16][i] := "#"
 	END;
   FOR i := 2 TO 15 DO
-			 m[i, 61] := "#"
+			 m[i][61] := "#"
 	END;
   body := "O"; head := "@";
   FOR i := 3 TO 6 DO
-			 m[8, i] := body
+			 m[8][i] := body
 	END;
-  m[8, 7] := head
+  m[8][7] := head
 END Limits;
 
 PROCEDURE Display;
@@ -78,8 +78,8 @@ BEGIN
   j := 5;
   FOR k := 1 TO 16 DO
     j := j + 1;
-    Terminal.Goto(10, j);
-    FOR i := 1 TO 61 DO Out.Char(m[k, i]) END
+    Terminal.Goto(10,j);
+    FOR i := 1 TO 61 DO Out.Char(m[k][i]) END
   END
 END Display;
 
@@ -88,15 +88,15 @@ BEGIN
   REPEAT
     fy := Terminal.Random(13) + 2;
     fx := Terminal.Random(58) + 2
-  UNTIL m[fy, fx] = " ";
-  m[fy, fx] := "+";
+  UNTIL m[fy][fx] = " ";
+  m[fy][fx] := "+";
   WriteChar(fx + 9, fy + 4, "+")
 END Food;
 
 PROCEDURE MoveBody;
 BEGIN
   count := count + 1;
-  m[ty[count], tx[count]] := " ";
+  m[ty[count]][tx[count]] := " ";
   WriteChar(tx[count] + 9, ty[count] + 4, " ");
   ty[count] := y;
   tx[count] := x;
@@ -107,10 +107,10 @@ PROCEDURE MoveSnake(nox, noy: INTEGER);
 BEGIN
   x := x + nox; y := y + noy;
   MoveBody;
-  m[y, x] := head;
+  m[y][x] := head;
   WriteChar(x + 9, y + 4, head);
   m[y - noy, x - nox] := body;
-  WriteChar(x + 9 - nox, y + 4 - noy, body)
+	WriteChar(x + 9 - nox, y + 4 - noy, body)
 END MoveSnake;
 
 PROCEDURE InWallOrHimself(): BOOLEAN;
@@ -121,7 +121,7 @@ BEGIN
   IF c = KeyRight THEN nx := 1 ELSIF c = KeyLeft THEN nx := -1
   ELSIF c = KeyUp THEN ny := -1 ELSIF c = KeyDown THEN ny := 1 END;
   
-  IF (m[y + ny, x + nx] = "#") OR (m[y + ny, x + nx] = body) THEN
+  IF (m[y + ny][x + nx] = "#") OR (m[y + ny][x + nx] = body) THEN
     res := TRUE
   ELSE
     res := FALSE
@@ -197,7 +197,7 @@ VAR i, k: INTEGER; eaten: BOOLEAN;
 BEGIN
   eaten := TRUE;
   FOR k := 2 TO 15 DO
-    FOR i := 2 TO 60 DO IF m[k, i] = "+" THEN eaten := FALSE END END
+    FOR i := 2 TO 60 DO IF m[k][i] = "+" THEN eaten := FALSE END END
   END;
   RETURN eaten
 END FoodEaten;
