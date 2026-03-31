@@ -1,17 +1,22 @@
-CC = gcc
+CC     = gcc
 CFLAGS = -Wall -O -std=c99
-TARGET = obc
-SOURCE = oberon.c
 PREFIX = $(HOME)
 
-all: $(TARGET)
+all: obc lextest parsetest
 
-$(TARGET): $(SOURCE)
-	$(CC) $(CFLAGS) -o $(TARGET) $(SOURCE)
+lextest: lextest.c lexer.c lexer.h
+	$(CC) $(CFLAGS) -o lextest lextest.c lexer.c
 
-install: $(TARGET)
-	cp $(TARGET) $(PREFIX)/bin
+obc: obc.c codegen.c parser.c lexer.c codegen.h parser.h lexer.h
+	$(CC) $(CFLAGS) -o obc obc.c codegen.c parser.c lexer.c
+
+parsetest: parsetest.c parser.c lexer.c parser.h lexer.h
+	$(CC) $(CFLAGS) -o parsetest parsetest.c parser.c lexer.c
+
+install: obc
+	cp obc $(PREFIX)/bin
+
 clean:
-	rm -f $(TARGET)
+	rm -f obc lextest parsetest
 
-.PHONY: all clean
+.PHONY: all clean install
