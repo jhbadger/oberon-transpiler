@@ -63,13 +63,12 @@ const ushort
     cmRunProgram  = 205,
     cmAbout       = 206,
     cmGotoLine    = 207,
-    cmCompileRun  = 208,
     cmWindowList  = 209,     // Show window list dialog
     cmWindow1     = 210;     // cmWindow1..cmWindow1+N select window N
                              // (reserve 210-249 for up to 40 windows)
 
 // ── Run oberon  ────────────────────────────────────────────────
-static int runOberonInteractive(const char* filepath) {
+static int runOberon(const char* filepath) {
     TScreen::suspend();
     printf("\n--- Running %s ---\n\n", filepath);
     fflush(stdout);
@@ -475,8 +474,7 @@ public:
                 case kbCtrlF: event.what = evCommand; event.message.command = cmFind;        break;
                 case kbCtrlH: event.what = evCommand; event.message.command = cmReplace;     break;
                 case kbF7:    event.what = evCommand; event.message.command = cmSearchAgain; break;
-                // FIX: F8 → compile and run
-                case kbF8:    event.what = evCommand; event.message.command = cmCompileRun;  break;
+						case kbF9:    event.what = evCommand; event.message.command = cmRunProgram;  break;
                 default: break;
             }
         }
@@ -639,7 +637,6 @@ private:
     void runProgram();
     void showAbout();
     void gotoLine();
-    void compileAndRun();
     void showWindowList();
     void selectWindow(int idx);
     TEditorWindow* activeEditor();
@@ -689,8 +686,8 @@ TMenuBar* TOberonIDE::initMenuBar(TRect r) {
                            "Shift-Ins") +
             newLine() + *new TMenuItem("~G~o to Line...", cmGotoLine, kbNoKey) +
             *new TSubMenu("~R~un", kbAltR) +
-            *new TMenuItem("~C~ompile && Run", cmCompileRun, kbF8, hcNoContext,
-                           "F8") +
+            *new TMenuItem("~R~un", cmRunProgram, kbF9, hcNoContext,
+                           "F9") +
             *new TSubMenu("~S~earch", kbAltS) +
             *new TMenuItem("~F~ind...", cmFind, kbCtrlF, hcNoContext,
                            "Ctrl-F") +
@@ -713,7 +710,7 @@ TStatusLine* TOberonIDE::initStatusLine(TRect r) {
             *new TStatusItem("~F2~ Save",    kbF2,   cmSaveFile)   +
             *new TStatusItem("~F3~ Open",    kbF3,   cmOpenFile)   +
             *new TStatusItem("~F7~ Again",   kbF7,   cmSearchAgain) +
-            *new TStatusItem("~F8~ Compile", kbF8,   cmCompileRun) +
+            *new TStatusItem("~F9~ Run", kbF9,   cmRunProgram) +
             *new TStatusItem("~Alt-X~ Exit", kbAltX, cmQuit)
     );
 }
@@ -750,7 +747,6 @@ if (event.message.command >= cmWindow1 && event.message.command < cmWindow1 + 40
             case cmSaveFile:   saveFile();       clearEvent(event); return;
             case cmSaveFileAs: saveFileAs();     clearEvent(event); return;
             case cmRunProgram: runProgram();     clearEvent(event); return;
-            case cmCompileRun: compileAndRun();  clearEvent(event); return;
             case cmAbout:      showAbout();      clearEvent(event); return;
             case cmGotoLine:   gotoLine();       clearEvent(event); return;
             case cmWindowList: showWindowList(); clearEvent(event); return;
@@ -861,111 +857,12 @@ void TOberonIDE::runProgram() {
     std::string path = w->getFilePath();
     if (path.empty()) return;
     w->editor->errorLine = 0;
-    int errLine = runOberonInteractive(path.c_str());
+    int errLine = runOberon(path.c_str());
     if (errLine > 0) {
         w->editor->errorLine = errLine;
         w->jumpToLine(errLine - 1);
         w->drawView();
     }
-}
-
-void TOberonIDE::compileAndRun() {
-    auto* w = activeEditor();
-    if (!w) { messageBox(" No editor open. ", mfError | mfOKButton); return; }
-    std::string path = w->getFilePath();
-    if (path.empty()) { messageBox(" Save the file first. ", mfError | mfOKButton); return; }
-
-    std::string binPath = path;
-    auto dot = binPath.rfind('.');
-    if (dot != std::string::npos) binPath = binPath.substr(0, dot);
-
-    w->editor->errorLine = 0;
-    TScreen::suspend();
-    printf("\n--- Compiling %s ---\n", path.c_str());
-    fflush(stdout);
-
-    std::string interp = "oberon";
-    {
-        char self[4096] = {};
-        ssize_t len = readlink("/proc/self/exe", self, sizeof(self)-1);
-        if (len > 0) {
-            std::string dir = std::string(self, len);
-            dir = dir.substr(0, dir.rfind('/') + 1);
-            std::string candidate = dir + "oberon";
-            if (access(candidate.c_str(), X_OK) == 0) interp = candidate;
-        }
-    }
-
-    int errpipe[2]; pipe(errpipe);
-    int compileOk = 0;
-    std::string errout;
-    {
-        pid_t pid = fork();
-        if (pid == 0) {
-            close(errpipe[0]);
-            dup2(errpipe[1], STDERR_FILENO);
-            close(errpipe[1]);
-            execlp(interp.c_str(), interp.c_str(), path.c_str(),
-                   binPath.c_str(), nullptr);
-            _exit(127);
-        } else if (pid > 0) {
-            close(errpipe[1]);
-            char buf[1024]; ssize_t n;
-            while ((n = ::read(errpipe[0], buf, sizeof(buf))) > 0) errout.append(buf, n);
-            close(errpipe[0]);
-            int status; waitpid(pid, &status, 0);
-            compileOk = WIFEXITED(status) && WEXITSTATUS(status) == 0;
-        }
-    }
-
-    if (!compileOk) {
-        fwrite(errout.c_str(), 1, errout.size(), stderr);
-        printf("\n--- Compilation FAILED. Press Enter ---");
-        fflush(stdout);
-        int c; while ((c = getchar()) != '\n' && c != EOF) {}
-        TScreen::resume();
-        TProgram::application->redraw();
-        return;
-    }
-
-    printf("OK -- running %s\n\n", binPath.c_str());
-    fflush(stdout);
-
-    int errpipe2[2]; pipe(errpipe2);
-    {
-        pid_t pid = fork();
-        if (pid == 0) {
-            close(errpipe2[0]);
-            dup2(errpipe2[1], STDERR_FILENO);
-            close(errpipe2[1]);
-            std::string absPath = binPath;
-            if (absPath.empty() || absPath[0] != '/') {
-                char cwd[4096] = {};
-                if (getcwd(cwd, sizeof(cwd)))
-                    absPath = std::string(cwd) + "/" + absPath;
-            }
-            char* argv0 = const_cast<char*>(absPath.c_str());
-            char* execArgv[] = { argv0, nullptr };
-            execv(absPath.c_str(), execArgv);
-            perror("exec");
-            _exit(127);
-        } else if (pid > 0) {
-            close(errpipe2[1]);
-            char buf[1024]; ssize_t n; errout.clear();
-            while ((n = ::read(errpipe2[0], buf, sizeof(buf))) > 0) errout.append(buf, n);
-            close(errpipe2[0]);
-            int status; waitpid(pid, &status, 0);
-            if (!errout.empty()) fwrite(errout.c_str(), 1, errout.size(), stderr);
-            if (!(WIFEXITED(status) && WEXITSTATUS(status) == 0))
-                printf("\n[Process exited with code %d]\n", WEXITSTATUS(status));
-        }
-    }
-
-    printf("\n--- Press Enter to return to the IDE ---");
-    fflush(stdout);
-    int c; while ((c = getchar()) != '\n' && c != EOF) {}
-    TScreen::resume();
-    TProgram::application->redraw();
 }
 
 void TOberonIDE::showAbout() {
@@ -974,7 +871,7 @@ void TOberonIDE::showAbout() {
     dlg->insert(new TStaticText(TRect(2,2,48,3), " Oberon IDE  v1.0"));
     dlg->insert(new TStaticText(TRect(2,3,48,4), " Built on tvision (magiblot)"));
     dlg->insert(new TStaticText(TRect(2,5,48,6), " F2  Save         F3  Open"));
-    dlg->insert(new TStaticText(TRect(2,6,48,7), " F8  Compile+Run  F9  Run"));
+    dlg->insert(new TStaticText(TRect(2,6,48,7), " F9  Run"));
     dlg->insert(new TStaticText(TRect(2,7,48,8), " Alt-W  Window list"));
     dlg->insert(new TStaticText(TRect(2,8,48,9), " Alt-X  Exit"));
     dlg->insert(new TButton(TRect(20,10,30,11), "  ~O~K  ", cmOK, bfDefault));
