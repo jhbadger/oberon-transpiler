@@ -1,0 +1,1014 @@
+/*
+ * Oberon IDE — Turbo Pascal 7-style IDE built on magiblot/tvision
+ *
+ */
+
+#define Uses_TApplication
+#define Uses_TButton
+#define Uses_TDeskTop
+#define Uses_TDialog
+#define Uses_TEditor
+#define Uses_TEvent
+#define Uses_TFileDialog
+#define Uses_TFileEditor
+#define Uses_TFrame
+#define Uses_TIndicator
+#define Uses_TInputLine
+#define Uses_TKeys
+#define Uses_TLabel
+#define Uses_TCheckBoxes
+#define Uses_TSItem
+#define Uses_TMenuBar
+#define Uses_TMenuItem
+#define Uses_TProgram
+#define Uses_TRect
+#define Uses_TScrollBar
+#define Uses_TStaticText
+#define Uses_TStatusDef
+#define Uses_TStatusItem
+#define Uses_TStatusLine
+#define Uses_TSubMenu
+#define Uses_TWindow
+#define Uses_MsgBox
+#define Uses_TTerminal
+#define Uses_otstream
+#define Uses_TDrawBuffer
+#define Uses_TScroller
+#define Uses_TScreen
+#define Uses_TFindDialogRec
+#define Uses_TReplaceDialogRec
+#define Uses_TEditorDialog
+#define Uses_TColorAttr
+#include <tvision/tv.h>
+
+#include <cstring>
+#include <cstdarg>
+#include <cstdio>
+#include <string>
+#include <vector>
+#include <algorithm>
+#include <cctype>
+#include <fstream>
+#include <unistd.h>
+#include <sys/wait.h>
+#include <fcntl.h>
+#include <signal.h>
+
+// Custom commands — all above 200 to avoid clashing with tvision built-ins
+const ushort
+    cmNewFile     = 201,
+    cmOpenFile    = 202,
+    cmSaveFile    = 203,
+    cmSaveFileAs  = 204,
+    cmRunProgram  = 205,
+    cmAbout       = 206,
+    cmGotoLine    = 207,
+    cmCompileRun  = 208,
+    cmWindowList  = 209,     // Show window list dialog
+    cmWindow1     = 210;     // cmWindow1..cmWindow1+N select window N
+                             // (reserve 210-249 for up to 40 windows)
+
+// ── Run oberon  ────────────────────────────────────────────────
+static int runOberonInteractive(const char* filepath) {
+    TScreen::suspend();
+    printf("\n--- Running %s ---\n\n", filepath);
+    fflush(stdout);
+
+    std::string interp = "obc";
+    {
+        char self[4096] = {};
+        ssize_t len = readlink("/proc/self/exe", self, sizeof(self)-1);
+        if (len > 0) {
+            std::string selfPath(self, len);
+            std::string dir = selfPath.substr(0, selfPath.rfind('/') + 1);
+            std::string candidate = dir + "obc";
+            if (access(candidate.c_str(), X_OK) == 0)
+                interp = candidate;
+        }
+    }
+
+    int errpipe[2] = {-1,-1};
+    pipe(errpipe);
+
+    int errorLine = 0;
+    bool failed   = false;
+
+    pid_t pid = fork();
+    if (pid == 0) {
+        close(errpipe[0]);
+        dup2(errpipe[1], STDERR_FILENO);
+        close(errpipe[1]);
+        execlp(interp.c_str(), interp.c_str(), filepath, nullptr);
+        perror("execlp: obc not found");
+        _exit(127);
+    } else if (pid > 0) {
+        close(errpipe[1]);
+        std::string errout;
+        char ebuf[1024]; ssize_t n;
+        while ((n = read(errpipe[0], ebuf, sizeof(ebuf))) > 0)
+            errout.append(ebuf, n);
+        close(errpipe[0]);
+
+        int status = 0;
+        waitpid(pid, &status, 0);
+        failed = !(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+
+        if (failed) {
+            if (!errout.empty()) { fwrite(errout.c_str(), 1, errout.size(), stderr); fflush(stderr); }
+            if (WIFEXITED(status) && WEXITSTATUS(status) != 0)
+                printf("\n[Process exited with code %d]\n", WEXITSTATUS(status));
+            else if (!WIFEXITED(status))
+                printf("\n[Process terminated abnormally]\n");
+
+            auto parseErrorLine = [](const std::string& s) -> int {
+                size_t pos = s.find("at line ");
+                if (pos != std::string::npos) {
+                    size_t numStart = pos + 8;
+                    if (numStart < s.size() && isdigit((unsigned char)s[numStart]))
+                        return std::stoi(s.substr(numStart));
+                }
+                pos = 0;
+                while ((pos = s.find("line ", pos)) != std::string::npos) {
+                    size_t numStart = pos + 5;
+                    if (numStart < s.size() && isdigit((unsigned char)s[numStart]))
+                        return std::stoi(s.substr(numStart));
+                    pos++;
+                }
+                return 0;
+            };
+            errorLine = parseErrorLine(errout);
+        }
+    } else {
+        close(errpipe[0]); close(errpipe[1]);
+        perror("fork");
+    }
+
+    printf("\n--- Press Enter to return to the IDE ---");
+    fflush(stdout);
+    int c;
+    while ((c = getchar()) != '\n' && c != EOF) {}
+
+    TScreen::resume();
+    TProgram::application->redraw();
+    return failed ? errorLine : 0;
+}
+
+// ── Output dialog ─────────────────────────────────────────────────────────
+class TOutputDialog : public TDialog {
+public:
+    TOutputDialog(const std::string& text, bool success)
+        : TWindowInit(&TOutputDialog::initFrame),
+          TDialog(TRect(2, 1, 78, 22),
+                  success ? " Program Output " : " Output / Errors ")
+    {
+        options |= ofCentered;
+        TScrollBar* vbar = new TScrollBar(TRect(size.x-2, 1,        size.x-1, size.y-3));
+        TScrollBar* hbar = new TScrollBar(TRect(1,        size.y-3, size.x-2, size.y-2));
+        insert(vbar);
+        insert(hbar);
+        TRect r(1, 1, size.x-2, size.y-3);
+        auto* term = new TTerminal(r, hbar, vbar, 32768);
+        insert(term);
+        otstream os(term);
+        os << text;
+        if (text.empty() || text.back() != '\n') os << '\n';
+        os.flush();
+        insert(new TButton(TRect((size.x-10)/2, size.y-2, (size.x+10)/2, size.y-1),
+                           "  ~O~K  ", cmOK, bfDefault));
+        selectNext(False);
+    }
+};
+
+// ── editorDialog implementation ───────────────────────────────────────────
+static ushort oberonEditorDialog(int dialog, ...) {
+    va_list args;
+    va_start(args, dialog);
+    ushort result = cmCancel;
+
+    switch (dialog) {
+        case edFind: {
+            TFindDialogRec* rec = va_arg(args, TFindDialogRec*);
+            TDialog* dlg = new TDialog(TRect(0,0,50,10), " Find ");
+            dlg->options |= ofCentered;
+            TInputLine* findInp = new TInputLine(TRect(2,3,48,4), maxFindStrLen);
+            dlg->insert(new TLabel(TRect(2,2,12,3), "~T~ext:", findInp));
+            dlg->insert(findInp);
+            TCheckBoxes* opts = new TCheckBoxes(TRect(2,5,48,7),
+                new TSItem("~C~ase sensitive",
+                new TSItem("~W~hole words only", nullptr)));
+            dlg->insert(opts);
+            dlg->insert(new TButton(TRect(12,8,22,9), " ~O~K ",     cmOK,     bfDefault));
+            dlg->insert(new TButton(TRect(28,8,38,9), " ~C~ancel ", cmCancel, bfNormal));
+            findInp->setData((void*)rec->find);
+            ushort optVal = rec->options & (efCaseSensitive | efWholeWordsOnly);
+            opts->setData(&optVal);
+            dlg->selectNext(False);
+            if (TProgram::deskTop->execView(dlg) != cmCancel) {
+                findInp->getData(rec->find);
+                opts->getData(&optVal);
+                rec->options = (rec->options & ~(efCaseSensitive|efWholeWordsOnly)) | optVal;
+                result = cmOK;
+            }
+            TObject::destroy(dlg);
+            break;
+        }
+        case edReplace: {
+            TReplaceDialogRec* rec = va_arg(args, TReplaceDialogRec*);
+            TDialog* dlg = new TDialog(TRect(0,0,54,14), " Replace ");
+            dlg->options |= ofCentered;
+            TInputLine* findInp = new TInputLine(TRect(2,3,52,4), maxFindStrLen);
+            dlg->insert(new TLabel(TRect(2,2,14,3), "~F~ind:", findInp));
+            dlg->insert(findInp);
+            TInputLine* replInp = new TInputLine(TRect(2,6,52,7), maxReplaceStrLen);
+            dlg->insert(new TLabel(TRect(2,5,20,6), "~R~eplace with:", replInp));
+            dlg->insert(replInp);
+            TCheckBoxes* opts = new TCheckBoxes(TRect(2,8,52,11),
+                new TSItem("~C~ase sensitive",
+                new TSItem("~W~hole words only",
+                new TSItem("~P~rompt on replace",
+                new TSItem("~A~ll occurrences", nullptr)))));
+            dlg->insert(opts);
+            dlg->insert(new TButton(TRect(8,12,20,13),  " ~O~K ",     cmOK,     bfDefault));
+            dlg->insert(new TButton(TRect(24,12,38,13), " ~C~ancel ", cmCancel, bfNormal));
+            findInp->setData((void*)rec->find);
+            replInp->setData((void*)rec->replace);
+            ushort optVal = rec->options &
+                (efCaseSensitive|efWholeWordsOnly|efPromptOnReplace|efReplaceAll);
+            opts->setData(&optVal);
+            dlg->selectNext(False);
+            if (TProgram::deskTop->execView(dlg) != cmCancel) {
+                findInp->getData(rec->find);
+                replInp->getData(rec->replace);
+                opts->getData(&optVal);
+                rec->options = (rec->options &
+                    ~(efCaseSensitive|efWholeWordsOnly|efPromptOnReplace|efReplaceAll)) | optVal;
+                result = cmOK;
+            }
+            TObject::destroy(dlg);
+            break;
+        }
+        case edReplacePrompt:
+            result = messageBox(" Replace this occurrence? ", mfYesNoCancel | mfInformation);
+            break;
+        case edSearchFailed:
+            messageBox(" Search string not found. ", mfOKButton | mfInformation);
+            result = cmOK;
+            break;
+        case edOutOfMemory:
+            messageBox(" Not enough memory for this operation. ", mfOKButton | mfError);
+            result = cmOK;
+            break;
+        case edSaveModify: {
+            const char* fname = va_arg(args, const char*);
+            char msg[128];
+            snprintf(msg, sizeof(msg), " %s has been modified. Save? ", fname ? fname : "File");
+            result = messageBox(msg, mfYesNoCancel | mfInformation);
+            break;
+        }
+        case edSaveAs: {
+            const char* fname = va_arg(args, const char*);
+            TFileDialog* dlg = new TFileDialog("*.mod", " Save As ", "~N~ame", fdOKButton, 100);
+            result = cmCancel;
+            if (TProgram::deskTop->execView(dlg) != cmCancel) {
+                char buf[MAXPATH] = {};
+                dlg->getFileName(buf);
+                if (fname) strncpy(const_cast<char*>(fname), buf, MAXPATH-1);
+                result = cmOK;
+            }
+            TObject::destroy(dlg);
+            break;
+        }
+        default:
+            result = cmCancel;
+            break;
+    }
+    va_end(args);
+    return result;
+}
+
+static const char* OBERON_KEYWORDS[] = {
+	"ARRAY", "BEGIN", "BY", "CASE", "CONST", "DIV", "DO", "ELSE",
+	"ELSIF", "END", "FALSE", "FOR", "IF", "IMPORT", "IN", "IS",
+	"MOD", "MODULE", "NIL", "OF", "OR", "POINTER", "PROCEDURE",
+	"RECORD", "REPEAT", "RETURN", "THEN", "TO", "TRUE", "TYPE",
+	"UNTIL", "VAR", "WHILE", "BOOLEAN", "BYTE", "CHAR", "INTEGER",
+	"REAL", "SET", "ABS", "ASR", "ASSERT", "CHR", "FLOOR", "FLT",
+	"INC", "DEC", "LEN", "LSL", "ORD", "PACK", "ROR", "UNPK",
+	"WRITE", "READ",  nullptr
+};
+
+static bool isOberonKeyword(const char* p, int len) {
+    char buf[32];
+    if (len <= 0 || len >= 32) return false;
+    for (int i = 0; i < len; i++) buf[i] = toupper((unsigned char)p[i]);
+    buf[len] = '\0';
+    for (int i = 0; OBERON_KEYWORDS[i]; i++)
+        if (strcmp(buf, OBERON_KEYWORDS[i]) == 0) return true;
+    return false;
+}
+
+class TOberonEditor : public TFileEditor {
+public:
+    TOberonEditor(const TRect& bounds,
+                  TScrollBar* hScrollBar,
+                  TScrollBar* vScrollBar,
+                  TIndicator* indicator,
+                  TStringView filename)
+        : TFileEditor(bounds, hScrollBar, vScrollBar, indicator, filename),
+          errorLine(0)
+    {}
+
+    int errorLine;
+
+    TColorAttr mapColor(uchar index) noexcept override {
+        switch (index) {
+            case 1: return TColorAttr(TColorRGB(0xC0C0C0), TColorRGB(0x000080));
+            case 2: return TColorAttr(TColorRGB(0x000000), TColorRGB(0x00AAAA));
+            default: return TFileEditor::mapColor(index);
+        }
+    }
+
+    void draw() override {
+        TFileEditor::draw();
+
+        int firstLine = delta.y;
+        int visRows   = size.y;
+        int visCols   = size.x;
+        int firstCol  = delta.x;
+
+        uint selLo = (selStart <= selEnd) ? selStart : selEnd;
+        uint selHi = (selStart <= selEnd) ? selEnd   : selStart;
+
+        auto gapChar = [&](uint i) -> char {
+            return buffer[ i < curPtr ? i : i + gapLen ];
+        };
+
+        uint lineStart = 0;
+        int  lineNo    = 0;
+        while (lineNo < firstLine && lineStart < bufLen) {
+            if (gapChar(lineStart) == '\n') lineNo++;
+            lineStart++;
+        }
+
+        for (int row = 0; row < visRows && lineStart <= bufLen; row++) {
+            uint lineEnd = lineStart;
+            while (lineEnd < bufLen && gapChar(lineEnd) != '\n') lineEnd++;
+
+            auto recolour = [&](uint offset, char ch, TColorAttr ca) {
+                if (offset >= selLo && offset < selHi) return;
+                int sc = (int)(offset - lineStart) - firstCol;
+                if (sc < 0 || sc >= visCols) return;
+                TDrawBuffer b;
+                b.moveChar(0, ch, ca, 1);
+                writeBuf(sc, row, 1, 1, b);
+            };
+
+            uint i = lineStart;
+            while (i < lineEnd) {
+                char c = gapChar(i);
+                if (c == '{') {
+                    uint start = i++;
+                    while (i < lineEnd && gapChar(i) != '}') i++;
+                    if (i < lineEnd) i++;
+                    TColorAttr ca = TColorAttr(TColorRGB(0x55FFFF), TColorRGB(0x000080));
+                    for (uint j = start; j < i; j++) recolour(j, gapChar(j), ca);
+                    continue;
+                }
+                if (c == '(' && i+1 < lineEnd && gapChar(i+1) == '*') {
+                    uint start = i; i += 2;
+                    while (i < lineEnd) {
+                        if (gapChar(i) == '*' && i+1 < lineEnd && gapChar(i+1) == ')') { i += 2; break; }
+                        i++;
+                    }
+                    TColorAttr ca = TColorAttr(TColorRGB(0x55FFFF), TColorRGB(0x000080));
+                    for (uint j = start; j < i; j++) recolour(j, gapChar(j), ca);
+                    continue;
+                }
+                if (c == '/' && i+1 < lineEnd && gapChar(i+1) == '/') {
+                    TColorAttr ca = TColorAttr(TColorRGB(0x55FFFF), TColorRGB(0x000080));
+                    for (uint j = i; j < lineEnd; j++) recolour(j, gapChar(j), ca);
+                    i = lineEnd;
+                    continue;
+                }
+                if (c == '\'') {
+                    uint start = i++;
+                    while (i < lineEnd) { if (gapChar(i++) == '\'') break; }
+                    TColorAttr ca = TColorAttr(TColorRGB(0x55FF55), TColorRGB(0x000080));
+                    for (uint j = start; j < i; j++) recolour(j, gapChar(j), ca);
+                    continue;
+                }
+                if (isdigit((unsigned char)c) ||
+                    (c == '$' && i+1 < lineEnd && isxdigit((unsigned char)gapChar(i+1)))) {
+                    uint start = i;
+                    while (i < lineEnd && (isalnum((unsigned char)gapChar(i)) || gapChar(i) == '.')) i++;
+                    TColorAttr ca = TColorAttr(TColorRGB(0x55FFFF), TColorRGB(0x000080));
+                    for (uint j = start; j < i; j++) recolour(j, gapChar(j), ca);
+                    continue;
+                }
+                if (isalpha((unsigned char)c) || c == '_') {
+                    uint start = i;
+                    while (i < lineEnd && (isalnum((unsigned char)gapChar(i)) || gapChar(i) == '_')) i++;
+                    char word[64]; int wlen = std::min((int)(i - start), 63);
+                    for (int k = 0; k < wlen; k++) word[k] = gapChar(start + k);
+                    word[wlen] = '\0';
+                    if (isOberonKeyword(word, wlen)) {
+                        TColorAttr ca = TColorAttr(TColorRGB(0xFFFF55), TColorRGB(0x000080));
+                        for (uint j = start; j < i; j++) recolour(j, gapChar(j), ca);
+                    }
+                    continue;
+                }
+                i++;
+            }
+            lineStart = lineEnd + 1;
+        }
+
+        if (errorLine > 0) {
+            int errRow = (errorLine - 1) - delta.y;
+            if (errRow >= 0 && errRow < size.y) {
+                uint ls = 0; int ln = 0;
+                while (ln < errorLine - 1 && ls < bufLen) {
+                    if (gapChar(ls) == '\n') ln++;
+                    ls++;
+                }
+                uint le = ls;
+                while (le < bufLen && gapChar(le) != '\n') le++;
+
+                TColorAttr errNorm = TColorAttr(TColorRGB(0xFFFFFF), TColorRGB(0xAA0000));
+                TColorAttr errKw   = TColorAttr(TColorRGB(0xFFFF55), TColorRGB(0xAA0000));
+
+                TDrawBuffer b;
+                b.moveChar(0, ' ', errNorm, size.x);
+
+                uint i2 = ls;
+                while (i2 < le) {
+                    int logCol = (int)(i2 - ls);
+                    if (logCol < delta.x) { i2++; continue; }
+                    int sc = logCol - delta.x;
+                    if (sc >= size.x) break;
+
+                    char ch = gapChar(i2);
+                    TColorAttr ca = errNorm;
+                    if (isalpha((unsigned char)ch) || ch == '_') {
+                        uint ws = i2;
+                        while (i2 < le && (isalnum((unsigned char)gapChar(i2)) || gapChar(i2) == '_')) i2++;
+                        char w[64]; int wl = std::min((int)(i2-ws), 63);
+                        for (int k = 0; k < wl; k++) w[k] = gapChar(ws+k); w[wl] = 0;
+                        ca = isOberonKeyword(w, wl) ? errKw : errNorm;
+                        for (uint j = ws; j < i2; j++) {
+                            int sc2 = (int)(j - ls) - delta.x;
+                            if (sc2 >= 0 && sc2 < size.x)
+                                b.moveChar(sc2, gapChar(j), ca, 1);
+                        }
+                        continue;
+                    }
+                    b.moveChar(sc, ch, ca, 1);
+                    i2++;
+                }
+                writeBuf(0, errRow, size.x, 1, b);
+            }
+        }
+    }
+
+    void handleEvent(TEvent& event) override {
+        if (event.what == evKeyDown) {
+            switch (event.keyDown.keyCode) {
+                case kbCtrlF: event.what = evCommand; event.message.command = cmFind;        break;
+                case kbCtrlH: event.what = evCommand; event.message.command = cmReplace;     break;
+                case kbF7:    event.what = evCommand; event.message.command = cmSearchAgain; break;
+                // FIX: F8 → compile and run
+                case kbF8:    event.what = evCommand; event.message.command = cmCompileRun;  break;
+                default: break;
+            }
+        }
+        if (event.what == evCommand) {
+            switch (event.message.command) {
+                case cmFind:        find();            clearEvent(event); return;
+                case cmReplace:     replace();         clearEvent(event); return;
+                case cmSearchAgain: doSearchReplace(); clearEvent(event); return;
+            }
+        }
+        TFileEditor::handleEvent(event);
+    }
+};
+
+
+// ── Editor Window ─────────────────────────────────────────────────────────
+class TEditorWindow : public TWindow {
+public:
+    TOberonEditor* editor;
+    TIndicator*    indicator;
+    char         filename[MAXPATH];
+
+    TEditorWindow(TRect bounds, const char* aFile)
+        : TWindowInit(&TEditorWindow::initFrame),
+          TWindow(bounds,
+                  (aFile && *aFile) ? aFile : " Untitled ",
+                  wnNoNumber)
+    {
+        options |= ofTileable;
+        TScrollBar* vbar = new TScrollBar(TRect(size.x-1, 1,        size.x,   size.y-1));
+        TScrollBar* hbar = new TScrollBar(TRect(1,        size.y-1, size.x-1, size.y));
+        insert(vbar);
+        insert(hbar);
+        indicator = new TIndicator(TRect(0, size.y-1, 12, size.y));
+        insert(indicator);
+        TRect r(1, 1, size.x-1, size.y-1);
+        if (aFile && *aFile) {
+            strncpy(filename, aFile, MAXPATH-1);
+            filename[MAXPATH-1] = '\0';
+        } else {
+            filename[0] = '\0';
+        }
+        editor = new TOberonEditor(r, hbar, vbar, indicator,
+                                   filename[0] ? TStringView(filename) : TStringView());
+        insert(editor);
+        editor->select();
+    }
+
+    const char* getTitle(short /*maxSize*/) override {
+        return filename[0] ? filename : " Untitled ";
+    }
+
+    bool writeBufferToFile(const char* path) {
+        std::ofstream f(path, std::ios::binary | std::ios::trunc);
+        if (!f) return false;
+        if (editor->curPtr > 0)
+            f.write(editor->buffer, editor->curPtr);
+        uint postStart = editor->curPtr + editor->gapLen;
+        uint total     = editor->bufLen + editor->gapLen;
+        if (postStart < total)
+            f.write(editor->buffer + postStart, total - postStart);
+        return f.good();
+    }
+
+    bool save() {
+        if (filename[0] == '\0') return saveAs();
+        if (writeBufferToFile(filename)) {
+            editor->modified = False;
+            return true;
+        }
+        messageBox(" Error saving file! ", mfError | mfOKButton);
+        return false;
+    }
+
+    bool saveAs() {
+        TFileDialog* dlg = new TFileDialog("*.mod", " Save As ", "~N~ame", fdOKButton, 100);
+        bool ok = false;
+        if (TProgram::deskTop->execView(dlg) != cmCancel) {
+            char buf[MAXPATH] = {};
+            dlg->getFileName(buf);
+            strncpy(filename, buf, MAXPATH-1);
+            if (writeBufferToFile(filename)) {
+                editor->modified = False;
+                ok = true;
+                if (frame) frame->drawView();
+            } else {
+                messageBox(" Error saving file! ", mfError | mfOKButton);
+            }
+        }
+        TObject::destroy(dlg);
+        return ok;
+    }
+
+    Boolean valid(ushort command) override {
+        if (command == cmQuit || command == cmClose) {
+            if (editor->modified) {
+                int r = messageBox(
+                    " File has unsaved changes. Save before closing?",
+                    mfYesNoCancel
+                );
+                if (r == cmYes)   return Boolean(save());
+                if (r == cmNo)    return True;
+                return False;
+            }
+        }
+        return TWindow::valid(command);
+    }
+
+    std::string getFilePath() {
+        if (filename[0] == '\0') {
+            if (!saveAs()) return "";
+        } else {
+            save();
+        }
+        return std::string(filename);
+    }
+
+    void jumpToLine(int targetLine) {
+        if (targetLine <= 0) { editor->setCurPtr(0, 0); editor->drawView(); return; }
+        uint line = 0;
+        uint len  = editor->bufLen;
+        for (uint i = 0; i < len; i++) {
+            uint phys = (i < editor->curPtr) ? i : i + editor->gapLen;
+            if (editor->buffer[phys] == '\n') {
+                line++;
+                if ((int)line == targetLine) {
+                    editor->setCurPtr(i + 1, 0);
+                    editor->drawView();
+                    return;
+                }
+            }
+        }
+        editor->setCurPtr(len, 0);
+        editor->drawView();
+    }
+
+    void handleEvent(TEvent& event) override {
+        if (event.what == evCommand) {
+            switch (event.message.command) {
+                case cmSaveFile:   save();   clearEvent(event); return;
+                case cmSaveFileAs: saveAs(); clearEvent(event); return;
+            }
+        }
+        TWindow::handleEvent(event);
+    }
+};
+
+// ── Application ───────────────────────────────────────────────────────────
+class TOberonIDE : public TApplication {
+public:
+    TOberonIDE();
+    void handleEvent(TEvent& event) override;
+    static TMenuBar*    initMenuBar(TRect r);
+    static TStatusLine* initStatusLine(TRect r);
+private:
+    void newFile();
+    void openFile();
+    void saveFile();
+    void saveFileAs();
+    void runProgram();
+    void showAbout();
+    void gotoLine();
+    void compileAndRun();
+    void showWindowList();
+    void selectWindow(int idx);
+    TEditorWindow* activeEditor();
+
+    // Collect all open editor windows in z-order
+    std::vector<TEditorWindow*> getEditorWindows();
+};
+
+TOberonIDE::TOberonIDE()
+    : TProgInit(&TOberonIDE::initStatusLine,
+                &TOberonIDE::initMenuBar,
+                &TOberonIDE::initDeskTop)
+{
+    TCommandSet editorCmds;
+    editorCmds += cmFind;
+    editorCmds += cmReplace;
+    editorCmds += cmSearchAgain;
+    editorCmds += cmCut;
+    editorCmds += cmCopy;
+    editorCmds += cmPaste;
+    editorCmds += cmUndo;
+    editorCmds += cmClear;
+    disableCommands(editorCmds);
+    TEditor::editorDialog = oberonEditorDialog;
+    newFile();
+}
+
+TMenuBar* TOberonIDE::initMenuBar(TRect r) {
+    r.b.y = r.a.y + 1;
+    return new TMenuBar(
+        r,
+        *new TSubMenu("~F~ile", kbAltF) +
+            *new TMenuItem("~N~ew", cmNewFile, kbNoKey, hcNoContext, "F2") +
+            *new TMenuItem("~O~pen...", cmOpenFile, kbF3, hcNoContext, "F3") +
+            *new TMenuItem("~S~ave", cmSaveFile, kbF2, hcNoContext, "F2") +
+            *new TMenuItem("Save ~A~s...", cmSaveFileAs, kbNoKey) + newLine() +
+            *new TMenuItem("E~x~it", cmQuit, kbAltX, hcNoContext, "Alt-X") +
+            *new TSubMenu("~E~dit", kbAltE) +
+            *new TMenuItem("~U~ndo", cmUndo, kbAltBack, hcNoContext,
+                           "Alt-BkSp") +
+            newLine() +
+            *new TMenuItem("~C~ut", cmCut, kbShiftDel, hcNoContext,
+                           "Shift-Del") +
+            *new TMenuItem("C~o~py", cmCopy, kbCtrlIns, hcNoContext,
+                           "Ctrl-Ins") +
+            *new TMenuItem("~P~aste", cmPaste, kbShiftIns, hcNoContext,
+                           "Shift-Ins") +
+            newLine() + *new TMenuItem("~G~o to Line...", cmGotoLine, kbNoKey) +
+            *new TSubMenu("~R~un", kbAltR) +
+            *new TMenuItem("~C~ompile && Run", cmCompileRun, kbF8, hcNoContext,
+                           "F8") +
+            *new TSubMenu("~S~earch", kbAltS) +
+            *new TMenuItem("~F~ind...", cmFind, kbCtrlF, hcNoContext,
+                           "Ctrl-F") +
+            *new TMenuItem("~R~eplace...", cmReplace, kbCtrlH, hcNoContext,
+                           "Ctrl-H") +
+            *new TMenuItem("~A~gain", cmSearchAgain, kbF7, hcNoContext, "F7") +
+*new TSubMenu("~W~indow", kbAltW) +
+            
+            *new TMenuItem("Switch Window",      cmWindow1 + 1, kbAlt2, hcNoContext, "Alt-2") +
+            
+        *new TSubMenu("~H~elp", kbAltH) +
+            *new TMenuItem("~A~bout...",      cmAbout,      kbNoKey)
+    );
+}
+
+TStatusLine* TOberonIDE::initStatusLine(TRect r) {
+    r.a.y = r.b.y - 1;
+    return new TStatusLine(r,
+        *new TStatusDef(0, 0xFFFF) +
+            *new TStatusItem("~F2~ Save",    kbF2,   cmSaveFile)   +
+            *new TStatusItem("~F3~ Open",    kbF3,   cmOpenFile)   +
+            *new TStatusItem("~F7~ Again",   kbF7,   cmSearchAgain) +
+            *new TStatusItem("~F8~ Compile", kbF8,   cmCompileRun) +
+            *new TStatusItem("~Alt-X~ Exit", kbAltX, cmQuit)
+    );
+}
+
+TEditorWindow* TOberonIDE::activeEditor() {
+    return dynamic_cast<TEditorWindow*>(deskTop->current);
+}
+
+std::vector<TEditorWindow*> TOberonIDE::getEditorWindows() {
+    std::vector<TEditorWindow*> windows;
+    if (!deskTop || !deskTop->last) return windows;
+    TView* start = deskTop->last->next;
+    TView* v = start;
+    int count = 0;
+    do {
+        if (auto* w = dynamic_cast<TEditorWindow*>(v))
+            windows.push_back(w);
+        v = v->next;
+        if (++count > 100) break;
+    } while (v != start);
+    return windows;
+}
+
+void TOberonIDE::handleEvent(TEvent& event) {
+  if (event.what == evCommand) {
+if (event.message.command >= cmWindow1 && event.message.command < cmWindow1 + 40) {
+            selectWindow(event.message.command - cmWindow1);
+            clearEvent(event);
+            return;
+        }    
+        switch (event.message.command) {
+            case cmNewFile:    newFile();        clearEvent(event); return;
+            case cmOpenFile:   openFile();       clearEvent(event); return;
+            case cmSaveFile:   saveFile();       clearEvent(event); return;
+            case cmSaveFileAs: saveFileAs();     clearEvent(event); return;
+            case cmRunProgram: runProgram();     clearEvent(event); return;
+            case cmCompileRun: compileAndRun();  clearEvent(event); return;
+            case cmAbout:      showAbout();      clearEvent(event); return;
+            case cmGotoLine:   gotoLine();       clearEvent(event); return;
+            case cmWindowList: showWindowList(); clearEvent(event); return;
+            default:
+                // Check for window selection commands (cmWindow1..cmWindow1+39)
+                if (event.message.command >= cmWindow1 &&
+                    event.message.command < cmWindow1 + 40) {
+                    selectWindow(event.message.command - cmWindow1);
+                    clearEvent(event);
+                    return;
+                }
+                break;
+        }
+    }
+    TApplication::handleEvent(event);
+}
+
+void TOberonIDE::showWindowList() {
+    auto windows = getEditorWindows();
+    if (windows.empty()) {
+        messageBox(" No editor windows open. ", mfInformation | mfOKButton);
+        return;
+    }
+
+    int count = (int)windows.size();
+    int listCount = std::min(count, 14);
+
+    // Build display: each line "N. filename"
+    // Dialog height: 2 header + listCount lines + 1 gap + 1 input + 1 gap + 1 buttons + 1 border = listCount+6
+    int dlgH = listCount + 7;
+    int dlgW = 64;
+
+    auto* dlg = new TDialog(TRect(0, 0, dlgW, dlgH), " Window List ");
+    dlg->options |= ofCentered;
+
+    // Show file list as static text lines
+    for (int i = 0; i < listCount; i++) {
+        const char* fullname = windows[i]->filename[0]
+                               ? windows[i]->filename : "Untitled";
+        const char* slash = strrchr(fullname, '/');
+        const char* name = slash ? slash + 1 : fullname;
+        char label[62];
+        bool modified = windows[i]->editor->modified;
+        snprintf(label, sizeof(label), "%d. %s%s", i+1, name, modified ? " *" : "");
+        dlg->insert(new TStaticText(TRect(2, 1+i, dlgW-2, 2+i), label));
+    }
+
+    // Number input
+    int inputY = listCount + 2;
+    auto* inp = new TInputLine(TRect(18, inputY, 22, inputY+1), 4);
+    dlg->insert(new TLabel(TRect(2, inputY, 18, inputY+1), "~G~o to window #:", inp));
+    dlg->insert(inp);
+
+    int btnY = inputY + 2;
+    dlg->insert(new TButton(TRect(dlgW/2-12, btnY, dlgW/2-2, btnY+1),
+                            " ~O~K ", cmOK, bfDefault));
+    dlg->insert(new TButton(TRect(dlgW/2+2,  btnY, dlgW/2+12, btnY+1),
+                            " ~C~ancel ", cmCancel, bfNormal));
+    dlg->selectNext(False);
+    inp->select();
+
+    ushort result = deskTop->execView(dlg);
+    char buf[8] = {};
+    inp->getData(buf);
+    TObject::destroy(dlg);
+
+    if (result == cmOK) {
+        int n = atoi(buf);
+        if (n >= 1 && n <= listCount)
+            selectWindow(n - 1);
+    }
+}
+
+void TOberonIDE::selectWindow(int idx) {
+    auto windows = getEditorWindows();
+    if (idx < 0 || idx >= (int)windows.size()) return;
+    TEditorWindow* w = windows[idx];
+    // Bring to front and focus
+    w->select();
+    w->makeFirst();
+}
+
+void TOberonIDE::newFile() {
+    TRect r = deskTop->getExtent();
+    r.grow(-2, -1);
+    deskTop->insert(new TEditorWindow(r, nullptr));
+}
+
+void TOberonIDE::openFile() {
+    TFileDialog* dlg = new TFileDialog("*.mod", " Open Oberon File ",
+                                       "~N~ame", fdOpenButton, 100);
+    if (deskTop->execView(dlg) != cmCancel) {
+        char buf[MAXPATH] = {};
+        dlg->getFileName(buf);
+        TRect r = deskTop->getExtent();
+        r.grow(-2, -1);
+        deskTop->insert(new TEditorWindow(r, buf));
+    }
+    TObject::destroy(dlg);
+}
+
+void TOberonIDE::saveFile()   { if (auto* w = activeEditor()) w->save(); }
+void TOberonIDE::saveFileAs() { if (auto* w = activeEditor()) w->saveAs(); }
+
+void TOberonIDE::runProgram() {
+    auto* w = activeEditor();
+    if (!w) { messageBox(" No editor open. ", mfError | mfOKButton); return; }
+    std::string path = w->getFilePath();
+    if (path.empty()) return;
+    w->editor->errorLine = 0;
+    int errLine = runOberonInteractive(path.c_str());
+    if (errLine > 0) {
+        w->editor->errorLine = errLine;
+        w->jumpToLine(errLine - 1);
+        w->drawView();
+    }
+}
+
+void TOberonIDE::compileAndRun() {
+    auto* w = activeEditor();
+    if (!w) { messageBox(" No editor open. ", mfError | mfOKButton); return; }
+    std::string path = w->getFilePath();
+    if (path.empty()) { messageBox(" Save the file first. ", mfError | mfOKButton); return; }
+
+    std::string binPath = path;
+    auto dot = binPath.rfind('.');
+    if (dot != std::string::npos) binPath = binPath.substr(0, dot);
+
+    w->editor->errorLine = 0;
+    TScreen::suspend();
+    printf("\n--- Compiling %s ---\n", path.c_str());
+    fflush(stdout);
+
+    std::string interp = "oberon";
+    {
+        char self[4096] = {};
+        ssize_t len = readlink("/proc/self/exe", self, sizeof(self)-1);
+        if (len > 0) {
+            std::string dir = std::string(self, len);
+            dir = dir.substr(0, dir.rfind('/') + 1);
+            std::string candidate = dir + "oberon";
+            if (access(candidate.c_str(), X_OK) == 0) interp = candidate;
+        }
+    }
+
+    int errpipe[2]; pipe(errpipe);
+    int compileOk = 0;
+    std::string errout;
+    {
+        pid_t pid = fork();
+        if (pid == 0) {
+            close(errpipe[0]);
+            dup2(errpipe[1], STDERR_FILENO);
+            close(errpipe[1]);
+            execlp(interp.c_str(), interp.c_str(), path.c_str(),
+                   binPath.c_str(), nullptr);
+            _exit(127);
+        } else if (pid > 0) {
+            close(errpipe[1]);
+            char buf[1024]; ssize_t n;
+            while ((n = ::read(errpipe[0], buf, sizeof(buf))) > 0) errout.append(buf, n);
+            close(errpipe[0]);
+            int status; waitpid(pid, &status, 0);
+            compileOk = WIFEXITED(status) && WEXITSTATUS(status) == 0;
+        }
+    }
+
+    if (!compileOk) {
+        fwrite(errout.c_str(), 1, errout.size(), stderr);
+        printf("\n--- Compilation FAILED. Press Enter ---");
+        fflush(stdout);
+        int c; while ((c = getchar()) != '\n' && c != EOF) {}
+        TScreen::resume();
+        TProgram::application->redraw();
+        return;
+    }
+
+    printf("OK -- running %s\n\n", binPath.c_str());
+    fflush(stdout);
+
+    int errpipe2[2]; pipe(errpipe2);
+    {
+        pid_t pid = fork();
+        if (pid == 0) {
+            close(errpipe2[0]);
+            dup2(errpipe2[1], STDERR_FILENO);
+            close(errpipe2[1]);
+            std::string absPath = binPath;
+            if (absPath.empty() || absPath[0] != '/') {
+                char cwd[4096] = {};
+                if (getcwd(cwd, sizeof(cwd)))
+                    absPath = std::string(cwd) + "/" + absPath;
+            }
+            char* argv0 = const_cast<char*>(absPath.c_str());
+            char* execArgv[] = { argv0, nullptr };
+            execv(absPath.c_str(), execArgv);
+            perror("exec");
+            _exit(127);
+        } else if (pid > 0) {
+            close(errpipe2[1]);
+            char buf[1024]; ssize_t n; errout.clear();
+            while ((n = ::read(errpipe2[0], buf, sizeof(buf))) > 0) errout.append(buf, n);
+            close(errpipe2[0]);
+            int status; waitpid(pid, &status, 0);
+            if (!errout.empty()) fwrite(errout.c_str(), 1, errout.size(), stderr);
+            if (!(WIFEXITED(status) && WEXITSTATUS(status) == 0))
+                printf("\n[Process exited with code %d]\n", WEXITSTATUS(status));
+        }
+    }
+
+    printf("\n--- Press Enter to return to the IDE ---");
+    fflush(stdout);
+    int c; while ((c = getchar()) != '\n' && c != EOF) {}
+    TScreen::resume();
+    TProgram::application->redraw();
+}
+
+void TOberonIDE::showAbout() {
+    auto* dlg = new TDialog(TRect(0,0,50,12), " About Oberon IDE ");
+    dlg->options |= ofCentered;
+    dlg->insert(new TStaticText(TRect(2,2,48,3), " Oberon IDE  v1.0"));
+    dlg->insert(new TStaticText(TRect(2,3,48,4), " Built on tvision (magiblot)"));
+    dlg->insert(new TStaticText(TRect(2,5,48,6), " F2  Save         F3  Open"));
+    dlg->insert(new TStaticText(TRect(2,6,48,7), " F8  Compile+Run  F9  Run"));
+    dlg->insert(new TStaticText(TRect(2,7,48,8), " Alt-W  Window list"));
+    dlg->insert(new TStaticText(TRect(2,8,48,9), " Alt-X  Exit"));
+    dlg->insert(new TButton(TRect(20,10,30,11), "  ~O~K  ", cmOK, bfDefault));
+    deskTop->execView(dlg);
+    TObject::destroy(dlg);
+}
+
+void TOberonIDE::gotoLine() {
+    auto* w = activeEditor();
+    if (!w) return;
+    auto* dlg = new TDialog(TRect(0,0,36,8), " Go to Line ");
+    dlg->options |= ofCentered;
+    auto* inp = new TInputLine(TRect(2,3,34,4), 10);
+    dlg->insert(new TLabel(TRect(2,2,20,3), "~L~ine number:", inp));
+    dlg->insert(inp);
+    dlg->insert(new TButton(TRect(4,5,14,6),  " ~O~K ",     cmOK,     bfDefault));
+    dlg->insert(new TButton(TRect(16,5,28,6), " ~C~ancel ", cmCancel, bfNormal));
+    dlg->selectNext(False);
+    if (deskTop->execView(dlg) != cmCancel) {
+        char buf[16] = {};
+        inp->getData(buf);
+        int line = atoi(buf);
+        if (line > 0) w->jumpToLine(line - 1);
+    }
+    TObject::destroy(dlg);
+}
+
+int main(int argc, char* argv[]) {
+    TOberonIDE app;
+    if (argc >= 2) {
+        TRect r = app.deskTop->getExtent();
+        r.grow(-2, -1);
+        app.deskTop->insert(new TEditorWindow(r, argv[1]));
+    }
+    app.run();
+    return 0;
+}
