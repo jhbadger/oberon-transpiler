@@ -43,7 +43,7 @@ int main(int argc, char *argv[]) {
     dot = strrchr(binfile, '.'); if (dot) *dot = '\0';
 
     char cmd[1024];
-    snprintf(cmd, sizeof(cmd), "gcc -std=c11 -Wall -o %s %s", binfile, cfile);
+    snprintf(cmd, sizeof(cmd), "gcc -std=c11 -Wall -O -o %s %s", binfile, cfile);
     int rc = system(cmd);
     if (rc == 0) { printf("Success: ./%s\n", binfile); remove(cfile); }
     else         { fprintf(stderr, "obc2: C compilation failed; C source left in %s\n", cfile); }
