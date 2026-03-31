@@ -1,4 +1,7 @@
 MODULE types;
+
+IMPORT Out;
+
 VAR
     name : STRING;
     age : INTEGER;
@@ -8,10 +11,13 @@ BEGIN
     age := 1;
     pi := 3.14159;
 
-    Write("Name: ");
-    Write(name);
-    Write("Age: ");
-    Write(age);
-    Write("Pi: ");
-    Write(pi);
+    Out.String("Name: ");
+    Out.String(name);
+		Out.Ln;
+    Out.String("Age: ");
+    Out.Int(age);
+		Out.Ln;
+    Out.String("Pi: ");
+    Out.Real(pi);
+		Out.Ln;
 END types.

@@ -1,5 +1,7 @@
 MODULE fact;
 
+IMPORT Out, In;
+
 PROCEDURE Fact(n : INTEGER) : INTEGER;
 BEGIN
     IF n = 0 THEN
@@ -13,9 +15,9 @@ VAR
     num : INTEGER;
     res : INTEGER;
 BEGIN
-    Write("Enter a number: ");
-    Read(num);
+    Out.String("Enter a number: ");
+    In.Int(num);
     res := Fact(num);
-    Write("Factorial is: ");
-    Write(res);
+    Out.String("Factorial is: ");
+    Out.Int(res);
 END fact.

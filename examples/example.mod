@@ -1,4 +1,7 @@
 MODULE Example;
+
+IMPORT In, Out;
+
 VAR
     x, res : INTEGER;  (* These must be here to be global *)
 
@@ -8,7 +11,7 @@ BEGIN
 END Calc;
 
 BEGIN
-    Read(x);
+    In.Int(x);
     res := Calc(x);
-    Write(res);
+    Out.Int(res);
 END Example.
