@@ -69,87 +69,89 @@ const ushort
 
 // ── Run oberon  ────────────────────────────────────────────────
 static int runOberon(const char* filepath) {
-    TScreen::suspend();
-    printf("\n--- Running %s ---\n\n", filepath);
-    fflush(stdout);
+    // 1. Prepare Paths
+    std::string sourcePath = filepath;
+    std::string exePath = sourcePath;
 
-    std::string interp = "obc";
-    {
-        char self[4096] = {};
-        ssize_t len = readlink("/proc/self/exe", self, sizeof(self)-1);
-        if (len > 0) {
-            std::string selfPath(self, len);
-            std::string dir = selfPath.substr(0, selfPath.rfind('/') + 1);
-            std::string candidate = dir + "obc";
-            if (access(candidate.c_str(), X_OK) == 0)
-                interp = candidate;
-        }
+    // Strip ".mod" to get the executable name
+    size_t lastDot = exePath.find_last_of(".");
+    if (lastDot != std::string::npos) {
+        exePath = exePath.substr(0, lastDot);
     }
 
-    int errpipe[2] = {-1,-1};
-    pipe(errpipe);
+    // Ensure we run from the current directory if no path is provided
+    std::string runCmd = exePath;
+    if (runCmd.find('/') == std::string::npos) {
+        runCmd = "./" + runCmd;
+    }
 
-    int errorLine = 0;
-    bool failed   = false;
+    // 2. Suspend UI
+    TScreen::suspend();
+    printf("\n--- Compiling: %s ---\n", filepath);
+    fflush(stdout);
+
+    // 3. Build the Shell Command
+    // Example: "mycompiler myProg.mod && ./myProg"
+    std::string compilerBin = "obc";
+    std::string fullCmd = compilerBin + " " + sourcePath + " && " + runCmd;
+
+    int errpipe[2];
+    pipe(errpipe);
 
     pid_t pid = fork();
     if (pid == 0) {
         close(errpipe[0]);
-        dup2(errpipe[1], STDERR_FILENO);
+        dup2(errpipe[1], STDERR_FILENO); // Capture compiler errors and runtime crashes
         close(errpipe[1]);
-        execlp(interp.c_str(), interp.c_str(), filepath, nullptr);
-        perror("execlp: obc not found");
+
+        execlp("sh", "sh", "-c", fullCmd.c_str(), nullptr);
         _exit(127);
     } else if (pid > 0) {
         close(errpipe[1]);
         std::string errout;
-        char ebuf[1024]; ssize_t n;
+        char ebuf[1024];
+        ssize_t n;
         while ((n = read(errpipe[0], ebuf, sizeof(ebuf))) > 0)
             errout.append(ebuf, n);
         close(errpipe[0]);
 
         int status = 0;
         waitpid(pid, &status, 0);
-        failed = !(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+        bool failed = !(WIFEXITED(status) && WEXITSTATUS(status) == 0);
 
         if (failed) {
-            if (!errout.empty()) { fwrite(errout.c_str(), 1, errout.size(), stderr); fflush(stderr); }
-            if (WIFEXITED(status) && WEXITSTATUS(status) != 0)
-                printf("\n[Process exited with code %d]\n", WEXITSTATUS(status));
-            else if (!WIFEXITED(status))
-                printf("\n[Process terminated abnormally]\n");
+            if (!errout.empty()) {
+                fprintf(stderr, "\n[Output/Errors]\n%s", errout.c_str());
+            }
 
+            // Parser: Adjust this based on your compiler's specific error format
             auto parseErrorLine = [](const std::string& s) -> int {
-                size_t pos = s.find("at line ");
+                size_t pos = s.find("line ");
                 if (pos != std::string::npos) {
-                    size_t numStart = pos + 8;
-                    if (numStart < s.size() && isdigit((unsigned char)s[numStart]))
-                        return std::stoi(s.substr(numStart));
-                }
-                pos = 0;
-                while ((pos = s.find("line ", pos)) != std::string::npos) {
                     size_t numStart = pos + 5;
                     if (numStart < s.size() && isdigit((unsigned char)s[numStart]))
                         return std::stoi(s.substr(numStart));
-                    pos++;
                 }
                 return 0;
             };
-            errorLine = parseErrorLine(errout);
+
+            int errorLine = parseErrorLine(errout);
+            printf("\n--- Press Enter to return to IDE ---");
+            fflush(stdout);
+            while (getchar() != '\n');
+            TScreen::resume();
+            return errorLine;
         }
-    } else {
-        close(errpipe[0]); close(errpipe[1]);
-        perror("fork");
     }
 
-    printf("\n--- Press Enter to return to the IDE ---");
+    // 4. Success Completion
+    printf("\n\n[Process completed] - Press Enter");
     fflush(stdout);
-    int c;
-    while ((c = getchar()) != '\n' && c != EOF) {}
+    while (getchar() != '\n');
 
     TScreen::resume();
     TProgram::application->redraw();
-    return failed ? errorLine : 0;
+    return 0;
 }
 
 // ── Output dialog ─────────────────────────────────────────────────────────
