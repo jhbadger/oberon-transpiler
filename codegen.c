@@ -334,6 +334,28 @@ static int try_emit_import(CG *g, Node *fa, Node *args) {
             return 1;
         }
     }
+    /* Math module */
+    if (!strcmp(mod,"Math")) {
+        /* one-argument functions */
+        if (!strcmp(proc,"sqrt"))   { emit(g,"sqrt(");  emit_expr(g,a0); emit(g,")"); return 1; }
+        if (!strcmp(proc,"exp"))    { emit(g,"exp(");   emit_expr(g,a0); emit(g,")"); return 1; }
+        if (!strcmp(proc,"ln"))     { emit(g,"log(");   emit_expr(g,a0); emit(g,")"); return 1; }
+        if (!strcmp(proc,"log"))    { emit(g,"log10("); emit_expr(g,a0); emit(g,")"); return 1; }
+        if (!strcmp(proc,"sin"))    { emit(g,"sin(");   emit_expr(g,a0); emit(g,")"); return 1; }
+        if (!strcmp(proc,"cos"))    { emit(g,"cos(");   emit_expr(g,a0); emit(g,")"); return 1; }
+        if (!strcmp(proc,"tan"))    { emit(g,"tan(");   emit_expr(g,a0); emit(g,")"); return 1; }
+        if (!strcmp(proc,"arcsin")) { emit(g,"asin(");  emit_expr(g,a0); emit(g,")"); return 1; }
+        if (!strcmp(proc,"arccos")) { emit(g,"acos(");  emit_expr(g,a0); emit(g,")"); return 1; }
+        if (!strcmp(proc,"arctan")) { emit(g,"atan(");  emit_expr(g,a0); emit(g,")"); return 1; }
+        if (!strcmp(proc,"floor"))  { emit(g,"floor("); emit_expr(g,a0); emit(g,")"); return 1; }
+        if (!strcmp(proc,"ceil"))   { emit(g,"ceil(");  emit_expr(g,a0); emit(g,")"); return 1; }
+        if (!strcmp(proc,"round"))  { emit(g,"round("); emit_expr(g,a0); emit(g,")"); return 1; }
+        if (!strcmp(proc,"entier")) { emit(g,"(int)floor("); emit_expr(g,a0); emit(g,")"); return 1; }
+        if (!strcmp(proc,"abs"))    { emit(g,"fabs(");  emit_expr(g,a0); emit(g,")"); return 1; }
+        /* two-argument functions */
+        if (!strcmp(proc,"arctan2")) { emit(g,"atan2("); emit_expr(g,a0); emit(g,","); emit_expr(g,a1); emit(g,")"); return 1; }
+        if (!strcmp(proc,"power"))   { emit(g,"pow(");   emit_expr(g,a0); emit(g,","); emit_expr(g,a1); emit(g,")"); return 1; }
+    }
     /* Unknown import call → Module_Proc(args) */
     emit(g,"%s_%s(",mod,proc);
     for (Node *a=args;a;a=a->next) { if(a!=args) emit(g,","); emit_expr(g,a); }
@@ -425,6 +447,13 @@ static void emit_expr(CG *g, Node *e) {
         emit_expr(g,e->c0); emit(g,"["); emit_expr(g,e->c1); emit(g,"]");
         break;
     case ND_FIELD_ACCESS:
+        /* Module constants (e.g. Math.pi) */
+        if (e->c0 && e->c0->kind==ND_IDENT && is_import(e->c0->str)) {
+            if (!strcmp(e->c0->str,"Math")) {
+                if (!strcmp(e->str,"pi")) { emit(g,"M_PI"); break; }
+                if (!strcmp(e->str,"e"))  { emit(g,"M_E");  break; }
+            }
+        }
         /* If base is pointer: use ->, else use . */
         emit_expr(g,e->c0);
         {
@@ -804,9 +833,13 @@ void codegen(Node *module, FILE *out) {
     for (int i=0;i<g_nimports;i++) if (!strcmp(g_imports[i],"Graphics")) { has_graphics=1; break; }
     int has_random = 0;
     for (int i=0;i<g_nimports;i++) if (!strcmp(g_imports[i],"Random"))   { has_random=1;   break; }
+    int has_math = 0;
+    for (int i=0;i<g_nimports;i++) if (!strcmp(g_imports[i],"Math"))     { has_math=1;     break; }
 
     if (has_random && !has_terminal)
         emit(g,"#include <time.h>\n");
+    if (has_math)
+        emit(g,"#include <math.h>\n");
 
     /* ── Terminal module runtime (emitted when Terminal is imported) ─ */
     if (has_terminal) {
