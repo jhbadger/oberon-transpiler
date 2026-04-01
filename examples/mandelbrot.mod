@@ -1,31 +1,31 @@
 MODULE Mandelbrot;
 (*
- * Mandelbrot set plotted in the terminal using the Graphics module.
- * Colours are drawn using 256-colour ANSI backgrounds; each cell is
- * a space character so the background colour fills it completely.
+ * Mandelbrot set — rendered into the pixel buffer with Plot/Flush so
+ * each terminal cell carries two pixel rows (▀ / ▄ / █ half-blocks),
+ * giving 2× vertical resolution over the old character-cell version.
  *
- * Layout (fits an 80x24 terminal):
- *   box  : columns 3-78, rows 1-23  (76 wide, 23 tall)
- *   plot : columns 4-77, rows 2-22  (74 wide, 21 tall)
+ * Fits an 80×24 terminal:
+ *   pixel cols  3..76  → terminal cols  3..76   (74 wide)
+ *   pixel rows  2..43  → terminal rows  2..22   (42 px = 21 rows via half-blocks)
  *   status line: row 24
  *)
 
 IMPORT Graphics, Out;
 
 CONST
-  W       = 74;     (* plot width  in character columns *)
-  H       = 21;     (* plot height in character rows    *)
-  MaxIter = 64;     (* max Mandelbrot iterations        *)
+  PW      = 74;     (* pixel width                            *)
+  PH      = 42;     (* pixel height  (2 × 21 terminal rows)  *)
+  OX      = 3;      (* left pixel offset                      *)
+  OY      = 2;      (* top  pixel offset                      *)
+  MaxIter = 128;
 
 VAR
-  col, row, n : INTEGER;
-  cx, cy      : REAL;
-  ch          : CHAR;
+  px, py, n, color : INTEGER;
+  cx, cy           : REAL;
+  ch               : CHAR;
 
 (* ------------------------------------------------------------------ *)
-(* Iterate z <- z^2 + c starting from z=0.                            *)
-(* Returns the iteration count at which |z| > 2, or MaxIter if the   *)
-(* point appears to be inside the set.                                *)
+(* Mandelbrot iteration count for c = (cx0, cy0).                     *)
 (* ------------------------------------------------------------------ *)
 PROCEDURE Iterate(cx0, cy0 : REAL) : INTEGER;
 VAR zx, zy, t : REAL;
@@ -41,43 +41,31 @@ BEGIN
   RETURN n
 END Iterate;
 
-(* ------------------------------------------------------------------ *)
-(* Map an iteration count to a 256-colour index.                      *)
-(* Interior (n = MaxIter) -> colour 16 (very dark, near black).       *)
-(* Exterior -> cycle through the 6x6x6 colour cube (indices 17-231). *)
-(* The multiplier 7 is coprime with 215 so all 215 colours are hit    *)
-(* before the pattern repeats.                                         *)
-(* ------------------------------------------------------------------ *)
-PROCEDURE PickColor(n : INTEGER) : INTEGER;
-BEGIN
-  IF n >= MaxIter THEN RETURN 16 END;
-  RETURN 17 + (n * 7) MOD 215
-END PickColor;
-
 BEGIN
   Graphics.Clear;
+  Graphics.ClearBuf;
 
-  (* ── Plot ──────────────────────────────────────────────────────── *)
-  FOR row := 0 TO H - 1 DO
-    FOR col := 0 TO W - 1 DO
-      (* Map (col, row) to a point in the complex plane.
-         Real axis : -2.5 .. 1.0   (range 3.5)
-         Imag axis :  1.1 .. -1.1  (range 2.2, top-to-bottom)
-         The 2:1 char aspect ratio means 3.5/74 ~= 2.2/21 * 0.5,
-         giving a reasonable approximation of a circular set. *)
-      cx := -2.5 + 3.5 * col / W;
-      cy :=  1.1 - 2.2 * row / H;
+  (* ── Fill pixel buffer ─────────────────────────────────────────── *)
+  FOR py := 0 TO PH - 1 DO
+    FOR px := 0 TO PW - 1 DO
+      cx := -2.5 + 3.5 * px / PW;
+      cy :=  1.1 - 2.2 * py / PH;
       n  := Iterate(cx, cy);
-      Graphics.Color256(0, PickColor(n));
-      Graphics.Goto(col + 4, row + 2);
-      Out.Char(' ')
+      IF n < MaxIter THEN
+        (* Cycle through colours 1-6; inner points (n=MaxIter) → black *)
+        color := (n MOD 6) + 1;
+        Graphics.Plot(OX + px, OY + py, color)
+      END
     END
   END;
 
+  (* ── Render buffer using half-block characters ─────────────────── *)
+  Graphics.Flush;
+
   (* ── Border and status ─────────────────────────────────────────── *)
   Graphics.Reset;
-  Graphics.Box(3, 1, 76, 23);
-  Graphics.Goto(4, 24);
-  Out.String("Mandelbrot set  [Re: -2.5 .. 1.0   Im: -1.1 .. 1.1]   press Enter");
+  Graphics.Box(1, 1, 80, 23);
+  Graphics.Goto(2, 24);
+  Out.String(" Mandelbrot  Re[-2.5,1.0] Im[-1.1,1.1]  press Enter ");
   READ(ch)
 END Mandelbrot.

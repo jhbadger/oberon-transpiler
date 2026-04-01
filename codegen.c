@@ -19,6 +19,18 @@ static void emit(CG *g, const char *fmt, ...) {
     va_list ap; va_start(ap, fmt); vfprintf(g->out, fmt, ap); va_end(ap);
 }
 static void ind(CG *g)        { for (int i=0;i<g->indent;i++) fputs("    ",g->out); }
+/* Emit a C string literal with proper escaping of \, ", and control chars */
+static void emit_string_lit(CG *g, const char *s) {
+    fputc('"', g->out);
+    for (; *s; s++) {
+        if      (*s == '\\') fputs("\\\\", g->out);
+        else if (*s == '"')  fputs("\\\"", g->out);
+        else if (*s == '\n') fputs("\\n",  g->out);
+        else if (*s == '\t') fputs("\\t",  g->out);
+        else                 fputc(*s, g->out);
+    }
+    fputc('"', g->out);
+}
 static void iemit(CG *g, const char *fmt, ...) {
     ind(g); va_list ap; va_start(ap,fmt); vfprintf(g->out,fmt,ap); va_end(ap);
 }
@@ -351,7 +363,7 @@ static int try_emit_import(CG *g, Node *fa, Node *args) {
              * is wrong here — always force the double-quoted form. */
             emit(g,"fputs(");
             if (a0 && a0->kind == ND_STRING)
-                emit(g,"\"%s\"", a0->str);
+                emit_string_lit(g, a0->str);
             else
                 emit_expr(g,a0);
             emit(g,",stdout)");
@@ -433,7 +445,7 @@ static void emit_expr(CG *g, Node *e) {
             else if (c=='\\') emit(g,"'\\\\'");
             else              emit(g,"'%c'",c);
         } else {
-            emit(g,"\"%s\"",e->str);
+            emit_string_lit(g, e->str);
         }
         break;
     case ND_CHAR:
@@ -586,7 +598,7 @@ static void emit_stmt(CG *g, Node *s) {
         if (is_str) {
             iemit(g,"strcpy("); emit_expr(g,lhs); emit(g,",");
             /* Always emit RHS as string literal for strcpy */
-            if (rhs->kind == ND_STRING) emit(g,"\"%s\"", rhs->str);
+            if (rhs->kind == ND_STRING) emit_string_lit(g, rhs->str);
             else emit_expr(g,rhs);
             emit(g,");\n");
         } else {
@@ -1079,6 +1091,65 @@ void codegen(Node *module, FILE *out, int is_main) {
         emit(g,"    for (int i=1;i<w-1;i++) fputs(\"\\xe2\\x94\\x80\",stdout);\n");
         emit(g,"    fputs(\"\\xe2\\x94\\x98\\n\",stdout);\n");                  /* ┘ */
         emit(g,"    fflush(stdout);\n");
+        emit(g,"}\n");
+        /* ── Pixel buffer (half-block: each cell = 2 vertical pixels) ── */
+        emit(g,"#define _GFX_W 240\n");
+        emit(g,"#define _GFX_H 100\n");
+        emit(g,"static int _gfx_buf[_GFX_H][_GFX_W];\n");
+        emit(g,"static void Graphics_ClearBuf(void) {\n");
+        emit(g,"    for(int r=0;r<_GFX_H;r++) for(int c=0;c<_GFX_W;c++) _gfx_buf[r][c]=0;\n");
+        emit(g,"}\n");
+        emit(g,"static void Graphics_Plot(int x, int y, int color) {\n");
+        emit(g,"    if(x<0||x>=_GFX_W||y<0||y>=_GFX_H) return;\n");
+        emit(g,"    _gfx_buf[y][x] = color ? color : 7;\n");
+        emit(g,"}\n");
+        emit(g,"static void Graphics_Flush(void) {\n");
+        emit(g,"    for(int row=0;row<_GFX_H;row+=2) {\n");
+        /* Find the last non-empty column so we don't write trailing spaces
+         * that would wrap onto the next terminal line on narrow terminals. */
+        emit(g,"        int last=-1;\n");
+        emit(g,"        for(int c=0;c<_GFX_W;c++) {\n");
+        emit(g,"            int b=(row+1<_GFX_H)?_gfx_buf[row+1][c]:0;\n");
+        emit(g,"            if(_gfx_buf[row][c]||b) last=c;\n");
+        emit(g,"        }\n");
+        emit(g,"        if(last<0) continue;\n");
+        emit(g,"        printf(\"\\033[%%d;1H\",row/2+1);\n");
+        emit(g,"        for(int col=0;col<=last;col++) {\n");
+        emit(g,"            int top=_gfx_buf[row][col];\n");
+        emit(g,"            int bot=(row+1<_GFX_H)?_gfx_buf[row+1][col]:0;\n");
+        emit(g,"            if(!top&&!bot) { printf(\"\\033[0m \"); }\n");
+        /* same color both halves → full block █ */
+        emit(g,"            else if(top&&bot&&top==bot) { printf(\"\\033[3%%dm\\xe2\\x96\\x88\",top); }\n");
+        /* different colors → ▀ with fg=top, bg=bot */
+        emit(g,"            else if(top&&bot) { printf(\"\\033[3%%d;4%%dm\\xe2\\x96\\x80\",top,bot); }\n");
+        /* top only → ▀ */
+        emit(g,"            else if(top) { printf(\"\\033[3%%dm\\xe2\\x96\\x80\",top); }\n");
+        /* bot only → ▄ */
+        emit(g,"            else { printf(\"\\033[3%%dm\\xe2\\x96\\x84\",bot); }\n");
+        emit(g,"        }\n");
+        emit(g,"    }\n");
+        emit(g,"    printf(\"\\033[0m\"); fflush(stdout);\n");
+        emit(g,"}\n");
+        /* Bresenham circle using Plot */
+        emit(g,"static void Graphics_Circle(int cx, int cy, int r, int color) {\n");
+        emit(g,"    int x=0,y=r,d=1-r;\n");
+        emit(g,"    while(x<=y) {\n");
+        emit(g,"        Graphics_Plot(cx+x,cy+y,color); Graphics_Plot(cx-x,cy+y,color);\n");
+        emit(g,"        Graphics_Plot(cx+x,cy-y,color); Graphics_Plot(cx-x,cy-y,color);\n");
+        emit(g,"        Graphics_Plot(cx+y,cy+x,color); Graphics_Plot(cx-y,cy+x,color);\n");
+        emit(g,"        Graphics_Plot(cx+y,cy-x,color); Graphics_Plot(cx-y,cy-x,color);\n");
+        emit(g,"        if(d<0) d+=2*x+3; else { d+=2*(x-y)+5; y--; } x++;\n");
+        emit(g,"    }\n");
+        emit(g,"}\n");
+        /* Sprite: draw multi-line string at (x,y) with ANSI color */
+        emit(g,"static void Graphics_Sprite(int x, int y, const char *s, int color) {\n");
+        emit(g,"    printf(\"\\033[3%%dm\",color&7);\n");
+        emit(g,"    int cx=x,cy=y;\n");
+        emit(g,"    for(const char *p=s;*p;p++) {\n");
+        emit(g,"        if(*p=='\\n') { cy++; cx=x; printf(\"\\033[%%d;%%dH\",cy,cx); }\n");
+        emit(g,"        else { printf(\"\\033[%%d;%%dH\",cy,cx++); putchar(*p); }\n");
+        emit(g,"    }\n");
+        emit(g,"    printf(\"\\033[0m\"); fflush(stdout);\n");
         emit(g,"}\n");
     }
     emit(g,"\n");
