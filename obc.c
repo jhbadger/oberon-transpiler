@@ -53,6 +53,12 @@ static void add_cfile(const char *path) {
 }
 
 /* -----------------------------------------------------------------------
+ * Command-line options
+ * ----------------------------------------------------------------------- */
+static int         g_emit_c = 0;      /* --emit-c: keep generated .c files */
+static const char *g_outfile = NULL;   /* -o <outfile> */
+
+/* -----------------------------------------------------------------------
  * Core: compile one module file.
  *
  * modfile  — absolute or relative path to the .mod source
@@ -75,6 +81,7 @@ static int compile_module(const char *modfile, int is_main,
 
     Parser p;
     parser_init(&p, in);
+    p.filename = modfile;
     Node *ast = parse_module(&p);
     fclose(in);
 
@@ -142,18 +149,35 @@ static int compile_module(const char *modfile, int is_main,
 }
 
 int main(int argc, char *argv[]) {
-    if (argc < 2) {
-        fprintf(stderr, "usage: obc <file.mod>\n");
+    const char *mainfile = NULL;
+
+    for (int i = 1; i < argc; i++) {
+        if (!strcmp(argv[i], "--emit-c")) {
+            g_emit_c = 1;
+        } else if (!strcmp(argv[i], "-o") && i + 1 < argc) {
+            g_outfile = argv[++i];
+        } else if (argv[i][0] == '-') {
+            fprintf(stderr, "obc: unknown flag: %s\n", argv[i]);
+            fprintf(stderr, "usage: obc [--emit-c] [-o outfile] <file.mod>\n");
+            return 1;
+        } else {
+            mainfile = argv[i];
+        }
+    }
+    if (!mainfile) {
+        fprintf(stderr, "usage: obc [--emit-c] [-o outfile] <file.mod>\n");
         return 1;
     }
 
-    const char *mainfile = argv[1];
-
-    /* Derive binary name: strip path and extension */
+    /* Derive binary name from source path unless -o was given */
     char binpath[512];
-    strncpy(binpath, mainfile, sizeof(binpath)-1);
-    char *dot = strrchr(binpath, '.');
-    if (dot) *dot = '\0';
+    if (g_outfile) {
+        strncpy(binpath, g_outfile, sizeof(binpath)-1);
+    } else {
+        strncpy(binpath, mainfile, sizeof(binpath)-1);
+        char *dot = strrchr(binpath, '.');
+        if (dot) *dot = '\0';
+    }
 
     /* Search directory = directory of the main file */
     char dirbuf[512];
@@ -165,6 +189,7 @@ int main(int argc, char *argv[]) {
     if (!in) { perror(mainfile); return 1; }
     Parser p;
     parser_init(&p, in);
+    p.filename = mainfile;
     Node *ast = parse_module(&p);
     fclose(in);
     if (p.errors) {
@@ -192,8 +217,8 @@ int main(int argc, char *argv[]) {
     /* ── Compile the main module ─────────────────────────────────── */
     char maincfile[512];
     strncpy(maincfile, mainfile, sizeof(maincfile)-5);
-    dot = strrchr(maincfile, '.');
-    if (dot) strcpy(dot, ".c"); else strcat(maincfile, ".c");
+    char *cdot = strrchr(maincfile, '.');
+    if (cdot) strcpy(cdot, ".c"); else strcat(maincfile, ".c");
 
     FILE *out = fopen(maincfile, "w");
     if (!out) { perror(maincfile); ast_free_all(); return 1; }
@@ -215,10 +240,15 @@ int main(int argc, char *argv[]) {
 
     int rc = system(cmd);
     if (rc == 0) {
-        printf("Success: ./%s\n", binpath);
-        /* Clean up generated .c files */
-        for (int i=0; i<g_ncfiles; i++) remove(g_cfiles[i]);
-        remove(maincfile);
+        printf("Success: %s\n", binpath);
+        if (!g_emit_c) {
+            for (int i=0; i<g_ncfiles; i++) remove(g_cfiles[i]);
+            remove(maincfile);
+        } else {
+            printf("C sources kept: %s", maincfile);
+            for (int i=0; i<g_ncfiles; i++) printf(", %s", g_cfiles[i]);
+            printf("\n");
+        }
     } else {
         fprintf(stderr, "obc: C compilation failed\n");
     }

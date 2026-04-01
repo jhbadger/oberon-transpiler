@@ -11,7 +11,34 @@
 static char   g_arena[ARENA_SIZE];
 static size_t g_arena_used = 0;
 
-void ast_free_all(void) { g_arena_used = 0; }
+/* -----------------------------------------------------------------------
+ * Source-line store — for caret diagnostics
+ * ----------------------------------------------------------------------- */
+#define MAX_SRC_LINES 8192
+#define MAX_SRC_SIZE  (512 * 1024)
+static char  g_src_buf[MAX_SRC_SIZE];
+static char *g_src_lines[MAX_SRC_LINES];
+static int   g_src_nlines = 0;
+
+static void load_source_lines(FILE *f) {
+    g_src_nlines = 0;
+    int n = (int)fread(g_src_buf, 1, MAX_SRC_SIZE - 1, f);
+    g_src_buf[n] = '\0';
+    rewind(f);
+    /* Split into NUL-terminated lines, stripping \r. */
+    char *p = g_src_buf;
+    if (g_src_nlines < MAX_SRC_LINES) g_src_lines[g_src_nlines++] = p;
+    for (int i = 0; i < n; i++) {
+        if (g_src_buf[i] == '\r') { g_src_buf[i] = '\0'; continue; }
+        if (g_src_buf[i] == '\n') {
+            g_src_buf[i] = '\0';
+            if (i + 1 <= n && g_src_nlines < MAX_SRC_LINES)
+                g_src_lines[g_src_nlines++] = &g_src_buf[i + 1];
+        }
+    }
+}
+
+void ast_free_all(void) { g_arena_used = 0; g_src_nlines = 0; }
 
 static Node *node_new(NodeKind kind, int line, int col) {
     size_t sz = (sizeof(Node) + 7) & ~(size_t)7;
@@ -49,9 +76,28 @@ static void next_tok(Parser *p) {
 
 static void parse_err(Parser *p, const char *fmt, ...) {
     va_list ap;
-    fprintf(stderr, "%d:%d: error: ", p->cur.line, p->cur.col);
+    int line = p->cur.line, col = p->cur.col;
+
+    /* file:line:col: error: message */
+    if (p->filename)
+        fprintf(stderr, "%s:%d:%d: error: ", p->filename, line, col);
+    else
+        fprintf(stderr, "%d:%d: error: ", line, col);
     va_start(ap, fmt); vfprintf(stderr, fmt, ap); va_end(ap);
     fputc('\n', stderr);
+
+    /* Source line + caret, clang-style:
+     *    5 | WHILE x =< 5 DO
+     *      |         ^-- here
+     */
+    if (line >= 1 && line <= g_src_nlines) {
+        const char *src = g_src_lines[line - 1];
+        int plen = snprintf(NULL, 0, " %d | ", line);  /* prefix width */
+        fprintf(stderr, " %d | %s\n", line, src);
+        /* caret line: (plen-1) spaces + '|' + (col-1) spaces + '^-- here' */
+        fprintf(stderr, "%*s|%*s^-- here\n", plen - 1, "", col - 1, "");
+    }
+
     p->errors++;
 }
 
@@ -813,6 +859,7 @@ end_seq:
 
 void parser_init(Parser *p, FILE *file) {
     memset(p, 0, sizeof(*p));
+    load_source_lines(file);   /* reads + rewinds */
     lexer_init(&p->lex, file);
     next_tok(p);
 }

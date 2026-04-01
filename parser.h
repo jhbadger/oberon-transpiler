@@ -104,9 +104,10 @@ struct Node {
  * Parser
  * ----------------------------------------------------------------------- */
 typedef struct {
-    Lexer lex;
-    Token cur;
-    int   errors;
+    Lexer       lex;
+    Token       cur;
+    int         errors;
+    const char *filename;   /* set by caller for diagnostic messages */
 } Parser;
 
 /* Initialise from an open file. */
