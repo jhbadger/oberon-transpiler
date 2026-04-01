@@ -19,7 +19,16 @@ static void emit(CG *g, const char *fmt, ...) {
     va_list ap; va_start(ap, fmt); vfprintf(g->out, fmt, ap); va_end(ap);
 }
 static void ind(CG *g)        { for (int i=0;i<g->indent;i++) fputs("    ",g->out); }
+static void emit_expr(CG *g, Node *e);  /* forward */
 /* Emit a C string literal with proper escaping of \, ", and control chars */
+static void emit_string_lit(CG *g, const char *s);
+/* Emit an expr node always as a char* string (not a char literal).
+ * Used when a C function parameter is const char* but the Oberon arg
+ * might be a 1-char string literal which emit_expr() would fold to 'x'. */
+static void emit_as_string(CG *g, Node *e) {
+    if (e && e->kind == ND_STRING) emit_string_lit(g, e->str);
+    else if (e)                    emit_expr(g, e);
+}
 static void emit_string_lit(CG *g, const char *s) {
     fputc('"', g->out);
     for (; *s; s++) {
@@ -87,7 +96,7 @@ static const char *import_realname(const char *alias) {
  * Built-in module list
  * ----------------------------------------------------------------------- */
 static const char *g_builtins[] = {
-    "Out","In","Random","Terminal","Graphics","Math","Strings",NULL
+    "Out","In","Random","Terminal","Graphics","Math","Strings","Files",NULL
 };
 static int is_builtin_module(const char *s) {
     for (int i=0;g_builtins[i];i++) if (!strcmp(g_builtins[i],s)) return 1;
@@ -424,6 +433,36 @@ static int try_emit_import(CG *g, Node *fa, Node *args) {
         /* two-argument functions */
         if (!strcmp(proc,"arctan2")) { emit(g,"atan2("); emit_expr(g,a0); emit(g,","); emit_expr(g,a1); emit(g,")"); return 1; }
         if (!strcmp(proc,"power"))   { emit(g,"pow(");   emit_expr(g,a0); emit(g,","); emit_expr(g,a1); emit(g,")"); return 1; }
+    }
+    /* Strings module */
+    if (!strcmp(mod,"Strings")) {
+        Node *a2=a1?a1->next:NULL;
+        if (!strcmp(proc,"Length"))  { emit(g,"Strings_Length(");  emit_as_string(g,a0); emit(g,")"); return 1; }
+        if (!strcmp(proc,"Append"))  { emit(g,"Strings_Append(");  emit_as_string(g,a0); emit(g,","); emit_expr(g,a1); emit(g,")"); return 1; }
+        if (!strcmp(proc,"Copy"))    { emit(g,"Strings_Copy(");    emit_as_string(g,a0); emit(g,","); emit_expr(g,a1); emit(g,")"); return 1; }
+        if (!strcmp(proc,"Compare")) { emit(g,"Strings_Compare("); emit_as_string(g,a0); emit(g,","); emit_as_string(g,a1); emit(g,")"); return 1; }
+        if (!strcmp(proc,"Pos"))     { emit(g,"Strings_Pos(");     emit_as_string(g,a0); emit(g,","); emit_as_string(g,a1); emit(g,")"); return 1; }
+        (void)a2;
+    }
+    /* Files module */
+    if (!strcmp(mod,"Files")) {
+        /* Open(name, mode): INTEGER — both args are strings */
+        if (!strcmp(proc,"Open"))        { emit(g,"Files_Open(");       emit_as_string(g,a0); emit(g,","); emit_as_string(g,a1); emit(g,")"); return 1; }
+        /* Close(f) */
+        if (!strcmp(proc,"Close"))       { emit(g,"Files_Close(");      emit_expr(g,a0); emit(g,")"); return 1; }
+        /* EOF(f): BOOLEAN */
+        if (!strcmp(proc,"EOF"))         { emit(g,"Files_EOF(");        emit_expr(g,a0); emit(g,")"); return 1; }
+        /* ReadChar(f, VAR c) — emit as (Files_ReadChar(f,&c),c) so it can appear in expr */
+        if (!strcmp(proc,"ReadChar"))    { emit(g,"(Files_ReadChar(");  emit_expr(g,a0); emit(g,",&"); emit_expr(g,a1); emit(g,"),"); emit_expr(g,a1); emit(g,")"); return 1; }
+        /* ReadLine(f, VAR s) */
+        if (!strcmp(proc,"ReadLine"))    { emit(g,"Files_ReadLine(");   emit_expr(g,a0); emit(g,","); emit_expr(g,a1); emit(g,")"); return 1; }
+        /* ReadInt(f, VAR n) — same trick */
+        if (!strcmp(proc,"ReadInt"))     { emit(g,"(Files_ReadInt(");   emit_expr(g,a0); emit(g,",&"); emit_expr(g,a1); emit(g,"),"); emit_expr(g,a1); emit(g,")"); return 1; }
+        /* Write* procedures */
+        if (!strcmp(proc,"WriteChar"))   { emit(g,"Files_WriteChar(");  emit_expr(g,a0); emit(g,","); emit_expr(g,a1); emit(g,")"); return 1; }
+        if (!strcmp(proc,"WriteString")) { emit(g,"Files_WriteString(");emit_expr(g,a0); emit(g,","); emit_as_string(g,a1); emit(g,")"); return 1; }
+        if (!strcmp(proc,"WriteInt"))    { emit(g,"Files_WriteInt(");   emit_expr(g,a0); emit(g,","); emit_expr(g,a1); emit(g,")"); return 1; }
+        if (!strcmp(proc,"WriteLn"))     { emit(g,"Files_WriteLn(");    emit_expr(g,a0);               emit(g,")"); return 1; }
     }
     /* Unknown import call → RealModule_Proc(args)  (resolves aliases) */
     emit(g,"%s_%s(",import_realname(mod),proc);
@@ -959,6 +998,10 @@ void codegen(Node *module, FILE *out, int is_main) {
     for (int i=0;i<g_nimports;i++) if (!strcmp(g_imports[i],"Random"))   { has_random=1;   break; }
     int has_math = 0;
     for (int i=0;i<g_nimports;i++) if (!strcmp(g_imports[i],"Math"))     { has_math=1;     break; }
+    int has_strings = 0;
+    for (int i=0;i<g_nimports;i++) if (!strcmp(g_imports[i],"Strings"))  { has_strings=1;  break; }
+    int has_files = 0;
+    for (int i=0;i<g_nimports;i++) if (!strcmp(g_imports[i],"Files"))    { has_files=1;    break; }
 
     if (has_random && !has_terminal)
         emit(g,"#include <time.h>\n");
@@ -1153,6 +1196,95 @@ void codegen(Node *module, FILE *out, int is_main) {
         emit(g,"}\n");
     }
     emit(g,"\n");
+
+    /* ── Strings module runtime ─────────────────────────────────── */
+    if (has_strings) {
+        emit(g,"/* Strings module — Oberon-07 compatible */\n");
+        emit(g,"static int Strings_Length(const char *s) {\n");
+        emit(g,"    return (int)strlen(s);\n");
+        emit(g,"}\n");
+        /* Append(extra, VAR dst) — dst := dst + extra */
+        emit(g,"static void Strings_Append(const char *src, char *dst) {\n");
+        emit(g,"    size_t dl=strlen(dst), sl=strlen(src), cap=256;\n");
+        emit(g,"    if (dl+sl < cap) strcat(dst, src);\n");
+        emit(g,"    else { strncat(dst, src, cap-dl-1); dst[cap-1]=0; }\n");
+        emit(g,"}\n");
+        /* Copy(src, VAR dst) — full string copy */
+        emit(g,"static void Strings_Copy(const char *src, char *dst) {\n");
+        emit(g,"    strncpy(dst, src, 255); dst[255]=0;\n");
+        emit(g,"}\n");
+        /* Compare(s1, s2): INTEGER — returns -1, 0, or 1 */
+        emit(g,"static int Strings_Compare(const char *a, const char *b) {\n");
+        emit(g,"    int r=strcmp(a,b); return r<0?-1:r>0?1:0;\n");
+        emit(g,"}\n");
+        /* Pos(pattern, s): INTEGER — first occurrence, -1 if absent */
+        emit(g,"static int Strings_Pos(const char *pat, const char *s) {\n");
+        emit(g,"    const char *p=strstr(s,pat); return p?(int)(p-s):-1;\n");
+        emit(g,"}\n");
+        emit(g,"\n");
+    }
+
+    /* ── Files module runtime ────────────────────────────────────── */
+    if (has_files) {
+        emit(g,"/* Files module — integer-handle FILE* wrapper */\n");
+        emit(g,"#define _FILES_MAX 16\n");
+        emit(g,"static FILE *_files[_FILES_MAX];\n");
+        emit(g,"static int   _files_init_done=0;\n");
+        emit(g,"static void _files_init(void) {\n");
+        emit(g,"    if(_files_init_done) return; _files_init_done=1;\n");
+        emit(g,"    for(int i=0;i<_FILES_MAX;i++) _files[i]=NULL;\n");
+        emit(g,"}\n");
+        /* Open(name, mode): INTEGER — mode is \"r\", \"w\", \"a\", etc. */
+        emit(g,"static int Files_Open(const char *name, const char *mode) {\n");
+        emit(g,"    _files_init();\n");
+        emit(g,"    FILE *f=fopen(name,mode); if(!f) return 0;\n");
+        emit(g,"    for(int i=1;i<_FILES_MAX;i++) if(!_files[i]){_files[i]=f;return i;}\n");
+        emit(g,"    fclose(f); return 0;\n");
+        emit(g,"}\n");
+        /* Close(f) */
+        emit(g,"static void Files_Close(int h) {\n");
+        emit(g,"    if(h>0&&h<_FILES_MAX&&_files[h]){fclose(_files[h]);_files[h]=NULL;}\n");
+        emit(g,"}\n");
+        /* EOF(f): BOOLEAN */
+        emit(g,"static int Files_EOF(int h) {\n");
+        emit(g,"    if(h<=0||h>=_FILES_MAX||!_files[h]) return 1;\n");
+        emit(g,"    int c=fgetc(_files[h]);\n");
+        emit(g,"    if(c==EOF) return 1;\n");
+        emit(g,"    ungetc(c,_files[h]); return 0;\n");
+        emit(g,"}\n");
+        /* ReadChar(f, VAR c) */
+        emit(g,"static void Files_ReadChar(int h, char *c) {\n");
+        emit(g,"    *c=(h>0&&h<_FILES_MAX&&_files[h])?(char)fgetc(_files[h]):0;\n");
+        emit(g,"}\n");
+        /* ReadLine(f, VAR s) — strips trailing newline */
+        emit(g,"static void Files_ReadLine(int h, char *buf) {\n");
+        emit(g,"    if(h<=0||h>=_FILES_MAX||!_files[h]){buf[0]=0;return;}\n");
+        emit(g,"    if(!fgets(buf,256,_files[h])){buf[0]=0;return;}\n");
+        emit(g,"    int l=(int)strlen(buf);\n");
+        emit(g,"    if(l>0&&buf[l-1]=='\\n') buf[l-1]=0;\n");
+        emit(g,"}\n");
+        /* ReadInt(f, VAR n) */
+        emit(g,"static void Files_ReadInt(int h, int *n) {\n");
+        emit(g,"    if(h>0&&h<_FILES_MAX&&_files[h]) fscanf(_files[h],\"%%d\",n);\n");
+        emit(g,"}\n");
+        /* WriteChar(f, c) */
+        emit(g,"static void Files_WriteChar(int h, char c) {\n");
+        emit(g,"    if(h>0&&h<_FILES_MAX&&_files[h]) fputc(c,_files[h]);\n");
+        emit(g,"}\n");
+        /* WriteString(f, s) */
+        emit(g,"static void Files_WriteString(int h, const char *s) {\n");
+        emit(g,"    if(h>0&&h<_FILES_MAX&&_files[h]) fputs(s,_files[h]);\n");
+        emit(g,"}\n");
+        /* WriteInt(f, n) */
+        emit(g,"static void Files_WriteInt(int h, int n) {\n");
+        emit(g,"    if(h>0&&h<_FILES_MAX&&_files[h]) fprintf(_files[h],\"%%d\",n);\n");
+        emit(g,"}\n");
+        /* WriteLn(f) */
+        emit(g,"static void Files_WriteLn(int h) {\n");
+        emit(g,"    if(h>0&&h<_FILES_MAX&&_files[h]) fputc('\\n',_files[h]);\n");
+        emit(g,"}\n");
+        emit(g,"\n");
+    }
 
     /* ── Helper: set range ───────────────────────────────────────── */
     emit(g,"static unsigned int _obc_range(int lo, int hi) {\n");
