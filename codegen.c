@@ -301,7 +301,10 @@ static int try_emit_import(CG *g, Node *fa, Node *args) {
             return 1;
         }
         if (!strcmp(proc,"Ln"))      { emit(g,"putchar('\\n')"); return 1; }
-        if (!strcmp(proc,"Int"))     { emit(g,"printf(\"%%d\",(int)("); emit_expr(g,a0); emit(g,"))"); return 1; }
+        if (!strcmp(proc,"Int"))     {
+            if (a1) { emit(g,"printf(\"%%*d\",(int)("); emit_expr(g,a1); emit(g,"),(int)("); emit_expr(g,a0); emit(g,"))"); }
+            else    { emit(g,"printf(\"%%d\",(int)(");  emit_expr(g,a0); emit(g,"))"); }
+            return 1; }
         if (!strcmp(proc,"Real"))    { emit(g,"printf(\"%%g\","); emit_expr(g,a0); emit(g,")"); return 1; }
         if (!strcmp(proc,"Char"))    { emit(g,"putchar("); emit_expr(g,a0); emit(g,")"); return 1; }
         if (!strcmp(proc,"Fixed"))   { emit(g,"printf(\"%%-*.*f\",");
