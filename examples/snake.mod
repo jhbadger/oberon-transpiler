@@ -1,224 +1,279 @@
-MODULE SnakeGame;
+MODULE Snake;
+(*
+ * Snake — ring-buffer body, colour, WASD + arrow keys, speed scaling.
+ *
+ * Layout (80×24 terminal):
+ *   border  : (2,2) .. (41,21)  — 40 wide, 20 tall
+ *   grid    : (3,3) .. (40,20)  — 38 × 18 cells
+ *   status  : row 23
+ *
+ * Controls: W A S D  or  arrow keys.   Esc = quit.
+ *)
 
-IMPORT Out, In, Terminal, Strings; (* Terminal is a common abstraction for CRT *)
+IMPORT Terminal, Graphics, Out;
 
 CONST
-  KeyUp    = 01X;
-  KeyDown  = 02X;
-  KeyLeft  = 03X;
-  KeyRight = 04X;
-  KeyEnter = 0DX;
-  KeyEsc   = 1BX;
+  GW   = 38;   (* grid columns *)
+  GH   = 18;   (* grid rows    *)
+  MAXB = 700;  (* ring-buffer capacity *)
+
+  Right = 0;  Down = 1;  Left = 2;  Up = 3;
+
+  KUp    = 01X;  KDown  = 02X;
+  KLeft  = 03X;  KRight = 04X;
+  KEsc   = 1BX;
+
+  OX = 3;  OY = 3;   (* grid origin in terminal coords *)
+  BL = 2;  BT = 2;   (* border top-left                *)
 
 VAR
-  body, head, goc, wcc: CHAR;
-  c, cc: CHAR;
-  fx, fy: INTEGER;
-  nr, nd1, k1: INTEGER;
-  b, finish: BOOLEAN;
-  i, j, k, x, y, cx, cy, cxp, cyp, nd2, ndp, s, slength, count: INTEGER;
-  m: ARRAY 17, 62 OF CHAR;
-  tx, ty: ARRAY 827 OF INTEGER;
+  bx, by    : ARRAY MAXB OF INTEGER;  (* ring buffer   *)
+  bhead     : INTEGER;                (* head index    *)
+  blen      : INTEGER;                (* snake length  *)
 
-PROCEDURE WriteIn(x1, y1: INTEGER; s1: ARRAY OF CHAR);
-BEGIN
-  Terminal.Goto(x1, y1);
-  Out.String(s1)
-END WriteIn;
+  grid      : ARRAY GH, GW OF INTEGER; (* 0=empty 1=body 3=food *)
 
-PROCEDURE WriteChar(x1, y1: INTEGER; ch: CHAR);
-BEGIN
-  Terminal.Goto(x1, y1);
-  Out.Char(ch)
-END WriteChar;
+  fx, fy    : INTEGER;   (* food position     *)
+  dir       : INTEGER;   (* current direction *)
+  ndir      : INTEGER;   (* queued direction  *)
+  score     : INTEGER;
+  delay     : INTEGER;   (* ms per step       *)
+  alive     : BOOLEAN;
+  quitting  : BOOLEAN;
 
-PROCEDURE Delay(time: INTEGER);
-VAR timer: LONGINT;
-BEGIN
-  timer := Terminal.GetTickCount() + time;
-  REPEAT UNTIL Terminal.GetTickCount() >= timer
-END Delay;
+  last, now : LONGINT;
+  i, j      : INTEGER;
+  hx, hy    : INTEGER;
+  nx, ny    : INTEGER;
+  tidx      : INTEGER;
+  eating    : BOOLEAN;
+  key       : CHAR;
+  headch    : CHAR;
 
-PROCEDURE Initialisations;
-BEGIN
-  nd1 := 1; nd2 := 370; ndp := 120; nr := 3
-END Initialisations;
 
-PROCEDURE Limits;
-VAR i, k: INTEGER;
-BEGIN
-  Terminal.Clear;
-  FOR k := 0 TO 16 DO
-			 FOR i := 0 TO 61 DO
-						m[k][i] := " "
-			 END
-  END;
-  FOR i := 1 TO 61 DO
-			 m[1][i] := "#"
-	END;
-  FOR i := 2 TO 16 DO
-			 m[i][1] := "#"
-	END;
-  FOR i := 2 TO 61 DO
-			 m[16][i] := "#"
-	END;
-  FOR i := 2 TO 15 DO
-			 m[i][61] := "#"
-	END;
-  body := "O"; head := "@";
-  FOR i := 3 TO 6 DO
-			 m[8][i] := body
-	END;
-  m[8][7] := head
-END Limits;
+(* ── Drawing helpers ──────────────────────────────────────────────── *)
 
-PROCEDURE Display;
-VAR i, k, j: INTEGER;
+PROCEDURE DrawBorder;
 BEGIN
-  j := 5;
-  FOR k := 1 TO 16 DO
-    j := j + 1;
-    Terminal.Goto(10,j);
-    FOR i := 1 TO 61 DO Out.Char(m[k][i]) END
+  Graphics.Color(6, 0);
+  Graphics.Box(BL, BT, GW + 2, GH + 2);
+  Graphics.Reset
+END DrawBorder;
+
+PROCEDURE DrawScore;
+BEGIN
+  Terminal.Goto(BL + 2, BT);
+  Graphics.Color(3, 0);
+  Out.String(" Score:");  Out.Int(score, 4);
+  Out.String("  Lvl:");   Out.Int(score DIV 5 + 1, 2);
+  Out.String("  WASD / arrows  Esc:quit ");
+  Graphics.Reset
+END DrawScore;
+
+PROCEDURE HeadChar() : CHAR;
+BEGIN
+  IF    dir = Right THEN  RETURN '>'
+  ELSIF dir = Down  THEN  RETURN 'v'
+  ELSIF dir = Left  THEN  RETURN '<'
+  ELSE                    RETURN '^'
   END
-END Display;
+END HeadChar;
 
-PROCEDURE Food;
+PROCEDURE DrawCell(x, y, kind : INTEGER);
+BEGIN
+  Terminal.Goto(OX + x, OY + y);
+  IF    kind = 1 THEN  Graphics.Color(2, 0);  Out.Char('o')
+  ELSIF kind = 2 THEN  Graphics.Color(3, 0);  Out.Char(HeadChar())
+  ELSIF kind = 3 THEN  Graphics.Color(1, 0);  Out.Char('*')
+  ELSE                 Graphics.Reset;        Out.Char(' ')
+  END;
+  Graphics.Reset
+END DrawCell;
+
+(* ── Food ─────────────────────────────────────────────────────────── *)
+
+PROCEDURE PlaceFood;
 BEGIN
   REPEAT
-    fy := Terminal.Random(13) + 2;
-    fx := Terminal.Random(58) + 2
-  UNTIL m[fy][fx] = " ";
-  m[fy][fx] := "+";
-  WriteChar(fx + 9, fy + 4, "+")
-END Food;
+    fx := Terminal.Random(GW);
+    fy := Terminal.Random(GH)
+  UNTIL grid[fy][fx] = 0;
+  grid[fy][fx] := 3;
+  DrawCell(fx, fy, 3)
+END PlaceFood;
 
-PROCEDURE MoveBody;
-BEGIN
-  count := count + 1;
-  m[ty[count]][tx[count]] := " ";
-  WriteChar(tx[count] + 9, ty[count] + 4, " ");
-  ty[count] := y;
-  tx[count] := x;
-  IF count = slength THEN count := 0 END
-END MoveBody;
+(* ── Initialise ───────────────────────────────────────────────────── *)
 
-PROCEDURE MoveSnake(nox, noy: INTEGER);
+PROCEDURE Init;
 BEGIN
-  x := x + nox; y := y + noy;
-  MoveBody;
-  m[y][x] := head;
-  WriteChar(x + 9, y + 4, head);
-  m[y - noy, x - nox] := body;
-	WriteChar(x + 9 - nox, y + 4 - noy, body)
-END MoveSnake;
-
-PROCEDURE InWallOrHimself(): BOOLEAN;
-VAR res: BOOLEAN;
-    nx, ny: INTEGER;
-BEGIN
-  nx := 0; ny := 0;
-  IF c = KeyRight THEN nx := 1 ELSIF c = KeyLeft THEN nx := -1
-  ELSIF c = KeyUp THEN ny := -1 ELSIF c = KeyDown THEN ny := 1 END;
-  
-  IF (m[y + ny][x + nx] = "#") OR (m[y + ny][x + nx] = body) THEN
-    res := TRUE
-  ELSE
-    res := FALSE
+  FOR i := 0 TO GH - 1 DO
+    FOR j := 0 TO GW - 1 DO  grid[i][j] := 0  END
   END;
-  RETURN res
-END InWallOrHimself;
 
-PROCEDURE Walk;
-BEGIN
-  IF c = KeyRight THEN MoveSnake(1, 0)
-  ELSIF c = KeyLeft THEN MoveSnake(-1, 0)
-  ELSIF c = KeyUp THEN MoveSnake(0, -1)
-  ELSIF c = KeyDown THEN MoveSnake(0, 1)
+  blen := 5;  bhead := 4;
+  FOR i := 0 TO 4 DO
+    bx[i] := GW DIV 2 - 4 + i;
+    by[i] := GH DIV 2;
+    grid[by[i]][bx[i]] := 1
   END;
-  cc := c;
-  IF Terminal.KeyPressed() THEN
-    c := Terminal.ReadKey();
-    IF (c # KeyUp) & (c # KeyDown) & (c # KeyLeft) & (c # KeyRight) & (c # "p") & (c # KeyEsc) THEN
-      c := cc
+  grid[by[4]][bx[4]] := 2;
+
+  dir := Right;  ndir := Right;
+  score := 0;  delay := 160;
+  alive := TRUE;
+
+  Terminal.Clear;
+  DrawBorder;
+  DrawScore;
+
+  FOR i := 0 TO 3 DO  DrawCell(bx[i], by[i], 1)  END;
+  DrawCell(bx[4], by[4], 2);
+  PlaceFood;
+
+  (* "Ready?" prompt — wait for first keypress *)
+  Terminal.Goto(OX + GW DIV 2 - 10, OY + GH DIV 2 - 1);
+  Graphics.Color(7, 0);
+  Out.String("  Press any arrow key  ");
+  Graphics.Reset;
+  REPEAT  key := Terminal.ReadKey()
+  UNTIL (key = KUp) OR (key = KDown) OR (key = KLeft) OR (key = KRight)
+        OR (key = 'w') OR (key = 'a') OR (key = 's') OR (key = 'd');
+
+  (* Erase prompt *)
+  Terminal.Goto(OX + GW DIV 2 - 10, OY + GH DIV 2 - 1);
+  Out.String("                       ");
+
+  IF    key = KRight THEN  ndir := Right  ELSIF key = KDown  THEN  ndir := Down
+  ELSIF key = KLeft  THEN  ndir := Left   ELSIF key = KUp    THEN  ndir := Up
+  ELSIF key = 'd'    THEN  ndir := Right  ELSIF key = 's'    THEN  ndir := Down
+  ELSIF key = 'a'    THEN  ndir := Left   ELSIF key = 'w'    THEN  ndir := Up
+  END
+END Init;
+
+(* ── One step ─────────────────────────────────────────────────────── *)
+
+PROCEDURE Step;
+BEGIN
+  hx := bx[bhead];  hy := by[bhead];
+
+  (* Apply queued turn, prevent 180° *)
+  IF    (ndir = Right) & (dir # Left)  THEN  dir := Right
+  ELSIF (ndir = Down)  & (dir # Up)    THEN  dir := Down
+  ELSIF (ndir = Left)  & (dir # Right) THEN  dir := Left
+  ELSIF (ndir = Up)    & (dir # Down)  THEN  dir := Up
+  END;
+
+  nx := hx;  ny := hy;
+  IF    dir = Right THEN  nx := nx + 1
+  ELSIF dir = Down  THEN  ny := ny + 1
+  ELSIF dir = Left  THEN  nx := nx - 1
+  ELSE                    ny := ny - 1
+  END;
+
+  IF (nx < 0) OR (nx >= GW) OR (ny < 0) OR (ny >= GH) THEN
+    alive := FALSE;  RETURN
+  END;
+  IF grid[ny][nx] = 1 THEN
+    alive := FALSE;  RETURN
+  END;
+
+  eating := grid[ny][nx] = 3;
+
+  (* Remove tail unless growing *)
+  IF eating = FALSE THEN
+    tidx := (bhead - blen + 1 + MAXB) MOD MAXB;
+    grid[by[tidx]][bx[tidx]] := 0;
+    DrawCell(bx[tidx], by[tidx], 0)
+  END;
+
+  (* Old head → body *)
+  grid[hy][hx] := 1;
+  DrawCell(hx, hy, 1);
+
+  (* Advance ring to new head *)
+  bhead := (bhead + 1) MOD MAXB;
+  bx[bhead] := nx;  by[bhead] := ny;
+  grid[ny][nx] := 2;
+  DrawCell(nx, ny, 2);
+
+  IF eating THEN
+    blen  := blen + 1;
+    score := score + 1;
+    IF score MOD 5 = 0 THEN
+      delay := delay - 12;
+      IF delay < 50 THEN  delay := 50  END
     END;
-    (* Directional Lock Logic *)
-    IF (c = KeyRight) & (cc = KeyLeft) THEN c := cc END;
-    IF (c = KeyLeft) & (cc = KeyRight) THEN c := cc END;
-    IF (c = KeyUp) & (cc = KeyDown) THEN c := cc END;
-    IF (c = KeyDown) & (cc = KeyUp) THEN c := cc END
-  END;
-  Delay(ndp)
-END Walk;
+    DrawScore;
+    PlaceFood
+  END
+END Step;
 
-PROCEDURE Score;
-BEGIN
-  s := s + nr + 1;
-  Terminal.Goto(30, 2); Out.Int(s, 4);
-  Terminal.Goto(59, 2); Out.Int(slength, 3)
-END Score;
+(* ── Game-over screen ─────────────────────────────────────────────── *)
 
 PROCEDURE GameOver;
+VAR cx, cy : INTEGER;
 BEGIN
-  FOR i := 1 TO 9 DO
-    WriteChar(x+9, y+4, "-"); Delay(25);
-    WriteChar(x+9, y+4, "*"); Delay(25);
-    WriteChar(x+9, y+4, "|"); Delay(25);
-    WriteChar(x+9, y+4, "/"); Delay(25)
+  cx := OX + GW DIV 2 - 8;
+  cy := OY + GH DIV 2 - 1;
+
+  (* flash the crash point *)
+  FOR i := 1 TO 8 DO
+    Terminal.Goto(OX + bx[bhead], OY + by[bhead]);
+    IF i MOD 2 = 0 THEN  Graphics.Color(1,0); Out.Char('X')
+    ELSE                 Graphics.Color(7,0); Out.Char('+')
+    END;
+    Graphics.Reset;
+    last := Terminal.GetTickCount() + 80;
+    REPEAT  now := Terminal.GetTickCount()  UNTIL now >= last
   END;
-  WriteChar(x+9, y+4, "X");
-  Delay(730);
-  WriteIn(36, 11, "Game Over");
-  WriteIn(33, 13, "Your score : ");
-  Out.Int(s, 0);
-  WriteIn(32, 14, "Replay? (Y/N)...< >");
-  REPEAT Terminal.Goto(49, 14); goc := Terminal.ReadKey() UNTIL (goc = "y") OR (goc = "n")
+
+  Terminal.Goto(cx, cy);
+  Graphics.Color(1, 0);  Out.String("    GAME  OVER    ");
+  Terminal.Goto(cx, cy + 1);
+  Graphics.Color(3, 0);  Out.String("  Final score: ");  Out.Int(score, 0);
+  Terminal.Goto(cx, cy + 3);
+  Graphics.Color(7, 0);  Out.String("  [Y] again   [N] quit  ");
+  Graphics.Reset;
+
+  REPEAT  key := Terminal.ReadKey()
+  UNTIL (key = 'y') OR (key = 'n') OR (key = KEsc);
+
+  quitting := (key = 'n') OR (key = KEsc)
 END GameOver;
 
-PROCEDURE Start;
-BEGIN
-  slength := 5; count := 0; s := 0; x := 7; y := 8; k := 3;
-  FOR i := 1 TO slength DO tx[i] := k; ty[i] := 8; k := k + 1 END;
-  WriteIn(22, 2, "Score : 0000");
-  WriteIn(44, 2, "Snake length : 005");
-  c := KeyRight;
-  REPEAT
-    WriteIn(24, 12, "Press any arrow key to start...");
-    Delay(500);
-    WriteIn(24, 12, "                                ");
-    Delay(500);
-    IF Terminal.KeyPressed() THEN c := Terminal.ReadKey() END
-  UNTIL (c = KeyUp) OR (c = KeyDown) OR (c = KeyLeft) OR (c = KeyRight);
-  c := KeyRight
-END Start;
 
-PROCEDURE FoodEaten(): BOOLEAN;
-VAR i, k: INTEGER; eaten: BOOLEAN;
+(* ── Main ─────────────────────────────────────────────────────────── *)
+
 BEGIN
-  eaten := TRUE;
-  FOR k := 2 TO 15 DO
-    FOR i := 2 TO 60 DO IF m[k][i] = "+" THEN eaten := FALSE END END
+  quitting := FALSE;
+  WHILE quitting = FALSE DO
+    Init;
+    last := Terminal.GetTickCount();
+
+    WHILE alive DO
+      IF Terminal.KeyPressed() THEN
+        key := Terminal.ReadKey();
+        IF    key = KRight THEN  ndir := Right
+        ELSIF key = KDown  THEN  ndir := Down
+        ELSIF key = KLeft  THEN  ndir := Left
+        ELSIF key = KUp    THEN  ndir := Up
+        ELSIF key = 'd'    THEN  ndir := Right
+        ELSIF key = 's'    THEN  ndir := Down
+        ELSIF key = 'a'    THEN  ndir := Left
+        ELSIF key = 'w'    THEN  ndir := Up
+        ELSIF key = KEsc   THEN  alive := FALSE;  quitting := TRUE
+        END
+      END;
+      now := Terminal.GetTickCount();
+      IF now - last >= delay THEN
+        last := now;
+        Step
+      END
+    END;
+
+    IF quitting = FALSE THEN  GameOver  END
   END;
-  RETURN eaten
-END FoodEaten;
 
-PROCEDURE RunGame(): BOOLEAN;
-VAR restart: BOOLEAN;
-BEGIN
-  Limits; Display; Food; Start; Display;
-  LOOP
-    Walk;
-    IF FoodEaten() THEN Food; slength := slength + 1; Score END;
-    IF InWallOrHimself() THEN
-      GameOver;
-      IF goc = "y" THEN restart := TRUE ELSE restart := FALSE END;
-      EXIT
-    END
-  END;
-  RETURN restart
-END RunGame;
-
-BEGIN
-  Initialisations;
-  WHILE RunGame() DO END
-END SnakeGame.
+  Terminal.Clear;
+  Terminal.Goto(1, 1)
+END Snake.

@@ -1055,23 +1055,32 @@ void codegen(Node *module, FILE *out, int is_main) {
         emit(g,"    return 0;\n");
         emit(g,"}\n");
         emit(g,"static char Terminal_ReadKey(void) {\n");
-        emit(g,"    if (_term_kready) { _term_kready=0; return _term_kbuf; }\n");
-        emit(g,"    /* switch to blocking */\n");
-        emit(g,"    struct termios t; tcgetattr(STDIN_FILENO,&t);\n");
-        emit(g,"    t.c_cc[VMIN]=1; t.c_cc[VTIME]=0;\n");
-        emit(g,"    tcsetattr(STDIN_FILENO,TCSANOW,&t);\n");
-        emit(g,"    char c; read(STDIN_FILENO,&c,1);\n");
-        emit(g,"    t.c_cc[VMIN]=0; tcsetattr(STDIN_FILENO,TCSANOW,&t);\n");
+        emit(g,"    char c;\n");
+        emit(g,"    if (_term_kready) { _term_kready=0; c=_term_kbuf; }\n");
+        emit(g,"    else {\n");
+        emit(g,"        /* blocking read for first byte */\n");
+        emit(g,"        struct termios t; tcgetattr(STDIN_FILENO,&t);\n");
+        emit(g,"        t.c_cc[VMIN]=1; t.c_cc[VTIME]=0;\n");
+        emit(g,"        tcsetattr(STDIN_FILENO,TCSANOW,&t);\n");
+        emit(g,"        read(STDIN_FILENO,&c,1);\n");
+        emit(g,"        t.c_cc[VMIN]=0; tcsetattr(STDIN_FILENO,TCSANOW,&t);\n");
+        emit(g,"    }\n");
+        /* escape-sequence detection runs regardless of which path produced c */
         emit(g,"    if (c == '\\033') {\n");
-        emit(g,"        char c2,c3;\n");
+        emit(g,"        /* Read rest of escape sequence with a short timeout */\n");
+        emit(g,"        struct termios t2; tcgetattr(STDIN_FILENO,&t2);\n");
+        emit(g,"        t2.c_cc[VMIN]=0; t2.c_cc[VTIME]=1; /* 100 ms */\n");
+        emit(g,"        tcsetattr(STDIN_FILENO,TCSANOW,&t2);\n");
+        emit(g,"        char c2=0,c3=0;\n");
         emit(g,"        if (read(STDIN_FILENO,&c2,1)==1 && c2=='[') {\n");
-        emit(g,"            if (read(STDIN_FILENO,&c3,1)==1) {\n");
-        emit(g,"                if (c3=='A') return '\\x01';\n"); /* Up    */
-        emit(g,"                if (c3=='B') return '\\x02';\n"); /* Down  */
-        emit(g,"                if (c3=='C') return '\\x04';\n"); /* Right */
-        emit(g,"                if (c3=='D') return '\\x03';\n"); /* Left  */
-        emit(g,"            }\n");
+        emit(g,"            read(STDIN_FILENO,&c3,1);\n");
+        emit(g,"            if (c3=='A') { tcsetattr(STDIN_FILENO,TCSANOW,&t2); return '\\x01'; }\n"); /* Up    */
+        emit(g,"            if (c3=='B') { tcsetattr(STDIN_FILENO,TCSANOW,&t2); return '\\x02'; }\n"); /* Down  */
+        emit(g,"            if (c3=='C') { tcsetattr(STDIN_FILENO,TCSANOW,&t2); return '\\x04'; }\n"); /* Right */
+        emit(g,"            if (c3=='D') { tcsetattr(STDIN_FILENO,TCSANOW,&t2); return '\\x03'; }\n"); /* Left  */
         emit(g,"        }\n");
+        emit(g,"        t2.c_cc[VMIN]=0; t2.c_cc[VTIME]=0;\n");
+        emit(g,"        tcsetattr(STDIN_FILENO,TCSANOW,&t2);\n");
         emit(g,"        return '\\x1B';\n");
         emit(g,"    }\n");
         emit(g,"    return c;\n");
