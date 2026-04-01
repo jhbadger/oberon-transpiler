@@ -288,7 +288,18 @@ static int try_emit_import(CG *g, Node *fa, Node *args) {
     Node *a0=args, *a1=a0?a0->next:NULL;
     /* Out module */
     if (!strcmp(mod,"Out")) {
-        if (!strcmp(proc,"String"))  { emit(g,"fputs("); emit_expr(g,a0); emit(g,",stdout)"); return 1; }
+        if (!strcmp(proc,"String")) {
+            /* Single-char string literals must stay as strings for fputs.
+             * emit_expr() would turn them into char literals ('x'), which
+             * is wrong here — always force the double-quoted form. */
+            emit(g,"fputs(");
+            if (a0 && a0->kind == ND_STRING)
+                emit(g,"\"%s\"", a0->str);
+            else
+                emit_expr(g,a0);
+            emit(g,",stdout)");
+            return 1;
+        }
         if (!strcmp(proc,"Ln"))      { emit(g,"putchar('\\n')"); return 1; }
         if (!strcmp(proc,"Int"))     { emit(g,"printf(\"%%d\",(int)("); emit_expr(g,a0); emit(g,"))"); return 1; }
         if (!strcmp(proc,"Real"))    { emit(g,"printf(\"%%g\","); emit_expr(g,a0); emit(g,")"); return 1; }
@@ -306,6 +317,19 @@ static int try_emit_import(CG *g, Node *fa, Node *args) {
         }
         if (!strcmp(proc,"Int"))  { emit(g,"scanf(\"%%d\",&"); emit_expr(g,a0); emit(g,")"); return 1; }
         if (!strcmp(proc,"Real")) { emit(g,"scanf(\"%%lf\",&"); emit_expr(g,a0); emit(g,")"); return 1; }
+    }
+    /* Random module */
+    if (!strcmp(mod,"Random")) {
+        if (!strcmp(proc,"Int")) {
+            /* Random.Int(n) -> random integer in [0, n) */
+            emit(g,"(int)(rand()%%(unsigned)("); emit_expr(g,a0); emit(g,"))");
+            return 1;
+        }
+        if (!strcmp(proc,"Real")) {
+            /* Random.Real() -> random double in [0.0, 1.0) */
+            emit(g,"((double)rand()/(double)RAND_MAX)");
+            return 1;
+        }
     }
     /* Unknown import call → Module_Proc(args) */
     emit(g,"%s_%s(",mod,proc);
@@ -459,10 +483,11 @@ static void emit_stmt(CG *g, Node *s) {
         /* Determine if LHS is a char array type → use strcpy */
         Node *lt = NULL;
         if (lhs->kind==ND_IDENT)  lt = sym_type(lhs->str);
-        /* For FIELD_ACCESS or INDEX with unknown type, if RHS is a string literal
-         * it must be a char array assignment → strcpy */
+        /* Single-char string literals are char values; only multi-char strings
+         * need strcpy. A single-char RHS ("X") is emitted as 'X' by emit_expr. */
+        int rhs_is_multichar_str = (rhs->kind == ND_STRING && strlen(rhs->str) > 1);
         int is_str = is_char_array(lt) ||
-                     (lt == NULL && rhs->kind == ND_STRING);
+                     (lt == NULL && rhs_is_multichar_str);
         if (is_str) {
             iemit(g,"strcpy("); emit_expr(g,lhs); emit(g,",");
             /* Always emit RHS as string literal for strcpy */
@@ -550,6 +575,18 @@ static void emit_stmt(CG *g, Node *s) {
         iemit(g,"}\n");
         break;
     }
+
+    case ND_LOOP:
+        iemit(g,"for(;;) {\n");
+        g->indent++;
+        for (Node *st=s->c0;st;st=st->next) emit_stmt(g,st);
+        g->indent--;
+        iemit(g,"}\n");
+        break;
+
+    case ND_EXIT:
+        iemit(g,"break;\n");
+        break;
 
     case ND_RETURN:
         if (s->c0) { iemit(g,"return "); emit_expr(g,s->c0); emit(g,";\n"); }
@@ -755,7 +792,148 @@ void codegen(Node *module, FILE *out) {
     emit(g,"#include <stdio.h>\n");
     emit(g,"#include <stdlib.h>\n");
     emit(g,"#include <string.h>\n");
-    emit(g,"#include <assert.h>\n\n");
+    emit(g,"#include <assert.h>\n");
+
+    /* ── Detect imported modules ─────────────────────────────────── */
+    int has_terminal = 0;
+    for (int i=0;i<g_nimports;i++) if (!strcmp(g_imports[i],"Terminal")) { has_terminal=1; break; }
+    int has_graphics = 0;
+    for (int i=0;i<g_nimports;i++) if (!strcmp(g_imports[i],"Graphics")) { has_graphics=1; break; }
+    int has_random = 0;
+    for (int i=0;i<g_nimports;i++) if (!strcmp(g_imports[i],"Random"))   { has_random=1;   break; }
+
+    if (has_random && !has_terminal)
+        emit(g,"#include <time.h>\n");
+
+    /* ── Terminal module runtime (emitted when Terminal is imported) ─ */
+    if (has_terminal) {
+        emit(g,"#include <termios.h>\n");
+        emit(g,"#include <sys/time.h>\n");
+        emit(g,"#include <unistd.h>\n");
+        emit(g,"#include <time.h>\n");
+        emit(g,"\n");
+        emit(g,"static struct termios _term_orig;\n");
+        emit(g,"static char _term_kbuf = 0;\n");
+        emit(g,"static int  _term_kready = 0;\n");
+        emit(g,"static void _term_restore(void) {\n");
+        emit(g,"    tcsetattr(STDIN_FILENO, TCSANOW, &_term_orig);\n");
+        emit(g,"    printf(\"\\033[?25h\"); fflush(stdout);\n");
+        emit(g,"}\n");
+        emit(g,"static void _term_init(void) {\n");
+        emit(g,"    struct termios raw;\n");
+        emit(g,"    tcgetattr(STDIN_FILENO, &_term_orig);\n");
+        emit(g,"    raw = _term_orig;\n");
+        emit(g,"    raw.c_lflag &= ~(unsigned)(ECHO|ICANON|ISIG);\n");
+        emit(g,"    raw.c_cc[VMIN] = 0; raw.c_cc[VTIME] = 0;\n");
+        emit(g,"    tcsetattr(STDIN_FILENO, TCSANOW, &raw);\n");
+        emit(g,"    printf(\"\\033[?25l\"); fflush(stdout);\n");
+        emit(g,"    atexit(_term_restore);\n");
+        emit(g,"    srand((unsigned)time(NULL));\n");
+        emit(g,"}\n");
+        emit(g,"static void Terminal_Goto(int x, int y) {\n");
+        emit(g,"    printf(\"\\033[%%d;%%dH\", y, x); fflush(stdout);\n");
+        emit(g,"}\n");
+        emit(g,"static void Terminal_Clear(void) {\n");
+        emit(g,"    printf(\"\\033[2J\\033[H\"); fflush(stdout);\n");
+        emit(g,"}\n");
+        emit(g,"static long Terminal_GetTickCount(void) {\n");
+        emit(g,"    struct timeval tv;\n");
+        emit(g,"    gettimeofday(&tv, NULL);\n");
+        emit(g,"    return (long)(tv.tv_sec * 1000L + tv.tv_usec / 1000);\n");
+        emit(g,"}\n");
+        emit(g,"static int Terminal_Random(int n) {\n");
+        emit(g,"    return n > 0 ? rand() %% n : 0;\n");
+        emit(g,"}\n");
+        emit(g,"static int Terminal_KeyPressed(void) {\n");
+        emit(g,"    if (_term_kready) return 1;\n");
+        emit(g,"    char c; if (read(STDIN_FILENO,&c,1)==1) {\n");
+        emit(g,"        _term_kbuf=c; _term_kready=1; return 1;\n");
+        emit(g,"    }\n");
+        emit(g,"    return 0;\n");
+        emit(g,"}\n");
+        emit(g,"static char Terminal_ReadKey(void) {\n");
+        emit(g,"    if (_term_kready) { _term_kready=0; return _term_kbuf; }\n");
+        emit(g,"    /* switch to blocking */\n");
+        emit(g,"    struct termios t; tcgetattr(STDIN_FILENO,&t);\n");
+        emit(g,"    t.c_cc[VMIN]=1; t.c_cc[VTIME]=0;\n");
+        emit(g,"    tcsetattr(STDIN_FILENO,TCSANOW,&t);\n");
+        emit(g,"    char c; read(STDIN_FILENO,&c,1);\n");
+        emit(g,"    t.c_cc[VMIN]=0; tcsetattr(STDIN_FILENO,TCSANOW,&t);\n");
+        emit(g,"    if (c == '\\033') {\n");
+        emit(g,"        char c2,c3;\n");
+        emit(g,"        if (read(STDIN_FILENO,&c2,1)==1 && c2=='[') {\n");
+        emit(g,"            if (read(STDIN_FILENO,&c3,1)==1) {\n");
+        emit(g,"                if (c3=='A') return '\\x01';\n"); /* Up    */
+        emit(g,"                if (c3=='B') return '\\x02';\n"); /* Down  */
+        emit(g,"                if (c3=='C') return '\\x04';\n"); /* Right */
+        emit(g,"                if (c3=='D') return '\\x03';\n"); /* Left  */
+        emit(g,"            }\n");
+        emit(g,"        }\n");
+        emit(g,"        return '\\x1B';\n");
+        emit(g,"    }\n");
+        emit(g,"    return c;\n");
+        emit(g,"}\n");
+    }
+
+    /* ── Graphics module runtime (emitted when Graphics is imported) ─ */
+    if (has_graphics) {
+        emit(g,"\n");
+        emit(g,"static void _gfx_restore(void) {\n");
+        emit(g,"    printf(\"\\033[0m\\033[?25h\"); fflush(stdout);\n");
+        emit(g,"}\n");
+        emit(g,"static void Graphics_Init(void) {\n");
+        emit(g,"    printf(\"\\033[?25l\"); fflush(stdout);\n");
+        emit(g,"    atexit(_gfx_restore);\n");
+        emit(g,"}\n");
+        emit(g,"static void Graphics_Color(int fg, int bg) {\n");
+        emit(g,"    printf(\"\\033[3%%d;4%%dm\", fg & 7, bg & 7); fflush(stdout);\n");
+        emit(g,"}\n");
+        emit(g,"static void Graphics_Color256(int fg, int bg) {\n");
+        emit(g,"    printf(\"\\033[38;5;%%d;48;5;%%dm\", fg & 255, bg & 255); fflush(stdout);\n");
+        emit(g,"}\n");
+        emit(g,"static void Graphics_Reset(void) {\n");
+        emit(g,"    printf(\"\\033[0m\"); fflush(stdout);\n");
+        emit(g,"}\n");
+        emit(g,"static void Graphics_Goto(int x, int y) {\n");
+        emit(g,"    printf(\"\\033[%%d;%%dH\", y, x); fflush(stdout);\n");
+        emit(g,"}\n");
+        emit(g,"static void Graphics_Clear(void) {\n");
+        emit(g,"    printf(\"\\033[2J\\033[H\"); fflush(stdout);\n");
+        emit(g,"}\n");
+        emit(g,"static void Graphics_Fill(int x, int y, int w, int h, char ch) {\n");
+        emit(g,"    for (int row = 0; row < h; row++) {\n");
+        emit(g,"        printf(\"\\033[%%d;%%dH\", y + row, x);\n");
+        emit(g,"        for (int col = 0; col < w; col++) putchar(ch);\n");
+        emit(g,"    }\n");
+        emit(g,"    fflush(stdout);\n");
+        emit(g,"}\n");
+        emit(g,"static void Graphics_HLine(int x, int y, int len, char ch) {\n");
+        emit(g,"    printf(\"\\033[%%d;%%dH\", y, x);\n");
+        emit(g,"    for (int i = 0; i < len; i++) putchar(ch);\n");
+        emit(g,"    fflush(stdout);\n");
+        emit(g,"}\n");
+        emit(g,"static void Graphics_VLine(int x, int y, int len, char ch) {\n");
+        emit(g,"    for (int i = 0; i < len; i++) {\n");
+        emit(g,"        printf(\"\\033[%%d;%%dH\", y + i, x); putchar(ch);\n");
+        emit(g,"    }\n");
+        emit(g,"    fflush(stdout);\n");
+        emit(g,"}\n");
+        emit(g,"static void Graphics_Box(int x, int y, int w, int h) {\n");
+        emit(g,"    if (w < 2 || h < 2) return;\n");
+        emit(g,"    printf(\"\\033[%%d;%%dH\\xe2\\x94\\x8c\", y, x);\n");      /* ┌ */
+        emit(g,"    for (int i=1;i<w-1;i++) fputs(\"\\xe2\\x94\\x80\",stdout);\n"); /* ─ */
+        emit(g,"    fputs(\"\\xe2\\x94\\x90\",stdout);\n");                    /* ┐ */
+        emit(g,"    for (int row=1;row<h-1;row++) {\n");
+        emit(g,"        printf(\"\\033[%%d;%%dH\\xe2\\x94\\x82\", y+row, x);\n"); /* │ */
+        emit(g,"        printf(\"\\033[%%d;%%dH\\xe2\\x94\\x82\", y+row, x+w-1);\n");
+        emit(g,"    }\n");
+        emit(g,"    printf(\"\\033[%%d;%%dH\\xe2\\x94\\x94\", y+h-1, x);\n");  /* └ */
+        emit(g,"    for (int i=1;i<w-1;i++) fputs(\"\\xe2\\x94\\x80\",stdout);\n");
+        emit(g,"    fputs(\"\\xe2\\x94\\x98\\n\",stdout);\n");                  /* ┘ */
+        emit(g,"    fflush(stdout);\n");
+        emit(g,"}\n");
+    }
+    emit(g,"\n");
 
     /* ── Helper: set range ───────────────────────────────────────── */
     emit(g,"static unsigned int _obc_range(int lo, int hi) {\n");
@@ -799,6 +977,9 @@ void codegen(Node *module, FILE *out) {
     /* ── Module body → main() ────────────────────────────────────── */
     emit(g,"\nint main(void) {\n");
     g->indent++;
+    if (has_terminal) iemit(g,"_term_init();\n");
+    if (has_graphics) iemit(g,"Graphics_Init();\n");
+    if (has_random && !has_terminal) iemit(g,"srand((unsigned)time(NULL));\n");
     for (Node *s=module->c2; s; s=s->next) emit_stmt(g,s);
     iemit(g,"return 0;\n");
     g->indent--;

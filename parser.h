@@ -39,6 +39,8 @@ typedef enum {
     ND_WHILE,       /* c0=cond  c1=body                                    */
     ND_REPEAT,      /* c0=body  c1=cond                                    */
     ND_FOR,         /* str=var  c0=from  c1=to  c2=by  c3=body            */
+    ND_LOOP,        /* c0=body                                             */
+    ND_EXIT,        /* (no children)                                       */
     ND_RETURN,      /* c0=expr (NULL = bare RETURN)                        */
     ND_CASE,        /* c0=expr  c1=clauses  c2=else                        */
     ND_CASECLAUSE,  /* c0=labels  c1=stmts                                 */

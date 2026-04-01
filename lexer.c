@@ -48,8 +48,10 @@ static const Keyword keywords[] = {
     { "FOR",       TOK_FOR       },
     { "IF",        TOK_IF        },
     { "IMPORT",    TOK_IMPORT    },
+    { "EXIT",      TOK_EXIT      },
     { "IN",        TOK_IN        },
     { "IS",        TOK_IS        },
+    { "LOOP",      TOK_LOOP      },
     { "MOD",       TOK_MOD       },
     { "MODULE",    TOK_MODULE    },
     { "NIL",       TOK_NIL       },
@@ -338,8 +340,10 @@ const char *token_kind_name(TokenKind k) {
     case TOK_FOR:       return "FOR";
     case TOK_IF:        return "IF";
     case TOK_IMPORT:    return "IMPORT";
+    case TOK_EXIT:      return "EXIT";
     case TOK_IN:        return "IN";
     case TOK_IS:        return "IS";
+    case TOK_LOOP:      return "LOOP";
     case TOK_MOD:       return "MOD";
     case TOK_MODULE:    return "MODULE";
     case TOK_NIL:       return "NIL";

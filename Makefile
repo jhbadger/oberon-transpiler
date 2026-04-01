@@ -1,28 +1,32 @@
-CC     = gcc
-CXX    = g++
-CFLAGS = -Wall -O -std=c99
-PREFIX = $(HOME)
-TVISION = ./tvision
+CC       = gcc
+CXX      = g++
+CFLAGS   = -Wall -O -std=c99
+CXXFLAGS = -O
+PREFIX   = $(HOME)
+TVISION  = ./tvision
+
+OBC_SRCS = obc.c codegen.c parser.c lexer.c
+OBC_HDRS = codegen.h parser.h lexer.h
+
+.PHONY: all clean install
 
 all: obc oberon lextest parsetest
 
+obc: $(OBC_SRCS) $(OBC_HDRS)
+	$(CC) $(CFLAGS) -o $@ $(OBC_SRCS)
+
+oberon: oberon_ide.cpp $(TVISION)/libtvision.a
+	$(CXX) $(CXXFLAGS) -o $@ $< -I$(TVISION)/include -L$(TVISION) -ltvision -lncurses
+
 lextest: lextest.c lexer.c lexer.h
-	$(CC) $(CFLAGS) -o lextest lextest.c lexer.c
-
-obc: obc.c codegen.c parser.c lexer.c codegen.h parser.h lexer.h
-	$(CC) $(CFLAGS) -o obc obc.c codegen.c parser.c lexer.c
-
-oberon: oberon_ide.cpp
-	$(CXX) -o oberon oberon_ide.cpp -I$(TVISION)/include -L$(TVISION) -ltvision -lncurses
+	$(CC) $(CFLAGS) -o $@ lextest.c lexer.c
 
 parsetest: parsetest.c parser.c lexer.c parser.h lexer.h
-	$(CC) $(CFLAGS) -o parsetest parsetest.c parser.c lexer.c
+	$(CC) $(CFLAGS) -o $@ parsetest.c parser.c lexer.c
 
-install: obc oberon
-	cp obc $(PREFIX)/bin
-	cp oberon $(PREFIX)/bin
+install: all
+	cp obc    $(PREFIX)/bin/
+	cp oberon $(PREFIX)/bin/
 
 clean:
-	rm -f obc lextest parsetest
-
-.PHONY: all clean install
+	rm -f obc oberon lextest parsetest

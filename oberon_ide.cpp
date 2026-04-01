@@ -68,7 +68,9 @@ const ushort
                              // (reserve 210-249 for up to 40 windows)
 
 // ── Run oberon  ────────────────────────────────────────────────
-static int runOberon(const char* filepath) {
+struct RunResult { int errorLine; std::string errorText; };
+
+static RunResult runOberon(const char* filepath) {
     // 1. Prepare Paths
     std::string sourcePath = filepath;
     std::string exePath = sourcePath;
@@ -120,11 +122,6 @@ static int runOberon(const char* filepath) {
         bool failed = !(WIFEXITED(status) && WEXITSTATUS(status) == 0);
 
         if (failed) {
-            if (!errout.empty()) {
-                fprintf(stderr, "\n[Output/Errors]\n%s", errout.c_str());
-            }
-
-            // Parser: Adjust this based on your compiler's specific error format
             auto parseErrorLine = [](const std::string& s) -> int {
                 size_t pos = s.find("line ");
                 if (pos != std::string::npos) {
@@ -136,11 +133,12 @@ static int runOberon(const char* filepath) {
             };
 
             int errorLine = parseErrorLine(errout);
-            printf("\n--- Press Enter to return to IDE ---");
+            printf("\n--- Error — press Enter to return ---");
             fflush(stdout);
             while (getchar() != '\n');
             TScreen::resume();
-            return errorLine;
+            TProgram::application->redraw();
+            return { errorLine, errout };
         }
     }
 
@@ -151,7 +149,7 @@ static int runOberon(const char* filepath) {
 
     TScreen::resume();
     TProgram::application->redraw();
-    return 0;
+    return { 0, "" };
 }
 
 // ── Output dialog ─────────────────────────────────────────────────────────
@@ -351,6 +349,14 @@ public:
             lineStart++;
         }
 
+        // Determine block-comment state at the start of the first visible line
+        bool inBlockComment = false;
+        for (uint bci = 0; bci + 1 < lineStart; bci++) {
+            char c1 = gapChar(bci), c2 = gapChar(bci + 1);
+            if (!inBlockComment && c1 == '(' && c2 == '*') { inBlockComment = true;  bci++; }
+            else if (inBlockComment && c1 == '*' && c2 == ')') { inBlockComment = false; bci++; }
+        }
+
         for (int row = 0; row < visRows && lineStart <= bufLen; row++) {
             uint lineEnd = lineStart;
             while (lineEnd < bufLen && gapChar(lineEnd) != '\n') lineEnd++;
@@ -364,30 +370,52 @@ public:
                 writeBuf(sc, row, 1, 1, b);
             };
 
+            TColorAttr commentColor = TColorAttr(TColorRGB(0x55FFFF), TColorRGB(0x000080));
             uint i = lineStart;
+
+            // If continuing a block comment from a previous line, consume until *)
+            if (inBlockComment) {
+                while (i < lineEnd) {
+                    if (gapChar(i) == '*' && i + 1 < lineEnd && gapChar(i + 1) == ')') {
+                        recolour(i,   gapChar(i),   commentColor);
+                        recolour(i+1, gapChar(i+1), commentColor);
+                        i += 2;
+                        inBlockComment = false;
+                        break;
+                    }
+                    recolour(i, gapChar(i), commentColor);
+                    i++;
+                }
+                if (inBlockComment) {
+                    lineStart = lineEnd + 1;
+                    continue;
+                }
+            }
+
             while (i < lineEnd) {
                 char c = gapChar(i);
                 if (c == '{') {
                     uint start = i++;
                     while (i < lineEnd && gapChar(i) != '}') i++;
                     if (i < lineEnd) i++;
-                    TColorAttr ca = TColorAttr(TColorRGB(0x55FFFF), TColorRGB(0x000080));
-                    for (uint j = start; j < i; j++) recolour(j, gapChar(j), ca);
+                    for (uint j = start; j < i; j++) recolour(j, gapChar(j), commentColor);
                     continue;
                 }
                 if (c == '(' && i+1 < lineEnd && gapChar(i+1) == '*') {
                     uint start = i; i += 2;
+                    bool closed = false;
                     while (i < lineEnd) {
-                        if (gapChar(i) == '*' && i+1 < lineEnd && gapChar(i+1) == ')') { i += 2; break; }
+                        if (gapChar(i) == '*' && i+1 < lineEnd && gapChar(i+1) == ')') {
+                            i += 2; closed = true; break;
+                        }
                         i++;
                     }
-                    TColorAttr ca = TColorAttr(TColorRGB(0x55FFFF), TColorRGB(0x000080));
-                    for (uint j = start; j < i; j++) recolour(j, gapChar(j), ca);
+                    if (!closed) inBlockComment = true;
+                    for (uint j = start; j < i; j++) recolour(j, gapChar(j), commentColor);
                     continue;
                 }
                 if (c == '/' && i+1 < lineEnd && gapChar(i+1) == '/') {
-                    TColorAttr ca = TColorAttr(TColorRGB(0x55FFFF), TColorRGB(0x000080));
-                    for (uint j = i; j < lineEnd; j++) recolour(j, gapChar(j), ca);
+                    for (uint j = i; j < lineEnd; j++) recolour(j, gapChar(j), commentColor);
                     i = lineEnd;
                     continue;
                 }
@@ -398,12 +426,18 @@ public:
                     for (uint j = start; j < i; j++) recolour(j, gapChar(j), ca);
                     continue;
                 }
+                if (c == '"') {
+                    uint start = i++;
+                    while (i < lineEnd) { if (gapChar(i++) == '"') break; }
+                    TColorAttr ca = TColorAttr(TColorRGB(0x55FF55), TColorRGB(0x000080));
+                    for (uint j = start; j < i; j++) recolour(j, gapChar(j), ca);
+                    continue;
+                }
                 if (isdigit((unsigned char)c) ||
                     (c == '$' && i+1 < lineEnd && isxdigit((unsigned char)gapChar(i+1)))) {
                     uint start = i;
                     while (i < lineEnd && (isalnum((unsigned char)gapChar(i)) || gapChar(i) == '.')) i++;
-                    TColorAttr ca = TColorAttr(TColorRGB(0x55FFFF), TColorRGB(0x000080));
-                    for (uint j = start; j < i; j++) recolour(j, gapChar(j), ca);
+                    for (uint j = start; j < i; j++) recolour(j, gapChar(j), commentColor);
                     continue;
                 }
                 if (isalpha((unsigned char)c) || c == '_') {
@@ -604,6 +638,7 @@ public:
                 line++;
                 if ((int)line == targetLine) {
                     editor->setCurPtr(i + 1, 0);
+                    editor->delta.y = std::max(0, targetLine - editor->size.y / 2);
                     editor->drawView();
                     return;
                 }
@@ -671,7 +706,7 @@ TMenuBar* TOberonIDE::initMenuBar(TRect r) {
     return new TMenuBar(
         r,
         *new TSubMenu("~F~ile", kbAltF) +
-            *new TMenuItem("~N~ew", cmNewFile, kbNoKey, hcNoContext, "F2") +
+            *new TMenuItem("~N~ew", cmNewFile, kbNoKey, hcNoContext, "") +
             *new TMenuItem("~O~pen...", cmOpenFile, kbF3, hcNoContext, "F3") +
             *new TMenuItem("~S~ave", cmSaveFile, kbF2, hcNoContext, "F2") +
             *new TMenuItem("Save ~A~s...", cmSaveFileAs, kbNoKey) + newLine() +
@@ -697,8 +732,8 @@ TMenuBar* TOberonIDE::initMenuBar(TRect r) {
                            "Ctrl-H") +
             *new TMenuItem("~A~gain", cmSearchAgain, kbF7, hcNoContext, "F7") +
 *new TSubMenu("~W~indow", kbAltW) +
-            
-            *new TMenuItem("Switch Window",      cmWindow1 + 1, kbAlt2, hcNoContext, "Alt-2") +
+            *new TMenuItem("~L~ist...",      cmWindowList,  kbNoKey, hcNoContext, "") +
+            *new TMenuItem("Switch Window",  cmWindow1 + 1, kbAlt2,  hcNoContext, "Alt-2") +
             
         *new TSubMenu("~H~elp", kbAltH) +
             *new TMenuItem("~A~bout...",      cmAbout,      kbNoKey)
@@ -753,13 +788,6 @@ if (event.message.command >= cmWindow1 && event.message.command < cmWindow1 + 40
             case cmGotoLine:   gotoLine();       clearEvent(event); return;
             case cmWindowList: showWindowList(); clearEvent(event); return;
             default:
-                // Check for window selection commands (cmWindow1..cmWindow1+39)
-                if (event.message.command >= cmWindow1 &&
-                    event.message.command < cmWindow1 + 40) {
-                    selectWindow(event.message.command - cmWindow1);
-                    clearEvent(event);
-                    return;
-                }
                 break;
         }
     }
@@ -859,11 +887,16 @@ void TOberonIDE::runProgram() {
     std::string path = w->getFilePath();
     if (path.empty()) return;
     w->editor->errorLine = 0;
-    int errLine = runOberon(path.c_str());
-    if (errLine > 0) {
-        w->editor->errorLine = errLine;
-        w->jumpToLine(errLine - 1);
+    RunResult result = runOberon(path.c_str());
+    if (result.errorLine > 0) {
+        w->editor->errorLine = result.errorLine;
+        w->jumpToLine(result.errorLine - 1);
         w->drawView();
+    }
+    if (!result.errorText.empty()) {
+        TOutputDialog* dlg = new TOutputDialog(result.errorText, false);
+        deskTop->execView(dlg);
+        TObject::destroy(dlg);
     }
 }
 

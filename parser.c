@@ -406,8 +406,16 @@ static Node *parse_designator(Parser *p) {
             Node *idx = node_new(ND_INDEX, n->line, n->col);
             idx->c0 = n;
             idx->c1 = parse_expr(p);
-            eat(p, TOK_RBRACKET);
             n = idx;
+            /* Handle m[i, j] as m[i][j] */
+            while (p->cur.kind == TOK_COMMA) {
+                next_tok(p);
+                Node *idx2 = node_new(ND_INDEX, n->line, n->col);
+                idx2->c0 = n;
+                idx2->c1 = parse_expr(p);
+                n = idx2;
+            }
+            eat(p, TOK_RBRACKET);
         } else if (p->cur.kind == TOK_CARET) {
             Node *deref = node_new(ND_DEREF, n->line, n->col);
             deref->c0 = n;
@@ -725,6 +733,22 @@ static Node *parse_stat_seq(Parser *p) {
             break;
         }
 
+        /* LOOP stmts END */
+        case TOK_LOOP: {
+            next_tok(p);
+            s = node_new(ND_LOOP, line, col);
+            s->c0 = parse_stat_seq(p);
+            eat(p, TOK_END);
+            break;
+        }
+
+        /* EXIT */
+        case TOK_EXIT: {
+            next_tok(p);
+            s = node_new(ND_EXIT, line, col);
+            break;
+        }
+
         /* CASE expr OF Case {"|" Case} [ELSE stmts] END
          * Case = [CaseLabelList ":" StatSeq]                            */
         case TOK_CASE: {
@@ -842,6 +866,8 @@ const char *node_kind_name(NodeKind k) {
     case ND_WHILE:       return "WHILE";
     case ND_REPEAT:      return "REPEAT";
     case ND_FOR:         return "FOR";
+    case ND_LOOP:        return "LOOP";
+    case ND_EXIT:        return "EXIT";
     case ND_RETURN:      return "RETURN";
     case ND_CASE:        return "CASE";
     case ND_CASECLAUSE:  return "CASECLAUSE";
