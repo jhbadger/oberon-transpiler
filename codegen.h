@@ -4,8 +4,12 @@
 #include "parser.h"
 #include <stdio.h>
 
-/* Translate an Oberon AST (as returned by parse_module) to C, writing
- * the result to `out`.  Does not close the file.                      */
-void codegen(Node *module, FILE *out);
+/* Translate an Oberon AST to C.
+ * is_main=1 → emit int main(); is_main=0 → emit ModName_init(). */
+void codegen(Node *module, FILE *out, int is_main);
+
+/* Generate a C header (.h) with extern declarations of all exported
+ * symbols.  Call this for every library (non-main) module.           */
+void codegen_header(Node *module, FILE *out);
 
 #endif

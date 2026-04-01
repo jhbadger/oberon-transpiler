@@ -8,7 +8,12 @@
 /* -----------------------------------------------------------------------
  * Emitter context
  * ----------------------------------------------------------------------- */
-typedef struct { FILE *out; int indent; } CG;
+typedef struct {
+    FILE *out;
+    int   indent;
+    char  modname[MAX_IDENT]; /* current module name (library mode) */
+    int   is_main;            /* 1 = top-level program, 0 = library  */
+} CG;
 
 static void emit(CG *g, const char *fmt, ...) {
     va_list ap; va_start(ap, fmt); vfprintf(g->out, fmt, ap); va_end(ap);
@@ -51,11 +56,63 @@ static int sym_is_var(const char *name) {
 /* -----------------------------------------------------------------------
  * Known imports (module aliases)
  * ----------------------------------------------------------------------- */
-static char g_imports[32][MAX_IDENT];
+static char g_imports[32][MAX_IDENT];      /* alias (or module name) */
+static char g_import_real[32][MAX_IDENT];  /* real module name       */
 static int  g_nimports = 0;
+
 static int  is_import(const char *s) {
     for (int i=0;i<g_nimports;i++) if (!strcmp(g_imports[i],s)) return 1;
     return 0;
+}
+/* Resolve an import alias to its real module name. */
+static const char *import_realname(const char *alias) {
+    for (int i=0;i<g_nimports;i++)
+        if (!strcmp(g_imports[i],alias)) return g_import_real[i];
+    return alias;
+}
+
+/* -----------------------------------------------------------------------
+ * Built-in module list
+ * ----------------------------------------------------------------------- */
+static const char *g_builtins[] = {
+    "Out","In","Random","Terminal","Graphics","Math","Strings",NULL
+};
+static int is_builtin_module(const char *s) {
+    for (int i=0;g_builtins[i];i++) if (!strcmp(g_builtins[i],s)) return 1;
+    return 0;
+}
+
+/* -----------------------------------------------------------------------
+ * Module-level exported symbol names — used to emit #define aliases so
+ * that proc bodies can call exported symbols by their original names.
+ * Only exported (public) symbols need aliases; private ones keep their
+ * original name and are marked static, so no aliasing is required.
+ * ----------------------------------------------------------------------- */
+#define MAX_MODSYMS 256
+static char g_modsyms[MAX_MODSYMS][MAX_IDENT];
+static int  g_nmodsyms = 0;
+
+static void collect_modsyms(Node *decls) {
+    g_nmodsyms = 0;
+    for (Node *d=decls; d; d=d->next) {
+        const char *name = NULL;
+        int exported = 0;
+        if ((d->kind==ND_CONST_DECL || d->kind==ND_TYPE_DECL) &&
+            (d->flags & FLAG_EXPORTED)) {
+            name = d->str; exported = 1;
+        } else if (d->kind==ND_VAR_DECL) {
+            /* Each ident in the list may be individually exported */
+            for (Node *id=d->c0; id; id=id->next) {
+                if ((id->flags & FLAG_EXPORTED) && g_nmodsyms < MAX_MODSYMS)
+                    strncpy(g_modsyms[g_nmodsyms++], id->str, MAX_IDENT-1);
+            }
+            continue;
+        } else if (d->kind==ND_PROC_DECL && (d->flags & FLAG_EXPORTED)) {
+            name = d->str; exported = 1;
+        }
+        if (exported && name && g_nmodsyms < MAX_MODSYMS)
+            strncpy(g_modsyms[g_nmodsyms++], name, MAX_IDENT-1);
+    }
 }
 
 /* -----------------------------------------------------------------------
@@ -356,8 +413,8 @@ static int try_emit_import(CG *g, Node *fa, Node *args) {
         if (!strcmp(proc,"arctan2")) { emit(g,"atan2("); emit_expr(g,a0); emit(g,","); emit_expr(g,a1); emit(g,")"); return 1; }
         if (!strcmp(proc,"power"))   { emit(g,"pow(");   emit_expr(g,a0); emit(g,","); emit_expr(g,a1); emit(g,")"); return 1; }
     }
-    /* Unknown import call → Module_Proc(args) */
-    emit(g,"%s_%s(",mod,proc);
+    /* Unknown import call → RealModule_Proc(args)  (resolves aliases) */
+    emit(g,"%s_%s(",import_realname(mod),proc);
     for (Node *a=args;a;a=a->next) { if(a!=args) emit(g,","); emit_expr(g,a); }
     emit(g,")");
     return 1;
@@ -447,11 +504,17 @@ static void emit_expr(CG *g, Node *e) {
         emit_expr(g,e->c0); emit(g,"["); emit_expr(g,e->c1); emit(g,"]");
         break;
     case ND_FIELD_ACCESS:
-        /* Module constants (e.g. Math.pi) */
+        /* Module constants / variables (e.g. Math.pi, Utils.count) */
         if (e->c0 && e->c0->kind==ND_IDENT && is_import(e->c0->str)) {
-            if (!strcmp(e->c0->str,"Math")) {
+            const char *real = import_realname(e->c0->str);
+            if (!strcmp(real,"Math")) {
                 if (!strcmp(e->str,"pi")) { emit(g,"M_PI"); break; }
                 if (!strcmp(e->str,"e"))  { emit(g,"M_E");  break; }
+            }
+            /* User module variable/constant: alias.Name → RealMod_Name */
+            if (!is_builtin_module(real)) {
+                emit(g,"%s_%s", real, e->str);
+                break;
             }
         }
         /* If base is pointer: use ->, else use . */
@@ -728,8 +791,22 @@ static void emit_global_var(CG *g, Node *n) {
     /* n: ND_VAR_DECL, c0=idents, c1=type */
     for (Node *id=n->c0; id; id=id->next) {
         sym_add(id->str, n->c1, 0);
-        emit_var_decl_raw(g, id->str, n->c1, 0);
-        /* Zero-initialise globals */
+        if (!g->is_main) {
+            /* Library module:
+             *   exported → ModName_VarName  (extern linkage, #define alias)
+             *   private  → static VarName   (internal linkage, original name) */
+            int exp = (id->flags & FLAG_EXPORTED);
+            if (!exp) {
+                emit(g,"static ");
+                emit_var_decl_raw(g, id->str, n->c1, 0);
+            } else {
+                char pname[MAX_IDENT*2+2];
+                snprintf(pname,sizeof(pname),"%s_%s",g->modname,id->str);
+                emit_var_decl_raw(g, pname, n->c1, 0);
+            }
+        } else {
+            emit_var_decl_raw(g, id->str, n->c1, 0);
+        }
         if (n->c1 && n->c1->kind==ND_TNAME && !strcmp(n->c1->str,"STRING"))
             emit(g," = \"\"");
         emit(g,";\n");
@@ -747,23 +824,43 @@ static void emit_local_vars(CG *g, Node *decls) {
     }
 }
 
-/* Emit a forward declaration (prototype) for a procedure */
-static void emit_proc_proto(CG *g, Node *proc) {
-    /* proc: ND_PROC_DECL, str=name, c0=params, c1=ret_type, c2=decls, c3=stmts */
-    emit_proc_ret(g, proc);
-    emit(g," %s", proc->str);
+/* Emit a forward declaration (prototype) for a procedure.
+ * nested=1 when called recursively for an inner procedure. */
+static void emit_proc_proto(CG *g, Node *proc, int nested) {
+    if (!g->is_main) {
+        /* Library module:
+         *   exported top-level → ModName_ProcName (extern linkage)
+         *   private top-level  → static ProcName  (internal linkage)
+         *   nested             → static ProcName  (always private) */
+        int exp = !nested && (proc->flags & FLAG_EXPORTED);
+        if (!exp) emit(g,"static ");
+        emit_proc_ret(g, proc);
+        if (exp) emit(g," %s_%s", g->modname, proc->str);
+        else     emit(g," %s", proc->str);
+    } else {
+        emit_proc_ret(g, proc);
+        emit(g," %s", proc->str);
+    }
     emit_proc_params(g, proc->c0);
     emit(g,";\n");
-    /* Also handle nested procedure declarations */
     for (Node *d=proc->c2; d; d=d->next)
-        if (d->kind==ND_PROC_DECL) emit_proc_proto(g, d);
+        if (d->kind==ND_PROC_DECL) emit_proc_proto(g, d, 1);
 }
 
-/* Emit a complete procedure definition */
-static void emit_proc_def(CG *g, Node *proc) {
+/* Emit a complete procedure definition.
+ * nested=1 when called recursively for an inner procedure. */
+static void emit_proc_def(CG *g, Node *proc, int nested) {
     emit(g,"\n");
-    emit_proc_ret(g, proc);
-    emit(g," %s", proc->str);
+    if (!g->is_main) {
+        int exp = !nested && (proc->flags & FLAG_EXPORTED);
+        if (!exp) emit(g,"static ");
+        emit_proc_ret(g, proc);
+        if (exp) emit(g," %s_%s", g->modname, proc->str);
+        else     emit(g," %s", proc->str);
+    } else {
+        emit_proc_ret(g, proc);
+        emit(g," %s", proc->str);
+    }
 
     /* Register parameters in a new scope */
     sym_push();
@@ -780,7 +877,7 @@ static void emit_proc_def(CG *g, Node *proc) {
 
     /* Nested procedure prototypes */
     for (Node *d=proc->c2; d; d=d->next)
-        if (d->kind==ND_PROC_DECL) { iemit(g,""); emit_proc_proto(g,d); }
+        if (d->kind==ND_PROC_DECL) { iemit(g,""); emit_proc_proto(g,d,1); }
 
     /* Local variable declarations */
     emit_local_vars(g, proc->c2);
@@ -798,33 +895,48 @@ static void emit_proc_def(CG *g, Node *proc) {
 
     /* Emit any nested procedures (they'll be hoisted to file scope in C) */
     for (Node *d=proc->c2; d; d=d->next)
-        if (d->kind==ND_PROC_DECL) emit_proc_def(g, d);
+        if (d->kind==ND_PROC_DECL) emit_proc_def(g, d, 1);
 }
 
 /* -----------------------------------------------------------------------
  * Main entry point
  * ----------------------------------------------------------------------- */
 
-void codegen(Node *module, FILE *out) {
-    CG cg = { out, 0 };
+void codegen(Node *module, FILE *out, int is_main) {
+    CG cg;
+    memset(&cg, 0, sizeof(cg));
+    cg.out     = out;
+    cg.is_main = is_main;
+    strncpy(cg.modname, module->str, MAX_IDENT-1);
     CG *g = &cg;
     g_nsyms=0; g_sdepth=0; g_nimports=0;
 
-    /* ── Collect import module names ─────────────────────────────── */
+    /* ── Collect import module names (alias + real name) ─────────── */
     for (Node *imp=module->c0; imp; imp=imp->next) {
-        /* str = alias (or module name if no alias) */
-        if (g_nimports < 32)
-            strncpy(g_imports[g_nimports++], imp->str, MAX_IDENT-1);
-        /* Also register the real name if aliased */
-        if ((imp->flags & FLAG_HAS_ALIAS) && imp->c0 && g_nimports < 32)
-            strncpy(g_imports[g_nimports++], imp->c0->str, MAX_IDENT-1);
+        if (g_nimports >= 32) break;
+        const char *alias = imp->str;
+        const char *real  = (imp->flags & FLAG_HAS_ALIAS) && imp->c0
+                            ? imp->c0->str : imp->str;
+        strncpy(g_imports[g_nimports],      alias, MAX_IDENT-1);
+        strncpy(g_import_real[g_nimports],  real,  MAX_IDENT-1);
+        g_nimports++;
     }
+
+    /* ── Collect module-level exported symbols (for #define aliases) ─ */
+    if (!is_main) collect_modsyms(module->c1);
 
     /* ── Standard includes ───────────────────────────────────────── */
     emit(g,"#include <stdio.h>\n");
     emit(g,"#include <stdlib.h>\n");
     emit(g,"#include <string.h>\n");
     emit(g,"#include <assert.h>\n");
+
+    /* ── Include headers for user-imported modules ───────────────── */
+    for (int i=0;i<g_nimports;i++) {
+        const char *real = g_import_real[i];
+        if (!is_builtin_module(real))
+            emit(g,"#include \"%s.h\"\n", real);
+    }
 
     /* ── Detect imported modules ─────────────────────────────────── */
     int has_terminal = 0;
@@ -980,8 +1092,13 @@ void codegen(Node *module, FILE *out) {
     int has_consts = 0;
     for (Node *d=module->c1; d; d=d->next) {
         if (d->kind==ND_CONST_DECL) {
-            /* Emit as enum value so it's usable as an array size constant */
-            emit(g,"enum { %s = ", d->str);
+            /* Library: exported consts get module prefix; private keep name.
+             * Use enum so the constant can serve as an array size.          */
+            int exp = !is_main && (d->flags & FLAG_EXPORTED);
+            if (exp)
+                emit(g,"enum { %s_%s = ", g->modname, d->str);
+            else
+                emit(g,"enum { %s = ", d->str);
             emit_expr(g, d->c0);
             emit(g," };\n");
             has_consts = 1;
@@ -1003,21 +1120,133 @@ void codegen(Node *module, FILE *out) {
 
     /* ── Forward declarations for all procedures ─────────────────── */
     for (Node *d=module->c1; d; d=d->next)
-        if (d->kind==ND_PROC_DECL) emit_proc_proto(g,d);
+        if (d->kind==ND_PROC_DECL) emit_proc_proto(g,d,0);
     emit(g,"\n");
+
+    /* ── #define aliases (lib mode only): let proc bodies reference
+     *    exported symbols by their original Oberon names, which the C
+     *    preprocessor then expands to the prefixed C names.          ── */
+    if (!g->is_main) {
+        for (int i=0; i<g_nmodsyms; i++)
+            emit(g,"#define %s %s_%s\n", g_modsyms[i], g->modname, g_modsyms[i]);
+        emit(g,"\n");
+    }
 
     /* ── Procedure definitions ───────────────────────────────────── */
     for (Node *d=module->c1; d; d=d->next)
-        if (d->kind==ND_PROC_DECL) emit_proc_def(g,d);
+        if (d->kind==ND_PROC_DECL) emit_proc_def(g,d,0);
 
-    /* ── Module body → main() ────────────────────────────────────── */
-    emit(g,"\nint main(void) {\n");
-    g->indent++;
-    if (has_terminal) iemit(g,"_term_init();\n");
-    if (has_graphics) iemit(g,"Graphics_Init();\n");
-    if (has_random && !has_terminal) iemit(g,"srand((unsigned)time(NULL));\n");
-    for (Node *s=module->c2; s; s=s->next) emit_stmt(g,s);
-    iemit(g,"return 0;\n");
-    g->indent--;
-    emit(g,"}\n");
+    if (g->is_main) {
+        /* ── Main program: extern + call each user-imported init() ── */
+        for (int i=0;i<g_nimports;i++) {
+            const char *real = g_import_real[i];
+            if (!is_builtin_module(real))
+                emit(g,"extern void %s_init(void);\n", real);
+        }
+        emit(g,"\nint main(void) {\n");
+        g->indent++;
+        if (has_terminal) iemit(g,"_term_init();\n");
+        if (has_graphics) iemit(g,"Graphics_Init();\n");
+        if (has_random && !has_terminal) iemit(g,"srand((unsigned)time(NULL));\n");
+        for (int i=0;i<g_nimports;i++) {
+            const char *real = g_import_real[i];
+            if (!is_builtin_module(real))
+                iemit(g,"%s_init();\n", real);
+        }
+        for (Node *s=module->c2; s; s=s->next) emit_stmt(g,s);
+        iemit(g,"return 0;\n");
+        g->indent--;
+        emit(g,"}\n");
+    } else {
+        /* ── Library module: emit ModName_init() with once-guard ──── */
+        /* Extern declarations for this module's own user-module deps */
+        for (int i=0;i<g_nimports;i++) {
+            const char *real = g_import_real[i];
+            if (!is_builtin_module(real))
+                emit(g,"extern void %s_init(void);\n", real);
+        }
+        emit(g,"\nvoid %s_init(void) {\n", g->modname);
+        g->indent++;
+        iemit(g,"static int _once = 0;\n");
+        iemit(g,"if (_once) return; _once = 1;\n");
+        if (has_terminal) iemit(g,"_term_init();\n");
+        if (has_graphics) iemit(g,"Graphics_Init();\n");
+        if (has_random && !has_terminal) iemit(g,"srand((unsigned)time(NULL));\n");
+        /* Call each user-module dependency's init */
+        for (int i=0;i<g_nimports;i++) {
+            const char *real = g_import_real[i];
+            if (!is_builtin_module(real))
+                iemit(g,"%s_init();\n", real);
+        }
+        for (Node *s=module->c2; s; s=s->next) emit_stmt(g,s);
+        g->indent--;
+        emit(g,"}\n");
+        /* #undef aliases after the entire init body */
+        emit(g,"\n");
+        for (int i=0; i<g_nmodsyms; i++)
+            emit(g,"#undef %s\n", g_modsyms[i]);
+    }
+}
+
+/* -----------------------------------------------------------------------
+ * Header generation for library modules.
+ * Emits extern declarations for all exported procedures and variables,
+ * plus the module's init function declaration.
+ * ----------------------------------------------------------------------- */
+void codegen_header(Node *module, FILE *out) {
+    /* Guard macro */
+    char guard[MAX_IDENT*2];
+    snprintf(guard, sizeof(guard), "OBC_%s_H_", module->str);
+    /* Uppercase the guard */
+    for (char *p=guard; *p; p++) if (*p>='a'&&*p<='z') *p -= 32;
+
+    fprintf(out,"#ifndef %s\n#define %s\n\n", guard, guard);
+    fprintf(out,"#include <stdio.h>\n\n");
+
+    /* Use a temporary CG writing to `out` for type/ret emission */
+    CG cg;
+    memset(&cg,0,sizeof(cg));
+    cg.out = out; cg.is_main = 0;
+    strncpy(cg.modname, module->str, MAX_IDENT-1);
+    CG *g = &cg;
+    /* Re-init globals so emit_proc_ret / emit_type_prefix work */
+    g_nsyms=0; g_sdepth=0; g_nimports=0;
+
+    /* Exported constants as #define */
+    for (Node *d=module->c1; d; d=d->next) {
+        if (d->kind==ND_CONST_DECL && (d->flags & FLAG_EXPORTED)) {
+            fprintf(out,"#define %s_%s (", module->str, d->str);
+            emit_expr(g, d->c0);
+            fprintf(out,")\n");
+        }
+    }
+
+    /* Exported variables */
+    for (Node *d=module->c1; d; d=d->next) {
+        if (d->kind==ND_VAR_DECL) {
+            for (Node *id=d->c0; id; id=id->next) {
+                if (id->flags & FLAG_EXPORTED) {
+                    fprintf(out,"extern ");
+                    char pname[MAX_IDENT*2+2];
+                    snprintf(pname,sizeof(pname),"%s_%s",module->str,id->str);
+                    emit_var_decl_raw(g, pname, d->c1, 0);
+                    fprintf(out,";\n");
+                }
+            }
+        }
+    }
+
+    /* Exported procedures */
+    for (Node *d=module->c1; d; d=d->next) {
+        if (d->kind==ND_PROC_DECL && (d->flags & FLAG_EXPORTED)) {
+            emit_proc_ret(g, d);
+            fprintf(out," %s_%s", module->str, d->str);
+            emit_proc_params(g, d->c0);
+            fprintf(out,";\n");
+        }
+    }
+
+    /* Module init */
+    fprintf(out,"\nvoid %s_init(void);\n", module->str);
+    fprintf(out,"\n#endif /* %s */\n", guard);
 }
