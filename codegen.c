@@ -1026,6 +1026,7 @@ void codegen(Node *module, FILE *out, int is_main) {
         emit(g,"    struct termios raw;\n");
         emit(g,"    tcgetattr(STDIN_FILENO, &_term_orig);\n");
         emit(g,"    raw = _term_orig;\n");
+        emit(g,"    raw.c_iflag &= ~(unsigned)(ICRNL|IXON);\n");
         emit(g,"    raw.c_lflag &= ~(unsigned)(ECHO|ICANON|ISIG);\n");
         emit(g,"    raw.c_cc[VMIN] = 0; raw.c_cc[VTIME] = 0;\n");
         emit(g,"    tcsetattr(STDIN_FILENO, TCSANOW, &raw);\n");
@@ -1035,6 +1036,12 @@ void codegen(Node *module, FILE *out, int is_main) {
         emit(g,"}\n");
         emit(g,"static void Terminal_Goto(int x, int y) {\n");
         emit(g,"    printf(\"\\033[%%d;%%dH\", y, x); fflush(stdout);\n");
+        emit(g,"}\n");
+        emit(g,"static void Terminal_ShowCursor(void) {\n");
+        emit(g,"    printf(\"\\033[?25h\"); fflush(stdout);\n");
+        emit(g,"}\n");
+        emit(g,"static void Terminal_HideCursor(void) {\n");
+        emit(g,"    printf(\"\\033[?25l\"); fflush(stdout);\n");
         emit(g,"}\n");
         emit(g,"static void Terminal_Clear(void) {\n");
         emit(g,"    printf(\"\\033[2J\\033[H\"); fflush(stdout);\n");
