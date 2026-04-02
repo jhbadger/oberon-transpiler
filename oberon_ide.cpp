@@ -63,14 +63,16 @@ const ushort
     cmRunProgram  = 205,
     cmAbout       = 206,
     cmGotoLine    = 207,
+    cmCompileOnly = 208,     // F8: compile without running
     cmWindowList  = 209,     // Show window list dialog
-    cmWindow1     = 210;     // cmWindow1..cmWindow1+N select window N
+    cmWindow1     = 210,     // cmWindow1..cmWindow1+N select window N
                              // (reserve 210-249 for up to 40 windows)
+    cmCloseWindow = 250;     // Ctrl-W: close active editor window
 
 // ── Run oberon  ────────────────────────────────────────────────
 struct RunResult { int errorLine; std::string errorText; };
 
-static RunResult runOberon(const char* filepath) {
+static RunResult runOberon(const char* filepath, bool runAfter = true) {
     // 1. Prepare Paths
     std::string sourcePath = filepath;
     std::string exePath = sourcePath;
@@ -89,13 +91,14 @@ static RunResult runOberon(const char* filepath) {
 
     // 2. Suspend UI
     TScreen::suspend();
-    printf("\n--- Compiling: %s ---\n", filepath);
+    printf("\n--- %s: %s ---\n", runAfter ? "Compiling" : "Compile check", filepath);
     fflush(stdout);
 
     // 3. Build the Shell Command
-    // Example: "mycompiler myProg.mod && ./myProg"
     std::string compilerBin = "obc";
-    std::string fullCmd = compilerBin + " " + sourcePath + " && " + runCmd;
+    std::string fullCmd = runAfter
+        ? compilerBin + " " + sourcePath + " && " + runCmd
+        : compilerBin + " " + sourcePath;
 
     int errpipe[2];
     pipe(errpipe);
@@ -122,12 +125,21 @@ static RunResult runOberon(const char* filepath) {
         bool failed = !(WIFEXITED(status) && WEXITSTATUS(status) == 0);
 
         if (failed) {
+            // Parse "filename:LINE:col: error:" format emitted by the compiler
             auto parseErrorLine = [](const std::string& s) -> int {
-                size_t pos = s.find("line ");
-                if (pos != std::string::npos) {
-                    size_t numStart = pos + 5;
-                    if (numStart < s.size() && isdigit((unsigned char)s[numStart]))
-                        return std::stoi(s.substr(numStart));
+                size_t p = 0;
+                while (p < s.size()) {
+                    // Find a colon followed by digits followed by another colon
+                    size_t c = s.find(':', p);
+                    if (c == std::string::npos) break;
+                    size_t numStart = c + 1;
+                    if (numStart < s.size() && isdigit((unsigned char)s[numStart])) {
+                        size_t numEnd = numStart;
+                        while (numEnd < s.size() && isdigit((unsigned char)s[numEnd])) numEnd++;
+                        if (numEnd < s.size() && s[numEnd] == ':')
+                            return std::stoi(s.substr(numStart, numEnd - numStart));
+                    }
+                    p = c + 1;
                 }
                 return 0;
             };
@@ -306,6 +318,19 @@ static bool isOberonKeyword(const char* p, int len) {
     return false;
 }
 
+static const int LNUM_W = 5; // 4 digits + 1 space separator
+
+class TOberonEditor;
+
+class TLineNumbers : public TView {
+public:
+    TOberonEditor* editor;
+    TLineNumbers(TRect bounds) : TView(bounds), editor(nullptr) {
+        growMode = gfGrowHiY;
+    }
+    void draw() override;
+};
+
 class TOberonEditor : public TFileEditor {
 public:
     TOberonEditor(const TRect& bounds,
@@ -314,10 +339,12 @@ public:
                   TIndicator* indicator,
                   TStringView filename)
         : TFileEditor(bounds, hScrollBar, vScrollBar, indicator, filename),
-          errorLine(0)
+          errorLine(0), lineNumbers(nullptr)
     {}
 
     int errorLine;
+    std::string errorMsg;
+    TLineNumbers* lineNumbers;
 
     TColorAttr mapColor(uchar index) noexcept override {
         switch (index) {
@@ -475,6 +502,7 @@ public:
                 b.moveChar(0, ' ', errNorm, size.x);
 
                 uint i2 = ls;
+                int contentEnd = 0;
                 while (i2 < le) {
                     int logCol = (int)(i2 - ls);
                     if (logCol < delta.x) { i2++; continue; }
@@ -491,26 +519,76 @@ public:
                         ca = isOberonKeyword(w, wl) ? errKw : errNorm;
                         for (uint j = ws; j < i2; j++) {
                             int sc2 = (int)(j - ls) - delta.x;
-                            if (sc2 >= 0 && sc2 < size.x)
+                            if (sc2 >= 0 && sc2 < size.x) {
                                 b.moveChar(sc2, gapChar(j), ca, 1);
+                                contentEnd = sc2 + 1;
+                            }
                         }
                         continue;
                     }
                     b.moveChar(sc, ch, ca, 1);
+                    contentEnd = sc + 1;
                     i2++;
                 }
+
+                // Inline error annotation after the code
+                if (!errorMsg.empty()) {
+                    std::string annot = "  << " + errorMsg;
+                    int annotStart = contentEnd + 1;
+                    if (annotStart < 2) annotStart = 2;
+                    TColorAttr annotColor = TColorAttr(TColorRGB(0xFFFF88), TColorRGB(0x880000));
+                    int ac = annotStart;
+                    for (char ch : annot) {
+                        if (ac >= size.x) break;
+                        b.moveChar(ac, ch, annotColor, 1);
+                        ac++;
+                    }
+                }
+
                 writeBuf(0, errRow, size.x, 1, b);
             }
         }
+
+        if (lineNumbers) lineNumbers->drawView();
     }
 
     void handleEvent(TEvent& event) override {
         if (event.what == evKeyDown) {
-            switch (event.keyDown.keyCode) {
+            // Any editing key clears the stale error highlight
+            ushort kc = event.keyDown.keyCode;
+            if (kc != kbF2 && kc != kbF3 && kc != kbF7 &&
+                kc != kbF8 && kc != kbF9 && kc != kbCtrlF && kc != kbCtrlH) {
+                if (errorLine > 0) {
+                    errorLine = 0;
+                    errorMsg  = "";
+                }
+            }
+            switch (kc) {
+                case kbEnter: {
+                    // Auto-indent: only when no selection active
+                    if (selStart == selEnd) {
+                        // Walk back from cursor to find start of current line
+                        uint ls = curPtr;
+                        while (ls > 0 && buffer[ls-1] != '\n') ls--;
+                        // Collect leading whitespace from that line
+                        std::string indent = "\n";
+                        for (uint i = ls; i < curPtr; i++) {
+                            char c = buffer[i];
+                            if (c == ' ' || c == '\t') indent += c;
+                            else break;
+                        }
+                        insertText(indent.c_str(), indent.size(), False);
+                        clearEvent(event);
+                        return;
+                    }
+                    break;
+                }
                 case kbCtrlF: event.what = evCommand; event.message.command = cmFind;        break;
                 case kbCtrlH: event.what = evCommand; event.message.command = cmReplace;     break;
                 case kbF7:    event.what = evCommand; event.message.command = cmSearchAgain; break;
-						case kbF9:    event.what = evCommand; event.message.command = cmRunProgram;  break;
+                case kbF8:    event.what = evCommand; event.message.command = cmCompileOnly; break;
+                case kbF9:    event.what = evCommand; event.message.command = cmRunProgram;  break;
+                case kbCtrlW: event.what = evCommand; event.message.command = cmCloseWindow; break;
                 default: break;
             }
         }
@@ -526,6 +604,22 @@ public:
 };
 
 
+void TLineNumbers::draw() {
+    TColorAttr normal = TColorAttr(TColorRGB(0x606060), TColorRGB(0x000060));
+    TColorAttr errAttr = TColorAttr(TColorRGB(0xFF8080), TColorRGB(0x600000));
+    int firstLine = editor ? editor->delta.y : 0;
+    int errLine   = editor ? editor->errorLine : 0;
+    for (int row = 0; row < size.y; row++) {
+        int lineNo = firstLine + row + 1;
+        char buf[LNUM_W + 1];
+        snprintf(buf, sizeof(buf), "%*d ", LNUM_W - 1, lineNo);
+        TColorAttr ca = (lineNo == errLine) ? errAttr : normal;
+        TDrawBuffer b;
+        b.moveStr(0, buf, ca);
+        writeBuf(0, row, size.x, 1, b);
+    }
+}
+
 // ── Editor Window ─────────────────────────────────────────────────────────
 class TEditorWindow : public TWindow {
 public:
@@ -540,13 +634,15 @@ public:
                   wnNoNumber)
     {
         options |= ofTileable;
-        TScrollBar* vbar = new TScrollBar(TRect(size.x-1, 1,        size.x,   size.y-1));
-        TScrollBar* hbar = new TScrollBar(TRect(1,        size.y-1, size.x-1, size.y));
+        TScrollBar* vbar = new TScrollBar(TRect(size.x-1, 1,              size.x,   size.y-1));
+        TScrollBar* hbar = new TScrollBar(TRect(1+LNUM_W, size.y-1, size.x-1, size.y));
         insert(vbar);
         insert(hbar);
         indicator = new TIndicator(TRect(0, size.y-1, 12, size.y));
         insert(indicator);
-        TRect r(1, 1, size.x-1, size.y-1);
+        TLineNumbers* lnum = new TLineNumbers(TRect(1, 1, 1+LNUM_W, size.y-1));
+        insert(lnum);
+        TRect r(1+LNUM_W, 1, size.x-1, size.y-1);
         if (aFile && *aFile) {
             strncpy(filename, aFile, MAXPATH-1);
             filename[MAXPATH-1] = '\0';
@@ -556,6 +652,8 @@ public:
         editor = new TOberonEditor(r, hbar, vbar, indicator,
                                    filename[0] ? TStringView(filename) : TStringView());
         insert(editor);
+        lnum->editor = editor;
+        editor->lineNumbers = lnum;
         editor->select();
     }
 
@@ -672,6 +770,8 @@ private:
     void saveFile();
     void saveFileAs();
     void runProgram();
+    void compileOnly();
+    void closeWindow();
     void showAbout();
     void gotoLine();
     void showWindowList();
@@ -723,8 +823,8 @@ TMenuBar* TOberonIDE::initMenuBar(TRect r) {
                            "Shift-Ins") +
             newLine() + *new TMenuItem("~G~o to Line...", cmGotoLine, kbNoKey) +
             *new TSubMenu("~R~un", kbAltR) +
-            *new TMenuItem("~R~un", cmRunProgram, kbF9, hcNoContext,
-                           "F9") +
+            *new TMenuItem("~C~ompile", cmCompileOnly, kbF8, hcNoContext, "F8") +
+            *new TMenuItem("~R~un",     cmRunProgram,  kbF9, hcNoContext, "F9") +
             *new TSubMenu("~S~earch", kbAltS) +
             *new TMenuItem("~F~ind...", cmFind, kbCtrlF, hcNoContext,
                            "Ctrl-F") +
@@ -732,6 +832,7 @@ TMenuBar* TOberonIDE::initMenuBar(TRect r) {
                            "Ctrl-H") +
             *new TMenuItem("~A~gain", cmSearchAgain, kbF7, hcNoContext, "F7") +
 *new TSubMenu("~W~indow", kbAltW) +
+            *new TMenuItem("~C~lose",        cmCloseWindow, kbCtrlW, hcNoContext, "Ctrl-W") +
             *new TMenuItem("~L~ist...",      cmWindowList,  kbNoKey, hcNoContext, "") +
             *new TMenuItem("Switch Window",  cmWindow1 + 1, kbAlt2,  hcNoContext, "Alt-2") +
             
@@ -747,7 +848,8 @@ TStatusLine* TOberonIDE::initStatusLine(TRect r) {
             *new TStatusItem("~F2~ Save",    kbF2,   cmSaveFile)   +
             *new TStatusItem("~F3~ Open",    kbF3,   cmOpenFile)   +
             *new TStatusItem("~F7~ Again",   kbF7,   cmSearchAgain) +
-            *new TStatusItem("~F9~ Run", kbF9,   cmRunProgram) +
+            *new TStatusItem("~F8~ Compile", kbF8,   cmCompileOnly) +
+            *new TStatusItem("~F9~ Run",     kbF9,   cmRunProgram) +
             *new TStatusItem("~Alt-X~ Exit", kbAltX, cmQuit)
     );
 }
@@ -783,7 +885,9 @@ if (event.message.command >= cmWindow1 && event.message.command < cmWindow1 + 40
             case cmOpenFile:   openFile();       clearEvent(event); return;
             case cmSaveFile:   saveFile();       clearEvent(event); return;
             case cmSaveFileAs: saveFileAs();     clearEvent(event); return;
-            case cmRunProgram: runProgram();     clearEvent(event); return;
+            case cmRunProgram:  runProgram();     clearEvent(event); return;
+            case cmCompileOnly: compileOnly();   clearEvent(event); return;
+            case cmCloseWindow: closeWindow();   clearEvent(event); return;
             case cmAbout:      showAbout();      clearEvent(event); return;
             case cmGotoLine:   gotoLine();       clearEvent(event); return;
             case cmWindowList: showWindowList(); clearEvent(event); return;
@@ -887,17 +991,77 @@ void TOberonIDE::runProgram() {
     std::string path = w->getFilePath();
     if (path.empty()) return;
     w->editor->errorLine = 0;
+    w->editor->errorMsg = "";
     RunResult result = runOberon(path.c_str());
     if (result.errorLine > 0) {
         w->editor->errorLine = result.errorLine;
-        w->jumpToLine(result.errorLine - 1);
-        w->drawView();
+
+        // Extract short error message for inline annotation
+        const std::string& s = result.errorText;
+        std::string msg;
+        size_t ep = s.find(": error: ");
+        if (ep != std::string::npos) {
+            size_t ms = ep + 9;
+            size_t nl = s.find('\n', ms);
+            msg = s.substr(ms, nl == std::string::npos ? std::string::npos : nl - ms);
+        } else {
+            size_t i = 0;
+            while (i < s.size() && (s[i] == '\n' || s[i] == '\r')) i++;
+            size_t nl = s.find('\n', i);
+            msg = s.substr(i, nl == std::string::npos ? std::string::npos : nl - i);
+        }
+        w->editor->errorMsg = msg;
     }
     if (!result.errorText.empty()) {
         TOutputDialog* dlg = new TOutputDialog(result.errorText, false);
         deskTop->execView(dlg);
         TObject::destroy(dlg);
     }
+    if (result.errorLine > 0) {
+        w->jumpToLine(result.errorLine - 1);
+        w->drawView();
+    }
+}
+
+void TOberonIDE::compileOnly() {
+    auto* w = activeEditor();
+    if (!w) { messageBox(" No editor open. ", mfError | mfOKButton); return; }
+    std::string path = w->getFilePath();
+    if (path.empty()) return;
+    w->editor->errorLine = 0;
+    w->editor->errorMsg = "";
+    RunResult result = runOberon(path.c_str(), false);
+    if (result.errorLine > 0) {
+        w->editor->errorLine = result.errorLine;
+        const std::string& s = result.errorText;
+        std::string msg;
+        size_t ep = s.find(": error: ");
+        if (ep != std::string::npos) {
+            size_t ms = ep + 9;
+            size_t nl = s.find('\n', ms);
+            msg = s.substr(ms, nl == std::string::npos ? std::string::npos : nl - ms);
+        } else {
+            size_t i = 0;
+            while (i < s.size() && (s[i] == '\n' || s[i] == '\r')) i++;
+            size_t nl = s.find('\n', i);
+            msg = s.substr(i, nl == std::string::npos ? std::string::npos : nl - i);
+        }
+        w->editor->errorMsg = msg;
+    }
+    if (!result.errorText.empty()) {
+        TOutputDialog* dlg = new TOutputDialog(result.errorText, result.errorLine == 0);
+        deskTop->execView(dlg);
+        TObject::destroy(dlg);
+    }
+    if (result.errorLine > 0) {
+        w->jumpToLine(result.errorLine - 1);
+        w->drawView();
+    }
+}
+
+void TOberonIDE::closeWindow() {
+    if (auto* w = activeEditor())
+        w->close();
 }
 
 void TOberonIDE::showAbout() {
