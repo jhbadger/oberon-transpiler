@@ -710,10 +710,16 @@ static void emit_stmt(CG *g, Node *s) {
         Node *t = sym_type(s->str);
         const char *ct = t ? ctype(t->kind==ND_TNAME?t->str:"INTEGER") : "int";
         iemit(g,"for (%s %s = ", ct, s->str);
-        emit_expr(g,s->c0); emit(g,"; %s <= ",s->str);
-        emit_expr(g,s->c1);
-        if (s->c2) { emit(g,"; %s += ",s->str); emit_expr(g,s->c2); }
-        else        emit(g,"; %s++",s->str);
+        emit_expr(g,s->c0);
+        if (s->c2) {
+            /* step may be negative — use runtime ternary for correct comparison */
+            emit(g,"; ("); emit_expr(g,s->c2); emit(g,")>0 ? %s<=",s->str);
+            emit_expr(g,s->c1); emit(g," : %s>=",s->str); emit_expr(g,s->c1);
+            emit(g,"; %s += ",s->str); emit_expr(g,s->c2);
+        } else {
+            emit(g,"; %s <= ",s->str); emit_expr(g,s->c1);
+            emit(g,"; %s++",s->str);
+        }
         emit(g,") {\n");
         g->indent++;
         for (Node *st=s->c3;st;st=st->next) emit_stmt(g,st);
