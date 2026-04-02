@@ -39,6 +39,8 @@
 #define Uses_TReplaceDialogRec
 #define Uses_TEditorDialog
 #define Uses_TColorAttr
+#define Uses_TListBox
+#define Uses_TStringCollection
 #include <tvision/tv.h>
 
 #include <cstring>
@@ -47,6 +49,7 @@
 #include <string>
 #include <vector>
 #include <algorithm>
+#include <set>
 #include <cctype>
 #include <fstream>
 #include <unistd.h>
@@ -583,6 +586,7 @@ public:
                     }
                     break;
                 }
+                case kbCtrlK: autoComplete(); clearEvent(event); return;
                 case kbCtrlF: event.what = evCommand; event.message.command = cmFind;        break;
                 case kbCtrlH: event.what = evCommand; event.message.command = cmReplace;     break;
                 case kbF7:    event.what = evCommand; event.message.command = cmSearchAgain; break;
@@ -600,6 +604,101 @@ public:
             }
         }
         TFileEditor::handleEvent(event);
+    }
+
+    void autoComplete() {
+        // 1. Extract partial word immediately before cursor (pre-gap only)
+        uint end = curPtr;
+        uint start = end;
+        while (start > 0 &&
+               (isalnum((unsigned char)buffer[start-1]) || buffer[start-1] == '_'))
+            start--;
+        if (start == end) return;
+        std::string partial(buffer + start, end - start);
+
+        // 2. Collect candidates
+        auto charAt = [&](uint i) -> char {
+            return buffer[i < curPtr ? i : i + gapLen];
+        };
+
+        std::set<std::string>    seen;
+        std::vector<std::string> completions;
+
+        // Keywords — case-insensitive prefix match, returned uppercase
+        std::string partUpper = partial;
+        for (auto& c : partUpper) c = toupper((unsigned char)c);
+        for (int i = 0; OBERON_KEYWORDS[i]; i++) {
+            const char* kw = OBERON_KEYWORDS[i];
+            if (strncmp(kw, partUpper.c_str(), partUpper.size()) == 0 &&
+                strlen(kw) > partial.size()) {
+                if (seen.insert(kw).second) completions.push_back(kw);
+            }
+        }
+
+        // Identifiers from buffer — case-sensitive prefix match, skip keywords
+        for (uint i = 0; i < bufLen; ) {
+            char c = charAt(i);
+            if (isalpha((unsigned char)c) || c == '_') {
+                uint ws = i;
+                while (i < bufLen &&
+                       (isalnum((unsigned char)charAt(i)) || charAt(i) == '_')) i++;
+                uint wlen = i - ws;
+                if (wlen > partial.size()) {
+                    bool match = true;
+                    for (size_t k = 0; k < partial.size(); k++)
+                        if (charAt(ws + k) != (unsigned char)partial[k])
+                            { match = false; break; }
+                    if (match) {
+                        std::string word;
+                        for (uint k = ws; k < ws + wlen; k++) word += charAt(k);
+                        if (!isOberonKeyword(word.c_str(), word.size()) &&
+                            seen.insert(word).second)
+                            completions.push_back(word);
+                    }
+                }
+            } else {
+                i++;
+            }
+        }
+
+        if (completions.empty()) return;
+        std::sort(completions.begin(), completions.end());
+
+        // 3. If only one match, insert immediately
+        if (completions.size() == 1) {
+            std::string suffix = completions[0].substr(partial.size());
+            insertText(suffix.c_str(), suffix.size(), False);
+            return;
+        }
+
+        // 4. Show modal picker dialog
+        int lh = std::min((int)completions.size(), 10);
+        int dw = 34, dh = lh + 4;
+        TDialog* dlg = new TDialog(TRect(0, 0, dw, dh), " Complete ");
+        dlg->options |= ofCentered;
+
+        TScrollBar* sb = new TScrollBar(TRect(dw-2, 1, dw-1, dh-3));
+        dlg->insert(sb);
+        TListBox* lb = new TListBox(TRect(1, 1, dw-2, dh-3), 1, sb);
+
+        TStringCollection* sc = new TStringCollection(completions.size() + 1, 4);
+        for (const auto& s : completions) sc->insert(newStr(s.c_str()));
+        lb->newList(sc);
+        dlg->insert(lb);
+
+        int bw = 10;
+        dlg->insert(new TButton(TRect(4,      dh-2, 4+bw,    dh-1), " ~O~K ",     cmOK,     bfDefault));
+        dlg->insert(new TButton(TRect(dw-4-bw, dh-2, dw-4, dh-1), " ~C~ancel ", cmCancel, bfNormal));
+        dlg->selectNext(False);
+
+        if (TProgram::deskTop->execView(dlg) == cmOK) {
+            int sel = lb->focused;
+            if (sel >= 0 && sel < (int)completions.size()) {
+                std::string suffix = completions[sel].substr(partial.size());
+                insertText(suffix.c_str(), suffix.size(), False);
+            }
+        }
+        TObject::destroy(dlg);
     }
 };
 
