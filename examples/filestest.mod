@@ -1,66 +1,45 @@
 MODULE filestest;
 (*
- * Tests the Files and Strings modules.
- * Writes a small file, reads it back line by line,
- * then exercises Strings operations on the content.
+ * Tests the standard Oberon Files API.
+ * Writes binary strings and an integer, reads them back.
  *)
 
-IMPORT Files, Strings, Out;
+IMPORT Files, Out;
 
 VAR
-  f         : INTEGER;
-  line, buf : STRING;
-  n, pos    : INTEGER;
+  f    : Files.File;
+  r    : Files.Rider;
+  s    : STRING;
+  n    : INTEGER;
 
 BEGIN
   (* ── Write a test file ─────────────────────────────────────────── *)
-  f := Files.Open("filestest.tmp", "w");
-  IF f = 0 THEN
+  f := Files.New("filestest.tmp");
+  IF f = NIL THEN
     Out.String("Error: could not create filestest.tmp"); Out.Ln()
   ELSE
-    Files.WriteString(f, "Hello, Oberon!");  Files.WriteLn(f);
-    Files.WriteString(f, "Second line.");    Files.WriteLn(f);
-    Files.WriteString(f, "Third line.");     Files.WriteLn(f);
-    Files.Close(f);
-    Out.String("Written filestest.tmp"); Out.Ln()
-  END;
-
-  (* ── Read it back ─────────────────────────────────────────────── *)
-  f := Files.Open("filestest.tmp", "r");
-  IF f = 0 THEN
-    Out.String("Error: could not open filestest.tmp"); Out.Ln()
-  ELSE
-    Out.String("Lines read back:"); Out.Ln();
-    WHILE Files.EOF(f) = 0 DO
-      Files.ReadLine(f, line);
-      IF Strings.Length(line) > 0 THEN
-        Out.String("  ["); Out.String(line); Out.String("]"); Out.Ln()
-      END
-    END;
+    Files.Set(r, f, 0);
+    Files.WriteString(r, "Hello, Oberon!");
+    Files.WriteString(r, "Second line.");
+    Files.WriteString(r, "Third line.");
+    Files.WriteInt(r, 42);
+    Out.String("Written filestest.tmp, length = ");
+    Out.Int(Files.Length(f)); Out.Ln();
+    Files.Register(f);
     Files.Close(f)
   END;
 
-  (* ── Strings operations ────────────────────────────────────────── *)
-  Out.Ln();
-  Out.String("Strings tests:"); Out.Ln();
-
-  Strings.Copy("Hello", buf);
-  Out.String("  Copy:    "); Out.String(buf); Out.Ln();
-
-  Strings.Append(", world", buf);
-  Out.String("  Append:  "); Out.String(buf); Out.Ln();
-
-  Out.String("  Length:  "); Out.Int(Strings.Length(buf)); Out.Ln();
-
-  Out.String("  Compare(Hello,Hello):  ");
-  Out.Int(Strings.Compare("Hello", "Hello")); Out.Ln();
-
-  Out.String("  Compare(abc,abd):      ");
-  Out.Int(Strings.Compare("abc", "abd")); Out.Ln();
-
-  pos := Strings.Pos("world", buf);
-  Out.String("  Pos(world, buf):         "); Out.Int(pos); Out.Ln();
-
-  pos := Strings.Pos("xyz", buf);
-  Out.String("  Pos(xyz, buf):           "); Out.Int(pos); Out.Ln()
+  (* ── Read it back ─────────────────────────────────────────────── *)
+  f := Files.Old("filestest.tmp");
+  IF f = NIL THEN
+    Out.String("Error: could not open filestest.tmp"); Out.Ln()
+  ELSE
+    Files.Set(r, f, 0);
+    Files.ReadString(r, s); Out.String("  ["); Out.String(s); Out.String("]"); Out.Ln();
+    Files.ReadString(r, s); Out.String("  ["); Out.String(s); Out.String("]"); Out.Ln();
+    Files.ReadString(r, s); Out.String("  ["); Out.String(s); Out.String("]"); Out.Ln();
+    Files.ReadInt(r, n);
+    Out.String("  int: "); Out.Int(n); Out.Ln();
+    Files.Close(f)
+  END
 END filestest.

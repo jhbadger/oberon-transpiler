@@ -142,15 +142,17 @@ static void collect_modsyms(Node *decls) {
 
 /* Map Oberon built-in type name → C type */
 static const char *ctype(const char *name) {
-    if (!strcmp(name,"INTEGER"))  return "int";
-    if (!strcmp(name,"LONGINT"))  return "long";
-    if (!strcmp(name,"SHORTINT")) return "short";
-    if (!strcmp(name,"REAL"))     return "double";
-    if (!strcmp(name,"LONGREAL")) return "double";
-    if (!strcmp(name,"CHAR"))     return "char";
-    if (!strcmp(name,"BOOLEAN"))  return "int";
-    if (!strcmp(name,"BYTE"))     return "unsigned char";
-    if (!strcmp(name,"SET"))      return "unsigned int";
+    if (!strcmp(name,"INTEGER"))      return "int";
+    if (!strcmp(name,"LONGINT"))      return "long";
+    if (!strcmp(name,"SHORTINT"))     return "short";
+    if (!strcmp(name,"REAL"))         return "double";
+    if (!strcmp(name,"LONGREAL"))     return "double";
+    if (!strcmp(name,"CHAR"))         return "char";
+    if (!strcmp(name,"BOOLEAN"))      return "int";
+    if (!strcmp(name,"BYTE"))         return "unsigned char";
+    if (!strcmp(name,"SET"))          return "unsigned int";
+    if (!strcmp(name,"Files.File"))   return "Files_File";
+    if (!strcmp(name,"Files.Rider"))  return "Files_Rider";
     return name; /* user-defined */
 }
 
@@ -356,6 +358,18 @@ static void emit_builtin(CG *g, const char *name, Node *args) {
     }
 }
 
+/* Emit the address of an expression — used when a C function needs a pointer
+ * to an Oberon VAR parameter.  If the node is an IDENT that is already a
+ * VAR param (i.e. already a pointer in C), emit it bare; otherwise add &. */
+static void emit_addr_of(CG *g, Node *e) {
+    if (!e) { emit(g,"NULL"); return; }
+    if (e->kind == ND_IDENT) {
+        if (sym_is_var(e->str)) { emit(g,"%s",e->str); return; }
+        emit(g,"&%s",e->str); return;
+    }
+    emit(g,"&("); emit_expr(g,e); emit(g,")");
+}
+
 /* Map import module calls:  Out.String(s) → fputs(s,stdout), etc. */
 static int try_emit_import(CG *g, Node *fa, Node *args) {
     if (!fa || fa->kind!=ND_FIELD_ACCESS) return 0;
@@ -444,25 +458,33 @@ static int try_emit_import(CG *g, Node *fa, Node *args) {
         if (!strcmp(proc,"Pos"))     { emit(g,"Strings_Pos(");     emit_as_string(g,a0); emit(g,","); emit_as_string(g,a1); emit(g,")"); return 1; }
         (void)a2;
     }
-    /* Files module */
+    /* Files module — standard Oberon Files API */
     if (!strcmp(mod,"Files")) {
-        /* Open(name, mode): INTEGER — both args are strings */
-        if (!strcmp(proc,"Open"))        { emit(g,"Files_Open(");       emit_as_string(g,a0); emit(g,","); emit_as_string(g,a1); emit(g,")"); return 1; }
-        /* Close(f) */
-        if (!strcmp(proc,"Close"))       { emit(g,"Files_Close(");      emit_expr(g,a0); emit(g,")"); return 1; }
-        /* EOF(f): BOOLEAN */
-        if (!strcmp(proc,"EOF"))         { emit(g,"Files_EOF(");        emit_expr(g,a0); emit(g,")"); return 1; }
-        /* ReadChar(f, VAR c) — emit as (Files_ReadChar(f,&c),c) so it can appear in expr */
-        if (!strcmp(proc,"ReadChar"))    { emit(g,"(Files_ReadChar(");  emit_expr(g,a0); emit(g,",&"); emit_expr(g,a1); emit(g,"),"); emit_expr(g,a1); emit(g,")"); return 1; }
-        /* ReadLine(f, VAR s) */
-        if (!strcmp(proc,"ReadLine"))    { emit(g,"Files_ReadLine(");   emit_expr(g,a0); emit(g,","); emit_expr(g,a1); emit(g,")"); return 1; }
-        /* ReadInt(f, VAR n) — same trick */
-        if (!strcmp(proc,"ReadInt"))     { emit(g,"(Files_ReadInt(");   emit_expr(g,a0); emit(g,",&"); emit_expr(g,a1); emit(g,"),"); emit_expr(g,a1); emit(g,")"); return 1; }
-        /* Write* procedures */
-        if (!strcmp(proc,"WriteChar"))   { emit(g,"Files_WriteChar(");  emit_expr(g,a0); emit(g,","); emit_expr(g,a1); emit(g,")"); return 1; }
-        if (!strcmp(proc,"WriteString")) { emit(g,"Files_WriteString(");emit_expr(g,a0); emit(g,","); emit_as_string(g,a1); emit(g,")"); return 1; }
-        if (!strcmp(proc,"WriteInt"))    { emit(g,"Files_WriteInt(");   emit_expr(g,a0); emit(g,","); emit_expr(g,a1); emit(g,")"); return 1; }
-        if (!strcmp(proc,"WriteLn"))     { emit(g,"Files_WriteLn(");    emit_expr(g,a0);               emit(g,")"); return 1; }
+        Node *a2 = a1 ? a1->next : NULL;
+        /* File operations */
+        if (!strcmp(proc,"Old"))         { emit(g,"Files_Old(");         emit_as_string(g,a0); emit(g,")"); return 1; }
+        if (!strcmp(proc,"New"))         { emit(g,"Files_New(");         emit_as_string(g,a0); emit(g,")"); return 1; }
+        if (!strcmp(proc,"Register"))    { emit(g,"Files_Register(");    emit_expr(g,a0); emit(g,")"); return 1; }
+        if (!strcmp(proc,"Close"))       { emit(g,"Files_Close(");       emit_expr(g,a0); emit(g,")"); return 1; }
+        if (!strcmp(proc,"Length"))      { emit(g,"Files_Length(");      emit_expr(g,a0); emit(g,")"); return 1; }
+        /* Rider operations: Set(VAR r, f, pos)  Pos(VAR r)  Base(VAR r) */
+        if (!strcmp(proc,"Set"))         { emit(g,"Files_Set(");  emit_addr_of(g,a0); emit(g,","); emit_expr(g,a1); emit(g,","); emit_expr(g,a2); emit(g,")"); return 1; }
+        if (!strcmp(proc,"Pos"))         { emit(g,"Files_Pos(");  emit_addr_of(g,a0); emit(g,")"); return 1; }
+        if (!strcmp(proc,"Base"))        { emit(g,"Files_Base("); emit_addr_of(g,a0); emit(g,")"); return 1; }
+        /* Read procedures — VAR r, VAR x  (string: VAR r, x array) */
+        if (!strcmp(proc,"Read"))        { emit(g,"Files_Read(");        emit_addr_of(g,a0); emit(g,","); emit_addr_of(g,a1); emit(g,")"); return 1; }
+        if (!strcmp(proc,"ReadInt"))     { emit(g,"Files_ReadInt(");     emit_addr_of(g,a0); emit(g,","); emit_addr_of(g,a1); emit(g,")"); return 1; }
+        if (!strcmp(proc,"ReadBool"))    { emit(g,"Files_ReadBool(");    emit_addr_of(g,a0); emit(g,","); emit_addr_of(g,a1); emit(g,")"); return 1; }
+        if (!strcmp(proc,"ReadReal"))    { emit(g,"Files_ReadReal(");    emit_addr_of(g,a0); emit(g,","); emit_addr_of(g,a1); emit(g,")"); return 1; }
+        if (!strcmp(proc,"ReadString"))  { emit(g,"Files_ReadString(");  emit_addr_of(g,a0); emit(g,","); emit_expr(g,a1); emit(g,")"); return 1; }
+        if (!strcmp(proc,"ReadNum"))     { emit(g,"Files_ReadNum(");     emit_addr_of(g,a0); emit(g,","); emit_addr_of(g,a1); emit(g,")"); return 1; }
+        /* Write procedures — VAR r, x by value  (string: const char*) */
+        if (!strcmp(proc,"Write"))       { emit(g,"Files_Write(");       emit_addr_of(g,a0); emit(g,","); emit_expr(g,a1); emit(g,")"); return 1; }
+        if (!strcmp(proc,"WriteInt"))    { emit(g,"Files_WriteInt(");    emit_addr_of(g,a0); emit(g,","); emit_expr(g,a1); emit(g,")"); return 1; }
+        if (!strcmp(proc,"WriteBool"))   { emit(g,"Files_WriteBool(");   emit_addr_of(g,a0); emit(g,","); emit_expr(g,a1); emit(g,")"); return 1; }
+        if (!strcmp(proc,"WriteReal"))   { emit(g,"Files_WriteReal(");   emit_addr_of(g,a0); emit(g,","); emit_expr(g,a1); emit(g,")"); return 1; }
+        if (!strcmp(proc,"WriteString")) { emit(g,"Files_WriteString("); emit_addr_of(g,a0); emit(g,","); emit_as_string(g,a1); emit(g,")"); return 1; }
+        if (!strcmp(proc,"WriteNum"))    { emit(g,"Files_WriteNum(");    emit_addr_of(g,a0); emit(g,","); emit_expr(g,a1); emit(g,")"); return 1; }
     }
     /* Unknown import call → RealModule_Proc(args)  (resolves aliases) */
     emit(g,"%s_%s(",import_realname(mod),proc);
@@ -1021,13 +1043,23 @@ void codegen(Node *module, FILE *out, int is_main) {
         emit(g,"#include <unistd.h>\n");
         emit(g,"#include <time.h>\n");
         emit(g,"\n");
+        /* State */
         emit(g,"static struct termios _term_orig;\n");
-        emit(g,"static char _term_kbuf = 0;\n");
+        emit(g,"static char _term_kbuf   = 0;\n");
         emit(g,"static int  _term_kready = 0;\n");
+        emit(g,"static int  _term_mouse_x   = 0;\n");
+        emit(g,"static int  _term_mouse_y   = 0;\n");
+        emit(g,"static int  _term_mouse_btn = 0;\n");
+        emit(g,"static int  _term_mouse_on  = 0;\n");
+        /* _term_restore — also disables mouse reporting if it was on */
         emit(g,"static void _term_restore(void) {\n");
+        emit(g,"    if (_term_mouse_on) {\n");
+        emit(g,"        printf(\"\\033[?1000l\\033[?1006l\"); fflush(stdout);\n");
+        emit(g,"    }\n");
         emit(g,"    tcsetattr(STDIN_FILENO, TCSANOW, &_term_orig);\n");
         emit(g,"    printf(\"\\033[?25h\"); fflush(stdout);\n");
         emit(g,"}\n");
+        /* _term_init */
         emit(g,"static void _term_init(void) {\n");
         emit(g,"    struct termios raw;\n");
         emit(g,"    tcgetattr(STDIN_FILENO, &_term_orig);\n");
@@ -1040,6 +1072,24 @@ void codegen(Node *module, FILE *out, int is_main) {
         emit(g,"    atexit(_term_restore);\n");
         emit(g,"    srand((unsigned)time(NULL));\n");
         emit(g,"}\n");
+        /* Mouse on/off */
+        emit(g,"static void Terminal_MouseOn(void) {\n");
+        emit(g,"    if (!_term_mouse_on) {\n");
+        emit(g,"        printf(\"\\033[?1000h\\033[?1006h\"); fflush(stdout);\n");
+        emit(g,"        _term_mouse_on = 1;\n");
+        emit(g,"    }\n");
+        emit(g,"}\n");
+        emit(g,"static void Terminal_MouseOff(void) {\n");
+        emit(g,"    if (_term_mouse_on) {\n");
+        emit(g,"        printf(\"\\033[?1000l\\033[?1006l\"); fflush(stdout);\n");
+        emit(g,"        _term_mouse_on = 0;\n");
+        emit(g,"    }\n");
+        emit(g,"}\n");
+        /* Mouse state accessors */
+        emit(g,"static int Terminal_MouseX(void)   { return _term_mouse_x; }\n");
+        emit(g,"static int Terminal_MouseY(void)   { return _term_mouse_y; }\n");
+        emit(g,"static int Terminal_MouseBtn(void) { return _term_mouse_btn; }\n");
+        /* Standard procedures */
         emit(g,"static void Terminal_Goto(int x, int y) {\n");
         emit(g,"    printf(\"\\033[%%d;%%dH\", y, x); fflush(stdout);\n");
         emit(g,"}\n");
@@ -1067,30 +1117,60 @@ void codegen(Node *module, FILE *out, int is_main) {
         emit(g,"    }\n");
         emit(g,"    return 0;\n");
         emit(g,"}\n");
+        /* ReadKey — handles keyboard sequences AND SGR mouse events.
+         * Returns:
+         *   01X  Up arrow      02X  Down arrow
+         *   03X  Left arrow    04X  Right arrow
+         *   05X  Mouse event   (call MouseX/Y/Btn for details)
+         *   1BX  Bare ESC
+         *   otherwise: the character itself
+         *
+         * Mouse button values stored in _term_mouse_btn:
+         *   0  left press     1  middle press   2  right press
+         *   3  any release    64 wheel up        65 wheel down    */
         emit(g,"static char Terminal_ReadKey(void) {\n");
         emit(g,"    char c;\n");
         emit(g,"    if (_term_kready) { _term_kready=0; c=_term_kbuf; }\n");
         emit(g,"    else {\n");
-        emit(g,"        /* blocking read for first byte */\n");
         emit(g,"        struct termios t; tcgetattr(STDIN_FILENO,&t);\n");
         emit(g,"        t.c_cc[VMIN]=1; t.c_cc[VTIME]=0;\n");
         emit(g,"        tcsetattr(STDIN_FILENO,TCSANOW,&t);\n");
         emit(g,"        read(STDIN_FILENO,&c,1);\n");
         emit(g,"        t.c_cc[VMIN]=0; tcsetattr(STDIN_FILENO,TCSANOW,&t);\n");
         emit(g,"    }\n");
-        /* escape-sequence detection runs regardless of which path produced c */
         emit(g,"    if (c == '\\033') {\n");
-        emit(g,"        /* Read rest of escape sequence with a short timeout */\n");
         emit(g,"        struct termios t2; tcgetattr(STDIN_FILENO,&t2);\n");
-        emit(g,"        t2.c_cc[VMIN]=0; t2.c_cc[VTIME]=1; /* 100 ms */\n");
+        emit(g,"        t2.c_cc[VMIN]=0; t2.c_cc[VTIME]=1;\n");
         emit(g,"        tcsetattr(STDIN_FILENO,TCSANOW,&t2);\n");
-        emit(g,"        char c2=0,c3=0;\n");
+        emit(g,"        char c2=0, c3=0;\n");
         emit(g,"        if (read(STDIN_FILENO,&c2,1)==1 && c2=='[') {\n");
-        emit(g,"            read(STDIN_FILENO,&c3,1);\n");
-        emit(g,"            if (c3=='A') { tcsetattr(STDIN_FILENO,TCSANOW,&t2); return '\\x01'; }\n"); /* Up    */
-        emit(g,"            if (c3=='B') { tcsetattr(STDIN_FILENO,TCSANOW,&t2); return '\\x02'; }\n"); /* Down  */
-        emit(g,"            if (c3=='C') { tcsetattr(STDIN_FILENO,TCSANOW,&t2); return '\\x04'; }\n"); /* Right */
-        emit(g,"            if (c3=='D') { tcsetattr(STDIN_FILENO,TCSANOW,&t2); return '\\x03'; }\n"); /* Left  */
+        emit(g,"            if (read(STDIN_FILENO,&c3,1)!=1) c3=0;\n");
+        /* Arrow keys */
+        emit(g,"            if (c3=='A') { tcsetattr(STDIN_FILENO,TCSANOW,&t2); return '\\x01'; }\n");
+        emit(g,"            if (c3=='B') { tcsetattr(STDIN_FILENO,TCSANOW,&t2); return '\\x02'; }\n");
+        emit(g,"            if (c3=='D') { tcsetattr(STDIN_FILENO,TCSANOW,&t2); return '\\x03'; }\n");
+        emit(g,"            if (c3=='C') { tcsetattr(STDIN_FILENO,TCSANOW,&t2); return '\\x04'; }\n");
+        /* SGR mouse: \033[<btn;x;yM or \033[<btn;x;ym */
+        emit(g,"            if (c3=='<') {\n");
+        emit(g,"                char buf[32]; int bi=0; char last=0;\n");
+        emit(g,"                while (bi<31) {\n");
+        emit(g,"                    char ch=0;\n");
+        emit(g,"                    if (read(STDIN_FILENO,&ch,1)!=1) break;\n");
+        emit(g,"                    if (ch=='M'||ch=='m') { last=ch; break; }\n");
+        emit(g,"                    buf[bi++]=ch;\n");
+        emit(g,"                }\n");
+        emit(g,"                buf[bi]=0;\n");
+        emit(g,"                int btn=0,mx=0,my=0;\n");
+        emit(g,"                sscanf(buf,\"%%d;%%d;%%d\",&btn,&mx,&my);\n");
+        emit(g,"                _term_mouse_x = mx;\n");
+        emit(g,"                _term_mouse_y = my;\n");
+        /* btn: bits 0-1 = button (0=left,1=mid,2=right), bit 6 set = wheel.
+         * Release is signalled by the final 'm' rather than a button-3 code. */
+        emit(g,"                if (last=='m') _term_mouse_btn=3;\n");
+        emit(g,"                else           _term_mouse_btn=(btn&67);\n");
+        emit(g,"                tcsetattr(STDIN_FILENO,TCSANOW,&t2);\n");
+        emit(g,"                return '\\x05';\n");
+        emit(g,"            }\n");
         emit(g,"        }\n");
         emit(g,"        t2.c_cc[VMIN]=0; t2.c_cc[VTIME]=0;\n");
         emit(g,"        tcsetattr(STDIN_FILENO,TCSANOW,&t2);\n");
@@ -1246,64 +1326,106 @@ void codegen(Node *module, FILE *out, int is_main) {
         emit(g,"\n");
     }
 
-    /* ── Files module runtime ────────────────────────────────────── */
+    /* ── Files module runtime — standard Oberon Files API ───────── */
     if (has_files) {
-        emit(g,"/* Files module — integer-handle FILE* wrapper */\n");
-        emit(g,"#define _FILES_MAX 16\n");
-        emit(g,"static FILE *_files[_FILES_MAX];\n");
-        emit(g,"static int   _files_init_done=0;\n");
-        emit(g,"static void _files_init(void) {\n");
-        emit(g,"    if(_files_init_done) return; _files_init_done=1;\n");
-        emit(g,"    for(int i=0;i<_FILES_MAX;i++) _files[i]=NULL;\n");
+        emit(g,"/* Files module — standard Oberon Files API */\n");
+        /* Types */
+        emit(g,"typedef struct _Files_Rec { FILE *fp; char name[512]; } _Files_Rec;\n");
+        emit(g,"typedef _Files_Rec *Files_File;\n");
+        emit(g,"typedef struct { Files_File f; long pos; int eof; } Files_Rider;\n");
+        /* Old(name): File */
+        emit(g,"static Files_File Files_Old(const char *name) {\n");
+        emit(g,"    FILE *fp=fopen(name,\"rb\"); if(!fp) return NULL;\n");
+        emit(g,"    Files_File f=(Files_File)malloc(sizeof(_Files_Rec));\n");
+        emit(g,"    f->fp=fp; strncpy(f->name,name,511); f->name[511]=0; return f;\n");
         emit(g,"}\n");
-        /* Open(name, mode): INTEGER — mode is \"r\", \"w\", \"a\", etc. */
-        emit(g,"static int Files_Open(const char *name, const char *mode) {\n");
-        emit(g,"    _files_init();\n");
-        emit(g,"    FILE *f=fopen(name,mode); if(!f) return 0;\n");
-        emit(g,"    for(int i=1;i<_FILES_MAX;i++) if(!_files[i]){_files[i]=f;return i;}\n");
-        emit(g,"    fclose(f); return 0;\n");
+        /* New(name): File */
+        emit(g,"static Files_File Files_New(const char *name) {\n");
+        emit(g,"    FILE *fp=fopen(name,\"w+b\"); if(!fp) return NULL;\n");
+        emit(g,"    Files_File f=(Files_File)malloc(sizeof(_Files_Rec));\n");
+        emit(g,"    f->fp=fp; strncpy(f->name,name,511); f->name[511]=0; return f;\n");
         emit(g,"}\n");
+        /* Register(f) — no-op here (file is already on disk) */
+        emit(g,"static void Files_Register(Files_File f) { if(f) fflush(f->fp); }\n");
         /* Close(f) */
-        emit(g,"static void Files_Close(int h) {\n");
-        emit(g,"    if(h>0&&h<_FILES_MAX&&_files[h]){fclose(_files[h]);_files[h]=NULL;}\n");
+        emit(g,"static void Files_Close(Files_File f) { if(f){fclose(f->fp);free(f);} }\n");
+        /* Length(f): INTEGER */
+        emit(g,"static int Files_Length(Files_File f) {\n");
+        emit(g,"    if(!f) return 0;\n");
+        emit(g,"    long p=ftell(f->fp); fseek(f->fp,0,SEEK_END);\n");
+        emit(g,"    long len=ftell(f->fp); fseek(f->fp,p,SEEK_SET); return (int)len;\n");
         emit(g,"}\n");
-        /* EOF(f): BOOLEAN */
-        emit(g,"static int Files_EOF(int h) {\n");
-        emit(g,"    if(h<=0||h>=_FILES_MAX||!_files[h]) return 1;\n");
-        emit(g,"    int c=fgetc(_files[h]);\n");
-        emit(g,"    if(c==EOF) return 1;\n");
-        emit(g,"    ungetc(c,_files[h]); return 0;\n");
+        /* Set(VAR r, f, pos) */
+        emit(g,"static void Files_Set(Files_Rider *r, Files_File f, int pos) {\n");
+        emit(g,"    r->f=f; r->eof=0;\n");
+        emit(g,"    if(f){fseek(f->fp,(long)pos,SEEK_SET);r->pos=pos;}else r->pos=0;\n");
         emit(g,"}\n");
-        /* ReadChar(f, VAR c) */
-        emit(g,"static void Files_ReadChar(int h, char *c) {\n");
-        emit(g,"    *c=(h>0&&h<_FILES_MAX&&_files[h])?(char)fgetc(_files[h]):0;\n");
+        /* Pos(VAR r): INTEGER */
+        emit(g,"static int Files_Pos(Files_Rider *r) { return (int)r->pos; }\n");
+        /* Base(VAR r): File */
+        emit(g,"static Files_File Files_Base(Files_Rider *r) { return r->f; }\n");
+        /* Read(VAR r, VAR x: BYTE) */
+        emit(g,"static void Files_Read(Files_Rider *r, unsigned char *x) {\n");
+        emit(g,"    if(!r->f||r->eof){r->eof=1;return;}\n");
+        emit(g,"    int c=fgetc(r->f->fp);\n");
+        emit(g,"    if(c==EOF){r->eof=1;*x=0;}else{*x=(unsigned char)c;r->pos++;}\n");
         emit(g,"}\n");
-        /* ReadLine(f, VAR s) — strips trailing newline */
-        emit(g,"static void Files_ReadLine(int h, char *buf) {\n");
-        emit(g,"    if(h<=0||h>=_FILES_MAX||!_files[h]){buf[0]=0;return;}\n");
-        emit(g,"    if(!fgets(buf,256,_files[h])){buf[0]=0;return;}\n");
-        emit(g,"    int l=(int)strlen(buf);\n");
-        emit(g,"    if(l>0&&buf[l-1]=='\\n') buf[l-1]=0;\n");
+        /* ReadInt(VAR r, VAR x: INTEGER) — binary */
+        emit(g,"static void Files_ReadInt(Files_Rider *r, int *x) {\n");
+        emit(g,"    if(!r->f||r->eof){r->eof=1;return;}\n");
+        emit(g,"    if(fread(x,sizeof(int),1,r->f->fp)<1)r->eof=1;else r->pos+=sizeof(int);\n");
         emit(g,"}\n");
-        /* ReadInt(f, VAR n) */
-        emit(g,"static void Files_ReadInt(int h, int *n) {\n");
-        emit(g,"    if(h>0&&h<_FILES_MAX&&_files[h]) fscanf(_files[h],\"%%d\",n);\n");
+        /* ReadBool(VAR r, VAR x: BOOLEAN) */
+        emit(g,"static void Files_ReadBool(Files_Rider *r, int *x) {\n");
+        emit(g,"    unsigned char b=0; Files_Read(r,&b); *x=b?1:0;\n");
         emit(g,"}\n");
-        /* WriteChar(f, c) */
-        emit(g,"static void Files_WriteChar(int h, char c) {\n");
-        emit(g,"    if(h>0&&h<_FILES_MAX&&_files[h]) fputc(c,_files[h]);\n");
+        /* ReadReal(VAR r, VAR x: REAL) — binary */
+        emit(g,"static void Files_ReadReal(Files_Rider *r, double *x) {\n");
+        emit(g,"    if(!r->f||r->eof){r->eof=1;return;}\n");
+        emit(g,"    if(fread(x,sizeof(double),1,r->f->fp)<1)r->eof=1;else r->pos+=sizeof(double);\n");
         emit(g,"}\n");
-        /* WriteString(f, s) */
-        emit(g,"static void Files_WriteString(int h, const char *s) {\n");
-        emit(g,"    if(h>0&&h<_FILES_MAX&&_files[h]) fputs(s,_files[h]);\n");
+        /* ReadString(VAR r, VAR x: ARRAY OF CHAR) — null-terminated */
+        emit(g,"static void Files_ReadString(Files_Rider *r, char *x) {\n");
+        emit(g,"    int i=0,c;\n");
+        emit(g,"    if(!r->f||r->eof){x[0]=0;r->eof=1;return;}\n");
+        emit(g,"    while((c=fgetc(r->f->fp))!=EOF&&c!=0){x[i++]=(char)c;r->pos++;}\n");
+        emit(g,"    if(c==0)r->pos++;else r->eof=1;\n");
+        emit(g,"    x[i]=0;\n");
         emit(g,"}\n");
-        /* WriteInt(f, n) */
-        emit(g,"static void Files_WriteInt(int h, int n) {\n");
-        emit(g,"    if(h>0&&h<_FILES_MAX&&_files[h]) fprintf(_files[h],\"%%d\",n);\n");
+        /* ReadNum(VAR r, VAR x: INTEGER) — LEB128 */
+        emit(g,"static void Files_ReadNum(Files_Rider *r, int *x) {\n");
+        emit(g,"    unsigned int n=0; int sh=0; unsigned char b;\n");
+        emit(g,"    do{Files_Read(r,&b);n|=((unsigned)(b&0x7F))<<sh;sh+=7;}while(b&0x80);\n");
+        emit(g,"    *x=(int)n;\n");
         emit(g,"}\n");
-        /* WriteLn(f) */
-        emit(g,"static void Files_WriteLn(int h) {\n");
-        emit(g,"    if(h>0&&h<_FILES_MAX&&_files[h]) fputc('\\n',_files[h]);\n");
+        /* Write(VAR r, x: BYTE) */
+        emit(g,"static void Files_Write(Files_Rider *r, unsigned char x) {\n");
+        emit(g,"    if(!r->f||r->eof)return;\n");
+        emit(g,"    if(fputc(x,r->f->fp)!=EOF)r->pos++;else r->eof=1;\n");
+        emit(g,"}\n");
+        /* WriteInt(VAR r, x: INTEGER) — binary */
+        emit(g,"static void Files_WriteInt(Files_Rider *r, int x) {\n");
+        emit(g,"    if(!r->f||r->eof)return;\n");
+        emit(g,"    if(fwrite(&x,sizeof(int),1,r->f->fp)==1)r->pos+=sizeof(int);else r->eof=1;\n");
+        emit(g,"}\n");
+        /* WriteBool(VAR r, x: BOOLEAN) */
+        emit(g,"static void Files_WriteBool(Files_Rider *r, int x) {\n");
+        emit(g,"    unsigned char b=(unsigned char)(x?1:0); Files_Write(r,b);\n");
+        emit(g,"}\n");
+        /* WriteReal(VAR r, x: REAL) — binary */
+        emit(g,"static void Files_WriteReal(Files_Rider *r, double x) {\n");
+        emit(g,"    if(!r->f||r->eof)return;\n");
+        emit(g,"    if(fwrite(&x,sizeof(double),1,r->f->fp)==1)r->pos+=sizeof(double);else r->eof=1;\n");
+        emit(g,"}\n");
+        /* WriteString(VAR r, x: ARRAY OF CHAR) — null-terminated */
+        emit(g,"static void Files_WriteString(Files_Rider *r, const char *x) {\n");
+        emit(g,"    while(*x)Files_Write(r,(unsigned char)*x++);\n");
+        emit(g,"    Files_Write(r,0);\n");
+        emit(g,"}\n");
+        /* WriteNum(VAR r, x: INTEGER) — LEB128 */
+        emit(g,"static void Files_WriteNum(Files_Rider *r, int x) {\n");
+        emit(g,"    unsigned int n=(unsigned int)x;\n");
+        emit(g,"    do{unsigned char b=n&0x7F;n>>=7;if(n)b|=0x80;Files_Write(r,b);}while(n);\n");
         emit(g,"}\n");
         emit(g,"\n");
     }
