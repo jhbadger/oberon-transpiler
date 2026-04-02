@@ -909,18 +909,19 @@ TMenuBar* TOberonIDE::initMenuBar(TRect r) {
             *new TMenuItem("~O~pen...", cmOpenFile, kbF3, hcNoContext, "F3") +
             *new TMenuItem("~S~ave", cmSaveFile, kbF2, hcNoContext, "F2") +
             *new TMenuItem("Save ~A~s...", cmSaveFileAs, kbNoKey) + newLine() +
-            *new TMenuItem("E~x~it", cmQuit, kbAltX, hcNoContext, "Alt-X") +
+            *new TMenuItem("E~x~it", cmQuit, kbCtrlQ, hcNoContext, "Ctrl-Q") +
             *new TSubMenu("~E~dit", kbAltE) +
-            *new TMenuItem("~U~ndo", cmUndo, kbAltBack, hcNoContext,
-                           "Alt-BkSp") +
+            *new TMenuItem("~U~ndo", cmUndo, kbCtrlU, hcNoContext,
+                           "Ctrl-U") +
             newLine() +
-            *new TMenuItem("~C~ut", cmCut, kbShiftDel, hcNoContext,
-                           "Shift-Del") +
-            *new TMenuItem("C~o~py", cmCopy, kbCtrlIns, hcNoContext,
-                           "Ctrl-Ins") +
-            *new TMenuItem("~P~aste", cmPaste, kbShiftIns, hcNoContext,
-                           "Shift-Ins") +
-            newLine() + *new TMenuItem("~G~o to Line...", cmGotoLine, kbNoKey) +
+            *new TMenuItem("~C~ut", cmCut, kbCtrlX, hcNoContext,
+                           "Ctrl-X") +
+            *new TMenuItem("C~o~py", cmCopy, kbCtrlC, hcNoContext,
+                           "Ctrl-C") +
+            *new TMenuItem("~P~aste", cmPaste, kbCtrlV, hcNoContext,
+                           "Ctrl-V") +
+				newLine() + *new TMenuItem("~G~o to Line...", cmGotoLine, kbCtrlL,
+																	 hcNoContext, "Ctrl-L") +
             *new TSubMenu("~R~un", kbAltR) +
             *new TMenuItem("~C~ompile", cmCompileOnly, kbF8, hcNoContext, "F8") +
             *new TMenuItem("~R~un",     cmRunProgram,  kbF9, hcNoContext, "F9") +
@@ -949,7 +950,7 @@ TStatusLine* TOberonIDE::initStatusLine(TRect r) {
             *new TStatusItem("~F7~ Again",   kbF7,   cmSearchAgain) +
             *new TStatusItem("~F8~ Compile", kbF8,   cmCompileOnly) +
             *new TStatusItem("~F9~ Run",     kbF9,   cmRunProgram) +
-            *new TStatusItem("~Alt-X~ Exit", kbAltX, cmQuit)
+            *new TStatusItem("~Ctrl-Q~ Exit", kbAltX, cmQuit)
     );
 }
 
@@ -1168,10 +1169,10 @@ void TOberonIDE::showAbout() {
     dlg->options |= ofCentered;
     dlg->insert(new TStaticText(TRect(2,2,48,3), " Oberon IDE  v1.0"));
     dlg->insert(new TStaticText(TRect(2,3,48,4), " Built on tvision (magiblot)"));
-    dlg->insert(new TStaticText(TRect(2,5,48,6), " F2  Save         F3  Open"));
+    dlg->insert(new TStaticText(TRect(2,5,48,6), " F2  Save   Ctrl-K Autocomplete"));
     dlg->insert(new TStaticText(TRect(2,6,48,7), " F9  Run"));
-    dlg->insert(new TStaticText(TRect(2,7,48,8), " Alt-W  Window list"));
-    dlg->insert(new TStaticText(TRect(2,8,48,9), " Alt-X  Exit"));
+    
+    dlg->insert(new TStaticText(TRect(2,8,48,9), " Ctrl-Q  Exit"));
     dlg->insert(new TButton(TRect(20,10,30,11), "  ~O~K  ", cmOK, bfDefault));
     deskTop->execView(dlg);
     TObject::destroy(dlg);
