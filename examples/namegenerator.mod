@@ -8,7 +8,6 @@ MODULE NameGenerator;
   VAR
     firstNames: ARRAY MaxNames OF ARRAY 32 OF CHAR;
     lastNames: ARRAY MaxNames OF ARRAY 32 OF CHAR;
-    chosenFirst, chosenLast: ARRAY 32 OF CHAR;
     input: CHAR;
     i: INTEGER;
 
@@ -54,12 +53,16 @@ MODULE NameGenerator;
   END InitLists;
 
   PROCEDURE Generate;
+  VAR
+    chosenFirst, chosenLast: ARRAY 32 OF CHAR;
+    chosenMiddle: CHAR;
   BEGIN
     chosenFirst := firstNames[Random.Int(MaxNames)];
     chosenLast := lastNames[Random.Int(MaxNames)];
-
+    chosenMiddle := CHR(65 + Random.Int(26));
     Out.String("Result: ");
-    Out.String(chosenFirst); Out.Char(" "); Out.String(chosenLast);
+    Out.String(chosenFirst); Out.Char(" "); Out.Char(chosenMiddle);
+    Out.String(". "); Out.String(chosenLast);
     Out.Ln
   END Generate;
 
