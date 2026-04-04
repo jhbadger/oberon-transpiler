@@ -1,4 +1,4 @@
-# Oberon Transpiler — Standard Library Reference
+# Oberon Transpiler - Standard Library Reference
 
 This document covers every built-in procedure and every procedure/constant available
 in the built-in import modules.  All modules listed here are implemented directly by
@@ -43,7 +43,7 @@ These identifiers are always in scope without any IMPORT statement.
 
 ---
 
-## Out — Formatted Output
+## Out - Formatted Output
 
 ```
 IMPORT Out;
@@ -61,7 +61,7 @@ IMPORT Out;
 
 ---
 
-## In — Formatted Input
+## In - Formatted Input
 
 ```
 IMPORT In;
@@ -75,7 +75,7 @@ IMPORT In;
 
 ---
 
-## Random — Pseudo-random Numbers
+## Random - Pseudo-random Numbers
 
 ```
 IMPORT Random;
@@ -90,7 +90,7 @@ The RNG is seeded automatically at program start (`srand(time(NULL))`).
 
 ---
 
-## Math — Mathematical Functions
+## Math - Mathematical Functions
 
 ```
 IMPORT Math;
@@ -100,8 +100,8 @@ IMPORT Math;
 
 | Name | Value |
 |------|-------|
-| `Math.pi` | π (3.14159…) |
-| `Math.e`  | e (2.71828…) |
+| `Math.pi` | pi (3.14159...) |
+| `Math.e`  | e (2.71828...)  |
 
 ### Functions
 
@@ -116,20 +116,20 @@ All functions take and return REAL unless noted.
 | `Math.sin(x)` | Sine (radians). |
 | `Math.cos(x)` | Cosine (radians). |
 | `Math.tan(x)` | Tangent (radians). |
-| `Math.arcsin(x)` | Arcsine → radians. |
-| `Math.arccos(x)` | Arccosine → radians. |
-| `Math.arctan(x)` | Arctangent → radians. |
-| `Math.arctan2(y, x)` | Two-argument arctangent → radians. |
+| `Math.arcsin(x)` | Arcsine (result in radians). |
+| `Math.arccos(x)` | Arccosine (result in radians). |
+| `Math.arctan(x)` | Arctangent (result in radians). |
+| `Math.arctan2(y, x)` | Two-argument arctangent (result in radians). |
 | `Math.power(base, exp)` | `base` raised to `exp`. |
-| `Math.floor(x)` | Largest integer ≤ x, as REAL. |
-| `Math.ceil(x)` | Smallest integer ≥ x, as REAL. |
+| `Math.floor(x)` | Largest integer <= x, as REAL. |
+| `Math.ceil(x)` | Smallest integer >= x, as REAL. |
 | `Math.round(x)` | Nearest integer, as REAL. |
 | `Math.entier(x)` | Floor as INTEGER. |
 | `Math.abs(x)` | Absolute value (real). |
 
 ---
 
-## Strings — String Operations
+## Strings - String Operations
 
 ```
 IMPORT Strings;
@@ -142,12 +142,12 @@ String variables are `ARRAY OF CHAR` (or the `STRING` alias), capped at 256 byte
 | `Strings.Length(s): INTEGER` | Number of characters in `s` (like `strlen`). |
 | `Strings.Copy(src, VAR dst)` | Copy `src` into `dst`. |
 | `Strings.Append(extra, VAR dst)` | Append `extra` to the end of `dst`. |
-| `Strings.Compare(a, b): INTEGER` | Lexicographic compare: −1, 0, or +1. |
-| `Strings.Pos(pattern, s): INTEGER` | Index of first occurrence of `pattern` in `s`, or −1 if absent. |
+| `Strings.Compare(a, b): INTEGER` | Lexicographic compare: -1, 0, or +1. |
+| `Strings.Pos(pattern, s): INTEGER` | Index of first occurrence of `pattern` in `s`, or -1 if absent. |
 
 ---
 
-## Files — Standard Oberon File I/O
+## Files - Standard Oberon File I/O
 
 ```
 IMPORT Files;
@@ -213,7 +213,7 @@ All write procedures advance the rider position.  `r.eof` is set TRUE on write e
 
 ---
 
-## Terminal — Raw Terminal I/O
+## Terminal - Raw Terminal I/O
 
 ```
 IMPORT Terminal;
@@ -230,7 +230,7 @@ on exit.  `Random` is also seeded automatically.
 | `Terminal.ShowCursor()` | Make the cursor visible. |
 | `Terminal.HideCursor()` | Hide the cursor. |
 | `Terminal.KeyPressed(): BOOLEAN` | Returns TRUE (non-zero) if a key is waiting in the input buffer. Non-blocking. |
-| `Terminal.ReadKey(): CHAR` | Read and return the next key.  Blocks if no key is ready. Arrow keys are mapped to control characters: Up=`01X`, Down=`02X`, Left=`03X`, Right=`04X`. Mouse events return `05X` — call `MouseX/Y/Btn` immediately after to get the details. |
+| `Terminal.ReadKey(): CHAR` | Read and return the next key.  Blocks if no key is ready. Arrow keys are mapped to control characters: Up=`01X`, Down=`02X`, Left=`03X`, Right=`04X`. Mouse events return `05X` -- call `MouseX/Y/Btn` immediately after to get the details. |
 | `Terminal.GetTickCount(): INTEGER` | Milliseconds since the Unix epoch (useful for timing). |
 | `Terminal.Random(n: INTEGER): INTEGER` | Random integer in `[0, n)`. |
 
@@ -260,15 +260,15 @@ END
 
 ---
 
-## Graphics — ANSI Terminal Graphics
+## Graphics - ANSI Terminal Graphics
 
 ```
 IMPORT Graphics;
 ```
 
 Provides two layers:
-- **Text layer** — direct cursor/color control for character-cell graphics.
-- **Pixel buffer** — a 240 × 100 logical pixel grid rendered using Unicode half-block
+- **Text layer** -- direct cursor/color control for character-cell graphics.
+- **Pixel buffer** -- a 240 x 100 logical pixel grid rendered using half-block
   characters (two vertical pixels per terminal cell).
 
 ### Text Layer
@@ -277,30 +277,30 @@ Provides two layers:
 |-----------|-------------|
 | `Graphics.Clear()` | Clear screen and home cursor. |
 | `Graphics.Goto(x, y: INTEGER)` | Move cursor to column `x`, row `y` (1-based). |
-| `Graphics.Color(fg, bg: INTEGER)` | Set foreground / background using standard ANSI color indices 0–7. |
-| `Graphics.Color256(fg, bg: INTEGER)` | Set foreground / background using 256-color indices 0–255. |
+| `Graphics.Color(fg, bg: INTEGER)` | Set foreground / background using standard ANSI color indices 0-7. |
+| `Graphics.Color256(fg, bg: INTEGER)` | Set foreground / background using 256-color indices 0-255. |
 | `Graphics.Reset()` | Reset all color/style attributes. |
-| `Graphics.Fill(x, y, w, h: INTEGER; ch: CHAR)` | Fill a rectangle of `w` × `h` cells at `(x, y)` with character `ch`. |
+| `Graphics.Fill(x, y, w, h: INTEGER; ch: CHAR)` | Fill a rectangle of `w` x `h` cells at `(x, y)` with character `ch`. |
 | `Graphics.HLine(x, y, len: INTEGER; ch: CHAR)` | Draw a horizontal line of `len` copies of `ch` starting at `(x, y)`. |
 | `Graphics.VLine(x, y, len: INTEGER; ch: CHAR)` | Draw a vertical line of `len` copies of `ch` starting at `(x, y)`. |
-| `Graphics.Box(x, y, w, h: INTEGER)` | Draw a box using Unicode box-drawing characters (┌─┐│└┘). |
+| `Graphics.Box(x, y, w, h: INTEGER)` | Draw a box using ASCII box-drawing characters (+-+|+-). |
 | `Graphics.Sprite(x, y: INTEGER; s: ARRAY OF CHAR; color: INTEGER)` | Draw multi-line string `s` at `(x, y)` with ANSI color `color`. Newlines in `s` advance to the next row at column `x`. |
 
 ### Pixel Buffer
 
-The pixel buffer is 240 columns × 100 rows.  Call `Graphics.Flush` to render it.
-Colors are ANSI indices 1–7 (0 = transparent/off).
+The pixel buffer is 240 columns x 100 rows.  Call `Graphics.Flush` to render it.
+Colors are ANSI indices 1-7 (0 = transparent/off).
 
 | Procedure | Description |
 |-----------|-------------|
 | `Graphics.ClearBuf()` | Clear the pixel buffer (all pixels off). |
-| `Graphics.Plot(x, y, color: INTEGER)` | Set pixel at `(x, y)` to `color` (1–255, same palette as `Color256`). |
+| `Graphics.Plot(x, y, color: INTEGER)` | Set pixel at `(x, y)` to `color` (1-255, same palette as `Color256`). |
 | `Graphics.Circle(cx, cy, r, color: INTEGER)` | Draw a circle outline using Bresenham's algorithm. |
 | `Graphics.Flush()` | Render the pixel buffer to the terminal using half-block characters. |
 
 ---
 
-## Args — Command-line Arguments
+## Args - Command-line Arguments
 
 ```
 IMPORT Args;

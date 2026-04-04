@@ -50,9 +50,13 @@
 #include <vector>
 #include <algorithm>
 #include <set>
+#include <map>
+#include <sstream>
 #include <cctype>
 #include <fstream>
 #include <unistd.h>
+#include <libgen.h>
+#include <mach-o/dyld.h>
 #include <sys/wait.h>
 #include <fcntl.h>
 #include <signal.h>
@@ -71,6 +75,7 @@ const ushort
     cmWindow1     = 210,     // cmWindow1..cmWindow1+N select window N
                              // (reserve 210-249 for up to 40 windows)
     cmCloseWindow = 250;     // Ctrl-W: close active editor window
+// cmHelp = 9 is already defined by TVision (views.h) — we reuse it.
 
 // ── Run oberon  ────────────────────────────────────────────────
 struct RunResult { int errorLine; std::string errorText; };
@@ -586,6 +591,7 @@ public:
                     }
                     break;
                 }
+                case kbF1:    event.what = evCommand; event.message.command = cmHelp;         break;
                 case kbCtrlK: autoComplete(); clearEvent(event); return;
                 case kbCtrlF: event.what = evCommand; event.message.command = cmFind;        break;
                 case kbCtrlH: event.what = evCommand; event.message.command = cmReplace;     break;
@@ -860,6 +866,307 @@ public:
     }
 };
 
+// ── Help system ───────────────────────────────────────────────────────────
+
+struct HelpTopic {
+    std::string name;    // e.g. "Out.String", "INC"
+    std::string module;  // e.g. "Out", "Language"
+    std::string body;    // signature(s) + description(s), backtick-quoted
+};
+
+static std::vector<HelpTopic> g_helpTopics;
+static std::string            g_stdlibPath;
+
+static void loadHelpTopics() {
+    std::ifstream f(g_stdlibPath);
+    if (!f.is_open()) f.open("stdlib.md");
+    if (!f.is_open()) return;
+
+    auto trim = [](const std::string& s) -> std::string {
+        size_t a = s.find_first_not_of(" \t");
+        if (a == std::string::npos) return "";
+        size_t b = s.find_last_not_of(" \t");
+        return s.substr(a, b - a + 1);
+    };
+
+    std::string line, currentModule;
+    std::map<std::string, size_t> topicIndex;
+
+    while (std::getline(f, line)) {
+        // Section heading: ## ModuleName ...
+        if (line.size() >= 3 && line.compare(0, 3, "## ") == 0) {
+            std::string hdr = trim(line.substr(3));
+            size_t sp = hdr.find(' ');
+            currentModule = (sp != std::string::npos) ? hdr.substr(0, sp) : hdr;
+            if (hdr.find("Language") != std::string::npos ||
+                hdr.find("Built")    != std::string::npos)
+                currentModule = "Language";
+            continue;
+        }
+
+        // Only process table rows
+        if (line.empty() || line[0] != '|') continue;
+        if (line.find("---") != std::string::npos) continue;
+
+        // Split on '|'
+        std::vector<std::string> cols;
+        size_t p = 0;
+        while (true) {
+            size_t nxt = line.find('|', p + 1);
+            if (nxt == std::string::npos) break;
+            cols.push_back(trim(line.substr(p + 1, nxt - p - 1)));
+            p = nxt;
+        }
+        if (cols.size() < 2) continue;
+
+        // First column must contain a backtick-quoted signature
+        const std::string& fc = cols[0];
+        size_t bt1 = fc.find('`'), bt2 = fc.rfind('`');
+        if (bt1 == std::string::npos || bt2 == bt1) continue;
+        std::string sig = fc.substr(bt1 + 1, bt2 - bt1 - 1);
+        if (sig.empty()) continue;
+
+        std::string desc = cols.back();
+
+        // Name = everything before '(' or first space
+        std::string name = sig;
+        size_t pp = name.find('('); if (pp != std::string::npos) name = name.substr(0, pp);
+        size_t sp2 = name.find(' '); if (sp2 != std::string::npos) name = name.substr(0, sp2);
+        name = trim(name);
+        if (name.empty()) continue;
+
+        std::string entry = "`" + sig + "`\n  " + desc + "\n";
+
+        auto it = topicIndex.find(name);
+        if (it != topicIndex.end()) {
+            g_helpTopics[it->second].body += "\n" + entry;
+        } else {
+            HelpTopic t;
+            t.name   = name;
+            t.module = currentModule;
+            t.body   = "Module: " + currentModule + "\n\n" + entry;
+            topicIndex[name] = g_helpTopics.size();
+            g_helpTopics.push_back(std::move(t));
+        }
+    }
+}
+
+// ── Help text view (right panel of help dialog) ────────────────────────────
+
+class THelpTextView : public TView {
+public:
+    std::vector<std::string> lines;
+    int topLine = 0;
+
+    THelpTextView(TRect r) : TView(r) { growMode = gfGrowHiX | gfGrowHiY; }
+
+    void setContent(const std::string& text) {
+        lines.clear();
+        topLine = 0;
+        int wrap = std::max(size.x - 1, 10);
+        std::istringstream ss(text);
+        std::string ln;
+        while (std::getline(ss, ln)) {
+            while ((int)ln.size() > wrap) {
+                int cut = wrap;
+                while (cut > 0 && ln[cut] != ' ') cut--;
+                if (cut == 0) cut = wrap;
+                lines.push_back(ln.substr(0, cut));
+                ln = "    " + trim(ln.substr(cut));
+            }
+            lines.push_back(ln);
+        }
+        drawView();
+    }
+
+    void handleEvent(TEvent& e) override {
+        if (e.what == evKeyDown) {
+            switch (e.keyDown.keyCode) {
+                case kbUp:
+                    if (topLine > 0) { topLine--; drawView(); clearEvent(e); } return;
+                case kbDown:
+                    if (topLine + size.y < (int)lines.size()) { topLine++; drawView(); clearEvent(e); } return;
+                case kbPgUp:
+                    topLine = std::max(0, topLine - size.y); drawView(); clearEvent(e); return;
+                case kbPgDn:
+                    topLine = std::min(std::max(0, (int)lines.size() - size.y),
+                                       topLine + size.y);
+                    drawView(); clearEvent(e); return;
+            }
+        }
+        TView::handleEvent(e);
+    }
+
+    void draw() override {
+        TColorAttr normal = TColorAttr(TColorRGB(0xCCCCCC), TColorRGB(0x000050));
+        TColorAttr hilit  = TColorAttr(TColorRGB(0xFFFF88), TColorRGB(0x000050));
+        TColorAttr hdr    = TColorAttr(TColorRGB(0x88DDFF), TColorRGB(0x000050));
+        for (int row = 0; row < size.y; row++) {
+            TDrawBuffer b;
+            b.moveChar(0, ' ', normal, size.x);
+            int li = topLine + row;
+            if (li < (int)lines.size()) {
+                const std::string& l = lines[li];
+                bool isHdr = (l.rfind("Module:", 0) == 0);
+                bool inBt = false;
+                int col = 0;
+                for (size_t ci = 0; ci < l.size() && col < size.x; ci++) {
+                    char ch = l[ci];
+                    if (ch == '`') { inBt = !inBt; continue; }
+                    b.moveChar(col++, ch, inBt ? hilit : (isHdr ? hdr : normal), 1);
+                }
+            }
+            writeBuf(0, row, size.x, 1, b);
+        }
+    }
+
+private:
+    static std::string trim(const std::string& s) {
+        size_t a = s.find_first_not_of(" \t");
+        if (a == std::string::npos) return "";
+        size_t b = s.find_last_not_of(" \t");
+        return s.substr(a, b - a + 1);
+    }
+};
+
+// ── Help list: broadcasts when focused item changes ────────────────────────
+
+
+// ── Help dialog ────────────────────────────────────────────────────────────
+
+class THelpDialog : public TDialog {
+    TListBox*      listBox;
+    TInputLine*    searchInp;
+    THelpTextView* textView;
+    std::vector<int> filtered;  // indices into g_helpTopics
+    std::string      lastFilter;
+    int              prevFocused = -1;
+
+    static std::string toLower(std::string s) {
+        for (auto& c : s) c = (char)tolower((unsigned char)c);
+        return s;
+    }
+
+    void rebuildList(const char* raw) {
+        std::string f = toLower(raw);
+        lastFilter = f;
+        filtered.clear();
+        for (int i = 0; i < (int)g_helpTopics.size(); i++) {
+            if (f.empty() || toLower(g_helpTopics[i].name).find(f) != std::string::npos)
+                filtered.push_back(i);
+        }
+        // Sort to match TStringCollection's alphabetical display order
+        std::sort(filtered.begin(), filtered.end(), [](int a, int b) {
+            return g_helpTopics[a].name < g_helpTopics[b].name;
+        });
+        auto* sc = new TStringCollection(std::max((int)filtered.size(), 1), 4);
+        for (int idx : filtered) sc->insert(newStr(g_helpTopics[idx].name.c_str()));
+        listBox->newList(sc);
+        listBox->focused = 0;
+        prevFocused = 0;
+        listBox->drawView();
+        if (!filtered.empty()) updateDescription(0);
+        else textView->setContent("");
+    }
+
+    void selectByName(const std::string& kw) {
+        if (kw.empty() || filtered.empty()) return;
+        std::string kl = toLower(kw);
+        // Exact match
+        for (int i = 0; i < (int)filtered.size(); i++) {
+            if (toLower(g_helpTopics[filtered[i]].name) == kl) {
+                listBox->focused = i; prevFocused = i; listBox->drawView(); updateDescription(i); return;
+            }
+        }
+        // Short name match (after dot)
+        for (int i = 0; i < (int)filtered.size(); i++) {
+            std::string n = toLower(g_helpTopics[filtered[i]].name);
+            size_t dot = n.rfind('.');
+            if ((dot != std::string::npos ? n.substr(dot + 1) : n) == kl) {
+                listBox->focused = i; prevFocused = i; listBox->drawView(); updateDescription(i); return;
+            }
+        }
+    }
+
+    void updateDescription(int listIdx) {
+        if (listIdx >= 0 && listIdx < (int)filtered.size())
+            textView->setContent(g_helpTopics[filtered[listIdx]].body);
+    }
+
+public:
+    THelpDialog(const char* keyword = "")
+        : TWindowInit(&THelpDialog::initFrame),
+          TDialog(TRect(0, 0, 76, 21), " Oberon Help ")
+    {
+        options |= ofCentered;
+
+        // Search row
+        insert(new TLabel(TRect(2, 1, 11, 2), "~S~earch:", nullptr));
+        searchInp = new TInputLine(TRect(11, 1, 60, 2), 64);
+        insert(searchInp);
+
+        // Left panel: list + scrollbar
+        TScrollBar* sb = new TScrollBar(TRect(25, 2, 26, 19));
+        insert(sb);
+        listBox = new TListBox(TRect(1, 2, 25, 19), 1, sb);
+        insert(listBox);
+
+        // Right panel: description
+        textView = new THelpTextView(TRect(26, 2, 74, 19));
+        insert(textView);
+
+        // Close button
+        insert(new TButton(TRect(32, 19, 43, 20), " ~C~lose ", cmOK, bfDefault));
+
+        char empty[1] = {};
+        searchInp->setData(empty);
+        lastFilter = "";
+        rebuildList("");
+
+        if (keyword && *keyword) {
+            selectByName(keyword);
+            listBox->select();
+        }
+    }
+
+    void handleEvent(TEvent& e) override {
+        TDialog::handleEvent(e);
+        // Keep description in sync with list after any event
+        if (listBox->focused != prevFocused) {
+            prevFocused = listBox->focused;
+            updateDescription(listBox->focused);
+        }
+        // Re-filter whenever search text changes
+        char buf[65] = {};
+        searchInp->getData(buf);
+        if (toLower(buf) != lastFilter) rebuildList(buf);
+    }
+};
+
+// ── Word under cursor ──────────────────────────────────────────────────────
+
+static std::string wordAtCursor(TEditorWindow* w) {
+    if (!w || !w->editor) return "";
+    auto* ed = w->editor;
+    auto ch = [&](int i) -> char {
+        if (i < 0 || (uint)i >= ed->bufLen) return '\0';
+        uint u = (uint)i;
+        return ed->buffer[u < ed->curPtr ? u : u + ed->gapLen];
+    };
+    auto isIdent = [](char c) {
+        return isalnum((unsigned char)c) || c == '_' || c == '.';
+    };
+    int start = (int)ed->curPtr, end = (int)ed->curPtr;
+    while (start > 0 && isIdent(ch(start - 1))) start--;
+    while ((uint)end < ed->bufLen && isIdent(ch(end))) end++;
+    if (start == end) return "";
+    std::string word;
+    for (int i = start; i < end; i++) word += ch(i);
+    while (!word.empty() && word.front() == '.') word = word.substr(1);
+    while (!word.empty() && word.back()  == '.') word.pop_back();
+    return word;
+}
+
 // ── Application ───────────────────────────────────────────────────────────
 class TOberonIDE : public TApplication {
 public:
@@ -877,6 +1184,7 @@ private:
     void closeWindow();
     void showAbout();
     void gotoLine();
+    void showHelp();
     void showWindowList();
     void selectWindow(int idx);
     TEditorWindow* activeEditor();
@@ -941,7 +1249,9 @@ TMenuBar* TOberonIDE::initMenuBar(TRect r) {
             *new TMenuItem("Switch Window",  cmWindow1 + 1, kbAlt2,  hcNoContext, "Alt-2") +
             
         *new TSubMenu("~H~elp", kbAltH) +
-            *new TMenuItem("~A~bout...",      cmAbout,      kbNoKey)
+            *new TMenuItem("Help on ~K~eyword", cmHelp,  kbF1, hcNoContext, "F1") +
+            newLine() +
+            *new TMenuItem("~A~bout...",        cmAbout, kbNoKey)
     );
 }
 
@@ -949,6 +1259,7 @@ TStatusLine* TOberonIDE::initStatusLine(TRect r) {
     r.a.y = r.b.y - 1;
     return new TStatusLine(r,
         *new TStatusDef(0, 0xFFFF) +
+            *new TStatusItem("~F1~ Help",    kbF1,   cmHelp)       +
             *new TStatusItem("~F2~ Save",    kbF2,   cmSaveFile)   +
             *new TStatusItem("~F3~ Open",    kbF3,   cmOpenFile)   +
             *new TStatusItem("~F7~ Again",   kbF7,   cmSearchAgain) +
@@ -994,6 +1305,7 @@ if (event.message.command >= cmWindow1 && event.message.command < cmWindow1 + 40
             case cmCloseWindow: closeWindow();   clearEvent(event); return;
             case cmAbout:      showAbout();      clearEvent(event); return;
             case cmGotoLine:   gotoLine();       clearEvent(event); return;
+            case cmHelp:       showHelp();       clearEvent(event); return;
             case cmWindowList: showWindowList(); clearEvent(event); return;
             default:
                 break;
@@ -1202,7 +1514,45 @@ void TOberonIDE::gotoLine() {
     TObject::destroy(dlg);
 }
 
+void TOberonIDE::showHelp() {
+    std::string kw;
+    if (auto* w = activeEditor()) kw = wordAtCursor(w);
+    auto* dlg = new THelpDialog(kw.c_str());
+    deskTop->execView(dlg);
+    TObject::destroy(dlg);
+}
+
 int main(int argc, char* argv[]) {
+    // Locate stdlib.md next to the binary.
+    // Use _NSGetExecutablePath (macOS) so it works regardless of how the binary
+    // was launched (via PATH, symlink, etc.).
+    {
+        char exebuf[4096] = {};
+        uint32_t exesize = sizeof(exebuf);
+        if (_NSGetExecutablePath(exebuf, &exesize) == 0) {
+            char resolved[4096] = {};
+            if (realpath(exebuf, resolved)) {
+                char tmp[4096];
+                strncpy(tmp, resolved, sizeof(tmp) - 1);
+                g_stdlibPath = std::string(dirname(tmp)) + "/stdlib.md";
+            }
+        }
+        // Fallback: try argv[0] dirname, then cwd
+        if (g_stdlibPath.empty() || access(g_stdlibPath.c_str(), R_OK) != 0) {
+            if (argc >= 1 && argv[0] && strchr(argv[0], '/')) {
+                char resolved[4096] = {};
+                if (realpath(argv[0], resolved)) {
+                    char tmp[4096];
+                    strncpy(tmp, resolved, sizeof(tmp) - 1);
+                    g_stdlibPath = std::string(dirname(tmp)) + "/stdlib.md";
+                }
+            }
+        }
+        if (g_stdlibPath.empty() || access(g_stdlibPath.c_str(), R_OK) != 0)
+            g_stdlibPath = "stdlib.md";
+    }
+    loadHelpTopics();
+
     TOberonIDE app;
     if (argc >= 2) {
         TRect r = app.deskTop->getExtent();
