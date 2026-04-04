@@ -9,17 +9,17 @@ BEGIN
     Graphics.Clear();
     Graphics.ClearBuf();
 
-    (* Five concentric circles, each a different colour *)
-    Graphics.Circle(60, 48, 40, 1);
-    Graphics.Circle(60, 48, 30, 2);
-    Graphics.Circle(60, 48, 20, 3);
-    Graphics.Circle(60, 48, 12, 4);
-    Graphics.Circle(60, 48,  5, 5);
+    (* Five concentric circles using 256-colour palette *)
+    Graphics.Circle(60, 48, 40, 196);  (* red        *)
+    Graphics.Circle(60, 48, 30,  46);  (* green      *)
+    Graphics.Circle(60, 48, 20,  27);  (* blue       *)
+    Graphics.Circle(60, 48, 12, 226);  (* yellow     *)
+    Graphics.Circle(60, 48,  5, 201);  (* magenta    *)
 
-    (* A few individual pixels to check Plot *)
+    (* Gradient line across the full 256-colour cube *)
     i := 0;
     WHILE i < 120 DO
-        Graphics.Plot(i, 48, 6);
+        Graphics.Plot(i, 48, 17 + (i * 215) DIV 120);
         i := i + 1;
     END;
 

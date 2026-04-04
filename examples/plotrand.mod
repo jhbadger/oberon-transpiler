@@ -8,7 +8,7 @@ VAR
 BEGIN
   Graphics.Clear;
   FOR i := 1 TO 2000 DO
-    c := Random.Int(6)+1;
+    c := Random.Int(215)+17;
     x := Random.Int(100);
     y := Random.Int(100);
     Graphics.Plot(x, y, c);

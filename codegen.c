@@ -1385,13 +1385,13 @@ void codegen(Node *module, FILE *out, int is_main) {
         emit(g,"            int bot=(row+1<_GFX_H)?_gfx_buf[row+1][col]:0;\n");
         emit(g,"            if(!top&&!bot) { printf(\"\\033[0m \"); }\n");
         /* same color both halves → full block █ */
-        emit(g,"            else if(top&&bot&&top==bot) { printf(\"\\033[3%%dm\\xe2\\x96\\x88\",top); }\n");
+        emit(g,"            else if(top&&bot&&top==bot) { printf(\"\\033[38;5;%%dm\\xe2\\x96\\x88\",top); }\n");
         /* different colors → ▀ with fg=top, bg=bot */
-        emit(g,"            else if(top&&bot) { printf(\"\\033[3%%d;4%%dm\\xe2\\x96\\x80\",top,bot); }\n");
+        emit(g,"            else if(top&&bot) { printf(\"\\033[38;5;%%d;48;5;%%dm\\xe2\\x96\\x80\",top,bot); }\n");
         /* top only → ▀ */
-        emit(g,"            else if(top) { printf(\"\\033[3%%dm\\xe2\\x96\\x80\",top); }\n");
+        emit(g,"            else if(top) { printf(\"\\033[38;5;%%dm\\xe2\\x96\\x80\",top); }\n");
         /* bot only → ▄ */
-        emit(g,"            else { printf(\"\\033[3%%dm\\xe2\\x96\\x84\",bot); }\n");
+        emit(g,"            else { printf(\"\\033[38;5;%%dm\\xe2\\x96\\x84\",bot); }\n");
         emit(g,"        }\n");
         emit(g,"    }\n");
         emit(g,"    printf(\"\\033[0m\"); fflush(stdout);\n");

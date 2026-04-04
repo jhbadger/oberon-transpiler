@@ -67,7 +67,7 @@ BEGIN
       cim := yMax - h * py / PH;
       n   := Iterate(cre, cim);
       IF n < MaxIter THEN
-        color := (n MOD 6) + 1;
+        color := (n MOD 215) + 17;
         Graphics.Plot(OX + px, OY + py, color)
       END
     END
@@ -75,18 +75,18 @@ BEGIN
 
   (* Cursor crosshair in white (colour 7) *)
   IF curX > 0 THEN
-    Graphics.Plot(OX + curX - 1, OY + curY, 7)
+    Graphics.Plot(OX + curX - 1, OY + curY, 255)
   END;
   IF curX < PW - 1 THEN
-    Graphics.Plot(OX + curX + 1, OY + curY, 7)
+    Graphics.Plot(OX + curX + 1, OY + curY, 255)
   END;
   IF curY > 0 THEN
-    Graphics.Plot(OX + curX, OY + curY - 1, 7)
+    Graphics.Plot(OX + curX, OY + curY - 1, 255)
   END;
   IF curY < PH - 1 THEN
-    Graphics.Plot(OX + curX, OY + curY + 1, 7)
+    Graphics.Plot(OX + curX, OY + curY + 1, 255)
   END;
-  Graphics.Plot(OX + curX, OY + curY, 7);
+  Graphics.Plot(OX + curX, OY + curY, 255);
 
   Graphics.Flush;
   Graphics.Reset;

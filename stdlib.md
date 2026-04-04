@@ -294,7 +294,7 @@ Colors are ANSI indices 1–7 (0 = transparent/off).
 | Procedure | Description |
 |-----------|-------------|
 | `Graphics.ClearBuf()` | Clear the pixel buffer (all pixels off). |
-| `Graphics.Plot(x, y, color: INTEGER)` | Set pixel at `(x, y)` to `color` (1–7). |
+| `Graphics.Plot(x, y, color: INTEGER)` | Set pixel at `(x, y)` to `color` (1–255, same palette as `Color256`). |
 | `Graphics.Circle(cx, cy, r, color: INTEGER)` | Draw a circle outline using Bresenham's algorithm. |
 | `Graphics.Flush()` | Render the pixel buffer to the terminal using half-block characters. |
 
