@@ -307,15 +307,15 @@ static ushort oberonEditorDialog(int dialog, ...) {
     return result;
 }
 
-static const char* OBERON_KEYWORDS[] = {
-	"ARRAY", "BEGIN", "BY", "CASE", "CONST", "DIV", "DO", "ELSE",
-	"ELSIF", "END", "FALSE", "FOR", "IF", "IMPORT", "IN", "IS",
-	"MOD", "MODULE", "NIL", "OF", "OR", "POINTER", "PROCEDURE",
-	"RECORD", "REPEAT", "RETURN", "THEN", "TO", "TRUE", "TYPE",
-	"UNTIL", "VAR", "WHILE", "BOOLEAN", "BYTE", "CHAR", "INTEGER",
-	"REAL", "SET", "ABS", "ASR", "ASSERT", "CHR", "FLOOR", "FLT",
-	"INC", "DEC", "LEN", "LSL", "ORD", "PACK", "ROR", "UNPK",
-	"WRITE", "READ",  nullptr
+static const char *OBERON_KEYWORDS[] = {
+    "ARRAY", "BEGIN", "BY", "CASE", "CONST", "DIV", "DO", "ELSE", "ELSIF",
+    "END", "FALSE", "FOR", "IF", "IMPORT", "IN", "IS", "MOD", "MODULE", "NIL",
+    "OF", "OR", "POINTER", "PROCEDURE", "RECORD", "REPEAT", "RETURN", "THEN",
+    "TO", "TRUE", "TYPE", "UNTIL", "VAR", "WHILE", "BOOLEAN", "BYTE", "CHAR",
+    "INTEGER", "REAL", "SET", "ABS", "ASR", "ASSERT", "CHR", "FLOOR", "FLT",
+    "INC", "DEC", "LEN", "LSL", "ORD", "PACK", "ROR", "UNPK", "WRITE", "READ",
+    "LONGINT", "LONGREAL", "SHORTINT", "BYTE", "SET", "POINTER", "LOOP", "EXIT",
+    nullptr
 };
 
 static bool isOberonKeyword(const char* p, int len) {
@@ -632,12 +632,10 @@ public:
         std::set<std::string>    seen;
         std::vector<std::string> completions;
 
-        // Keywords — case-insensitive prefix match, returned uppercase
-        std::string partUpper = partial;
-        for (auto& c : partUpper) c = toupper((unsigned char)c);
+        // Keywords — case-ensitive prefix match, returned uppercase
         for (int i = 0; OBERON_KEYWORDS[i]; i++) {
             const char* kw = OBERON_KEYWORDS[i];
-            if (strncmp(kw, partUpper.c_str(), partUpper.size()) == 0 &&
+            if (strncmp(kw, partial.c_str(), partial.size()) == 0 &&
                 strlen(kw) > partial.size()) {
                 if (seen.insert(kw).second) completions.push_back(kw);
             }

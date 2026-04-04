@@ -2,7 +2,7 @@ MODULE fact;
 
 IMPORT Out, In;
 
-PROCEDURE Fact(n : INTEGER) : INTEGER;
+PROCEDURE Fact(n : LONGINT) : LONGINT;
 BEGIN
     IF n = 0 THEN
         RETURN 1;
@@ -12,8 +12,8 @@ BEGIN
 END Fact;
 
 VAR
-    num : INTEGER;
-    res : INTEGER;
+    num : LONGINT;
+    res : LONGINT;
 BEGIN
     Out.String("Enter a number: ");
     In.Int(num);
