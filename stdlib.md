@@ -347,11 +347,14 @@ identifiers.
 
 | Keyword | Description |
 |---------|-------------|
-| `INTEGER` | Signed whole-number type (maps to C `int`). |
-| `REAL` | Floating-point type (maps to C `double`). |
-| `BOOLEAN` | Logical type with values `TRUE` and `FALSE`. |
+| `BYTE` | Unsigned 8-bit integer (maps to C `unsigned char`). |
+| `SHORTINT` | Signed 16-bit integer (maps to C `short`). Oberon-2 extension. |
+| `INTEGER` | Signed 32-bit integer (maps to C `int`). |
+| `LONGINT` | Signed 64-bit integer on 64-bit platforms (maps to C `long`). Use for timestamps and large counts. Oberon-2 extension. |
+| `REAL` | 64-bit floating-point (maps to C `double`). |
+| `LONGREAL` | Alias for `REAL`; both map to C `double`. Oberon-2 extension. |
+| `BOOLEAN` | Logical type with values `TRUE` and `FALSE` (maps to C `int`). |
 | `CHAR` | Single character (maps to C `char`). |
-| `BYTE` | Unsigned 8-bit integer. |
 | `SET` | Bit-set type (32 bits); supports `+`, `-`, `*`, `/` (union, diff, intersection, sym-diff) and the `IN` operator. |
 | `STRING` | Alias for `ARRAY 256 OF CHAR`. |
 
