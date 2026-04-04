@@ -606,6 +606,12 @@ static void emit_addr_of(CG *g, Node *e) {
             emit(g,"_frame->%s", e->str); return;
         }
         if (sym_is_var(e->str)) { emit(g,"%s",e->str); return; }
+        { Node *t = sym_type(e->str);
+          if (t && t->kind==ND_TNAME) {
+              Node *td = find_type_decl(t->str);
+              if (td) t = td->c0;
+          }
+          if (t && t->kind==ND_TPOINTER) { emit(g,"%s",e->str); return; } }
         emit(g,"&%s",e->str); return;
     }
     emit(g,"&("); emit_expr(g,e); emit(g,")");
@@ -848,9 +854,9 @@ static void emit_expr(CG *g, Node *e) {
     case ND_IS:
         /* v IS T — runtime type test via _tag */
         emit(g,"(");
-        emit_expr(g,e->c0);
+        emit_addr_of(g,e->c0);
         emit(g," && (");
-        emit_expr(g,e->c0);
+        emit_addr_of(g,e->c0);
         emit(g,")->_tag == _TAG_%s)", e->c1->str);
         break;
     case ND_DEREF: emit(g,"(*"); emit_expr(g,e->c0); emit(g,")"); break;
@@ -1149,9 +1155,9 @@ static void emit_stmt(CG *g, Node *s) {
         for (Node *cl=s->c0; cl; cl=cl->next) {
             if (first) { iemit(g,"if ("); first=0; }
             else         iemit(g,"} else if (");
-            emit_expr(g, cl->c0);
+            emit_addr_of(g, cl->c0);
             emit(g," && (");
-            emit_expr(g, cl->c0);
+            emit_addr_of(g, cl->c0);
             emit(g,")->_tag == _TAG_%s) {\n", cl->str);
             g->indent++;
             /* Shadow the variable with the narrowed pointer type.
@@ -1159,7 +1165,7 @@ static void emit_stmt(CG *g, Node *s) {
              * new declaration's initializer would refer to itself.   */
             if (cl->c0 && cl->c0->kind==ND_IDENT) {
                 iemit(g,"void *_obc_wt_ = (void*)(");
-                emit_expr(g, cl->c0);
+                emit_addr_of(g, cl->c0);
                 emit(g,");\n");
                 iemit(g,"%s *%s = (%s*)_obc_wt_;\n",
                       ctype(cl->str), cl->c0->str, ctype(cl->str));
@@ -1298,6 +1304,8 @@ static void emit_global_var(CG *g, Node *n) {
         }
         if (n->c1 && n->c1->kind==ND_TNAME && !strcmp(n->c1->str,"STRING"))
             emit(g," = \"\"");
+        else if (n->c1 && n->c1->kind==ND_TNAME && is_known_record_type(n->c1->str))
+            emit(g," = { ._tag = _TAG_%s }", n->c1->str);
         emit(g,";\n");
     }
 }
