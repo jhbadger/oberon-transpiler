@@ -56,7 +56,8 @@ static void add_cfile(const char *path) {
  * Command-line options
  * ----------------------------------------------------------------------- */
 static int         g_emit_c = 0;      /* --emit-c: keep generated .c files */
-static const char *g_outfile = NULL;   /* -o <outfile> */
+static int         g_warnings = 0;    /* --warnings: enable C compiler warnings */
+static const char *g_outfile = NULL;  /* -o <outfile> */
 
 /* -----------------------------------------------------------------------
  * Core: compile one module file.
@@ -154,18 +155,20 @@ int main(int argc, char *argv[]) {
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--emit-c")) {
             g_emit_c = 1;
+        } else if (!strcmp(argv[i], "--warnings")) {
+            g_warnings = 1;
         } else if (!strcmp(argv[i], "-o") && i + 1 < argc) {
             g_outfile = argv[++i];
         } else if (argv[i][0] == '-') {
             fprintf(stderr, "obc: unknown flag: %s\n", argv[i]);
-            fprintf(stderr, "usage: obc [--emit-c] [-o outfile] <file.mod>\n");
+            fprintf(stderr, "usage: obc [--emit-c] [--warnings] [-o outfile] <file.mod>\n");
             return 1;
         } else {
             mainfile = argv[i];
         }
     }
     if (!mainfile) {
-        fprintf(stderr, "usage: obc [--emit-c] [-o outfile] <file.mod>\n");
+        fprintf(stderr, "usage: obc [--emit-c] [--warnings] [-o outfile] <file.mod>\n");
         return 1;
     }
 
@@ -229,8 +232,8 @@ int main(int argc, char *argv[]) {
     /* ── Build gcc command: all .c files → binary ────────────────── */
     char cmd[4096];
     int pos = snprintf(cmd, sizeof(cmd),
-        "gcc -std=c11 -Wall -Wno-unused-function -Wno-unused-variable "
-        "-I%s -O -o %s",
+        "gcc -std=c11 %s-I%s -O -o %s",
+        g_warnings ? "-Wall -Wno-unused-function -Wno-unused-variable " : "-w ",
         searchdir, binpath);
 
     /* Library modules first (in compilation order), then main */
