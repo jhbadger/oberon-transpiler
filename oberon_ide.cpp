@@ -826,22 +826,26 @@ public:
     }
 
     void jumpToLine(int targetLine) {
-        if (targetLine <= 0) { editor->setCurPtr(0, 0); editor->drawView(); return; }
-        uint line = 0;
-        uint len  = editor->bufLen;
-        for (uint i = 0; i < len; i++) {
-            uint phys = (i < editor->curPtr) ? i : i + editor->gapLen;
-            if (editor->buffer[phys] == '\n') {
-                line++;
-                if ((int)line == targetLine) {
-                    editor->setCurPtr(i + 1, 0);
-                    editor->delta.y = std::max(0, targetLine - editor->size.y / 2);
-                    editor->drawView();
-                    return;
+        uint pos = 0;
+        if (targetLine > 0) {
+            uint line = 0;
+            uint len  = editor->bufLen;
+            for (uint i = 0; i < len; i++) {
+                uint phys = (i < editor->curPtr) ? i : i + editor->gapLen;
+                if (editor->buffer[phys] == '\n') {
+                    line++;
+                    if ((int)line == targetLine) { pos = i + 1; break; }
                 }
             }
+            if (pos == 0 && targetLine > 0) pos = editor->bufLen; // past end
         }
-        editor->setCurPtr(len, 0);
+        // Use lock/unlock to batch the cursor move + scroll into one update,
+        // preventing setCurPtr's internal trackCursor(false) from overriding
+        // our scroll position before we've had a chance to set it.
+        editor->lock();
+        editor->setCurPtr(pos, 0);
+        editor->scrollTo(0, std::max(0, targetLine - editor->size.y / 2));
+        editor->unlock();
         editor->drawView();
     }
 
