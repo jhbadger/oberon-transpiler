@@ -38,7 +38,7 @@ These identifiers are always in scope without any IMPORT statement.
 | Call | Description |
 |------|-------------|
 | `WRITE(x)` | Print `x` followed by a newline. Chooses format by type: `%d`, `%g`, `%c`, or `%s`. |
-| `WRITELN` / `WRITELN(x)` | Same as `WRITE`, or just print a newline when called with no argument. |
+| `WRITELN(x)` | Same as `WRITE`, or just print a newline when called with no argument. |
 | `READ(VAR x)` | Read a value from stdin into `x`. Chooses format by type. |
 
 ---
@@ -297,6 +297,82 @@ Colors are ANSI indices 1-7 (0 = transparent/off).
 | `Graphics.Plot(x, y, color: INTEGER)` | Set pixel at `(x, y)` to `color` (1-255, same palette as `Color256`). |
 | `Graphics.Circle(cx, cy, r, color: INTEGER)` | Draw a circle outline using Bresenham's algorithm. |
 | `Graphics.Flush()` | Render the pixel buffer to the terminal using half-block characters. |
+
+---
+
+## Keywords - Oberon Language Keywords
+
+These are the reserved words of the Oberon language.  They cannot be used as
+identifiers.
+
+### Program Structure
+
+| Keyword | Description |
+|---------|-------------|
+| `MODULE name; ... END name.` | Top-level compilation unit. Every source file is a MODULE. |
+| `IMPORT m1 [, m2];` | Declare modules used by this module. Must come first, after MODULE heading. |
+| `CONST name = expr;` | Declare a compile-time constant. |
+| `TYPE name = TypeDef;` | Declare a named type alias or new type. |
+| `VAR name: Type;` | Declare a variable. Multiple names can share a type: `VAR a, b: INTEGER`. |
+| `PROCEDURE name(params): RetType; ... END name;` | Declare a procedure or function. Omit `: RetType` for procedures. |
+| `BEGIN` | Opens the statement sequence of a MODULE or PROCEDURE body. |
+| `END` | Closes a block: MODULE body, PROCEDURE body, IF, WHILE, FOR, LOOP, RECORD, etc. |
+| `RETURN expr` | Return a value from a function procedure. Also valid without `expr` to exit a procedure early. |
+
+### Control Flow
+
+| Keyword | Description |
+|---------|-------------|
+| `IF cond THEN ... END` | Conditional.  Add `ELSIF cond THEN` branches and an optional `ELSE` branch before `END`. |
+| `ELSIF cond THEN` | Additional condition branch inside an `IF` statement. |
+| `ELSE` | Fallback branch in `IF` or `CASE` statements. |
+| `WHILE cond DO ... END` | Loop while `cond` is TRUE. |
+| `REPEAT ... UNTIL cond` | Loop until `cond` is TRUE (body executes at least once). |
+| `FOR v := start TO stop [BY step] DO ... END` | Count loop. `v` is incremented by `step` (default 1) each iteration. |
+| `LOOP ... END` | Infinite loop. Use `EXIT` to break out. |
+| `EXIT` | Break out of the enclosing `LOOP ... END`. |
+| `CASE expr OF v: stmts ELSE stmts END` | Multi-way branch on an INTEGER or CHAR expression. Separate cases with a vertical bar. |
+| `WITH v: Type DO ... END` | Type guard: narrows the type of a pointer variable inside the block. |
+
+### Type Constructors
+
+| Keyword | Description |
+|---------|-------------|
+| `ARRAY n OF Type` | Fixed-length array of `n` elements.  Multi-dimensional: `ARRAY n, m OF Type`. |
+| `RECORD [( BaseType )] field: Type; ... END` | Record (struct).  Optional `(BaseType)` for inheritance. |
+| `POINTER TO Type` | Heap-allocated reference to `Type`.  Dereferenced with `^` (e.g. `p^.field`). |
+| `PROCEDURE (params): RetType` | Procedure type (for procedure variables and parameters). |
+
+### Predeclared Types
+
+| Keyword | Description |
+|---------|-------------|
+| `INTEGER` | Signed whole-number type (maps to C `int`). |
+| `REAL` | Floating-point type (maps to C `double`). |
+| `BOOLEAN` | Logical type with values `TRUE` and `FALSE`. |
+| `CHAR` | Single character (maps to C `char`). |
+| `BYTE` | Unsigned 8-bit integer. |
+| `SET` | Bit-set type (32 bits); supports `+`, `-`, `*`, `/` (union, diff, intersection, sym-diff) and the `IN` operator. |
+| `STRING` | Alias for `ARRAY 256 OF CHAR`. |
+
+### Predeclared Constants
+
+| Keyword | Description |
+|---------|-------------|
+| `TRUE` | Boolean true value. |
+| `FALSE` | Boolean false value. |
+| `NIL` | Null pointer value (compatible with any `POINTER TO` type). |
+
+### Operators
+
+| Keyword | Description |
+|---------|-------------|
+| `DIV` | Integer division (truncated toward negative infinity): `7 DIV 3 = 2`, `-7 DIV 3 = -3`. |
+| `MOD` | Integer modulo (always non-negative when divisor is positive): `7 MOD 3 = 1`, `-7 MOD 3 = 2`. |
+| `OR` | Boolean or (short-circuit): `a OR b`. |
+| `IN` | Set membership test: `x IN s` is TRUE if bit `x` is set in `s`. |
+| `IS` | Dynamic type test: `v IS T` is TRUE if `v` currently holds a value of type `T` or a subtype. |
+| `OF` | Used in `ARRAY n OF T`, `CASE ... OF`, `ARRAY OF CHAR` (open array), and type guards. |
 
 ---
 
