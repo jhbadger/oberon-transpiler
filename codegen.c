@@ -13,6 +13,7 @@ typedef struct {
     int   indent;
     char  modname[MAX_IDENT]; /* current module name (library mode) */
     int   is_main;            /* 1 = top-level program, 0 = library  */
+    int   in_proc;            /* 1 when inside a procedure body      */
 } CG;
 
 static void emit(CG *g, const char *fmt, ...) {
@@ -72,6 +73,57 @@ static int sym_is_var(const char *name) {
     for (int i = g_nsyms-1; i >= 0; i--)
         if (strcmp(g_syms[i].name, name) == 0) return g_syms[i].is_var;
     return 0;
+}
+
+/* -----------------------------------------------------------------------
+ * Procedure signature table — maps proc name → formal param list so that
+ * call sites can decide whether to pass an argument by address (VAR param)
+ * or by value.
+ * ----------------------------------------------------------------------- */
+#define MAX_PROCSIGS 256
+typedef struct { char name[MAX_IDENT]; Node *params; } ProcSig;
+static ProcSig g_procsigs[MAX_PROCSIGS];
+static int g_nprocsigs = 0;
+
+static void collect_proc_sigs(Node *decls) {
+    for (Node *d = decls; d; d = d->next) {
+        if (d->kind == ND_PROC_DECL && g_nprocsigs < MAX_PROCSIGS) {
+            strncpy(g_procsigs[g_nprocsigs].name, d->str, MAX_IDENT-1);
+            g_procsigs[g_nprocsigs].params = d->c0;
+            g_nprocsigs++;
+        }
+    }
+}
+static Node *lookup_proc_params(const char *name) {
+    for (int i = 0; i < g_nprocsigs; i++)
+        if (!strcmp(g_procsigs[i].name, name)) return g_procsigs[i].params;
+    return NULL;
+}
+
+/* Cross-module proc signatures — indexed by "RealModule.ProcName".
+ * Accumulated across all codegen() calls (never reset) so that when
+ * compiling the main module we can look up VAR-param info for imported procs. */
+#define MAX_XMOD_PROCSIGS 512
+typedef struct { char key[MAX_IDENT*2]; Node *params; } XModProcSig;
+static XModProcSig g_xmod_procsigs[MAX_XMOD_PROCSIGS];
+static int g_n_xmod_procsigs = 0;
+
+static void collect_xmod_proc_sigs(Node *decls, const char *modname) {
+    for (Node *d = decls; d; d = d->next) {
+        if (d->kind == ND_PROC_DECL && g_n_xmod_procsigs < MAX_XMOD_PROCSIGS) {
+            snprintf(g_xmod_procsigs[g_n_xmod_procsigs].key, MAX_IDENT*2,
+                     "%s.%s", modname, d->str);
+            g_xmod_procsigs[g_n_xmod_procsigs].params = d->c0;
+            g_n_xmod_procsigs++;
+        }
+    }
+}
+static Node *lookup_xmod_proc_params(const char *modname, const char *procname) {
+    char key[MAX_IDENT*2];
+    snprintf(key, sizeof(key), "%s.%s", modname, procname);
+    for (int i = 0; i < g_n_xmod_procsigs; i++)
+        if (!strcmp(g_xmod_procsigs[i].key, key)) return g_xmod_procsigs[i].params;
+    return NULL;
 }
 
 /* -----------------------------------------------------------------------
@@ -153,6 +205,19 @@ static const char *ctype(const char *name) {
     if (!strcmp(name,"SET"))          return "unsigned int";
     if (!strcmp(name,"Files.File"))   return "Files_File";
     if (!strcmp(name,"Files.Rider"))  return "Files_Rider";
+    /* General qualified name: Alias.Type → RealModule_Type */
+    {
+        const char *dot = strchr(name, '.');
+        if (dot) {
+            static char buf[MAX_IDENT*2];
+            int modlen = (int)(dot - name);
+            if (modlen >= MAX_IDENT) modlen = MAX_IDENT - 1;
+            char alias[MAX_IDENT];
+            strncpy(alias, name, modlen); alias[modlen] = '\0';
+            snprintf(buf, sizeof(buf), "%s_%s", import_realname(alias), dot + 1);
+            return buf;
+        }
+    }
     return name; /* user-defined */
 }
 
@@ -472,7 +537,7 @@ static int try_emit_import(CG *g, Node *fa, Node *args) {
         if (!strcmp(proc,"Pos"))         { emit(g,"Files_Pos(");  emit_addr_of(g,a0); emit(g,")"); return 1; }
         if (!strcmp(proc,"Base"))        { emit(g,"Files_Base("); emit_addr_of(g,a0); emit(g,")"); return 1; }
         /* Read procedures — VAR r, VAR x  (string: VAR r, x array) */
-        if (!strcmp(proc,"Read"))        { emit(g,"Files_Read(");        emit_addr_of(g,a0); emit(g,","); emit_addr_of(g,a1); emit(g,")"); return 1; }
+        if (!strcmp(proc,"Read"))        { emit(g,"Files_Read(");        emit_addr_of(g,a0); emit(g,",(unsigned char*)("); emit_addr_of(g,a1); emit(g,"))"); return 1; }
         if (!strcmp(proc,"ReadInt"))     { emit(g,"Files_ReadInt(");     emit_addr_of(g,a0); emit(g,","); emit_addr_of(g,a1); emit(g,")"); return 1; }
         if (!strcmp(proc,"ReadBool"))    { emit(g,"Files_ReadBool(");    emit_addr_of(g,a0); emit(g,","); emit_addr_of(g,a1); emit(g,")"); return 1; }
         if (!strcmp(proc,"ReadReal"))    { emit(g,"Files_ReadReal(");    emit_addr_of(g,a0); emit(g,","); emit_addr_of(g,a1); emit(g,")"); return 1; }
@@ -487,8 +552,23 @@ static int try_emit_import(CG *g, Node *fa, Node *args) {
         if (!strcmp(proc,"WriteNum"))    { emit(g,"Files_WriteNum(");    emit_addr_of(g,a0); emit(g,","); emit_expr(g,a1); emit(g,")"); return 1; }
     }
     /* Unknown import call → RealModule_Proc(args)  (resolves aliases) */
-    emit(g,"%s_%s(",import_realname(mod),proc);
-    for (Node *a=args;a;a=a->next) { if(a!=args) emit(g,","); emit_expr(g,a); }
+    const char *real = import_realname(mod);
+    emit(g,"%s_%s(",real,proc);
+    {
+        Node *params = lookup_xmod_proc_params(real, proc);
+        Node *fp    = params;
+        Node *fp_id = fp ? fp->c0 : NULL;
+        for (Node *a=args;a;a=a->next) {
+            if (a!=args) emit(g,",");
+            int is_var = fp ? (fp->flags & FLAG_VAR_PARAM) != 0 : 0;
+            if (is_var) emit_addr_of(g, a);
+            else        emit_expr(g, a);
+            if (fp) {
+                fp_id = fp_id ? fp_id->next : NULL;
+                if (!fp_id) { fp = fp->next; fp_id = fp ? fp->c0 : NULL; }
+            }
+        }
+    }
     emit(g,")");
     return 1;
 }
@@ -607,11 +687,23 @@ static void emit_expr(CG *g, Node *e) {
         }
         /* Normal call */
         emit_expr(g,e->c0); emit(g,"(");
-        /* For each argument, pass address if it's a VAR param destination.
-         * We can't know this without a full type system; pass as-is. */
+        /* Use the proc signature table to know which args are VAR params
+         * so we can pass the pointer directly instead of dereferencing. */
+        Node *params = NULL;
+        if (e->c0 && e->c0->kind == ND_IDENT)
+            params = lookup_proc_params(e->c0->str);
+        Node *fp    = params;
+        Node *fp_id = fp ? fp->c0 : NULL;
         for (Node *a=e->c1;a;a=a->next) {
             if (a!=e->c1) emit(g,",");
-            emit_expr(g,a);
+            int is_var = fp ? (fp->flags & FLAG_VAR_PARAM) != 0 : 0;
+            if (is_var) emit_addr_of(g, a);
+            else        emit_expr(g, a);
+            /* advance to next formal parameter */
+            if (fp) {
+                fp_id = fp_id ? fp_id->next : NULL;
+                if (!fp_id) { fp = fp->next; fp_id = fp ? fp->c0 : NULL; }
+            }
         }
         emit(g,")");
         break;
@@ -678,9 +770,22 @@ static void emit_stmt(CG *g, Node *s) {
         }
         /* Regular procedure call */
         iemit(g,""); emit_expr(g,s->c0); emit(g,"(");
-        for (Node *a=s->c1;a;a=a->next) {
-            if (a!=s->c1) emit(g,",");
-            emit_expr(g,a);
+        {
+            Node *params = NULL;
+            if (s->c0 && s->c0->kind == ND_IDENT)
+                params = lookup_proc_params(s->c0->str);
+            Node *fp    = params;
+            Node *fp_id = fp ? fp->c0 : NULL;
+            for (Node *a=s->c1;a;a=a->next) {
+                if (a!=s->c1) emit(g,",");
+                int is_var = fp ? (fp->flags & FLAG_VAR_PARAM) != 0 : 0;
+                if (is_var) emit_addr_of(g, a);
+                else        emit_expr(g, a);
+                if (fp) {
+                    fp_id = fp_id ? fp_id->next : NULL;
+                    if (!fp_id) { fp = fp->next; fp_id = fp ? fp->c0 : NULL; }
+                }
+            }
         }
         emit(g,");\n");
         break;
@@ -764,6 +869,7 @@ static void emit_stmt(CG *g, Node *s) {
 
     case ND_RETURN:
         if (s->c0) { iemit(g,"return "); emit_expr(g,s->c0); emit(g,";\n"); }
+        else if (g->is_main && !g->in_proc) iemit(g,"return 0;\n");
         else        iemit(g,"return;\n");
         break;
 
@@ -953,6 +1059,7 @@ static void emit_proc_def(CG *g, Node *proc, int nested) {
 
     emit(g," {\n");
     g->indent++;
+    g->in_proc++;
 
     /* Nested procedure prototypes */
     for (Node *d=proc->c2; d; d=d->next)
@@ -969,6 +1076,7 @@ static void emit_proc_def(CG *g, Node *proc, int nested) {
     for (Node *s=proc->c3; s; s=s->next) emit_stmt(g,s);
 
     g->indent--;
+    g->in_proc--;
     emit(g,"}\n");
     sym_pop();
 
@@ -988,7 +1096,9 @@ void codegen(Node *module, FILE *out, int is_main) {
     cg.is_main = is_main;
     strncpy(cg.modname, module->str, MAX_IDENT-1);
     CG *g = &cg;
-    g_nsyms=0; g_sdepth=0; g_nimports=0;
+    g_nsyms=0; g_sdepth=0; g_nimports=0; g_nprocsigs=0;
+    collect_proc_sigs(module->c1);
+    if (!is_main) collect_xmod_proc_sigs(module->c1, module->str);
 
     /* ── Collect import module names (alias + real name) ─────────── */
     for (Node *imp=module->c0; imp; imp=imp->next) {
@@ -1329,10 +1439,12 @@ void codegen(Node *module, FILE *out, int is_main) {
     /* ── Files module runtime — standard Oberon Files API ───────── */
     if (has_files) {
         emit(g,"/* Files module — standard Oberon Files API */\n");
-        /* Types */
+        /* Types — guarded so including a module header doesn't redefine them */
+        emit(g,"#ifndef OBC_FILES_TYPES_H_\n#define OBC_FILES_TYPES_H_\n");
         emit(g,"typedef struct _Files_Rec { FILE *fp; char name[512]; } _Files_Rec;\n");
         emit(g,"typedef _Files_Rec *Files_File;\n");
         emit(g,"typedef struct { Files_File f; long pos; int eof; } Files_Rider;\n");
+        emit(g,"#endif /* OBC_FILES_TYPES_H_ */\n");
         /* Old(name): File */
         emit(g,"static Files_File Files_Old(const char *name) {\n");
         emit(g,"    FILE *fp=fopen(name,\"rb\"); if(!fp) return NULL;\n");
@@ -1435,6 +1547,15 @@ void codegen(Node *module, FILE *out, int is_main) {
     emit(g,"    unsigned int m=0; for(int i=lo;i<=hi;i++) m|=(1u<<i); return m;\n");
     emit(g,"}\n\n");
 
+    /* ── #define aliases (lib mode only): let proc bodies reference
+     *    exported symbols by their original Oberon names, which the C
+     *    preprocessor then expands to the prefixed C names.          ── */
+    if (!g->is_main) {
+        for (int i=0; i<g_nmodsyms; i++)
+            emit(g,"#define %s %s_%s\n", g_modsyms[i], g->modname, g_modsyms[i]);
+        emit(g,"\n");
+    }
+
     /* ── Constant definitions (before types — may be used as array sizes) ── */
     int has_consts = 0;
     for (Node *d=module->c1; d; d=d->next) {
@@ -1469,15 +1590,6 @@ void codegen(Node *module, FILE *out, int is_main) {
     for (Node *d=module->c1; d; d=d->next)
         if (d->kind==ND_PROC_DECL) emit_proc_proto(g,d,0);
     emit(g,"\n");
-
-    /* ── #define aliases (lib mode only): let proc bodies reference
-     *    exported symbols by their original Oberon names, which the C
-     *    preprocessor then expands to the prefixed C names.          ── */
-    if (!g->is_main) {
-        for (int i=0; i<g_nmodsyms; i++)
-            emit(g,"#define %s %s_%s\n", g_modsyms[i], g->modname, g_modsyms[i]);
-        emit(g,"\n");
-    }
 
     /* ── Procedure definitions ───────────────────────────────────── */
     for (Node *d=module->c1; d; d=d->next)
@@ -1544,11 +1656,10 @@ void codegen_header(Node *module, FILE *out) {
     /* Guard macro */
     char guard[MAX_IDENT*2];
     snprintf(guard, sizeof(guard), "OBC_%s_H_", module->str);
-    /* Uppercase the guard */
     for (char *p=guard; *p; p++) if (*p>='a'&&*p<='z') *p -= 32;
 
     fprintf(out,"#ifndef %s\n#define %s\n\n", guard, guard);
-    fprintf(out,"#include <stdio.h>\n\n");
+    fprintf(out,"#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n\n");
 
     /* Use a temporary CG writing to `out` for type/ret emission */
     CG cg;
@@ -1559,14 +1670,61 @@ void codegen_header(Node *module, FILE *out) {
     /* Re-init globals so emit_proc_ret / emit_type_prefix work */
     g_nsyms=0; g_sdepth=0; g_nimports=0;
 
-    /* Exported constants as #define */
+    /* Collect imports for dependency detection */
+    for (Node *imp=module->c0; imp; imp=imp->next) {
+        if (g_nimports >= 32) break;
+        const char *alias = imp->str;
+        const char *real  = (imp->flags & FLAG_HAS_ALIAS) && imp->c0
+                            ? imp->c0->str : imp->str;
+        strncpy(g_imports[g_nimports],      alias, MAX_IDENT-1);
+        strncpy(g_import_real[g_nimports],  real,  MAX_IDENT-1);
+        g_nimports++;
+    }
+
+    /* Emit Files type definitions (guarded) if module uses Files */
+    int has_files = 0;
+    for (int i=0;i<g_nimports;i++) if (!strcmp(g_import_real[i],"Files")) { has_files=1; break; }
+    if (has_files) {
+        fprintf(out,"#ifndef OBC_FILES_TYPES_H_\n#define OBC_FILES_TYPES_H_\n");
+        fprintf(out,"typedef struct _Files_Rec { FILE *fp; char name[512]; } _Files_Rec;\n");
+        fprintf(out,"typedef _Files_Rec *Files_File;\n");
+        fprintf(out,"typedef struct { Files_File f; long pos; int eof; } Files_Rider;\n");
+        fprintf(out,"#endif\n\n");
+    }
+
+    /* Include headers for user-imported modules */
+    for (int i=0;i<g_nimports;i++) {
+        const char *real = g_import_real[i];
+        if (!is_builtin_module(real))
+            fprintf(out,"#include \"%s.h\"\n", real);
+    }
+
+    /* #define aliases so bare type/proc names expand to prefixed versions */
+    collect_modsyms(module->c1);
+    if (g_nmodsyms) {
+        for (int i=0; i<g_nmodsyms; i++)
+            fprintf(out,"#define %s %s_%s\n", g_modsyms[i], module->str, g_modsyms[i]);
+        fprintf(out,"\n");
+    }
+
+    /* All constants (exported and private — both may be needed for type dimensions) */
     for (Node *d=module->c1; d; d=d->next) {
-        if (d->kind==ND_CONST_DECL && (d->flags & FLAG_EXPORTED)) {
-            fprintf(out,"#define %s_%s (", module->str, d->str);
+        if (d->kind==ND_CONST_DECL) {
+            if (d->flags & FLAG_EXPORTED)
+                fprintf(out,"enum { %s_%s = ", module->str, d->str);
+            else
+                fprintf(out,"enum { %s = ", d->str);
             emit_expr(g, d->c0);
-            fprintf(out,")\n");
+            fprintf(out," };\n");
         }
     }
+
+    /* Exported type definitions */
+    for (Node *d=module->c1; d; d=d->next) {
+        if (d->kind==ND_TYPE_DECL && (d->flags & FLAG_EXPORTED))
+            emit_type_decl(g, d);
+    }
+    fprintf(out,"\n");
 
     /* Exported variables */
     for (Node *d=module->c1; d; d=d->next) {
