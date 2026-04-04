@@ -339,9 +339,44 @@ identifiers.
 | Keyword | Description |
 |---------|-------------|
 | `ARRAY n OF Type` | Fixed-length array of `n` elements.  Multi-dimensional: `ARRAY n, m OF Type`. |
-| `RECORD [( BaseType )] field: Type; ... END` | Record (struct).  Optional `(BaseType)` for inheritance. |
+| `RECORD [( BaseType )] field: Type; ... END` | Record (struct).  Optional `(BaseType)` extends `BaseType`, inheriting all its fields. |
 | `POINTER TO Type` | Heap-allocated reference to `Type`.  Dereferenced with `^` (e.g. `p^.field`). |
-| `PROCEDURE (params): RetType` | Procedure type (for procedure variables and parameters). |
+| `PROCEDURE (params): RetType` | Procedure type (for procedure-typed variables and parameters). Omit `: RetType` for procedures with no return value. |
+
+### Record Inheritance and Dynamic Dispatch
+
+A record type can extend a base type:
+
+```oberon
+TYPE
+  Animal  = RECORD name: ARRAY 32 OF CHAR END;
+  Dog     = RECORD (Animal) breed: ARRAY 32 OF CHAR END;
+  AnimalP = POINTER TO Animal;
+  DogP    = POINTER TO Dog;
+```
+
+- All fields of `Animal` are inherited by `Dog`.
+- A `DogP` pointer is assignment-compatible with `AnimalP`.
+- The `IS` operator tests the runtime type: `p IS Dog` is TRUE if `p` points to a `Dog`.
+- Use `WITH p: Dog DO ... END` to narrow the pointer type inside a block (see `WITH` in Control Flow).
+- Call `NEW(p)` on a pointer variable to heap-allocate the record.  The runtime type tag is set automatically.
+
+### Nested Procedures
+
+Procedures may be declared inside other procedures.  The inner procedure has read/write access to all variables and parameters of the enclosing procedure:
+
+```oberon
+PROCEDURE Outer;
+  VAR x: INTEGER;
+  PROCEDURE Inner;
+  BEGIN x := x + 1 END Inner;
+BEGIN
+  x := 10;
+  Inner;   (* x is now 11 *)
+END Outer;
+```
+
+Nested procedures are not visible outside their enclosing procedure.  They cannot be stored in procedure-type variables or passed as procedure parameters.
 
 ### Predeclared Types
 
@@ -370,11 +405,11 @@ identifiers.
 
 | Keyword | Description |
 |---------|-------------|
-| `DIV` | Integer division (truncated toward negative infinity): `7 DIV 3 = 2`, `-7 DIV 3 = -3`. |
-| `MOD` | Integer modulo (always non-negative when divisor is positive): `7 MOD 3 = 1`, `-7 MOD 3 = 2`. |
+| `DIV` | Integer division with floor semantics: `7 DIV 3 = 2`, `-7 DIV 3 = -3`. Result rounds toward negative infinity (unlike C `/` which truncates toward zero). |
+| `MOD` | Integer modulo, always non-negative when divisor is positive: `7 MOD 3 = 1`, `-7 MOD 3 = 2`. Satisfies `(a DIV b)*b + a MOD b = a`. |
 | `OR` | Boolean or (short-circuit): `a OR b`. |
 | `IN` | Set membership test: `x IN s` is TRUE if bit `x` is set in `s`. |
-| `IS` | Dynamic type test: `v IS T` is TRUE if `v` currently holds a value of type `T` or a subtype. |
+| `IS` | Dynamic type test: `v IS T` is TRUE if the pointer `v` currently points to a record of type `T` or a type that extends `T`. Requires the record type to be heap-allocated via `NEW`. |
 | `OF` | Used in `ARRAY n OF T`, `CASE ... OF`, `ARRAY OF CHAR` (open array), and type guards. |
 
 ---

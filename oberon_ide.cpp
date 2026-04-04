@@ -309,12 +309,14 @@ static ushort oberonEditorDialog(int dialog, ...) {
 
 static const char *OBERON_KEYWORDS[] = {
     "ARRAY", "BEGIN", "BY", "CASE", "CONST", "DIV", "DO", "ELSE", "ELSIF",
-    "END", "FALSE", "FOR", "IF", "IMPORT", "IN", "IS", "MOD", "MODULE", "NIL",
-    "OF", "OR", "POINTER", "PROCEDURE", "RECORD", "REPEAT", "RETURN", "THEN",
-    "TO", "TRUE", "TYPE", "UNTIL", "VAR", "WHILE", "BOOLEAN", "BYTE", "CHAR",
-    "INTEGER", "REAL", "SET", "ABS", "ASR", "ASSERT", "CHR", "FLOOR", "FLT",
-    "INC", "DEC", "LEN", "LSL", "ORD", "PACK", "ROR", "UNPK", "WRITE", "READ",
-    "LONGINT", "LONGREAL", "SHORTINT", "BYTE", "SET", "POINTER", "LOOP", "EXIT",
+    "END", "FALSE", "FOR", "IF", "IMPORT", "IN", "IS", "LOOP", "MOD", "MODULE",
+    "NIL", "OF", "OR", "POINTER", "PROCEDURE", "RECORD", "REPEAT", "RETURN",
+    "THEN", "TO", "TRUE", "TYPE", "UNTIL", "VAR", "WHILE", "WITH", "EXIT",
+    "BOOLEAN", "BYTE", "CHAR", "INTEGER", "LONGINT", "LONGREAL", "REAL",
+    "SHORTINT", "SET", "STRING",
+    "ABS", "ASR", "ASSERT", "CHR", "COPY", "DEC", "FLOOR", "FLT", "HALT",
+    "INC", "LEN", "LSL", "NEW", "ODD", "ORD", "PACK", "READ", "ROR", "UNPK",
+    "WRITE", "WRITELN",
     nullptr
 };
 

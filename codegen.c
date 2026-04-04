@@ -14,6 +14,16 @@ typedef struct {
     char  modname[MAX_IDENT]; /* current module name (library mode) */
     int   is_main;            /* 1 = top-level program, 0 = library  */
     int   in_proc;            /* 1 when inside a procedure body      */
+    /* Nested procedure closure support */
+    int   in_nested_proc;                   /* emitting a nested proc body */
+    char  outer_proc_name[MAX_IDENT];       /* enclosing proc name         */
+    int   n_frame;                          /* # outer vars in frame       */
+    char  frame_names[64][MAX_IDENT];
+    Node *frame_types[64];
+    int   frame_is_var[64];                 /* 1 if was a VAR param        */
+    int   nested_sym_start;                 /* g_nsyms after nested push   */
+    int   n_nested_procs;
+    char  nested_proc_names[16][MAX_IDENT];
 } CG;
 
 static void emit(CG *g, const char *fmt, ...) {
@@ -85,6 +95,54 @@ typedef struct { char name[MAX_IDENT]; Node *params; } ProcSig;
 static ProcSig g_procsigs[MAX_PROCSIGS];
 static int g_nprocsigs = 0;
 
+/* Module declaration list (set in codegen()) — used for type lookups. */
+static Node *g_module_decls = NULL;
+
+/* Pointer-type registry: names that are POINTER TO ... typedefs */
+#define MAX_PTR_TYPES 128
+static char g_ptr_types[MAX_PTR_TYPES][MAX_IDENT];
+static int  g_n_ptr_types = 0;
+static void ptr_type_add(const char *name) {
+    if (g_n_ptr_types < MAX_PTR_TYPES)
+        strncpy(g_ptr_types[g_n_ptr_types++], name, MAX_IDENT-1);
+}
+static int is_ptr_type(const char *name) {
+    for (int i=0;i<g_n_ptr_types;i++)
+        if (!strcmp(g_ptr_types[i],name)) return 1;
+    return 0;
+}
+static void ptr_types_reset(void) { g_n_ptr_types = 0; }
+
+/* Find a TYPE_DECL node by name */
+static Node *find_type_decl(const char *name) {
+    for (Node *d=g_module_decls; d; d=d->next)
+        if (d->kind==ND_TYPE_DECL && !strcmp(d->str,name)) return d;
+    return NULL;
+}
+
+/* -----------------------------------------------------------------------
+ * Type-tag table — maps record type names to unique integer tags.
+ * Tag 0 is reserved for "uninitialized / no type".
+ * ----------------------------------------------------------------------- */
+#define MAX_TYPE_TAGS 128
+static char g_type_tags[MAX_TYPE_TAGS][MAX_IDENT];
+static int  g_n_type_tags = 0;
+
+static void type_tags_reset(void) { g_n_type_tags = 0; }
+static int  type_tag_of(const char *name) {
+    for (int i=0;i<g_n_type_tags;i++)
+        if (!strcmp(g_type_tags[i],name)) return i+1;
+    return 0;
+}
+static int type_tag_add(const char *name) {
+    int t = type_tag_of(name);
+    if (t) return t;
+    if (g_n_type_tags < MAX_TYPE_TAGS)
+        strncpy(g_type_tags[g_n_type_tags++],name,MAX_IDENT-1);
+    return g_n_type_tags;
+}
+static int is_known_record_type(const char *name) { return type_tag_of(name)!=0; }
+
 static void collect_proc_sigs(Node *decls) {
     for (Node *d = decls; d; d = d->next) {
         if (d->kind == ND_PROC_DECL && g_nprocsigs < MAX_PROCSIGS) {
@@ -124,6 +182,78 @@ static Node *lookup_xmod_proc_params(const char *modname, const char *procname) 
     for (int i = 0; i < g_n_xmod_procsigs; i++)
         if (!strcmp(g_xmod_procsigs[i].key, key)) return g_xmod_procsigs[i].params;
     return NULL;
+}
+
+/* -----------------------------------------------------------------------
+ * Nested-proc frame helpers
+ * ----------------------------------------------------------------------- */
+static int has_nested_procs(Node *proc) {
+    for (Node *d=proc->c2;d;d=d->next)
+        if (d->kind==ND_PROC_DECL) return 1;
+    return 0;
+}
+
+/* Fill g->frame_* with all params + locals of proc. */
+static void build_frame(CG *g, Node *proc) {
+    g->n_frame = 0;
+    strncpy(g->outer_proc_name, proc->str, MAX_IDENT-1);
+    for (Node *fp=proc->c0;fp;fp=fp->next) {
+        int isv=(fp->flags&FLAG_VAR_PARAM)!=0;
+        for (Node *id=fp->c0;id;id=id->next) {
+            if (g->n_frame>=64) break;
+            strncpy(g->frame_names[g->n_frame],id->str,MAX_IDENT-1);
+            g->frame_types[g->n_frame]=fp->c1;
+            g->frame_is_var[g->n_frame]=isv;
+            g->n_frame++;
+        }
+    }
+    for (Node *d=proc->c2;d;d=d->next) {
+        if (d->kind!=ND_VAR_DECL) continue;
+        for (Node *id=d->c0;id;id=id->next) {
+            if (g->n_frame>=64) break;
+            strncpy(g->frame_names[g->n_frame],id->str,MAX_IDENT-1);
+            g->frame_types[g->n_frame]=d->c1;
+            g->frame_is_var[g->n_frame]=0;
+            g->n_frame++;
+        }
+    }
+}
+
+static void collect_nested_names(CG *g, Node *proc) {
+    g->n_nested_procs=0;
+    for (Node *d=proc->c2;d;d=d->next)
+        if (d->kind==ND_PROC_DECL && g->n_nested_procs<16)
+            strncpy(g->nested_proc_names[g->n_nested_procs++],d->str,MAX_IDENT-1);
+}
+
+static int is_nested_call(CG *g, const char *name) {
+    for (int i=0;i<g->n_nested_procs;i++)
+        if (!strcmp(g->nested_proc_names[i],name)) return 1;
+    return 0;
+}
+
+/* Is this variable from the outer proc's scope (not shadowed locally)? */
+static int is_outer_var(CG *g, const char *name) {
+    if (!g->in_nested_proc || g->n_frame==0) return 0;
+    int in_frame=0;
+    for (int i=0;i<g->n_frame;i++)
+        if (!strcmp(g->frame_names[i],name)) { in_frame=1; break; }
+    if (!in_frame) return 0;
+    /* Shadowed by nested proc's own vars? */
+    for (int i=g->nested_sym_start;i<g_nsyms;i++)
+        if (!strcmp(g_syms[i].name,name)) return 0;
+    return 1;
+}
+
+static int outer_var_is_array(CG *g, const char *name) {
+    for (int i=0;i<g->n_frame;i++) {
+        if (!strcmp(g->frame_names[i],name)) {
+            Node *t=g->frame_types[i];
+            return t && (t->kind==ND_TARRAY ||
+                         (t->kind==ND_TNAME&&!strcmp(t->str,"STRING")));
+        }
+    }
+    return 0;
 }
 
 /* -----------------------------------------------------------------------
@@ -279,6 +409,10 @@ static void emit_type_prefix(CG *g, Node *t) {
     }
     case ND_TRECORD: emit(g,"struct %s_s", t->str[0]?t->str:"_anon"); break;
     case ND_TPOINTER: emit_type_prefix(g,t->c0); emit(g,"*"); break;
+    case ND_TPROC:
+        /* For use as a plain type prefix (e.g. in casts), emit return type */
+        if (t->c1) emit_type_prefix(g,t->c1); else emit(g,"void");
+        break;
     default: emit(g,"void*");
     }
 }
@@ -295,6 +429,25 @@ static void emit_type_dims(CG *g, Node *t) {
 /* Emit "type name[dims]", handling VAR params (pointer) and open arrays.
  * This is the single place where Oberon types map to C declarations.  */
 static void emit_var_decl_raw(CG *g, const char *name, Node *t, int is_var) {
+    /* Procedure-type variable: rettype (*name)(params)  */
+    if (t && t->kind==ND_TPROC) {
+        if (t->c1) emit_type_prefix(g,t->c1); else emit(g,"void");
+        if (is_var) emit(g," (**%s)(",name); else emit(g," (*%s)(",name);
+        if (!t->c0) { emit(g,"void"); }
+        else {
+            int first=1;
+            for (Node *fp=t->c0;fp;fp=fp->next) {
+                int isv=(fp->flags&FLAG_VAR_PARAM)!=0;
+                for (Node *id=fp->c0;id;id=id->next) {
+                    if (!first) emit(g,", ");
+                    emit_var_decl_raw(g,id->str,fp->c1,isv);
+                    first=0;
+                }
+            }
+        }
+        emit(g,")");
+        return;
+    }
     /* VAR parameter → always pointer */
     if (is_var) {
         if (t && t->kind==ND_TARRAY) {
@@ -388,6 +541,25 @@ static void emit_builtin(CG *g, const char *name, Node *args) {
         else    { emit_expr(g,a0); emit(g,"--"); }
     } else if (!strcasecmp(name,"NEW")) {
         emit_expr(g,a0); emit(g," = malloc(sizeof(*"); emit_expr(g,a0); emit(g,"))");
+        /* Set _tag if we can determine the pointed-to record type */
+        if (a0 && a0->kind==ND_IDENT) {
+            const char *recname = NULL;
+            Node *pt = sym_type(a0->str);
+            if (pt && pt->kind==ND_TPOINTER && pt->c0 && pt->c0->kind==ND_TNAME)
+                recname = pt->c0->str;
+            else if (pt && pt->kind==ND_TNAME) {
+                /* Resolve type alias: Dog → POINTER TO DogRec */
+                Node *alias = find_type_decl(pt->str);
+                if (alias && alias->c0 && alias->c0->kind==ND_TPOINTER &&
+                    alias->c0->c0 && alias->c0->c0->kind==ND_TNAME)
+                    recname = alias->c0->c0->str;
+            }
+            if (recname && is_known_record_type(recname)) {
+                emit(g,"; if("); emit_expr(g,a0);
+                emit(g,") ("); emit_expr(g,a0);
+                emit(g,")->_tag = _TAG_%s", recname);
+            }
+        }
     } else if (!strcasecmp(name,"HALT")) {
         emit(g,"exit("); if(a0) emit_expr(g,a0); else emit(g,"0"); emit(g,")");
     } else if (!strcasecmp(name,"ASSERT")) {
@@ -429,6 +601,10 @@ static void emit_builtin(CG *g, const char *name, Node *args) {
 static void emit_addr_of(CG *g, Node *e) {
     if (!e) { emit(g,"NULL"); return; }
     if (e->kind == ND_IDENT) {
+        if (is_outer_var(g, e->str)) {
+            /* Frame member is already a pointer; return it directly */
+            emit(g,"_frame->%s", e->str); return;
+        }
         if (sym_is_var(e->str)) { emit(g,"%s",e->str); return; }
         emit(g,"&%s",e->str); return;
     }
@@ -610,6 +786,14 @@ static void emit_expr(CG *g, Node *e) {
     case ND_TRUE:  emit(g,"1");     break;
     case ND_FALSE: emit(g,"0");     break;
     case ND_IDENT: {
+        /* Outer scope variable accessed through nested-proc frame */
+        if (is_outer_var(g, e->str)) {
+            if (outer_var_is_array(g, e->str))
+                emit(g,"(_frame->%s)", e->str);   /* array: no extra deref */
+            else
+                emit(g,"(*(_frame->%s))", e->str);
+            break;
+        }
         /* VAR parameters are pointers.  Array-type VAR params are already
          * passed as a pointer in C (char*, int*, etc.) so no extra deref. */
         int is_var = sym_is_var(e->str);
@@ -626,8 +810,8 @@ static void emit_expr(CG *g, Node *e) {
     case ND_SUB: emit(g,"("); emit_expr(g,e->c0); emit(g,"-");  emit_expr(g,e->c1); emit(g,")"); break;
     case ND_MUL: emit(g,"("); emit_expr(g,e->c0); emit(g,"*");  emit_expr(g,e->c1); emit(g,")"); break;
     case ND_DIVF:emit(g,"("); emit_expr(g,e->c0); emit(g,"/");  emit_expr(g,e->c1); emit(g,")"); break;
-    case ND_DIVI:emit(g,"("); emit_expr(g,e->c0); emit(g,"/");  emit_expr(g,e->c1); emit(g,")"); break;
-    case ND_MOD: emit(g,"("); emit_expr(g,e->c0); emit(g,"%%"); emit_expr(g,e->c1); emit(g,")"); break;
+    case ND_DIVI:emit(g,"_OBC_DIV(");emit_expr(g,e->c0);emit(g,",");emit_expr(g,e->c1);emit(g,")");break;
+    case ND_MOD: emit(g,"_OBC_MOD(");emit_expr(g,e->c0);emit(g,",");emit_expr(g,e->c1);emit(g,")");break;
     case ND_AND: emit(g,"("); emit_expr(g,e->c0); emit(g,"&&"); emit_expr(g,e->c1); emit(g,")"); break;
     case ND_OR:  emit(g,"("); emit_expr(g,e->c0); emit(g,"||"); emit_expr(g,e->c1); emit(g,")"); break;
     case ND_EQ: {
@@ -661,6 +845,14 @@ static void emit_expr(CG *g, Node *e) {
         /* x IN set — check bit x in set */
         emit(g,"(("); emit_expr(g,e->c1); emit(g,">>"); emit_expr(g,e->c0); emit(g,")&1)");
         break;
+    case ND_IS:
+        /* v IS T — runtime type test via _tag */
+        emit(g,"(");
+        emit_expr(g,e->c0);
+        emit(g," && (");
+        emit_expr(g,e->c0);
+        emit(g,")->_tag == _TAG_%s)", e->c1->str);
+        break;
     case ND_DEREF: emit(g,"(*"); emit_expr(g,e->c0); emit(g,")"); break;
     case ND_INDEX:
         emit_expr(g,e->c0); emit(g,"["); emit_expr(g,e->c1); emit(g,"]");
@@ -683,11 +875,27 @@ static void emit_expr(CG *g, Node *e) {
         emit_expr(g,e->c0);
         {
             Node *bt = expr_type(e->c0);
-            if (bt && bt->kind==ND_TPOINTER) emit(g,"->%s",e->str);
+            int use_arrow = (bt && bt->kind==ND_TPOINTER) ||
+                            (bt && bt->kind==ND_TNAME && is_ptr_type(bt->str));
+            if (use_arrow) emit(g,"->%s",e->str);
             else emit(g,".%s",e->str);
         }
         break;
     case ND_CALL: {
+        /* Type guard: v(T) — single ident arg that is a known record type */
+        if (e->c0 && e->c0->kind==ND_IDENT &&
+            e->c1 && !e->c1->next && e->c1->kind==ND_IDENT &&
+            is_known_record_type(e->c1->str)) {
+            const char *tn = e->c1->str;
+            emit(g,"((assert(");
+            emit_expr(g,e->c0);
+            emit(g," && (");
+            emit_expr(g,e->c0);
+            emit(g,")->_tag == _TAG_%s), (%s*)(", tn, ctype(tn));
+            emit_expr(g,e->c0);
+            emit(g,")))");
+            break;
+        }
         /* Check for import call */
         if (try_emit_import(g, e->c0, e->c1)) break;
         /* Check for builtin */
@@ -696,19 +904,25 @@ static void emit_expr(CG *g, Node *e) {
         }
         /* Normal call */
         emit_expr(g,e->c0); emit(g,"(");
-        /* Use the proc signature table to know which args are VAR params
-         * so we can pass the pointer directly instead of dereferencing. */
+        int first_arg = 1;
+        /* Nested proc call: prepend frame pointer */
+        if (e->c0 && e->c0->kind==ND_IDENT && is_nested_call(g, e->c0->str)) {
+            if (g->in_nested_proc) emit(g,"_frame");
+            else                   emit(g,"&_frame");
+            first_arg = 0;
+        }
+        /* Use the proc signature table to know which args are VAR params */
         Node *params = NULL;
         if (e->c0 && e->c0->kind == ND_IDENT)
             params = lookup_proc_params(e->c0->str);
         Node *fp    = params;
         Node *fp_id = fp ? fp->c0 : NULL;
         for (Node *a=e->c1;a;a=a->next) {
-            if (a!=e->c1) emit(g,",");
+            if (!first_arg) emit(g,",");
+            first_arg = 0;
             int is_var = fp ? (fp->flags & FLAG_VAR_PARAM) != 0 : 0;
             if (is_var) emit_addr_of(g, a);
             else        emit_expr(g, a);
-            /* advance to next formal parameter */
             if (fp) {
                 fp_id = fp_id ? fp_id->next : NULL;
                 if (!fp_id) { fp = fp->next; fp_id = fp ? fp->c0 : NULL; }
@@ -780,13 +994,20 @@ static void emit_stmt(CG *g, Node *s) {
         /* Regular procedure call */
         iemit(g,""); emit_expr(g,s->c0); emit(g,"(");
         {
+            int first_s = 1;
+            if (s->c0 && s->c0->kind==ND_IDENT && is_nested_call(g,s->c0->str)) {
+                if (g->in_nested_proc) emit(g,"_frame");
+                else                   emit(g,"&_frame");
+                first_s = 0;
+            }
             Node *params = NULL;
             if (s->c0 && s->c0->kind == ND_IDENT)
                 params = lookup_proc_params(s->c0->str);
             Node *fp    = params;
             Node *fp_id = fp ? fp->c0 : NULL;
             for (Node *a=s->c1;a;a=a->next) {
-                if (a!=s->c1) emit(g,",");
+                if (!first_s) emit(g,",");
+                first_s = 0;
                 int is_var = fp ? (fp->flags & FLAG_VAR_PARAM) != 0 : 0;
                 if (is_var) emit_addr_of(g, a);
                 else        emit_expr(g, a);
@@ -921,6 +1142,43 @@ static void emit_stmt(CG *g, Node *s) {
         break;
     }
 
+    case ND_WITH: {
+        /* WITH v: T DO stmts {| v: T DO stmts} [ELSE stmts] END
+         * Emits as if/else if chain based on runtime _tag check.          */
+        int first = 1;
+        for (Node *cl=s->c0; cl; cl=cl->next) {
+            if (first) { iemit(g,"if ("); first=0; }
+            else         iemit(g,"} else if (");
+            emit_expr(g, cl->c0);
+            emit(g," && (");
+            emit_expr(g, cl->c0);
+            emit(g,")->_tag == _TAG_%s) {\n", cl->str);
+            g->indent++;
+            /* Shadow the variable with the narrowed pointer type.
+             * Use a void* temp to avoid the C scoping trap where the
+             * new declaration's initializer would refer to itself.   */
+            if (cl->c0 && cl->c0->kind==ND_IDENT) {
+                iemit(g,"void *_obc_wt_ = (void*)(");
+                emit_expr(g, cl->c0);
+                emit(g,");\n");
+                iemit(g,"%s *%s = (%s*)_obc_wt_;\n",
+                      ctype(cl->str), cl->c0->str, ctype(cl->str));
+            }
+            for (Node *st=cl->c1; st; st=st->next) emit_stmt(g,st);
+            g->indent--;
+        }
+        if (!first) {
+            if (s->c1) {
+                iemit(g,"} else {\n");
+                g->indent++;
+                for (Node *st=s->c1; st; st=st->next) emit_stmt(g,st);
+                g->indent--;
+            }
+            iemit(g,"}\n");
+        }
+        break;
+    }
+
     default:
         iemit(g,"/* unhandled stmt %s */\n", node_kind_name(s->kind));
     }
@@ -954,30 +1212,67 @@ static void emit_proc_params(CG *g, Node *params) {
     emit(g,")");
 }
 
+/* Emit inherited + own fields of a RECORD node, flattened (no _base wrapper).
+ * Recurses into base type declarations so inherited fields appear first. */
+static void emit_record_fields_flat(CG *g, Node *rec) {
+    if (rec->str[0]) {
+        Node *base = find_type_decl(rec->str);
+        if (base && base->c0 && base->c0->kind==ND_TRECORD)
+            emit_record_fields_flat(g, base->c0);
+    }
+    for (Node *fl=rec->c0; fl; fl=fl->next)
+        for (Node *id=fl->c0; id; id=id->next) {
+            emit(g,"    ");
+            emit_var_decl_raw(g, id->str, fl->c1, 0);
+            emit(g,";\n");
+        }
+}
+
 /* Emit a typedef struct for a record type */
 static void emit_type_decl(CG *g, Node *n) {
     /* n: ND_TYPE_DECL, str=name, c0=type */
     if (!n->c0) return;
     if (n->c0->kind == ND_TRECORD) {
         Node *rec = n->c0;
-        /* Two-pass: forward declare struct, then define typedef */
+        type_tag_add(n->str);   /* register tag for IS/WITH */
         emit(g,"typedef struct %s_s {\n", n->str);
-        for (Node *fl=rec->c0; fl; fl=fl->next) {
-            for (Node *id=fl->c0; id; id=id->next) {
-                emit(g,"    ");
-                emit_var_decl_raw(g, id->str, fl->c1, 0);
-                emit(g,";\n");
-            }
-        }
+        emit(g,"    int _tag;\n");  /* runtime type tag */
+        emit_record_fields_flat(g, rec);  /* flattened inherited + own fields */
         emit(g,"} %s;\n", n->str);
     } else if (n->c0->kind == ND_TNAME) {
         emit(g,"typedef %s %s;\n", ctype(n->c0->str), n->str);
     } else if (n->c0->kind == ND_TPOINTER) {
+        ptr_type_add(n->str);   /* register as a pointer type */
+        /* Use struct tag directly so the pointer typedef works before the
+         * struct body is declared (common for linked-list / extension types). */
+        if (n->c0->c0 && n->c0->c0->kind==ND_TNAME) {
+            const char *base = n->c0->c0->str;
+            emit(g,"struct %s_s;\n", base);
+            emit(g,"typedef struct %s_s *%s;\n", base, n->str);
+        } else {
+            emit(g,"typedef ");
+            emit_type_prefix(g, n->c0->c0);
+            emit(g," *%s;\n", n->str);
+        }
+    } else if (n->c0->kind == ND_TPROC) {
+        /* Procedure-type alias: typedef rettype (*Name)(params); */
         emit(g,"typedef ");
-        emit_type_prefix(g, n->c0->c0);
-        emit(g," *%s;\n", n->str);
+        if (n->c0->c1) emit_type_prefix(g,n->c0->c1); else emit(g,"void");
+        emit(g," (*%s)(", n->str);
+        if (!n->c0->c0) { emit(g,"void"); }
+        else {
+            int first=1;
+            for (Node *fp=n->c0->c0;fp;fp=fp->next) {
+                int isv=(fp->flags&FLAG_VAR_PARAM)!=0;
+                for (Node *id=fp->c0;id;id=id->next) {
+                    if (!first) emit(g,", ");
+                    emit_var_decl_raw(g,id->str,fp->c1,isv);
+                    first=0;
+                }
+            }
+        }
+        emit(g,");\n");
     }
-    /* Other type aliases could be added here */
 }
 
 /* Emit a global variable declaration */
@@ -1014,18 +1309,73 @@ static void emit_local_vars(CG *g, Node *decls) {
         for (Node *id=d->c0; id; id=id->next) {
             sym_add(id->str, d->c1, 0);
             iemit(g,""); emit_var_decl_raw(g, id->str, d->c1, 0); emit(g,";\n");
+            /* Initialise _tag for stack-allocated records */
+            if (d->c1 && d->c1->kind==ND_TNAME && is_known_record_type(d->c1->str))
+                iemit(g,"%s._tag = _TAG_%s;\n", id->str, d->c1->str);
         }
     }
+}
+
+/* Emit the _Frame_ProcName typedef for a proc that has nested procs. */
+static void emit_frame_struct(CG *g, Node *proc) {
+    if (!has_nested_procs(proc)) return;
+    /* Temporarily build frame info without modifying g */
+    CG tmp; memset(&tmp,0,sizeof(tmp)); tmp.out=g->out;
+    build_frame(&tmp, proc);
+    if (tmp.n_frame==0) return;
+    emit(g,"typedef struct {\n");
+    for (int i=0;i<tmp.n_frame;i++) {
+        Node *t=tmp.frame_types[i];
+        int is_arr = t && (t->kind==ND_TARRAY||
+                     (t->kind==ND_TNAME&&!strcmp(t->str,"STRING")));
+        emit(g,"    ");
+        if (is_arr) {
+            /* Store pointer to element type */
+            Node *et=t; while(et&&et->kind==ND_TARRAY) et=et->c1;
+            emit_type_prefix(g,et);
+        } else {
+            emit_type_prefix(g,t);
+        }
+        emit(g," *%s;\n", tmp.frame_names[i]);
+    }
+    emit(g,"} _Frame_%s;\n\n", proc->str);
+}
+
+/* Emit params, optionally prepending a frame pointer as the first param. */
+static void emit_proc_params_ex(CG *g, Node *params, const char *frame_type) {
+    emit(g,"(");
+    int first=1;
+    if (frame_type) { emit(g,"%s *_frame",frame_type); first=0; }
+    if (!params && first) { emit(g,"void"); }
+    else if (params) {
+        for (Node *fp=params;fp;fp=fp->next) {
+            int isv=(fp->flags&FLAG_VAR_PARAM)!=0;
+            for (Node *id=fp->c0;id;id=id->next) {
+                if (!first) emit(g,", ");
+                emit_var_decl_raw(g,id->str,fp->c1,isv);
+                first=0;
+            }
+        }
+    }
+    emit(g,")");
 }
 
 /* Emit a forward declaration (prototype) for a procedure.
  * nested=1 when called recursively for an inner procedure. */
 static void emit_proc_proto(CG *g, Node *proc, int nested) {
+    /* When emitting protos for a proc's nested children, build frame first
+     * so that the nested protos get the correct _Frame_* parameter.       */
+    int saved_n_frame = g->n_frame;
+    int saved_n_nested = g->n_nested_procs;
+    char saved_outer[MAX_IDENT];
+    strncpy(saved_outer, g->outer_proc_name, MAX_IDENT-1);
+
+    if (!nested && has_nested_procs(proc)) {
+        build_frame(g, proc);
+        collect_nested_names(g, proc);
+    }
+
     if (!g->is_main) {
-        /* Library module:
-         *   exported top-level → ModName_ProcName (extern linkage)
-         *   private top-level  → static ProcName  (internal linkage)
-         *   nested             → static ProcName  (always private) */
         int exp = !nested && (proc->flags & FLAG_EXPORTED);
         if (!exp) emit(g,"static ");
         emit_proc_ret(g, proc);
@@ -1035,16 +1385,48 @@ static void emit_proc_proto(CG *g, Node *proc, int nested) {
         emit_proc_ret(g, proc);
         emit(g," %s", proc->str);
     }
-    emit_proc_params(g, proc->c0);
+    if (nested && g->n_frame > 0) {
+        char _ft[MAX_IDENT+8];
+        snprintf(_ft,sizeof(_ft),"_Frame_%s",g->outer_proc_name);
+        emit_proc_params_ex(g, proc->c0, _ft);
+    } else {
+        emit_proc_params(g, proc->c0);
+    }
     emit(g,";\n");
     for (Node *d=proc->c2; d; d=d->next)
         if (d->kind==ND_PROC_DECL) emit_proc_proto(g, d, 1);
+
+    /* Restore frame context */
+    if (!nested) {
+        g->n_frame = saved_n_frame;
+        g->n_nested_procs = saved_n_nested;
+        strncpy(g->outer_proc_name, saved_outer, MAX_IDENT-1);
+    }
 }
 
 /* Emit a complete procedure definition.
  * nested=1 when called recursively for an inner procedure. */
 static void emit_proc_def(CG *g, Node *proc, int nested) {
     emit(g,"\n");
+
+    /* For outer procs with nested procs: build frame context */
+    int save_in_nested  = g->in_nested_proc;
+    int save_n_nested   = g->n_nested_procs;
+    int save_n_frame    = g->n_frame;
+    int save_nested_sym = g->nested_sym_start;
+    char save_outer[MAX_IDENT];
+    strncpy(save_outer, g->outer_proc_name, MAX_IDENT-1);
+    char save_nested_names[16][MAX_IDENT];
+    memcpy(save_nested_names, g->nested_proc_names, sizeof(g->nested_proc_names));
+
+    if (!nested && has_nested_procs(proc)) {
+        build_frame(g, proc);
+        collect_nested_names(g, proc);
+    }
+    if (nested) {
+        g->in_nested_proc = 1;
+    }
+
     if (!g->is_main) {
         int exp = !nested && (proc->flags & FLAG_EXPORTED);
         if (!exp) emit(g,"static ");
@@ -1056,10 +1438,15 @@ static void emit_proc_def(CG *g, Node *proc, int nested) {
         emit(g," %s", proc->str);
     }
 
-    /* Register parameters in a new scope */
     sym_push();
-    emit_proc_params(g, proc->c0);
-    /* Now register params in symbol table for body */
+    if (nested && g->n_frame > 0) {
+        char _ft2[MAX_IDENT+8];
+        snprintf(_ft2,sizeof(_ft2),"_Frame_%s",g->outer_proc_name);
+        emit_proc_params_ex(g, proc->c0, _ft2);
+        g->nested_sym_start = g_nsyms;  /* record boundary before own vars */
+    } else {
+        emit_proc_params(g, proc->c0);
+    }
     for (Node *fp=proc->c0; fp; fp=fp->next) {
         int is_var = (fp->flags & FLAG_VAR_PARAM) != 0;
         for (Node *id=fp->c0; id; id=id->next)
@@ -1070,16 +1457,28 @@ static void emit_proc_def(CG *g, Node *proc, int nested) {
     g->indent++;
     g->in_proc++;
 
-    /* Nested procedure prototypes */
+    /* Forward-declare nested procs inside this proc's body */
     for (Node *d=proc->c2; d; d=d->next)
         if (d->kind==ND_PROC_DECL) { iemit(g,""); emit_proc_proto(g,d,1); }
 
     /* Local variable declarations */
     emit_local_vars(g, proc->c2);
 
-    /* Nested procedure definitions */
-    /* Note: C99 does not support nested functions; emit them outside.
-     * For now we skip nested proc bodies here — they were emitted at top level. */
+    /* If outer proc has nested procs, init the frame struct */
+    if (!nested && g->n_frame > 0) {
+        iemit(g,"_Frame_%s _frame;\n", proc->str);
+        for (int i=0;i<g->n_frame;i++) {
+            Node *t=g->frame_types[i];
+            int is_arr = t && (t->kind==ND_TARRAY||
+                         (t->kind==ND_TNAME&&!strcmp(t->str,"STRING")));
+            if (is_arr || g->frame_is_var[i])
+                iemit(g,"_frame.%s = %s;\n",
+                      g->frame_names[i], g->frame_names[i]);
+            else
+                iemit(g,"_frame.%s = &%s;\n",
+                      g->frame_names[i], g->frame_names[i]);
+        }
+    }
 
     /* Body statements */
     for (Node *s=proc->c3; s; s=s->next) emit_stmt(g,s);
@@ -1089,9 +1488,19 @@ static void emit_proc_def(CG *g, Node *proc, int nested) {
     emit(g,"}\n");
     sym_pop();
 
-    /* Emit any nested procedures (they'll be hoisted to file scope in C) */
+    /* Restore outer proc context before emitting hoisted nested procs */
+    /* (they need g->frame_* from the outer proc, which is still valid) */
+    g->in_nested_proc = 1;  /* nested procs emitted here are indeed nested */
     for (Node *d=proc->c2; d; d=d->next)
         if (d->kind==ND_PROC_DECL) emit_proc_def(g, d, 1);
+
+    /* Restore CG context */
+    g->in_nested_proc   = save_in_nested;
+    g->n_nested_procs   = save_n_nested;
+    g->n_frame          = save_n_frame;
+    g->nested_sym_start = save_nested_sym;
+    strncpy(g->outer_proc_name, save_outer, MAX_IDENT-1);
+    memcpy(g->nested_proc_names, save_nested_names, sizeof(g->nested_proc_names));
 }
 
 /* -----------------------------------------------------------------------
@@ -1106,6 +1515,8 @@ void codegen(Node *module, FILE *out, int is_main) {
     strncpy(cg.modname, module->str, MAX_IDENT-1);
     CG *g = &cg;
     g_nsyms=0; g_sdepth=0; g_nimports=0; g_nprocsigs=0;
+    type_tags_reset(); ptr_types_reset();
+    g_module_decls = module->c1;
     collect_proc_sigs(module->c1);
     if (!is_main) collect_xmod_proc_sigs(module->c1, module->str);
 
@@ -1128,6 +1539,9 @@ void codegen(Node *module, FILE *out, int is_main) {
     emit(g,"#include <stdlib.h>\n");
     emit(g,"#include <string.h>\n");
     emit(g,"#include <assert.h>\n");
+    /* Floor-division and floor-mod macros (Oberon-07 semantics) */
+    emit(g,"#define _OBC_DIV(a,b) ((a)/(b)-((((a)%%(b))!=0)&&(((a)^(b))<0)))\n");
+    emit(g,"#define _OBC_MOD(a,b) ((a)%%(b)+((((a)%%(b))!=0)&&(((a)^(b))<0)?(b):0))\n");
 
     /* ── Include headers for user-imported modules ───────────────── */
     for (int i=0;i<g_nimports;i++) {
@@ -1599,11 +2013,22 @@ void codegen(Node *module, FILE *out, int is_main) {
     }
     if (has_consts) emit(g,"\n");
 
-    /* ── Type declarations ───────────────────────────────────────── */
+    /* ── Type declarations (emit_type_decl also populates type_tags) ── */
     int has_types = 0;
     for (Node *d=module->c1; d; d=d->next)
         if (d->kind==ND_TYPE_DECL) { emit_type_decl(g,d); has_types=1; }
-    if (has_types) emit(g,"\n");
+    /* Emit _TAG_* defines for every registered record type */
+    if (g_n_type_tags > 0) {
+        for (int i=0;i<g_n_type_tags;i++)
+            emit(g,"#define _TAG_%s %d\n", g_type_tags[i], i+1);
+        emit(g,"\n");
+    } else if (has_types) {
+        emit(g,"\n");
+    }
+
+    /* ── Frame structs for procedures with nested procs ──────────── */
+    for (Node *d=module->c1; d; d=d->next)
+        if (d->kind==ND_PROC_DECL) emit_frame_struct(g,d);
 
     /* ── Global variable declarations ───────────────────────────── */
     int has_globals = 0;

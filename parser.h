@@ -45,6 +45,8 @@ typedef enum {
     ND_CASE,        /* c0=expr  c1=clauses  c2=else                        */
     ND_CASECLAUSE,  /* c0=labels  c1=stmts                                 */
     ND_CASELABEL,   /* c0=lo  c1=hi (hi=NULL if not range)                 */
+    ND_WITH,        /* c0=clauses  c1=else                                 */
+    ND_WITHCLAUSE,  /* str=type-name  c0=var-expr  c1=stmts               */
 
     /* Expressions / designators */
     ND_IDENT,           /* str=name  flags&FLAG_EXPORTED                   */

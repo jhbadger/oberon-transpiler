@@ -828,6 +828,39 @@ static Node *parse_stat_seq(Parser *p) {
             break;
         }
 
+        /* WITH Guard DO stmts {"|" Guard DO stmts} [ELSE stmts] END
+         * Guard = qualident ":" qualident                                  */
+        case TOK_WITH: {
+            next_tok(p);
+            s = node_new(ND_WITH, line, col);
+            NodeList clauses = {0};
+            do {
+                int cl = p->cur.line, cc = p->cur.col;
+                Node *wc = node_new(ND_WITHCLAUSE, cl, cc);
+                wc->c0 = parse_expr(p);   /* variable (qualident) */
+                eat(p, TOK_COLON);
+                /* type name: IDENT [. IDENT] */
+                if (p->cur.kind == TOK_IDENT) {
+                    char qname[MAX_IDENT]; strncpy(qname, p->cur.text, MAX_IDENT-1);
+                    next_tok(p);
+                    if (p->cur.kind == TOK_DOT) {
+                        next_tok(p);
+                        if (p->cur.kind == TOK_IDENT) {
+                            snprintf(wc->str, MAX_IDENT, "%s.%s", qname, p->cur.text);
+                            next_tok(p);
+                        }
+                    } else { strncpy(wc->str, qname, MAX_IDENT-1); }
+                } else parse_err(p, "expected type name in WITH guard");
+                eat(p, TOK_DO);
+                wc->c1 = parse_stat_seq(p);
+                list_add(&clauses, wc);
+            } while (match(p, TOK_BAR));
+            s->c0 = clauses.head;
+            if (match(p, TOK_ELSE)) s->c1 = parse_stat_seq(p);
+            eat(p, TOK_END);
+            break;
+        }
+
         /* RETURN [Expr] */
         case TOK_RETURN: {
             next_tok(p);
@@ -919,6 +952,8 @@ const char *node_kind_name(NodeKind k) {
     case ND_CASE:        return "CASE";
     case ND_CASECLAUSE:  return "CASECLAUSE";
     case ND_CASELABEL:   return "CASELABEL";
+    case ND_WITH:        return "WITH";
+    case ND_WITHCLAUSE:  return "WITHCLAUSE";
     case ND_IDENT:       return "IDENT";
     case ND_INTEGER:     return "INTEGER";
     case ND_REAL:        return "REAL";
