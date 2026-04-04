@@ -297,3 +297,18 @@ Colors are ANSI indices 1–7 (0 = transparent/off).
 | `Graphics.Plot(x, y, color: INTEGER)` | Set pixel at `(x, y)` to `color` (1–7). |
 | `Graphics.Circle(cx, cy, r, color: INTEGER)` | Draw a circle outline using Bresenham's algorithm. |
 | `Graphics.Flush()` | Render the pixel buffer to the terminal using half-block characters. |
+
+---
+
+## Args — Command-line Arguments
+
+```
+IMPORT Args;
+```
+
+Arguments are numbered from 1 (argument 0 is the program name and is not accessible).
+
+| Procedure / Function | Description |
+|----------------------|-------------|
+| `Args.Count(): INTEGER` | Number of command-line arguments (not counting the program name). |
+| `Args.Get(n: INTEGER; VAR s: ARRAY OF CHAR)` | Copy argument `n` (1-based) into `s`. `s` is set to the empty string if `n` is out of range. |

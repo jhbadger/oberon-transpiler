@@ -148,7 +148,7 @@ static const char *import_realname(const char *alias) {
  * Built-in module list
  * ----------------------------------------------------------------------- */
 static const char *g_builtins[] = {
-    "Out","In","Random","Terminal","Graphics","Math","Strings","Files",NULL
+    "Out","In","Random","Terminal","Graphics","Math","Strings","Files","Args",NULL
 };
 static int is_builtin_module(const char *s) {
     for (int i=0;g_builtins[i];i++) if (!strcmp(g_builtins[i],s)) return 1;
@@ -550,6 +550,15 @@ static int try_emit_import(CG *g, Node *fa, Node *args) {
         if (!strcmp(proc,"WriteReal"))   { emit(g,"Files_WriteReal(");   emit_addr_of(g,a0); emit(g,","); emit_expr(g,a1); emit(g,")"); return 1; }
         if (!strcmp(proc,"WriteString")) { emit(g,"Files_WriteString("); emit_addr_of(g,a0); emit(g,","); emit_as_string(g,a1); emit(g,")"); return 1; }
         if (!strcmp(proc,"WriteNum"))    { emit(g,"Files_WriteNum(");    emit_addr_of(g,a0); emit(g,","); emit_expr(g,a1); emit(g,")"); return 1; }
+    }
+    /* Args module */
+    if (!strcmp(mod,"Args")) {
+        Node *a2=a1?a1->next:NULL; (void)a2;
+        if (!strcmp(proc,"Count")) { emit(g,"Args_Count()"); return 1; }
+        if (!strcmp(proc,"Get"))   {
+            emit(g,"Args_Get("); emit_expr(g,a0); emit(g,","); emit_expr(g,a1); emit(g,")");
+            return 1;
+        }
     }
     /* Unknown import call → RealModule_Proc(args)  (resolves aliases) */
     const char *real = import_realname(mod);
@@ -1140,6 +1149,8 @@ void codegen(Node *module, FILE *out, int is_main) {
     for (int i=0;i<g_nimports;i++) if (!strcmp(g_imports[i],"Strings"))  { has_strings=1;  break; }
     int has_files = 0;
     for (int i=0;i<g_nimports;i++) if (!strcmp(g_imports[i],"Files"))    { has_files=1;    break; }
+    int has_args = 0;
+    for (int i=0;i<g_nimports;i++) if (!strcmp(g_imports[i],"Args"))     { has_args=1;     break; }
 
     if (has_random && !has_terminal)
         emit(g,"#include <time.h>\n");
@@ -1542,6 +1553,20 @@ void codegen(Node *module, FILE *out, int is_main) {
         emit(g,"\n");
     }
 
+    /* ── Args module runtime ─────────────────────────────────────── */
+    if (has_args) {
+        emit(g,"/* Args module — command-line argument access */\n");
+        emit(g,"static int   _args_argc = 0;\n");
+        emit(g,"static char **_args_argv = NULL;\n");
+        emit(g,"static int Args_Count(void) { return _args_argc > 0 ? _args_argc - 1 : 0; }\n");
+        emit(g,"static void Args_Get(int n, char *s) {\n");
+        emit(g,"    if (n >= 1 && n < _args_argc && _args_argv) {\n");
+        emit(g,"        int i=0; const char *src=_args_argv[n];\n");
+        emit(g,"        while(src[i] && i<255){s[i]=src[i];i++;} s[i]=0;\n");
+        emit(g,"    } else { s[0]=0; }\n");
+        emit(g,"}\n\n");
+    }
+
     /* ── Helper: set range ───────────────────────────────────────── */
     emit(g,"static unsigned int _obc_range(int lo, int hi) {\n");
     emit(g,"    unsigned int m=0; for(int i=lo;i<=hi;i++) m|=(1u<<i); return m;\n");
@@ -1602,8 +1627,15 @@ void codegen(Node *module, FILE *out, int is_main) {
             if (!is_builtin_module(real))
                 emit(g,"extern void %s_init(void);\n", real);
         }
-        emit(g,"\nint main(void) {\n");
+        if (has_args)
+            emit(g,"\nint main(int _argc, char **_argv) {\n");
+        else
+            emit(g,"\nint main(void) {\n");
         g->indent++;
+        if (has_args) {
+            iemit(g,"_args_argc = _argc;\n");
+            iemit(g,"_args_argv = _argv;\n");
+        }
         if (has_terminal) iemit(g,"_term_init();\n");
         if (has_graphics) iemit(g,"Graphics_Init();\n");
         if (has_random && !has_terminal) iemit(g,"srand((unsigned)time(NULL));\n");
