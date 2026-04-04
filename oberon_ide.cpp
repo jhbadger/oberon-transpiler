@@ -56,7 +56,9 @@
 #include <fstream>
 #include <unistd.h>
 #include <libgen.h>
+#ifdef __APPLE__
 #include <mach-o/dyld.h>
+#endif
 #include <sys/wait.h>
 #include <fcntl.h>
 #include <signal.h>
@@ -1524,10 +1526,9 @@ void TOberonIDE::showHelp() {
 
 int main(int argc, char* argv[]) {
     // Locate stdlib.md next to the binary.
-    // Use _NSGetExecutablePath (macOS) so it works regardless of how the binary
-    // was launched (via PATH, symlink, etc.).
     {
         char exebuf[4096] = {};
+#ifdef __APPLE__
         uint32_t exesize = sizeof(exebuf);
         if (_NSGetExecutablePath(exebuf, &exesize) == 0) {
             char resolved[4096] = {};
@@ -1537,6 +1538,16 @@ int main(int argc, char* argv[]) {
                 g_stdlibPath = std::string(dirname(tmp)) + "/stdlib.md";
             }
         }
+#else
+        // Linux: /proc/self/exe is a symlink to the running binary
+        ssize_t len = readlink("/proc/self/exe", exebuf, sizeof(exebuf) - 1);
+        if (len > 0) {
+            exebuf[len] = '\0';
+            char tmp[4096];
+            strncpy(tmp, exebuf, sizeof(tmp) - 1);
+            g_stdlibPath = std::string(dirname(tmp)) + "/stdlib.md";
+        }
+#endif
         // Fallback: try argv[0] dirname, then cwd
         if (g_stdlibPath.empty() || access(g_stdlibPath.c_str(), R_OK) != 0) {
             if (argc >= 1 && argv[0] && strchr(argv[0], '/')) {
