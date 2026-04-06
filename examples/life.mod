@@ -123,18 +123,19 @@ END;
 *)
 PROCEDURE SeedFromMouse;
 VAR x, y: INTEGER;
+VAR running_seeding: BOOLEAN;
 BEGIN
   WRITELN("--- Seeding Mode ---");
   WRITELN("Click anywhere in the terminal window (mouse required).");
   WRITELN("Left click places a cell. ESC or Enter to finish seeding.");
 
-  (* Wait for user to signal end of seeding *)
-  WHILE TRUE DO
-    (* Try reading input, expecting mouse events, or a termination key *)
+  running_seeding := TRUE;
+  
+  WHILE running_seeding DO
     key := Terminal.ReadKey();
 
     IF key = 03X THEN (* Left Arrow Key, used here as a simple signal key *)
-      BREAK;
+      (* Do nothing, just acknowledge the key read *)
     ELSIF key = 05X THEN (* Mouse Event *)
       x := Terminal.MouseX();
       y := Terminal.MouseY();
@@ -150,8 +151,8 @@ BEGIN
         DrawGrid(); (* Update visualization immediately *)
       END;
     ELSE
-      (* If it's another keypress (like Enter), break the seeding loop *)
-      BREAK;
+      (* If the key is Enter or some other non-mouse key, stop seeding *)
+      running_seeding := FALSE;
     END;
   END;
 END;
@@ -176,53 +177,57 @@ BEGIN
   WHILE running DO
     DrawGrid();
     
-    (* Wait for comm& input *)
+    (* Wait for user input *)
     key := Terminal.ReadKey();
     
     IF key = 'q' THEN
       WRITELN("Simulation ended by user.");
       running := FALSE;
+      
     ELSIF key = 's' THEN
-      (* Single Step *)
+      (* Single Step: Execute turn, update state, and repeat *)
       CalculateNextState(NextState);
       UpdateGrid(NextState);
       WRITELN("Turn", turn, " completed (Single Step).");
       turn := turn + 1;
       DrawGrid();
+      
     ELSIF key = 'r' THEN
-      (* Run Mode (Loop until quit key or collapse) *)
-        LOOP
-          CalculateNextState(NextState);
-          UpdateGrid(NextState);
-          
-          (* Simple collapse detection: If the grid is all dead, stop. *)
-          FOR y := 1 TO GRID_HEIGHT DO
-            FOR x := 1 TO GRID_WIDTH DO
-              IF GridState[y, x] = TRUE THEN
-                all_dead := FALSE;
-              END;
+      (* Run Mode: Use a structured, finite loop instead of 'WHILE TRUE' *)
+      all_dead := TRUE; (* Reset detection for the run mode turn *)
+      
+      WHILE running DO
+        CalculateNextState(NextState);
+        UpdateGrid(NextState);
+        
+        (* 1. Check for collapse *)
+        all_dead := TRUE;
+        FOR y := 1 TO GRID_HEIGHT DO
+          FOR x := 1 TO GRID_WIDTH DO
+            IF GridState[y, x] = TRUE THEN
+              all_dead := FALSE;
             END;
-            IF all_dead = FALSE THEN
-            END;
-          END;
-          
-          IF all_dead THEN
-            WRITELN("Simulation detected collapse (all cells dead). Halting.");
-          END;
-
-          DrawGrid();
-          turn := turn + 1;
-          
-          (* Wait for keypress to continue the run mode *)
-          key := Terminal.ReadKey();
-          IF key = 'q' THEN
-            WRITELN("Simulation stopped by user.");
-            running := FALSE;
-            BREAK;
           END;
         END;
-      END;
-   END;
+        
+        IF all_dead THEN
+          WRITELN("Simulation detected collapse (all cells dead). Halting.");
+          running := FALSE; (* Exit the outer WHILE loop by setting the flag *)
+          EXIT; (* Exit the inner 'Run Mode' WHILE loop *)
+        END;
+
+        DrawGrid();
+        turn := turn + 1;
+        
+        (* 2. Wait for keypress to continue the run mode *)
+        key := Terminal.ReadKey();
+        IF key = 'q' THEN
+          WRITELN("Simulation stopped by user.");
+          running := FALSE; (* Exit the outer WHILE loop by setting the flag *)
+          EXIT; (* Exit the inner 'Run Mode' WHILE loop *)
+        END;        
+      END; (* End of Run Mode WHILE loop *)
+   END; (* End of main WHILE loop *)
  END;
  
 PROCEDURE Main;
