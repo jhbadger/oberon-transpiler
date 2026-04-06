@@ -3,7 +3,7 @@ MODULE Maze;
 IMPORT Random, Out;
 
 CONST 
-  MAZE_SIZE = 11; (* Odd numbers work best for the carving logic *)
+  MAZE_SIZE = 21; (* Odd numbers work best for the carving logic *)
   WALL = '#';
   PATH = '.';
   START = 'S';
@@ -65,8 +65,8 @@ PROCEDURE GenerateMaze(x, y : INTEGER);
 
 PROCEDURE SetEndpoints();
   BEGIN
-    maze[1, 1] := START;
-    maze[MAZE_SIZE-2, MAZE_SIZE-2] := STOP;
+    maze[Random.Int(MAZE_SIZE-1), 0] := START;
+    maze[Random.Int(MAZE_SIZE-1), MAZE_SIZE-1] := STOP;
   END SetEndpoints;
 
 PROCEDURE PrintMaze();
