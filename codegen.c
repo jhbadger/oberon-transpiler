@@ -977,12 +977,26 @@ static void emit_stmt(CG *g, Node *s) {
         int rhs_is_multichar_str = (rhs->kind == ND_STRING && strlen(rhs->str) > 1);
         int is_str = is_char_array(lt) ||
                      (lt == NULL && rhs_is_multichar_str);
+        /* Check if LHS is a non-char array type (named or direct) → memcpy */
+        int is_arr = 0;
+        if (!is_str) {
+            Node *arr_t = lt;
+            if (arr_t && arr_t->kind == ND_TNAME) {
+                Node *td = find_type_decl(arr_t->str);
+                if (td && td->c0) arr_t = td->c0;
+            }
+            if (arr_t && arr_t->kind == ND_TARRAY && !is_char_array(arr_t))
+                is_arr = 1;
+        }
         if (is_str) {
             iemit(g,"strcpy("); emit_expr(g,lhs); emit(g,",");
             /* Always emit RHS as string literal for strcpy */
             if (rhs->kind == ND_STRING) emit_string_lit(g, rhs->str);
             else emit_expr(g,rhs);
             emit(g,");\n");
+        } else if (is_arr) {
+            iemit(g,"memcpy("); emit_expr(g,lhs); emit(g,",");
+            emit_expr(g,rhs); emit(g,",sizeof("); emit_expr(g,lhs); emit(g,"));\n");
         } else {
             iemit(g,""); emit_expr(g,lhs);
             emit(g," = "); emit_expr(g,rhs); emit(g,";\n");
@@ -1260,6 +1274,12 @@ static void emit_type_decl(CG *g, Node *n) {
             emit_type_prefix(g, n->c0->c0);
             emit(g," *%s;\n", n->str);
         }
+    } else if (n->c0->kind == ND_TARRAY) {
+        emit(g,"typedef ");
+        emit_type_prefix(g, n->c0);
+        emit(g," %s", n->str);
+        emit_type_dims(g, n->c0);
+        emit(g,";\n");
     } else if (n->c0->kind == ND_TPROC) {
         /* Procedure-type alias: typedef rettype (*Name)(params); */
         emit(g,"typedef ");
