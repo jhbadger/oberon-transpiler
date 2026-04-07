@@ -26,6 +26,8 @@ typedef struct {
     char  nested_proc_names[16][MAX_IDENT];
 } CG;
 
+static int is_open_array(Node *t);   /* forward */
+
 static void emit(CG *g, const char *fmt, ...) {
     va_list ap; va_start(ap, fmt); vfprintf(g->out, fmt, ap); va_end(ap);
 }
@@ -573,9 +575,13 @@ static void emit_builtin(CG *g, const char *name, Node *args) {
     } else if (!strcasecmp(name,"CHR")) {
         emit(g,"((char)("); if(a0) emit_expr(g,a0); emit(g,"))");
     } else if (!strcasecmp(name,"LEN")) {
-        /* For fixed arrays we emit the count; for pointers it's unknown */
-        emit(g,"(int)(sizeof("); if(a0) emit_expr(g,a0);
-        emit(g,")/sizeof("); if(a0) emit_expr(g,a0); emit(g,"[0]))");
+        /* Open array param → use hidden _len; fixed array → sizeof trick */
+        if (a0 && a0->kind==ND_IDENT && is_open_array(sym_type(a0->str))) {
+            emit(g,"%s_len", a0->str);
+        } else {
+            emit(g,"(int)(sizeof("); if(a0) emit_expr(g,a0);
+            emit(g,")/sizeof("); if(a0) emit_expr(g,a0); emit(g,"[0]))");
+        }
     } else if (!strcasecmp(name,"WRITE")) {
         emit_write(g, a0, 1);
     } else if (!strcasecmp(name,"WRITELN")) {
@@ -598,6 +604,24 @@ static void emit_builtin(CG *g, const char *name, Node *args) {
 /* Emit the address of an expression — used when a C function needs a pointer
  * to an Oberon VAR parameter.  If the node is an IDENT that is already a
  * VAR param (i.e. already a pointer in C), emit it bare; otherwise add &. */
+/* Is this type node an open array (ARRAY OF T with no bound)? */
+static int is_open_array(Node *t) { return t && t->kind==ND_TARRAY && !t->c0; }
+
+/* Emit the runtime length of an array argument being passed to an open array
+ * formal parameter.  If the argument is itself an open array param, forward
+ * its hidden _len; otherwise compute from sizeof at compile time. */
+static void emit_open_array_len(CG *g, Node *arg) {
+    if (arg && arg->kind == ND_IDENT) {
+        Node *t = sym_type(arg->str);
+        if (is_open_array(t)) {
+            emit(g, "%s_len", arg->str);
+            return;
+        }
+    }
+    emit(g, "(int)(sizeof("); emit_expr(g, arg);
+    emit(g, ")/sizeof(");     emit_expr(g, arg); emit(g, "[0]))");
+}
+
 static void emit_addr_of(CG *g, Node *e) {
     if (!e) { emit(g,"NULL"); return; }
     if (e->kind == ND_IDENT) {
@@ -952,6 +976,7 @@ static void emit_expr(CG *g, Node *e) {
             int is_var = fp ? (fp->flags & FLAG_VAR_PARAM) != 0 : 0;
             if (is_var) emit_addr_of(g, a);
             else        emit_expr(g, a);
+            if (fp && is_open_array(fp->c1)) { emit(g,","); emit_open_array_len(g,a); }
             if (fp) {
                 fp_id = fp_id ? fp_id->next : NULL;
                 if (!fp_id) { fp = fp->next; fp_id = fp ? fp->c0 : NULL; }
@@ -1054,6 +1079,7 @@ static void emit_stmt(CG *g, Node *s) {
                 int is_var = fp ? (fp->flags & FLAG_VAR_PARAM) != 0 : 0;
                 if (is_var) emit_addr_of(g, a);
                 else        emit_expr(g, a);
+                if (fp && is_open_array(fp->c1)) { emit(g,","); emit_open_array_len(g,a); }
                 if (fp) {
                     fp_id = fp_id ? fp_id->next : NULL;
                     if (!fp_id) { fp = fp->next; fp_id = fp ? fp->c0 : NULL; }
@@ -1248,6 +1274,7 @@ static void emit_proc_params(CG *g, Node *params) {
             for (Node *id=fp->c0; id; id=id->next) {
                 if (!first) emit(g,", ");
                 emit_var_decl_raw(g, id->str, fp->c1, is_var);
+                if (is_open_array(fp->c1)) emit(g,", int %s_len", id->str);
                 first = 0;
             }
         }
@@ -1404,6 +1431,7 @@ static void emit_proc_params_ex(CG *g, Node *params, const char *frame_type) {
             for (Node *id=fp->c0;id;id=id->next) {
                 if (!first) emit(g,", ");
                 emit_var_decl_raw(g,id->str,fp->c1,isv);
+                if (is_open_array(fp->c1)) emit(g,", int %s_len", id->str);
                 first=0;
             }
         }
