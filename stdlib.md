@@ -70,8 +70,10 @@ IMPORT In;
 | Procedure | Description |
 |-----------|-------------|
 | `In.Read(VAR c: CHAR)` | Read one character from stdin. |
+| `In.Char(VAR c: CHAR)` | Read one character from stdin (alias for `In.Read`). |
 | `In.Int(VAR n: INTEGER)` | Read a decimal integer from stdin. |
 | `In.Real(VAR x: REAL)` | Read a floating-point number from stdin. |
+| `In.String(VAR s: ARRAY OF CHAR)` | Read a whitespace-delimited word from stdin (max 255 chars). |
 
 ---
 
@@ -143,7 +145,20 @@ String variables are `ARRAY OF CHAR` (or the `STRING` alias), capped at 256 byte
 | `Strings.Copy(src, VAR dst)` | Copy `src` into `dst`. |
 | `Strings.Append(extra, VAR dst)` | Append `extra` to the end of `dst`. |
 | `Strings.Compare(a, b): INTEGER` | Lexicographic compare: -1, 0, or +1. |
-| `Strings.Pos(pattern, s): INTEGER` | Index of first occurrence of `pattern` in `s`, or -1 if absent. |
+| `Strings.Pos(pattern, s: ARRAY OF CHAR): INTEGER` | Index of first occurrence of `pattern` in `s`, or -1 if absent. |
+| `Strings.Pos(pattern, s: ARRAY OF CHAR; from: INTEGER): INTEGER` | As above but search starts at `from`. |
+| `Strings.Extract(src: ARRAY OF CHAR; pos, len: INTEGER; VAR dst: ARRAY OF CHAR)` | Copy `len` characters from `src` starting at `pos` into `dst`. |
+| `Strings.Insert(src: ARRAY OF CHAR; pos: INTEGER; VAR dst: ARRAY OF CHAR)` | Insert `src` into `dst` at position `pos`. |
+| `Strings.Delete(VAR s: ARRAY OF CHAR; pos, len: INTEGER)` | Delete `len` characters from `s` starting at `pos`. |
+| `Strings.Replace(src: ARRAY OF CHAR; pos: INTEGER; VAR dst: ARRAY OF CHAR)` | Overwrite `dst` at `pos` with `src`. |
+| `Strings.ToUpper(VAR s: ARRAY OF CHAR)` | Convert all characters in `s` to uppercase in place. |
+| `Strings.ToLower(VAR s: ARRAY OF CHAR)` | Convert all characters in `s` to lowercase in place. |
+| `Strings.Trim(VAR s: ARRAY OF CHAR)` | Strip leading and trailing whitespace from `s` in place. |
+| `Strings.NextWord(src: ARRAY OF CHAR; VAR pos: INTEGER; VAR dst: ARRAY OF CHAR)` | Skip whitespace in `src` from `pos`, copy the next word into `dst`, advance `pos` past it. `dst` is empty if no more words. |
+| `Strings.IntToStr(n: INTEGER; VAR s: ARRAY OF CHAR)` | Format integer `n` into string `s`. |
+| `Strings.RealToStr(x: REAL; VAR s: ARRAY OF CHAR)` | Format real `x` into string `s` (`%g` format). |
+| `Strings.StrToInt(s: ARRAY OF CHAR; VAR n: INTEGER): BOOLEAN` | Parse integer from `s` into `n`. Returns FALSE if `s` is not a valid integer. |
+| `Strings.StrToReal(s: ARRAY OF CHAR; VAR x: REAL): BOOLEAN` | Parse real from `s` into `x`. Returns FALSE if `s` is not a valid number. |
 
 ---
 
@@ -426,3 +441,23 @@ Arguments are numbered from 1 (argument 0 is the program name and is not accessi
 |----------------------|-------------|
 | `Args.Count(): INTEGER` | Number of command-line arguments (not counting the program name). |
 | `Args.Get(n: INTEGER; VAR s: ARRAY OF CHAR)` | Copy argument `n` (1-based) into `s`. `s` is set to the empty string if `n` is out of range. |
+
+---
+
+## Dict - String-keyed Hash Table
+
+```
+IMPORT Dict;
+```
+
+Declare a table with `VAR d: Dict.Table` and initialise it with `Dict.Init` before use.
+Keys and values are strings (max 255 characters each). The table uses 256-bucket chaining and heap-allocates nodes internally.
+
+| Procedure / Function | Description |
+|----------------------|-------------|
+| `Dict.Init(VAR d: Dict.Table)` | Initialise (or reset) a table. Must be called before use. |
+| `Dict.Put(VAR d: Dict.Table; key, value: ARRAY OF CHAR)` | Insert or update `key` with `value`. |
+| `Dict.Get(VAR d: Dict.Table; key: ARRAY OF CHAR; VAR value: ARRAY OF CHAR): BOOLEAN` | Look up `key`. Copies value into `value` and returns TRUE, or returns FALSE if not found. |
+| `Dict.Has(VAR d: Dict.Table; key: ARRAY OF CHAR): BOOLEAN` | Returns TRUE if `key` exists. |
+| `Dict.Remove(VAR d: Dict.Table; key: ARRAY OF CHAR)` | Delete `key` from the table. No-op if absent. |
+| `Dict.Clear(VAR d: Dict.Table)` | Remove all entries and free memory. |

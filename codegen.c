@@ -278,7 +278,7 @@ static const char *import_realname(const char *alias) {
  * Built-in module list
  * ----------------------------------------------------------------------- */
 static const char *g_builtins[] = {
-    "Out","In","Random","Terminal","Graphics","Math","Strings","Files","Args",NULL
+    "Out","In","Random","Terminal","Graphics","Math","Strings","Files","Args","Dict",NULL
 };
 static int is_builtin_module(const char *s) {
     for (int i=0;g_builtins[i];i++) if (!strcmp(g_builtins[i],s)) return 1;
@@ -657,8 +657,10 @@ static int try_emit_import(CG *g, Node *fa, Node *args) {
             /* In.Read(ch) for a CHAR — assign from getchar */
             emit(g,"("); emit_expr(g,a0); emit(g," = (char)getchar())"); return 1;
         }
-        if (!strcmp(proc,"Int"))  { emit(g,"scanf(\"%%d\",&"); emit_expr(g,a0); emit(g,")"); return 1; }
-        if (!strcmp(proc,"Real")) { emit(g,"scanf(\"%%lf\",&"); emit_expr(g,a0); emit(g,")"); return 1; }
+        if (!strcmp(proc,"Int"))    { emit(g,"scanf(\"%%d\",&"); emit_expr(g,a0); emit(g,")"); return 1; }
+        if (!strcmp(proc,"Real"))   { emit(g,"scanf(\"%%lf\",&"); emit_expr(g,a0); emit(g,")"); return 1; }
+        if (!strcmp(proc,"Char"))   { emit(g,"("); emit_expr(g,a0); emit(g," = (char)getchar())"); return 1; }
+        if (!strcmp(proc,"String")) { emit(g,"scanf(\"%%255s\","); emit_expr(g,a0); emit(g,")"); return 1; }
     }
     /* Random module */
     if (!strcmp(mod,"Random")) {
@@ -702,7 +704,19 @@ static int try_emit_import(CG *g, Node *fa, Node *args) {
         if (!strcmp(proc,"Append"))  { emit(g,"Strings_Append(");  emit_as_string(g,a0); emit(g,","); emit_expr(g,a1); emit(g,")"); return 1; }
         if (!strcmp(proc,"Copy"))    { emit(g,"Strings_Copy(");    emit_as_string(g,a0); emit(g,","); emit_expr(g,a1); emit(g,")"); return 1; }
         if (!strcmp(proc,"Compare")) { emit(g,"Strings_Compare("); emit_as_string(g,a0); emit(g,","); emit_as_string(g,a1); emit(g,")"); return 1; }
-        if (!strcmp(proc,"Pos"))     { emit(g,"Strings_Pos(");     emit_as_string(g,a0); emit(g,","); emit_as_string(g,a1); emit(g,")"); return 1; }
+        if (!strcmp(proc,"Pos"))      { emit(g,"Strings_PosFrom(");   emit_as_string(g,a0); emit(g,","); emit_as_string(g,a1); emit(g,","); if (a2) emit_expr(g,a2); else emit(g,"0"); emit(g,")"); return 1; }
+        if (!strcmp(proc,"Extract"))  { emit(g,"Strings_Extract(");   emit_as_string(g,a0); emit(g,","); emit_expr(g,a1); emit(g,","); emit_expr(g,a2); emit(g,","); emit_expr(g,a2->next); emit(g,")"); return 1; }
+        if (!strcmp(proc,"NextWord")) { emit(g,"Strings_NextWord(");   emit_as_string(g,a0); emit(g,",&"); emit_expr(g,a1); emit(g,","); emit_expr(g,a2); emit(g,")"); return 1; }
+        if (!strcmp(proc,"Insert"))   { emit(g,"Strings_Insert(");    emit_as_string(g,a0); emit(g,","); emit_expr(g,a1); emit(g,","); emit_expr(g,a2); emit(g,")"); return 1; }
+        if (!strcmp(proc,"Delete"))   { emit(g,"Strings_Delete(");    emit_expr(g,a0); emit(g,","); emit_expr(g,a1); emit(g,","); emit_expr(g,a2); emit(g,")"); return 1; }
+        if (!strcmp(proc,"Replace"))  { emit(g,"Strings_Replace(");   emit_as_string(g,a0); emit(g,","); emit_expr(g,a1); emit(g,","); emit_expr(g,a2); emit(g,")"); return 1; }
+        if (!strcmp(proc,"ToUpper"))   { emit(g,"Strings_ToUpper(");    emit_expr(g,a0); emit(g,")"); return 1; }
+        if (!strcmp(proc,"ToLower"))   { emit(g,"Strings_ToLower(");    emit_expr(g,a0); emit(g,")"); return 1; }
+        if (!strcmp(proc,"Trim"))      { emit(g,"Strings_Trim(");       emit_expr(g,a0); emit(g,")"); return 1; }
+        if (!strcmp(proc,"IntToStr"))  { emit(g,"Strings_IntToStr(");   emit_expr(g,a0); emit(g,","); emit_expr(g,a1); emit(g,")"); return 1; }
+        if (!strcmp(proc,"RealToStr")) { emit(g,"Strings_RealToStr(");  emit_expr(g,a0); emit(g,","); emit_expr(g,a1); emit(g,")"); return 1; }
+        if (!strcmp(proc,"StrToInt"))  { emit(g,"Strings_StrToInt(");   emit_as_string(g,a0); emit(g,",&"); emit_expr(g,a1); emit(g,")"); return 1; }
+        if (!strcmp(proc,"StrToReal")) { emit(g,"Strings_StrToReal(");  emit_as_string(g,a0); emit(g,",&"); emit_expr(g,a1); emit(g,")"); return 1; }
         (void)a2;
     }
     /* Files module — standard Oberon Files API */
@@ -741,6 +755,15 @@ static int try_emit_import(CG *g, Node *fa, Node *args) {
             emit(g,"Args_Get("); emit_expr(g,a0); emit(g,","); emit_expr(g,a1); emit(g,")");
             return 1;
         }
+    }
+    /* Dict module — string-keyed hash table */
+    if (!strcmp(mod,"Dict")) {
+        if (!strcmp(proc,"Init"))   { emit(g,"Dict_Init(&");   emit_expr(g,a0); emit(g,")"); return 1; }
+        if (!strcmp(proc,"Put"))    { emit(g,"Dict_Put(&");    emit_expr(g,a0); emit(g,","); emit_as_string(g,a1); emit(g,","); emit_as_string(g,a1->next); emit(g,")"); return 1; }
+        if (!strcmp(proc,"Get"))    { emit(g,"Dict_Get(&");    emit_expr(g,a0); emit(g,","); emit_as_string(g,a1); emit(g,","); emit_expr(g,a1->next); emit(g,")"); return 1; }
+        if (!strcmp(proc,"Has"))    { emit(g,"Dict_Has(&");    emit_expr(g,a0); emit(g,","); emit_as_string(g,a1); emit(g,")"); return 1; }
+        if (!strcmp(proc,"Remove")) { emit(g,"Dict_Remove(&"); emit_expr(g,a0); emit(g,","); emit_as_string(g,a1); emit(g,")"); return 1; }
+        if (!strcmp(proc,"Clear"))  { emit(g,"Dict_Clear(&");  emit_expr(g,a0); emit(g,")"); return 1; }
     }
     /* Unknown import call → RealModule_Proc(args)  (resolves aliases) */
     const char *real = import_realname(mod);
@@ -1593,6 +1616,8 @@ void codegen(Node *module, FILE *out, int is_main) {
     for (int i=0;i<g_nimports;i++) if (!strcmp(g_imports[i],"Files"))    { has_files=1;    break; }
     int has_args = 0;
     for (int i=0;i<g_nimports;i++) if (!strcmp(g_imports[i],"Args"))     { has_args=1;     break; }
+    int has_dict = 0;
+    for (int i=0;i<g_nimports;i++) if (!strcmp(g_imports[i],"Dict"))     { has_dict=1;     break; }
 
     if (has_random && !has_terminal)
         emit(g,"#include <time.h>\n");
@@ -1882,10 +1907,69 @@ void codegen(Node *module, FILE *out, int is_main) {
         emit(g,"static int Strings_Compare(const char *a, const char *b) {\n");
         emit(g,"    int r=strcmp(a,b); return r<0?-1:r>0?1:0;\n");
         emit(g,"}\n");
-        /* Pos(pattern, s): INTEGER — first occurrence, -1 if absent */
-        emit(g,"static int Strings_Pos(const char *pat, const char *s) {\n");
-        emit(g,"    const char *p=strstr(s,pat); return p?(int)(p-s):-1;\n");
+        /* Pos(pattern, s, startPos): INTEGER — first occurrence at or after startPos, -1 if absent */
+        emit(g,"static int Strings_PosFrom(const char *pat, const char *s, int from) {\n");
+        emit(g,"    int slen=(int)strlen(s);\n");
+        emit(g,"    if (from<0) from=0;\n");
+        emit(g,"    if (from>slen) return -1;\n");
+        emit(g,"    const char *p=strstr(s+from,pat); return p?(int)(p-s):-1;\n");
         emit(g,"}\n");
+        /* Extract(src, pos, len, VAR dst) — copy substring */
+        emit(g,"static void Strings_Extract(const char *src, int pos, int len, char *dst) {\n");
+        emit(g,"    int slen=(int)strlen(src);\n");
+        emit(g,"    if (pos<0) pos=0;\n");
+        emit(g,"    if (pos>slen) { dst[0]=0; return; }\n");
+        emit(g,"    if (len>slen-pos) len=slen-pos;\n");
+        emit(g,"    if (len>255) len=255;\n");
+        emit(g,"    strncpy(dst, src+pos, len); dst[len]=0;\n");
+        emit(g,"}\n");
+        /* NextWord(src, VAR pos, VAR dst) — skip whitespace, copy next word, advance pos */
+        emit(g,"static void Strings_NextWord(const char *src, int *pos, char *dst) {\n");
+        emit(g,"    int i=*pos, j=0, cap=255;\n");
+        emit(g,"    while (src[i] && (src[i]==' '||src[i]=='\\t'||src[i]=='\\n'||src[i]=='\\r')) i++;\n");
+        emit(g,"    while (src[i] && src[i]!=' '&&src[i]!='\\t'&&src[i]!='\\n'&&src[i]!='\\r' && j<cap) dst[j++]=src[i++];\n");
+        emit(g,"    dst[j]=0; *pos=i;\n");
+        emit(g,"}\n");
+        /* Insert(src, pos, VAR dst) — insert src into dst at pos */
+        emit(g,"static void Strings_Insert(const char *src, int pos, char *dst) {\n");
+        emit(g,"    int dlen=(int)strlen(dst), slen=(int)strlen(src);\n");
+        emit(g,"    if (pos<0) pos=0; if (pos>dlen) pos=dlen;\n");
+        emit(g,"    int tail=dlen-pos; if (pos+slen+tail>255) tail=255-pos-slen; if (tail<0) tail=0;\n");
+        emit(g,"    memmove(dst+pos+slen, dst+pos, tail);\n");
+        emit(g,"    int copy=slen; if (pos+copy>255) copy=255-pos; if (copy>0) memcpy(dst+pos,src,copy);\n");
+        emit(g,"    int newlen=pos+copy+tail; dst[newlen]=0;\n");
+        emit(g,"}\n");
+        /* Delete(VAR s, pos, len) — delete len chars at pos */
+        emit(g,"static void Strings_Delete(char *s, int pos, int len) {\n");
+        emit(g,"    int slen=(int)strlen(s);\n");
+        emit(g,"    if (pos<0) pos=0; if (pos>=slen) return;\n");
+        emit(g,"    if (pos+len>slen) len=slen-pos;\n");
+        emit(g,"    memmove(s+pos, s+pos+len, slen-pos-len+1);\n");
+        emit(g,"}\n");
+        /* Replace(src, pos, VAR dst) — overwrite dst at pos with src */
+        emit(g,"static void Strings_Replace(const char *src, int pos, char *dst) {\n");
+        emit(g,"    int dlen=(int)strlen(dst), slen=(int)strlen(src);\n");
+        emit(g,"    if (pos<0) pos=0; if (pos>dlen) pos=dlen;\n");
+        emit(g,"    int end=pos+slen; if (end>255) end=255;\n");
+        emit(g,"    memcpy(dst+pos, src, end-pos);\n");
+        emit(g,"    if (end>dlen) dst[end]=0;\n");
+        emit(g,"}\n");
+        /* ToUpper / ToLower / Trim */
+        emit(g,"#include <ctype.h>\n");
+        emit(g,"static void Strings_ToUpper(char *s) { for(;*s;s++) *s=(char)toupper((unsigned char)*s); }\n");
+        emit(g,"static void Strings_ToLower(char *s) { for(;*s;s++) *s=(char)tolower((unsigned char)*s); }\n");
+        emit(g,"static void Strings_Trim(char *s) {\n");
+        emit(g,"    int i=0, len=(int)strlen(s);\n");
+        emit(g,"    while (s[i]==' '||s[i]=='\\t'||s[i]=='\\n'||s[i]=='\\r') i++;\n");
+        emit(g,"    if (i>0) memmove(s, s+i, len-i+1);\n");
+        emit(g,"    len=(int)strlen(s);\n");
+        emit(g,"    while (len>0 && (s[len-1]==' '||s[len-1]=='\\t'||s[len-1]=='\\n'||s[len-1]=='\\r')) s[--len]=0;\n");
+        emit(g,"}\n");
+        /* Number ↔ string conversions */
+        emit(g,"static void Strings_IntToStr(int n, char *s) { snprintf(s,256,\"%%d\",n); }\n");
+        emit(g,"static void Strings_RealToStr(double x, char *s) { snprintf(s,256,\"%%g\",x); }\n");
+        emit(g,"static int Strings_StrToInt(const char *s, int *n) { return sscanf(s,\"%%d\",n)==1; }\n");
+        emit(g,"static int Strings_StrToReal(const char *s, double *x) { return sscanf(s,\"%%lf\",x)==1; }\n");
         emit(g,"\n");
     }
 
@@ -2006,6 +2090,49 @@ void codegen(Node *module, FILE *out, int is_main) {
         emit(g,"        int i=0; const char *src=_args_argv[n];\n");
         emit(g,"        while(src[i] && i<255){s[i]=src[i];i++;} s[i]=0;\n");
         emit(g,"    } else { s[0]=0; }\n");
+        emit(g,"}\n\n");
+    }
+
+    /* ── Dict module runtime ─────────────────────────────────────── */
+    if (has_dict) {
+        emit(g,"/* Dict module — string-keyed hash table */\n");
+        emit(g,"#define DICT_BUCKETS 256\n");
+        emit(g,"typedef struct Dict_Node_s { char key[256]; char val[256]; struct Dict_Node_s *next; } Dict_Node;\n");
+        emit(g,"typedef struct { Dict_Node *buckets[DICT_BUCKETS]; } Dict_Table;\n");
+        emit(g,"static unsigned int Dict_hash(const char *s) {\n");
+        emit(g,"    unsigned int h=5381; while(*s) h=((h<<5)+h)^(unsigned char)*s++; return h%%DICT_BUCKETS;\n");
+        emit(g,"}\n");
+        emit(g,"static void Dict_Init(Dict_Table *d) { memset(d,0,sizeof(*d)); }\n");
+        emit(g,"static void Dict_Put(Dict_Table *d, const char *key, const char *val) {\n");
+        emit(g,"    unsigned int h=Dict_hash(key);\n");
+        emit(g,"    for (Dict_Node *n=d->buckets[h];n;n=n->next) {\n");
+        emit(g,"        if (!strcmp(n->key,key)) { strncpy(n->val,val,255); n->val[255]=0; return; }\n");
+        emit(g,"    }\n");
+        emit(g,"    Dict_Node *n=(Dict_Node*)malloc(sizeof(Dict_Node));\n");
+        emit(g,"    strncpy(n->key,key,255); n->key[255]=0;\n");
+        emit(g,"    strncpy(n->val,val,255); n->val[255]=0;\n");
+        emit(g,"    n->next=d->buckets[h]; d->buckets[h]=n;\n");
+        emit(g,"}\n");
+        emit(g,"static int Dict_Get(Dict_Table *d, const char *key, char *val) {\n");
+        emit(g,"    for (Dict_Node *n=d->buckets[Dict_hash(key)];n;n=n->next)\n");
+        emit(g,"        if (!strcmp(n->key,key)) { strncpy(val,n->val,255); val[255]=0; return 1; }\n");
+        emit(g,"    val[0]=0; return 0;\n");
+        emit(g,"}\n");
+        emit(g,"static int Dict_Has(Dict_Table *d, const char *key) {\n");
+        emit(g,"    for (Dict_Node *n=d->buckets[Dict_hash(key)];n;n=n->next)\n");
+        emit(g,"        if (!strcmp(n->key,key)) return 1;\n");
+        emit(g,"    return 0;\n");
+        emit(g,"}\n");
+        emit(g,"static void Dict_Remove(Dict_Table *d, const char *key) {\n");
+        emit(g,"    unsigned int h=Dict_hash(key); Dict_Node **p=&d->buckets[h];\n");
+        emit(g,"    while (*p) { if (!strcmp((*p)->key,key)) { Dict_Node *t=*p; *p=t->next; free(t); return; } p=&(*p)->next; }\n");
+        emit(g,"}\n");
+        emit(g,"static void Dict_Clear(Dict_Table *d) {\n");
+        emit(g,"    for (int i=0;i<DICT_BUCKETS;i++) {\n");
+        emit(g,"        Dict_Node *n=d->buckets[i];\n");
+        emit(g,"        while (n) { Dict_Node *t=n->next; free(n); n=t; }\n");
+        emit(g,"        d->buckets[i]=NULL;\n");
+        emit(g,"    }\n");
         emit(g,"}\n\n");
     }
 
@@ -2174,6 +2301,16 @@ void codegen_header(Node *module, FILE *out) {
         fprintf(out,"typedef struct _Files_Rec { FILE *fp; char name[512]; } _Files_Rec;\n");
         fprintf(out,"typedef _Files_Rec *Files_File;\n");
         fprintf(out,"typedef struct { Files_File f; long pos; int eof; } Files_Rider;\n");
+        fprintf(out,"#endif\n\n");
+    }
+
+    int has_dict_h = 0;
+    for (int i=0;i<g_nimports;i++) if (!strcmp(g_import_real[i],"Dict")) { has_dict_h=1; break; }
+    if (has_dict_h) {
+        fprintf(out,"#ifndef OBC_DICT_TYPES_H_\n#define OBC_DICT_TYPES_H_\n");
+        fprintf(out,"#define DICT_BUCKETS 256\n");
+        fprintf(out,"typedef struct Dict_Node_s { char key[256]; char val[256]; struct Dict_Node_s *next; } Dict_Node;\n");
+        fprintf(out,"typedef struct { Dict_Node *buckets[DICT_BUCKETS]; } Dict_Table;\n");
         fprintf(out,"#endif\n\n");
     }
 
