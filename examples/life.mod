@@ -14,6 +14,7 @@ TYPE
 VAR
   GridState: Grid;
   key: CHAR;
+  goSeed: BOOLEAN;
 
 PROCEDURE InitializeGrid;
 VAR x, y: INTEGER;
@@ -110,11 +111,13 @@ BEGIN
   WHILE running DO
     DrawGrid();
     Graphics.Goto(1, 47);
-    Out.String("RUN MODE  S=step  Q=quit  Turn: ");
+    Out.String("RUN MODE  S=step  E=seed  Q=quit  Turn: ");
     Out.Int(turn);
     key := Terminal.ReadKey();
     IF (key = "q") OR (key = "Q") THEN
-      running := FALSE;
+      running := FALSE; goSeed := FALSE;
+    ELSIF (key = "e") OR (key = "E") THEN
+      running := FALSE; goSeed := TRUE;
     ELSIF (key = "s") OR (key = "S") THEN
       CalculateNextState(NextState);
       GridState := NextState;
@@ -127,8 +130,11 @@ BEGIN
   Terminal.MouseOn();
   Graphics.Clear();
   InitializeGrid();
-  SeedFromMouse();
-  RunSimulation();
+  goSeed := TRUE;
+  WHILE goSeed DO
+    SeedFromMouse();
+    RunSimulation();
+  END;
   Terminal.MouseOff();
   Graphics.Reset();
 END GameOfLife.
