@@ -1,78 +1,93 @@
 MODULE FastaParser;
 
-IMPORT Files, Strings;
+IMPORT Files;
 
 CONST
-  MaxIdLen = 64;
-  MaxSeqLen = 10000;
+  MaxIdLen* = 128;
 
 TYPE
-  Sequence* = RECORD
-    id*: ARRAY MaxIdLen OF CHAR;
-    data*: ARRAY MaxSeqLen OF CHAR;
-    len*: INTEGER;
-  END;
-
   Scanner* = RECORD
     r: Files.Rider;
     ch: CHAR;
-    eof: BOOLEAN;
+    eof*: BOOLEAN;
+    headerProcessed: BOOLEAN; (* Internal state safety *)
   END;
 
-(** Initializes the scanner with an open file **)
+(** Initializes the scanner and primes the first character **)
 PROCEDURE InitScanner*(VAR s: Scanner; f: Files.File);
 BEGIN
   Files.Set(s.r, f, 0);
   Files.Read(s.r, s.ch);
   s.eof := s.r.eof;
+  s.headerProcessed := FALSE
 END InitScanner;
 
-(** Internal: Skips whitespace and reads until the next header or EOF **)
-PROCEDURE SkipToHeader(VAR s: Scanner);
+(** Internal: Advances to the next '>' character **)
+PROCEDURE SkipToNextRecord(VAR s: Scanner);
 BEGIN
   WHILE ~s.eof & (s.ch # '>') DO
     Files.Read(s.r, s.ch);
     s.eof := s.r.eof
   END
-END SkipToHeader;
+END SkipToNextRecord;
 
-(** Reads the next sequence from the file. Returns FALSE if no more sequences. **)
-PROCEDURE ReadNext*(VAR s: Scanner; VAR seq: Sequence): BOOLEAN;
+(** Locates the next record, copies the ID, and positions the rider at the data.
+    Returns FALSE if no more records are found. **)
+PROCEDURE NextRecord*(VAR s: Scanner; VAR id: ARRAY OF CHAR): BOOLEAN;
 VAR i: INTEGER;
 BEGIN
-  SkipToHeader(s);
+  SkipToNextRecord(s);
   IF s.eof THEN RETURN FALSE END;
 
-  (* 1. Read ID (everything after '>' until newline) *)
-  Files.Read(s.r, s.ch); (* skip '>' *)
+  (* Skip the '>' *)
+  Files.Read(s.r, s.ch);
+  
+  (* Read ID until newline or buffer limit *)
   i := 0;
-  WHILE ~s.eof & (s.ch # 0AX) & (s.ch # 0DX) & (i < MaxIdLen - 1) DO
-    seq.id[i] := s.ch;
+  WHILE ~s.eof & (s.ch >= ' ') & (i < LEN(id) - 1) DO
+    id[i] := s.ch;
     INC(i);
-    Files.Read(s.r, s.ch)
-  END;
-  seq.id[i] := 0X;
-
-  (* 2. Read Sequence Data (lines until next '>' or EOF) *)
-  i := 0;
-  WHILE ~s.eof DO
     Files.Read(s.r, s.ch);
-    s.eof := s.r.eof;
-    IF s.eof OR (s.ch = '>') THEN
-      (* Stay on '>' so the next call finds it *)
-      EXIT 
-    END;
-    
-    (* Filter out newlines and whitespace *)
-    IF (s.ch > ' ') & (i < MaxSeqLen - 1) THEN
-      seq.data[i] := s.ch;
-      INC(i)
-    END
+    s.eof := s.r.eof
   END;
-  seq.data[i] := 0X;
-  seq.len := i;
+  id[i] := 0X;
 
+  (* Clean up any trailing header text/whitespace before data begins *)
+  WHILE ~s.eof & (s.ch < '!') DO 
+    Files.Read(s.r, s.ch);
+    s.eof := s.r.eof
+  END;
+
+  s.headerProcessed := TRUE;
   RETURN TRUE
-END ReadNext;
+END NextRecord;
+
+(** Fills 'buffer' with the next segment of sequence data. 
+    Returns the number of characters read. Returns 0 when the record ends. **)
+PROCEDURE ReadChunk*(VAR s: Scanner; VAR buffer: ARRAY OF CHAR): INTEGER;
+VAR i, max: INTEGER;
+BEGIN
+  i := 0;
+  max := LEN(buffer) - 1;
+  
+  IF ~s.headerProcessed THEN RETURN 0 END;
+
+  (* Read until the next record starts, file ends, or buffer is full *)
+  WHILE ~s.eof & (s.ch # '>') & (i < max) DO
+    IF s.ch > ' ' THEN
+      buffer[i] := s.ch;
+      INC(i)
+    END;
+    Files.Read(s.r, s.ch);
+    s.eof := s.r.eof
+  END;
+  
+  buffer[i] := 0X;
+  
+  (* If we hit a new record, this sequence is done *)
+  IF s.ch = '>' THEN s.headerProcessed := FALSE END;
+  
+  RETURN i
+END ReadChunk;
 
 END FastaParser.
