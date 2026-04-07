@@ -36,6 +36,7 @@ BEGIN
   FOR i := 0 TO MAZE_SIZE-1 DO
     FOR j := 0 TO MAZE_SIZE-1 DO
       maze[i, j] := WALL;
+      seen[i, j] := FALSE;
     END;
   END;
 END InitializeMaze;
@@ -183,6 +184,7 @@ VAR fdx, fdy, ldx, ldy    : INTEGER;
     frontWall, leftWall, rightWall : BOOLEAN;
     mx, my                 : INTEGER;
 BEGIN
+  MarkVisible();
   DirVecs(pdir, fdx, fdy, ldx, ldy);
   Graphics.Clear();
 
@@ -252,7 +254,9 @@ BEGIN
   FOR my := 0 TO MAZE_SIZE-1 DO
     Terminal.Goto(MAP_COL, MAP_ROW + 1 + my);
     FOR mx := 0 TO MAZE_SIZE-1 DO
-      IF (mx = px) & (my = py) THEN
+      IF ~seen[my, mx] THEN
+        Out.Char(' ');
+      ELSIF (mx = px) & (my = py) THEN
         Graphics.Color(6, 0); Out.Char('@'); Graphics.Color(7, 0);
       ELSIF maze[my, mx] = WALL THEN
         Out.Char('#');
