@@ -39,6 +39,7 @@ BEGIN
     INC(count);
     slen := 0; 
     REPEAT
+      WRITELN(LEN(chunk));
       read := FastaParser.ReadChunk(s, chunk);
       INC(slen, Strings.Length(chunk));
     UNTIL read = 0;

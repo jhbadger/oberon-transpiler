@@ -69,7 +69,7 @@ VAR i, max: INTEGER;
 BEGIN
   i := 0;
   max := LEN(buffer) - 1;
-  
+  WRITELN(LEN(buffer));
   IF ~s.headerProcessed THEN RETURN 0 END;
 
   (* Read until the next record starts, file ends, or buffer is full *)

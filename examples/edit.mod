@@ -6,7 +6,6 @@ CONST
   MAXLINES = 2000;
   LLEN     = 256;
 
-  (* Key codes *)
   KEY_UP     = 1;    KEY_DOWN  = 2;
   KEY_LEFT   = 3;    KEY_RIGHT = 4;
   KEY_MOUSE  = 5;
@@ -20,11 +19,22 @@ CONST
   KEY_PGUP   = 258;  KEY_PGDN  = 259;
   KEY_DEL    = 260;
 
+  CLR_NORMAL  = 255;  BG_NORMAL  = 0;
+  CLR_HEAD    = 214;
+  CLR_BOLD    = 15;
+  CLR_ITALIC  = 123;
+  CLR_BOLDITA = 213;
+  CLR_CODE    = 156;  BG_CODE    = 236;
+  CLR_FENCE   = 156;  BG_FENCE   = 17;
+  CLR_MARKER  = 240;
+  CLR_LINK    = 75;
+  CLR_HR      = 242;
+
 VAR
   ROWS, EROWS, COLS : INTEGER;
   buf      : ARRAY MAXLINES, LLEN OF CHAR;
   nlines   : INTEGER;
-  cx, cy   : INTEGER;   (* 0-based *)
+  cx, cy   : INTEGER;
   topLine  : INTEGER;
   leftCol  : INTEGER;
   filename : ARRAY 256 OF CHAR;
@@ -34,8 +44,7 @@ VAR
   running     : BOOLEAN;
   k, mx, my  : INTEGER;
   searchQuery : ARRAY 128 OF CHAR;
-
-(*  Key input  *)
+  lineState : ARRAY MAXLINES OF INTEGER;
 
 PROCEDURE GetKey() : INTEGER;
 VAR c : CHAR;
@@ -55,8 +64,6 @@ BEGIN
   ELSE  RETURN ORD(c)
   END
 END GetKey;
-
-(*  Buffer helpers  *)
 
 PROCEDURE LineLen(li : INTEGER) : INTEGER;
 VAR i : INTEGER;
@@ -119,13 +126,11 @@ BEGIN
   modified := TRUE
 END RemoveLine;
 
-(*  Edit actions  *)
-
 PROCEDURE DoEnter;
 VAR len, rest, i : INTEGER;
 BEGIN
-  IF nlines >= MAXLINES THEN 
-    COPY("Buffer full!", statusMsg); RETURN 
+  IF nlines >= MAXLINES THEN
+    COPY("Buffer full!", statusMsg); RETURN
   END;
   len  := LineLen(cy);
   rest := len - cx;
@@ -172,25 +177,21 @@ BEGIN
   END
 END DoDelete;
 
-(*  Cursor / scroll  *)
-
 PROCEDURE ClampCursor;
 VAR len : INTEGER;
 BEGIN
-  IF cy < 0  THEN  cy := 0  ELSIF cy >= nlines  THEN  cy := nlines - 1  END;
+  IF cy < 0       THEN  cy := 0       ELSIF cy >= nlines  THEN  cy := nlines - 1  END;
   len := LineLen(cy);
-  IF cx < 0  THEN  cx := 0  ELSIF cx > len  THEN  cx := len  END
+  IF cx < 0       THEN  cx := 0       ELSIF cx > len      THEN  cx := len          END
 END ClampCursor;
 
 PROCEDURE ScrollToCursor;
 BEGIN
-  IF cy < topLine           THEN  topLine := cy  END;
-  IF cy >= topLine + EROWS    THEN  topLine := cy - EROWS + 1  END;
-  IF cx < leftCol           THEN  leftCol := cx  END;
-  IF cx >= leftCol + COLS     THEN  leftCol := cx - COLS + 1  END
+  IF cy < topLine            THEN  topLine := cy               END;
+  IF cy >= topLine + EROWS   THEN  topLine := cy - EROWS + 1   END;
+  IF cx < leftCol            THEN  leftCol := cx               END;
+  IF cx >= leftCol + COLS    THEN  leftCol := cx - COLS + 1    END
 END ScrollToCursor;
-
-(*  File I/O  *)
 
 PROCEDURE LoadFile(name : ARRAY OF CHAR) : BOOLEAN;
 VAR f : Files.File;  r : Files.Rider;
@@ -204,20 +205,23 @@ BEGIN
   Files.Read(r, b);
   WHILE ~r.eof DO
     bi := b;
-    IF bi = 10 THEN           (* LF *)
+    IF bi = 10 THEN
       buf[li][col] := 0X;
       INC(li);
-      IF li >= MAXLINES THEN  li := MAXLINES - 1;  WHILE ~r.eof DO Files.Read(r, b) END;  (* Truncate *)
-      ELSE  col := 0; ClearLine(li)
+      IF li >= MAXLINES THEN
+        li := MAXLINES - 1;
+        WHILE ~r.eof DO  Files.Read(r, b)  END
+      ELSE
+        col := 0;  ClearLine(li)
       END
-    ELSIF bi # 13 THEN        (* Ignore CR *)
+    ELSIF bi # 13 THEN
       IF col < LLEN - 1 THEN
-        IF bi = 9 THEN        (* Handle TAB during load *)
-          FOR bi := 1 TO 4 DO 
-            IF col < LLEN - 1 THEN buf[li][col] := ' '; INC(col) END 
+        IF bi = 9 THEN
+          FOR bi := 1 TO 4 DO
+            IF col < LLEN - 1 THEN  buf[li][col] := ' ';  INC(col)  END
           END
         ELSE
-          buf[li][col] := CHR(bi); INC(col)
+          buf[li][col] := CHR(bi);  INC(col)
         END
       END
     END;
@@ -250,6 +254,241 @@ BEGIN
   modified := FALSE;
   RETURN TRUE
 END SaveFile;
+
+PROCEDURE IsFence(li : INTEGER) : BOOLEAN;
+VAR len : INTEGER;
+BEGIN
+  len := LineLen(li);
+  RETURN ((len >= 3) &
+          ((buf[li][0] = '`') & (buf[li][1] = '`') & (buf[li][2] = '`')) OR
+          ((buf[li][0] = '~') & (buf[li][1] = '~') & (buf[li][2] = '~')))
+END IsFence;
+
+PROCEDURE ComputeLineStates;
+VAR li, st : INTEGER;
+BEGIN
+  st := 0;
+  FOR li := 0 TO nlines - 1 DO
+    lineState[li] := st;
+    IF IsFence(li) THEN
+      IF st = 0 THEN  st := 1  ELSE  st := 0  END
+    END
+  END;
+  lineState[nlines] := st
+END ComputeLineStates;
+
+PROCEDURE CountPattern(li : INTEGER; p : ARRAY OF CHAR; plen : INTEGER) : INTEGER;
+VAR col, len, i, cnt : INTEGER;  match : BOOLEAN;
+BEGIN
+  len := LineLen(li);  col := 0;  cnt := 0;
+  WHILE col <= len - plen DO
+    match := TRUE;  i := 0;
+    WHILE match & (i < plen) DO
+      IF buf[li][col + i] # p[i] THEN  match := FALSE  END;
+      INC(i)
+    END;
+    IF match THEN  INC(cnt);  col := col + plen  ELSE  INC(col)  END
+  END;
+  RETURN cnt
+END CountPattern;
+
+PROCEDURE IsHR(li : INTEGER) : BOOLEAN;
+VAR len, i : INTEGER;  ch : CHAR;  ok : BOOLEAN;
+BEGIN
+  len := LineLen(li);
+  IF len < 3 THEN  RETURN FALSE  END;
+  ch := buf[li][0];
+  IF (ch # '-') & (ch # '*') & (ch # '_') THEN  RETURN FALSE  END;
+  ok := TRUE;  i := 0;
+  WHILE ok & (i < len) DO
+    IF buf[li][i] # ch THEN  ok := FALSE  END;
+    INC(i)
+  END;
+  RETURN ok
+END IsHR;
+
+PROCEDURE RenderLine(li, leftCol, cols, carryIn : INTEGER);
+VAR
+  col, sc, len     : INTEGER;
+  c                : CHAR;
+  isHeading, isHR  : BOOLEAN;
+  isFenceLine      : BOOLEAN;
+  nBoldIta, nBold, nItalic, nCode : INTEGER;
+  inCode, inBold, inItalic, inBoldIta : BOOLEAN;
+  inLink, inUrl                        : BOOLEAN;
+
+  PROCEDURE ApplyState;
+  BEGIN
+    IF inCode THEN
+      Graphics.Color256(CLR_CODE, BG_CODE)
+    ELSIF carryIn = 1 THEN
+      Graphics.Color256(CLR_FENCE, BG_FENCE)
+    ELSIF inBoldIta THEN
+      Graphics.Color256(CLR_BOLDITA, BG_NORMAL)
+    ELSIF inBold THEN
+      Graphics.Color256(CLR_BOLD, BG_NORMAL)
+    ELSIF inItalic THEN
+      Graphics.Color256(CLR_ITALIC, BG_NORMAL)
+    ELSIF isHeading THEN
+      Graphics.Color256(CLR_HEAD, BG_NORMAL)
+    ELSIF isHR THEN
+      Graphics.Color256(CLR_HR, BG_NORMAL)
+    ELSIF inLink OR inUrl THEN
+      Graphics.Color256(CLR_LINK, BG_NORMAL)
+    ELSE
+      Graphics.Color256(CLR_NORMAL, BG_NORMAL)
+    END
+  END ApplyState;
+
+  PROCEDURE Marker;
+  BEGIN  Graphics.Color256(CLR_MARKER, BG_NORMAL)  END Marker;
+
+  PROCEDURE At(pos : INTEGER; ch : CHAR) : BOOLEAN;
+  BEGIN  RETURN (pos < len) & (buf[li][pos] = ch)  END At;
+
+  PROCEDURE EmitChar(ch : CHAR);
+  BEGIN
+    IF ORD(ch) < 32 THEN  Out.Char(' ')  ELSE  Out.Char(ch)  END
+  END EmitChar;
+
+BEGIN
+  len         := LineLen(li);
+  isFenceLine := IsFence(li);
+  isHeading   := (carryIn = 0) & ~isFenceLine & (len > 0) & (buf[li][0] = '#');
+  isHR        := (carryIn = 0) & ~isFenceLine & IsHR(li);
+
+  nBoldIta := 0;  nBold := 0;  nItalic := 0;  nCode := 0;
+  IF (carryIn = 0) & ~isFenceLine THEN
+    col := 0;
+    WHILE col <= len - 3 DO
+      IF At(col,'*') & At(col+1,'*') & At(col+2,'*') THEN
+        INC(nBoldIta);  col := col + 3
+      ELSE  INC(col)
+      END
+    END;
+    col := 0;
+    WHILE col <= len - 2 DO
+      IF At(col,'*') & At(col+1,'*') THEN
+        IF ~(At(col+2,'*') OR ((col > 0) & (buf[li][col-1] = '*'))) THEN
+          INC(nBold)
+        END;
+        col := col + 2
+      ELSE  INC(col)
+      END
+    END;
+    col := 0;
+    WHILE col < len DO
+      IF At(col,'*') THEN
+        IF ~At(col+1,'*') & ~((col > 0) & (buf[li][col-1] = '*')) THEN
+          INC(nItalic)
+        END
+      END;
+      INC(col)
+    END;
+  END;
+
+  inCode    := FALSE;  inBold    := FALSE;
+  inItalic  := FALSE;  inBoldIta := FALSE;
+  inLink    := FALSE;  inUrl     := FALSE;
+
+  IF isFenceLine THEN
+    Marker;
+    sc := 0;  col := leftCol;
+    WHILE sc < cols DO
+      IF col < len THEN  Out.Char(buf[li][col])  ELSE  Out.Char(' ')  END;
+      INC(col);  INC(sc)
+    END;
+    RETURN
+  END;
+
+  ApplyState;
+  sc := 0;  col := leftCol;
+
+  WHILE sc < cols DO
+    IF col >= len THEN
+      Out.Char(' ');  INC(col);  INC(sc)
+    ELSE
+      c := buf[li][col];
+
+      IF carryIn = 1 THEN
+        EmitChar(c)
+
+      ELSIF c = '`' THEN
+        IF ODD(nCode) THEN  Out.Char(c)
+        ELSE
+          Marker;  Out.Char(c);
+          inCode := ~inCode;
+          ApplyState
+        END
+
+      ELSIF inCode THEN
+        EmitChar(c)
+
+      ELSIF At(col,'*') & At(col+1,'*') & At(col+2,'*') THEN
+        IF ODD(nBoldIta) THEN
+          Out.Char(c)
+        ELSE
+          Marker;
+          Out.Char('*');                          INC(sc);
+          IF sc < cols THEN  Out.Char('*');  INC(sc)  END;
+          IF sc < cols THEN  Out.Char('*')         END;
+          INC(col, 2);
+          inBoldIta := ~inBoldIta;
+          ApplyState
+        END
+
+      ELSIF At(col,'*') & At(col+1,'*') THEN
+        IF ODD(nBold) THEN
+          Out.Char(c)
+        ELSE
+          Marker;
+          Out.Char('*');                          INC(sc);
+          IF sc < cols THEN  Out.Char('*')         END;
+          INC(col);
+          inBold := ~inBold;
+          ApplyState
+        END
+
+      ELSIF c = '*' THEN
+        IF ODD(nItalic) THEN  Out.Char(c)
+        ELSE
+          Marker;  Out.Char(c);
+          inItalic := ~inItalic;
+          ApplyState
+        END
+
+      ELSIF c = '[' THEN
+        Marker;  Out.Char(c);
+        inLink := TRUE;
+        Graphics.Color256(CLR_LINK, BG_NORMAL)
+
+      ELSIF (c = ']') & inLink THEN
+        inLink := FALSE;
+        Marker;  Out.Char(c);
+        IF At(col+1,'(') THEN
+          INC(col);  INC(sc);
+          IF sc < cols THEN
+            Marker;  Out.Char('(')
+          END;
+          inUrl := TRUE;
+          ApplyState
+        ELSE
+          ApplyState
+        END
+
+      ELSIF (c = ')') & inUrl THEN
+        inUrl := FALSE;
+        Marker;  Out.Char(c);
+        ApplyState
+
+      ELSE
+        EmitChar(c)
+      END;
+
+      INC(col);  INC(sc)
+    END
+  END
+END RenderLine;
 
 PROCEDURE DoFind;
 VAR li, col, i, qlen, count : INTEGER;
@@ -300,32 +539,21 @@ BEGIN
   END
 END Prompt;
 
-(*  Rendering  *)
-
 PROCEDURE Render;
-VAR row, li, col, sc, len : INTEGER;
-    c : CHAR;
+VAR row, li, col : INTEGER;
 BEGIN
-  FOR row := 0 TO EROWS-1 DO
+  ComputeLineStates;
+
+  FOR row := 0 TO EROWS - 1 DO
     li := topLine + row;
     Terminal.Goto(1, row + 2);
     IF li < nlines THEN
-      Graphics.Color256(255, 0);
-      sc  := 0; col := leftCol;
-      len := LineLen(li);
-      WHILE sc < COLS DO
-        IF col < len THEN
-          c := buf[li][col];
-          IF ORD(c) < 32 THEN  Out.Char(' ')  ELSE  Out.Char(c)  END
-        ELSE  Out.Char(' ')
-        END;
-        INC(col);  INC(sc)
-      END
+      RenderLine(li, leftCol, COLS, lineState[li])
     ELSE
       Graphics.Color256(240, 0);
       Out.Char('~');
       Graphics.Color256(0, 0);
-      FOR col := 1 TO COLS-1 DO  Out.Char(' ')  END
+      FOR col := 1 TO COLS - 1 DO  Out.Char(' ')  END
     END
   END;
 
@@ -333,13 +561,15 @@ BEGIN
   Graphics.Color256(15, 4);
   FOR col := 1 TO COLS DO  Out.Char(' ')  END;
   Terminal.Goto(1, 1);
-  IF filename[0] = 0X THEN Out.String("  [No Name]") ELSE Out.String("  "); Out.String(filename) END;
+  IF filename[0] = 0X THEN  Out.String("  [No Name]")
+  ELSE  Out.String("  ");  Out.String(filename)
+  END;
   IF modified THEN  Out.String(" [+]")  END;
-  IF statusMsg[0] # 0X THEN Out.String("  |  "); Out.String(statusMsg) END;
-  
+  IF statusMsg[0] # 0X THEN  Out.String("  |  ");  Out.String(statusMsg)  END;
+
   Terminal.Goto(COLS - 17, 1);
-  Out.String("Ln:"); Out.Int(cy+1, 4);
-  Out.String(" Col:"); Out.Int(cx+1, 3);
+  Out.String("Ln:");  Out.Int(cy + 1, 4);
+  Out.String(" Col:");  Out.Int(cx + 1, 3);
 
   Terminal.Goto(1, ROWS);
   Graphics.Color256(15, 239);
@@ -351,8 +581,6 @@ BEGIN
   Terminal.Goto(cx - leftCol + 1, cy - topLine + 2)
 END Render;
 
-(*  Main  *)
-
 BEGIN
   COLS  := Terminal.Cols();
   ROWS  := Terminal.Rows();
@@ -360,14 +588,14 @@ BEGIN
   Terminal.Clear;
   Terminal.MouseOn();
   Terminal.ShowCursor;
-  nlines := 1; ClearLine(0);
-  cx := 0; cy := 0; topLine := 0; leftCol := 0;
-  filename[0] := 0X; statusMsg[0] := 0X;
-  modified := FALSE; running := TRUE;  searchQuery[0] := 0X;
+  nlines := 1;  ClearLine(0);
+  cx := 0;  cy := 0;  topLine := 0;  leftCol := 0;
+  filename[0] := 0X;  statusMsg[0] := 0X;
+  modified := FALSE;  running := TRUE;  searchQuery[0] := 0X;
 
   IF Args.Count() > 0 THEN
     Args.Get(1, filename);
-    IF ~LoadFile(filename) THEN COPY("New file.", statusMsg) END
+    IF ~LoadFile(filename) THEN  COPY("New file.", statusMsg)  END
   END;
 
   WHILE running DO
@@ -388,27 +616,29 @@ BEGIN
       END
     ELSIF k = KEY_HOME  THEN  cy := 0;  cx := 0
     ELSIF k = KEY_END   THEN  cy := nlines - 1;  cx := LineLen(cy)
-    ELSIF k = KEY_PGUP  THEN  DEC(cy, EROWS); ClampCursor
-    ELSIF k = KEY_PGDN  THEN  INC(cy, EROWS); ClampCursor
+    ELSIF k = KEY_PGUP  THEN  DEC(cy, EROWS);  ClampCursor
+    ELSIF k = KEY_PGDN  THEN  INC(cy, EROWS);  ClampCursor
     ELSIF k = KEY_MOUSE THEN
       mx := Terminal.MouseX();  my := Terminal.MouseY();
-      IF (my >= 2) & (my <= EROWS+1) THEN
-        cy := topLine + my - 2; cx := leftCol + mx - 1; ClampCursor
+      IF (my >= 2) & (my <= EROWS + 1) THEN
+        cy := topLine + my - 2;  cx := leftCol + mx - 1;  ClampCursor
       END
     ELSIF k = KEY_ENTER THEN  DoEnter
     ELSIF k = KEY_BS    THEN  DoBackspace
     ELSIF k = KEY_DEL   THEN  DoDelete
     ELSIF k = KEY_TAB   THEN
-      FOR mx := 1 TO 4 DO InsertCharAt(cy, cx, ' '); INC(cx) END
+      FOR mx := 1 TO 4 DO  InsertCharAt(cy, cx, ' ');  INC(cx)  END
     ELSIF k = KEY_CTRL_F THEN
       IF Prompt("Find: ", searchQuery) THEN  DoFind  END
     ELSIF k = KEY_CTRL_W THEN
-      IF (filename[0] = 0X) & Prompt("Save as: ", tmpname) THEN COPY(tmpname, filename) END;
-      IF (filename[0] # 0X) & SaveFile() THEN COPY("Saved.", statusMsg) END
+      IF (filename[0] = 0X) & Prompt("Save as: ", tmpname) THEN  COPY(tmpname, filename)  END;
+      IF (filename[0] # 0X) & SaveFile() THEN  COPY("Saved.", statusMsg)  END
     ELSIF k = KEY_CTRL_O THEN
       IF Prompt("Open: ", tmpname) THEN
         COPY(tmpname, filename);
-        IF LoadFile(filename) THEN cx:=0; cy:=0; modified:=FALSE; COPY("Loaded.", statusMsg) END
+        IF LoadFile(filename) THEN
+          cx := 0;  cy := 0;  modified := FALSE;  COPY("Loaded.", statusMsg)
+        END
       END
     ELSIF k = KEY_CTRL_Q THEN  running := FALSE
     ELSIF (k >= 32) & (k <= 126) THEN
