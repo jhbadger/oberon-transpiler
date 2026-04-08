@@ -3,9 +3,6 @@ MODULE Edit;
 IMPORT Terminal, Graphics, Out, Files, Args, Strings;
 
 CONST
-  ROWS  = 24;
-  EROWS = 22;   (* text area rows 2..ROWS-1 *)
-  COLS  = 80;
   MAXLINES = 2000;
   LLEN     = 256;
 
@@ -15,6 +12,7 @@ CONST
   KEY_MOUSE  = 5;
   KEY_BS     = 8;    KEY_TAB   = 9;
   KEY_ENTER  = 13;   KEY_ESC   = 27;
+  KEY_CTRL_F = 6;
   KEY_CTRL_O = 15;
   KEY_CTRL_Q = 17;
   KEY_CTRL_W = 23;
@@ -23,6 +21,7 @@ CONST
   KEY_DEL    = 260;
 
 VAR
+  ROWS, EROWS, COLS : INTEGER;
   buf      : ARRAY MAXLINES, LLEN OF CHAR;
   nlines   : INTEGER;
   cx, cy   : INTEGER;   (* 0-based *)
@@ -31,53 +30,29 @@ VAR
   filename : ARRAY 256 OF CHAR;
   tmpname  : ARRAY 256 OF CHAR;
   statusMsg: ARRAY 60  OF CHAR;
-  modified : BOOLEAN;
-  running  : BOOLEAN;
-  k, mx, my: INTEGER;
+  modified    : BOOLEAN;
+  running     : BOOLEAN;
+  k, mx, my  : INTEGER;
+  searchQuery : ARRAY 128 OF CHAR;
 
 (*  Key input  *)
 
 PROCEDURE GetKey() : INTEGER;
-VAR c, c2 : CHAR;  t : LONGINT;
+VAR c : CHAR;
 BEGIN
   c := Terminal.ReadKey();
-  IF    ORD(c) = 1  THEN  RETURN KEY_UP
-  ELSIF ORD(c) = 2  THEN  RETURN KEY_DOWN
-  ELSIF ORD(c) = 3  THEN  RETURN KEY_LEFT
-  ELSIF ORD(c) = 4  THEN  RETURN KEY_RIGHT
-  ELSIF ORD(c) = 5  THEN  RETURN KEY_MOUSE
-  ELSIF ORD(c) = 27 THEN
-    t := Terminal.GetTickCount() + 20;
-    WHILE ~Terminal.KeyPressed() & (Terminal.GetTickCount() < t) DO  END;
-    IF ~Terminal.KeyPressed() THEN  RETURN KEY_ESC  END;
-    c := Terminal.ReadKey();
-    IF c # '[' THEN  RETURN KEY_ESC  END;
-    t := Terminal.GetTickCount() + 20;
-    WHILE ~Terminal.KeyPressed() & (Terminal.GetTickCount() < t) DO  END;
-    IF ~Terminal.KeyPressed() THEN  RETURN KEY_ESC  END;
-    c := Terminal.ReadKey();
-    IF    c = 'A' THEN  RETURN KEY_UP
-    ELSIF c = 'B' THEN  RETURN KEY_DOWN
-    ELSIF c = 'C' THEN  RETURN KEY_RIGHT
-    ELSIF c = 'D' THEN  RETURN KEY_LEFT
-    ELSIF c = 'H' THEN  RETURN KEY_HOME
-    ELSIF c = 'F' THEN  RETURN KEY_END
-    ELSIF (c >= '1') & (c <= '9') THEN
-      t := Terminal.GetTickCount() + 20;
-      WHILE ~Terminal.KeyPressed() & (Terminal.GetTickCount() < t) DO  END;
-      IF Terminal.KeyPressed() THEN  c2 := Terminal.ReadKey()  END;
-      IF    c = '1' THEN  RETURN KEY_HOME
-      ELSIF c = '3' THEN  RETURN KEY_DEL
-      ELSIF c = '4' THEN  RETURN KEY_END
-      ELSIF c = '5' THEN  RETURN KEY_PGUP
-      ELSIF c = '6' THEN  RETURN KEY_PGDN
-      ELSIF c = '7' THEN  RETURN KEY_HOME
-      ELSIF c = '8' THEN  RETURN KEY_END
-      END
-    END;
-    RETURN KEY_ESC
-  ELSE
-    RETURN ORD(c)
+  IF    ORD(c) =  1 THEN  RETURN KEY_UP
+  ELSIF ORD(c) =  2 THEN  RETURN KEY_DOWN
+  ELSIF ORD(c) =  3 THEN  RETURN KEY_LEFT
+  ELSIF ORD(c) =  4 THEN  RETURN KEY_RIGHT
+  ELSIF ORD(c) =  5 THEN  RETURN KEY_MOUSE
+  ELSIF ORD(c) = 128 THEN  RETURN KEY_PGUP
+  ELSIF ORD(c) = 129 THEN  RETURN KEY_PGDN
+  ELSIF ORD(c) = 130 THEN  RETURN KEY_HOME
+  ELSIF ORD(c) = 131 THEN  RETURN KEY_END
+  ELSIF ORD(c) = 132 THEN  RETURN KEY_DEL
+  ELSIF ORD(c) = 127 THEN RETURN KEY_BS
+  ELSE  RETURN ORD(c)
   END
 END GetKey;
 
@@ -276,6 +251,32 @@ BEGIN
   RETURN TRUE
 END SaveFile;
 
+PROCEDURE DoFind;
+VAR li, col, i, qlen, count : INTEGER;
+    found : BOOLEAN;
+BEGIN
+  qlen := Strings.Length(searchQuery);
+  IF qlen = 0 THEN  RETURN  END;
+  li := cy;  col := cx + 1;
+  found := FALSE;  count := 0;
+  LOOP
+    IF col + qlen > LineLen(li) THEN
+      INC(li);  col := 0;
+      IF li >= nlines THEN  li := 0;  INC(count)  END;
+      IF count > 1 THEN  EXIT  END
+    ELSE
+      i := 0;
+      WHILE (i < qlen) & (buf[li][col + i] = searchQuery[i]) DO  INC(i)  END;
+      IF i = qlen THEN
+        cy := li;  cx := col;  found := TRUE;  EXIT
+      ELSE
+        INC(col)
+      END
+    END
+  END;
+  IF ~found THEN  COPY("Not found.", statusMsg)  END
+END DoFind;
+
 PROCEDURE Prompt(prompt : ARRAY OF CHAR; VAR result : ARRAY OF CHAR) : BOOLEAN;
 VAR i, j, plen : INTEGER;
 BEGIN
@@ -344,7 +345,7 @@ BEGIN
   Graphics.Color256(15, 239);
   FOR col := 1 TO COLS DO  Out.Char(' ')  END;
   Terminal.Goto(1, ROWS);
-  Out.String(" ^O Open  ^W Save  ^Q Quit | Arrows/Home/End/Pg Move | Mouse Click");
+  Out.String(" ^O Open  ^W Save  ^Q Quit  ^F Find | Arrows/PgUp/PgDn/Home/End | Mouse");
 
   Graphics.Reset;
   Terminal.Goto(cx - leftCol + 1, cy - topLine + 2)
@@ -353,13 +354,16 @@ END Render;
 (*  Main  *)
 
 BEGIN
+  COLS  := Terminal.Cols();
+  ROWS  := Terminal.Rows();
+  EROWS := ROWS - 2;
   Terminal.Clear;
   Terminal.MouseOn();
   Terminal.ShowCursor;
   nlines := 1; ClearLine(0);
   cx := 0; cy := 0; topLine := 0; leftCol := 0;
   filename[0] := 0X; statusMsg[0] := 0X;
-  modified := FALSE; running := TRUE;
+  modified := FALSE; running := TRUE;  searchQuery[0] := 0X;
 
   IF Args.Count() > 0 THEN
     Args.Get(1, filename);
@@ -382,8 +386,8 @@ BEGIN
       IF cx < LineLen(cy) THEN  INC(cx)
       ELSIF cy < nlines-1  THEN  INC(cy);  cx := 0
       END
-    ELSIF k = KEY_HOME  THEN  cx := 0
-    ELSIF k = KEY_END   THEN  cx := LineLen(cy)
+    ELSIF k = KEY_HOME  THEN  cy := 0;  cx := 0
+    ELSIF k = KEY_END   THEN  cy := nlines - 1;  cx := LineLen(cy)
     ELSIF k = KEY_PGUP  THEN  DEC(cy, EROWS); ClampCursor
     ELSIF k = KEY_PGDN  THEN  INC(cy, EROWS); ClampCursor
     ELSIF k = KEY_MOUSE THEN
@@ -396,6 +400,8 @@ BEGIN
     ELSIF k = KEY_DEL   THEN  DoDelete
     ELSIF k = KEY_TAB   THEN
       FOR mx := 1 TO 4 DO InsertCharAt(cy, cx, ' '); INC(cx) END
+    ELSIF k = KEY_CTRL_F THEN
+      IF Prompt("Find: ", searchQuery) THEN  DoFind  END
     ELSIF k = KEY_CTRL_W THEN
       IF (filename[0] = 0X) & Prompt("Save as: ", tmpname) THEN COPY(tmpname, filename) END;
       IF (filename[0] # 0X) & SaveFile() THEN COPY("Saved.", statusMsg) END

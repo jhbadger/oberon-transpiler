@@ -571,7 +571,7 @@ static void emit_builtin(CG *g, const char *name, Node *args) {
     } else if (!strcasecmp(name,"ODD")) {
         emit(g,"(("); if(a0) emit_expr(g,a0); emit(g,") & 1)");
     } else if (!strcasecmp(name,"ORD")) {
-        emit(g,"((int)("); if(a0) emit_expr(g,a0); emit(g,"))");
+        emit(g,"((int)(unsigned char)("); if(a0) emit_expr(g,a0); emit(g,"))");
     } else if (!strcasecmp(name,"CHR")) {
         emit(g,"((char)("); if(a0) emit_expr(g,a0); emit(g,"))");
     } else if (!strcasecmp(name,"LEN")) {
@@ -1656,6 +1656,7 @@ void codegen(Node *module, FILE *out, int is_main) {
     if (has_terminal) {
         emit(g,"#include <termios.h>\n");
         emit(g,"#include <sys/time.h>\n");
+        emit(g,"#include <sys/ioctl.h>\n");
         emit(g,"#include <unistd.h>\n");
         emit(g,"#include <time.h>\n");
         emit(g,"\n");
@@ -1681,8 +1682,9 @@ void codegen(Node *module, FILE *out, int is_main) {
         emit(g,"    tcgetattr(STDIN_FILENO, &_term_orig);\n");
         emit(g,"    raw = _term_orig;\n");
         emit(g,"    raw.c_iflag &= ~(unsigned)(ICRNL|IXON);\n");
-        emit(g,"    raw.c_lflag &= ~(unsigned)(ECHO|ICANON|ISIG);\n");
+        emit(g,"    raw.c_lflag &= ~(unsigned)(ECHO|ICANON|ISIG|FLUSHO);\n");
         emit(g,"    raw.c_cc[VMIN] = 0; raw.c_cc[VTIME] = 0;\n");
+        emit(g,"    raw.c_cc[VDISCARD] = _POSIX_VDISABLE;\n");
         emit(g,"    tcsetattr(STDIN_FILENO, TCSANOW, &raw);\n");
         emit(g,"    printf(\"\\033[?25l\"); fflush(stdout);\n");
         emit(g,"    atexit(_term_restore);\n");
@@ -1722,6 +1724,16 @@ void codegen(Node *module, FILE *out, int is_main) {
         emit(g,"    struct timeval tv;\n");
         emit(g,"    gettimeofday(&tv, NULL);\n");
         emit(g,"    return (long)(tv.tv_sec * 1000L + tv.tv_usec / 1000);\n");
+        emit(g,"}\n");
+        emit(g,"static int Terminal_Cols(void) {\n");
+        emit(g,"    struct winsize ws;\n");
+        emit(g,"    if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == 0 && ws.ws_col > 0) return ws.ws_col;\n");
+        emit(g,"    return 80;\n");
+        emit(g,"}\n");
+        emit(g,"static int Terminal_Rows(void) {\n");
+        emit(g,"    struct winsize ws;\n");
+        emit(g,"    if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == 0 && ws.ws_row > 0) return ws.ws_row;\n");
+        emit(g,"    return 24;\n");
         emit(g,"}\n");
         emit(g,"static int Terminal_Random(int n) {\n");
         emit(g,"    return n > 0 ? rand() %% n : 0;\n");
@@ -1786,6 +1798,20 @@ void codegen(Node *module, FILE *out, int is_main) {
         emit(g,"                else           _term_mouse_btn=(btn&67);\n");
         emit(g,"                tcsetattr(STDIN_FILENO,TCSANOW,&t2);\n");
         emit(g,"                return '\\x05';\n");
+        emit(g,"            }\n");
+        /* Home / End (ESC [ H / ESC [ F) */
+        emit(g,"            if (c3=='H') { tcsetattr(STDIN_FILENO,TCSANOW,&t2); return (char)130; }\n");
+        emit(g,"            if (c3=='F') { tcsetattr(STDIN_FILENO,TCSANOW,&t2); return (char)131; }\n");
+        /* ESC [ digit ~ sequences: PgUp=5, PgDn=6, Del=3, Home=1/7, End=4/8 */
+        emit(g,"            if (c3>='1' && c3<='9') {\n");
+        emit(g,"                char c4=0; read(STDIN_FILENO,&c4,1);\n");
+        emit(g,"                tcsetattr(STDIN_FILENO,TCSANOW,&t2);\n");
+        emit(g,"                if (c3=='5') return (char)128;\n");
+        emit(g,"                if (c3=='6') return (char)129;\n");
+        emit(g,"                if (c3=='3') return (char)132;\n");
+        emit(g,"                if (c3=='1'||c3=='7') return (char)130;\n");
+        emit(g,"                if (c3=='4'||c3=='8') return (char)131;\n");
+        emit(g,"                return '\\x1B';\n");
         emit(g,"            }\n");
         emit(g,"        }\n");
         emit(g,"        t2.c_cc[VMIN]=0; t2.c_cc[VTIME]=0;\n");
