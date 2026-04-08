@@ -1682,9 +1682,15 @@ void codegen(Node *module, FILE *out, int is_main) {
         emit(g,"    tcgetattr(STDIN_FILENO, &_term_orig);\n");
         emit(g,"    raw = _term_orig;\n");
         emit(g,"    raw.c_iflag &= ~(unsigned)(ICRNL|IXON);\n");
-        emit(g,"    raw.c_lflag &= ~(unsigned)(ECHO|ICANON|ISIG|FLUSHO);\n");
+        emit(g,"    raw.c_lflag &= ~(unsigned)(ECHO|ICANON|ISIG\n");
+        emit(g,"#ifdef FLUSHO\n");
+        emit(g,"        |FLUSHO\n");
+        emit(g,"#endif\n");
+        emit(g,"    );\n");
         emit(g,"    raw.c_cc[VMIN] = 0; raw.c_cc[VTIME] = 0;\n");
+        emit(g,"#ifdef VDISCARD\n");
         emit(g,"    raw.c_cc[VDISCARD] = _POSIX_VDISABLE;\n");
+        emit(g,"#endif\n");
         emit(g,"    tcsetattr(STDIN_FILENO, TCSANOW, &raw);\n");
         emit(g,"    printf(\"\\033[?25l\"); fflush(stdout);\n");
         emit(g,"    atexit(_term_restore);\n");
@@ -1802,9 +1808,23 @@ void codegen(Node *module, FILE *out, int is_main) {
         /* Home / End (ESC [ H / ESC [ F) */
         emit(g,"            if (c3=='H') { tcsetattr(STDIN_FILENO,TCSANOW,&t2); return (char)130; }\n");
         emit(g,"            if (c3=='F') { tcsetattr(STDIN_FILENO,TCSANOW,&t2); return (char)131; }\n");
-        /* ESC [ digit ~ sequences: PgUp=5, PgDn=6, Del=3, Home=1/7, End=4/8 */
+        /* ESC [ digit ~ sequences: PgUp=5, PgDn=6, Del=3, Home=1/7, End=4/8
+         * Also ESC [ 1 ; 5 D/C/H/F for Ctrl+Left/Right/Home/End */
         emit(g,"            if (c3>='1' && c3<='9') {\n");
         emit(g,"                char c4=0; read(STDIN_FILENO,&c4,1);\n");
+        emit(g,"                if (c4==';') {\n");
+        emit(g,"                    char c5=0,c6=0;\n");
+        emit(g,"                    read(STDIN_FILENO,&c5,1);\n");
+        emit(g,"                    read(STDIN_FILENO,&c6,1);\n");
+        emit(g,"                    tcsetattr(STDIN_FILENO,TCSANOW,&t2);\n");
+        emit(g,"                    if (c5=='5') {\n");
+        emit(g,"                        if (c6=='D') return (char)133;\n");
+        emit(g,"                        if (c6=='C') return (char)134;\n");
+        emit(g,"                        if (c6=='H') return (char)135;\n");
+        emit(g,"                        if (c6=='F') return (char)136;\n");
+        emit(g,"                    }\n");
+        emit(g,"                    return '\\x1B';\n");
+        emit(g,"                }\n");
         emit(g,"                tcsetattr(STDIN_FILENO,TCSANOW,&t2);\n");
         emit(g,"                if (c3=='5') return (char)128;\n");
         emit(g,"                if (c3=='6') return (char)129;\n");
