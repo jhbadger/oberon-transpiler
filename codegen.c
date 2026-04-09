@@ -737,8 +737,8 @@ static int try_emit_import(CG *g, Node *fa, Node *args) {
         if (!strcmp(proc,"ToUpper"))   { emit(g,"Strings_ToUpper(");    emit_expr(g,a0); emit(g,")"); return 1; }
         if (!strcmp(proc,"ToLower"))   { emit(g,"Strings_ToLower(");    emit_expr(g,a0); emit(g,")"); return 1; }
         if (!strcmp(proc,"Trim"))      { emit(g,"Strings_Trim(");       emit_expr(g,a0); emit(g,")"); return 1; }
-        if (!strcmp(proc,"IntToStr"))  { emit(g,"Strings_IntToStr(");   emit_expr(g,a0); emit(g,","); emit_expr(g,a1); emit(g,")"); return 1; }
-        if (!strcmp(proc,"RealToStr")) { emit(g,"Strings_RealToStr(");  emit_expr(g,a0); emit(g,","); emit_expr(g,a1); emit(g,")"); return 1; }
+        if (!strcmp(proc,"IntToStr"))  { emit(g,"Strings_IntToStr(");   emit_expr(g,a0); emit(g,","); emit_expr(g,a1); emit(g,","); emit_open_array_len(g,a1); emit(g,")"); return 1; }
+        if (!strcmp(proc,"RealToStr")) { emit(g,"Strings_RealToStr(");  emit_expr(g,a0); emit(g,","); emit_expr(g,a1); emit(g,","); emit_open_array_len(g,a1); emit(g,")"); return 1; }
         if (!strcmp(proc,"StrToInt"))  { emit(g,"Strings_StrToInt(");   emit_as_string(g,a0); emit(g,",&"); emit_expr(g,a1); emit(g,")"); return 1; }
         if (!strcmp(proc,"StrToReal")) { emit(g,"Strings_StrToReal(");  emit_as_string(g,a0); emit(g,",&"); emit_expr(g,a1); emit(g,")"); return 1; }
         (void)a2;
@@ -808,6 +808,7 @@ static int try_emit_import(CG *g, Node *fa, Node *args) {
             int is_var = fp ? (fp->flags & FLAG_VAR_PARAM) != 0 : 0;
             if (is_var) emit_addr_of(g, a);
             else        emit_expr(g, a);
+            if (fp && is_open_array(fp->c1)) { emit(g,","); emit_open_array_len(g,a); }
             if (fp) {
                 fp_id = fp_id ? fp_id->next : NULL;
                 if (!fp_id) { fp = fp->next; fp_id = fp ? fp->c0 : NULL; }
@@ -2047,8 +2048,8 @@ void codegen(Node *module, FILE *out, int is_main) {
         emit(g,"    while (len>0 && (s[len-1]==' '||s[len-1]=='\\t'||s[len-1]=='\\n'||s[len-1]=='\\r')) s[--len]=0;\n");
         emit(g,"}\n");
         /* Number ↔ string conversions */
-        emit(g,"static void Strings_IntToStr(int n, char *s) { snprintf(s,256,\"%%d\",n); }\n");
-        emit(g,"static void Strings_RealToStr(double x, char *s) { snprintf(s,256,\"%%g\",x); }\n");
+        emit(g,"static void Strings_IntToStr(int n, char *s, int s_len) { snprintf(s,(size_t)s_len,\"%%d\",n); }\n");
+        emit(g,"static void Strings_RealToStr(double x, char *s, int s_len) { snprintf(s,(size_t)s_len,\"%%g\",x); }\n");
         emit(g,"static int Strings_StrToInt(const char *s, int *n) { return sscanf(s,\"%%d\",n)==1; }\n");
         emit(g,"static int Strings_StrToReal(const char *s, double *x) { return sscanf(s,\"%%lf\",x)==1; }\n");
         emit(g,"\n");

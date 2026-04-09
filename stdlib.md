@@ -245,11 +245,12 @@ on exit.  `Random` is also seeded automatically.
 | `Terminal.ShowCursor()` | Make the cursor visible. |
 | `Terminal.HideCursor()` | Hide the cursor. |
 | `Terminal.KeyPressed(): BOOLEAN` | Returns TRUE (non-zero) if a key is waiting in the input buffer. Non-blocking. |
-| `Terminal.ReadKey(): CHAR` | Read and return the next key.  Blocks if no key is ready. Special keys are mapped to values above 127: Up=`01X`, Down=`02X`, Left=`03X`, Right=`04X`, Mouse=`05X`, PgUp=`ORD 128`, PgDn=`ORD 129`, Home=`ORD 130`, End=`ORD 131`, Del=`ORD 132`. Call `MouseX/Y/Btn` immediately after a mouse event to get the details. |
+| `Terminal.ReadKey(): CHAR` | Read and return the next key.  Blocks if no key is ready. Special keys are mapped to values above 127: Up=`01X`, Down=`02X`, Left=`03X`, Right=`04X`, Mouse=`05X`, PgUp=`ORD 128`, PgDn=`ORD 129`, Home=`ORD 130`, End=`ORD 131`, Del=`ORD 132`, Ctrl+Left=`ORD 133`, Ctrl+Right=`ORD 134`, Ctrl+Home=`ORD 135`, Ctrl+End=`ORD 136`. Call `MouseX/Y/Btn` immediately after a mouse event to get the details. |
 | `Terminal.GetTickCount(): INTEGER` | Milliseconds since the Unix epoch (useful for timing). |
 | `Terminal.Cols(): INTEGER` | Returns the terminal width in columns (falls back to 80 if unavailable). |
 | `Terminal.Rows(): INTEGER` | Returns the terminal height in rows (falls back to 24 if unavailable). |
 | `Terminal.Random(n: INTEGER): INTEGER` | Random integer in `[0, n)`. |
+| `Terminal.Shell(cmd: ARRAY OF CHAR)` | Suspend raw mode, run `cmd` via the system shell, print `-- Press Enter to return --`, wait for Enter, then reinitialise raw mode. Useful for invoking compilers, pagers, or any interactive command without leaving the editor. |
 
 ### Mouse Input
 
