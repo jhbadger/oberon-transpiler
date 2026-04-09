@@ -789,6 +789,13 @@ static int try_emit_import(CG *g, Node *fa, Node *args) {
         if (!strcmp(proc,"Remove")) { emit(g,"Dict_Remove(&"); emit_expr(g,a0); emit(g,","); emit_as_string(g,a1); emit(g,")"); return 1; }
         if (!strcmp(proc,"Clear"))  { emit(g,"Dict_Clear(&");  emit_expr(g,a0); emit(g,")"); return 1; }
     }
+    /* Terminal.Shell — restore terminal, run command, wait, reinit */
+    if (!strcmp(mod,"Terminal") && !strcmp(proc,"Shell")) {
+        emit(g,"(_term_restore(), system("); emit_expr(g,a0);
+        emit(g,"), printf(\"\\n-- Press Enter to return --\"), fflush(stdout),"
+               "(void)getchar(), _term_init())");
+        return 1;
+    }
     /* Unknown import call → RealModule_Proc(args)  (resolves aliases) */
     const char *real = import_realname(mod);
     emit(g,"%s_%s(",real,proc);
