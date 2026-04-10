@@ -6,6 +6,7 @@ MODULE sheet;
  *   Arrows / mouse     navigate
  *   Enter / F2         edit current cell
  *   Delete             clear current cell
+ *   Ctrl+O             open a CSV/TSV file
  *   Ctrl+S             save CSV
  *   Ctrl+L             reload from disk
  *   Ctrl+N             new empty sheet
@@ -46,6 +47,7 @@ CONST
   KEY_HOME  = 256; KEY_END   = 257;
   KEY_DEL   = 260;
   KEY_F2    = 265; (* mapped below from ORD 265 … handled via terminal *)
+  KEY_CTRL_O = 15;
   KEY_CTRL_S = 19;
   KEY_CTRL_L = 12;
   KEY_CTRL_N = 14;
@@ -472,7 +474,7 @@ BEGIN
   IF mode = EDIT THEN
     s := "Enter:confirm  Esc:cancel  Backspace:delete"
   ELSE
-    s := "Arrows/Mouse:nav  Enter:edit  Del:clear  ^S:save  ^L:reload  ^Q:quit"
+    s := "Arrows/Mouse:nav  Enter:edit  Del:clear  ^O:open  ^S:save  ^L:reload  ^Q:quit"
   END;
   PadPrint(s, tCols - 1);
   Graphics.Reset
@@ -624,6 +626,31 @@ BEGIN
   END
 END HandleEdit;
 
+(* ── prompt user for a string (displayed in formula bar) ─────────── *)
+PROCEDURE Prompt(prompt: ARRAY OF CHAR; VAR result: ARRAY OF CHAR): BOOLEAN;
+VAR i, j, plen, x: INTEGER;
+BEGIN
+  result[0] := 0X;  i := 0;
+  plen := Strings.Length(prompt);
+  LOOP
+    Graphics.Goto(1, 1);
+    Graphics.Color256(CLR_SEL, BG_SEL);
+    x := 1;
+    WHILE x <= tCols DO Out.Char(' '); INC(x) END;
+    Graphics.Goto(1, 1);
+    Out.String(prompt);  Out.String(result);
+    Graphics.Reset;
+    Graphics.Goto(plen + i + 1, 1);
+    j := GetKey();
+    IF j = KEY_ENTER THEN RETURN i > 0
+    ELSIF j = KEY_ESC THEN result[0] := 0X; RETURN FALSE
+    ELSIF j = KEY_BS THEN IF i > 0 THEN DEC(i); result[i] := 0X END
+    ELSIF (j >= 32) & (j < 127) & (i < LEN(result) - 1) THEN
+      result[i] := CHR(j); INC(i); result[i] := 0X
+    END
+  END
+END Prompt;
+
 (* ── handle a key in NORMAL mode ───────────────────────────────── *)
 PROCEDURE HandleNormal(k: INTEGER);
 VAR nr, nc: INTEGER;
@@ -670,6 +697,22 @@ BEGIN
     fname[0] := 0X; dirty := FALSE;
     curRow := 0; curCol := 0; scrRow := 0; scrCol := 0;
     COPY("New sheet.", statusMsg)
+  ELSIF k = KEY_CTRL_O THEN
+    IF Prompt("Open: ", fname) THEN
+      nr := Strings.Length(fname) - 4;
+      IF (nr >= 0) & (fname[nr] = '.') & (fname[nr+1] = 't') &
+         (fname[nr+2] = 's') & (fname[nr+3] = 'v') THEN
+        df := DataFrame.LoadTSV(fname, FALSE, nc)
+      ELSE
+        df := DataFrame.LoadCSV(fname, FALSE, nc)
+      END;
+      IF df = NIL THEN df := DataFrame.Create(); COPY("New file.", statusMsg)
+      ELSE dirty := FALSE; curRow := 0; curCol := 0;
+        scrRow := 0; scrCol := 0; COPY("Opened.", statusMsg)
+      END
+    ELSE
+      fname[0] := 0X
+    END
   ELSIF (k = KEY_CTRL_Q) OR (k = KEY_ESC) THEN
     running := FALSE
   ELSIF (k >= 32) & (k < 127) THEN
