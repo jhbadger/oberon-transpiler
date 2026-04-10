@@ -7,7 +7,7 @@ MODULE sheet;
  *   Enter / F2         edit current cell
  *   Delete             clear current cell
  *   Ctrl+O             open a CSV/TSV file
- *   Ctrl+S             save CSV
+ *   Ctrl+S             save CSV or TSV (by extension; prompts if no filename)
  *   Ctrl+L             reload from disk
  *   Ctrl+N             new empty sheet
  *   Esc / Ctrl+Q       quit
@@ -511,19 +511,6 @@ BEGIN
   IF f = NIL THEN RETURN FALSE END;
   Files.Set(r2, f, 0);
   nc := DataFrame.NCols(df); nr := DataFrame.NRows(df);
-  (* header row: column letters A B C … *)
-  FOR c := 0 TO nc - 1 DO
-    IF c > 0 THEN Files.Write(r2, ',') END;
-    DataFrame.ColName(df, c, cell);
-    IF Strings.Length(cell) = 0 THEN
-      (* use letter label if no name *)
-      Files.Write(r2, CHR(ORD('A') + c))
-    ELSE
-      Files.WriteString(r2, cell)
-    END
-  END;
-  Files.Write(r2, 0AX);
-  (* data rows *)
   FOR r := 0 TO nr - 1 DO
     FOR c := 0 TO nc - 1 DO
       IF c > 0 THEN Files.Write(r2, ',') END;
@@ -542,6 +529,37 @@ BEGIN
   Files.Register(f); Files.Close(f);
   RETURN TRUE
 END SaveCSV;
+
+(* ── save to TSV ─────────────────────────────────────────────────── *)
+PROCEDURE SaveTSV(fn: ARRAY OF CHAR): BOOLEAN;
+VAR f: Files.File; r2: Files.Rider;
+    r, c, nr, nc: INTEGER;
+    cell: ARRAY DataFrame.CELLLEN OF CHAR;
+BEGIN
+  f := Files.New(fn);
+  IF f = NIL THEN RETURN FALSE END;
+  Files.Set(r2, f, 0);
+  nc := DataFrame.NCols(df); nr := DataFrame.NRows(df);
+  FOR r := 0 TO nr - 1 DO
+    FOR c := 0 TO nc - 1 DO
+      IF c > 0 THEN Files.Write(r2, 09X) END;
+      DataFrame.GetStr(df, r, c, cell);
+      Files.WriteString(r2, cell)
+    END;
+    Files.Write(r2, 0AX)
+  END;
+  Files.Register(f); Files.Close(f);
+  RETURN TRUE
+END SaveTSV;
+
+(* ── true if filename has .tsv extension ────────────────────────── *)
+PROCEDURE IsTSV(fn: ARRAY OF CHAR): BOOLEAN;
+VAR n: INTEGER;
+BEGIN
+  n := Strings.Length(fn) - 4;
+  RETURN (n >= 0) & (fn[n] = '.') & (fn[n+1] = 't') &
+         (fn[n+2] = 's') & (fn[n+3] = 'v')
+END IsTSV;
 
 (* ── move cursor, keeping it in sheet bounds ────────────────────── *)
 PROCEDURE MoveTo(r, c: INTEGER);
@@ -673,16 +691,20 @@ BEGIN
       DataFrame.SetStr(df, curRow, curCol, ""); dirty := TRUE
     END
   ELSIF k = KEY_CTRL_S THEN
-    IF fname[0] = 0X THEN COPY("sheet.csv", fname) END;
-    ok := SaveCSV(fname);
-    IF ok THEN COPY("Saved.", statusMsg); dirty := FALSE
-    ELSE COPY("Save failed!", statusMsg)
+    IF fname[0] = 0X THEN
+      IF ~Prompt("Save as: ", fname) THEN fname[0] := 0X END
+    END;
+    IF fname[0] # 0X THEN
+      IF IsTSV(fname) THEN ok := SaveTSV(fname)
+      ELSE ok := SaveCSV(fname)
+      END;
+      IF ok THEN COPY("Saved.", statusMsg); dirty := FALSE
+      ELSE COPY("Save failed!", statusMsg)
+      END
     END
   ELSIF k = KEY_CTRL_L THEN
     IF fname[0] # 0X THEN
-      nr := Strings.Length(fname) - 4;
-      IF (nr >= 0) & (fname[nr] = '.') & (fname[nr+1] = 't') &
-         (fname[nr+2] = 's') & (fname[nr+3] = 'v') THEN
+      IF IsTSV(fname) THEN
         df := DataFrame.LoadTSV(fname, FALSE, nc)
       ELSE
         df := DataFrame.LoadCSV(fname, FALSE, nc)
@@ -699,9 +721,7 @@ BEGIN
     COPY("New sheet.", statusMsg)
   ELSIF k = KEY_CTRL_O THEN
     IF Prompt("Open: ", fname) THEN
-      nr := Strings.Length(fname) - 4;
-      IF (nr >= 0) & (fname[nr] = '.') & (fname[nr+1] = 't') &
-         (fname[nr+2] = 's') & (fname[nr+3] = 'v') THEN
+      IF IsTSV(fname) THEN
         df := DataFrame.LoadTSV(fname, FALSE, nc)
       ELSE
         df := DataFrame.LoadCSV(fname, FALSE, nc)
@@ -769,7 +789,7 @@ END GetKey;
 
 (* ── main ────────────────────────────────────────────────────────── *)
 VAR
-  k, err, i: INTEGER;
+  k, err: INTEGER;
   prevRow, prevCol, prevScrRow, prevScrCol: INTEGER;
 
 BEGIN
@@ -777,10 +797,7 @@ BEGIN
   fname[0] := 0X;
   IF Args.Count() >= 1 THEN
     Args.Get(1, fname);
-    (* detect TSV by extension; load without consuming header row *)
-    i := Strings.Length(fname) - 4;
-    IF (i >= 0) & (fname[i] = '.') & (fname[i+1] = 't') &
-       (fname[i+2] = 's') & (fname[i+3] = 'v') THEN
+    IF IsTSV(fname) THEN
       df := DataFrame.LoadTSV(fname, FALSE, err)
     ELSE
       df := DataFrame.LoadCSV(fname, FALSE, err)
