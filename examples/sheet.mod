@@ -22,7 +22,6 @@ MODULE sheet;
 IMPORT DataFrame, Terminal, Graphics, Strings, Files, Args, Out;
 
 CONST
-  COLW     = 12;   (* data-column display width *)
   ROWW     = 5;    (* row-number field width *)
   MAXDEPTH = 16;   (* formula recursion depth limit *)
 
@@ -56,6 +55,7 @@ CONST
 VAR
   df        : DataFrame.DataFrame;
   fname     : ARRAY 256 OF CHAR;
+  colWidths : ARRAY DataFrame.MAXCOLS OF INTEGER;
   dirty     : BOOLEAN;
   curRow    : INTEGER;  (* 0-based cursor *)
   curCol    : INTEGER;
@@ -329,14 +329,34 @@ END EnsureSize;
 
 (* ── set visible dimensions from terminal size ───────────────────── *)
 PROCEDURE CalcVis();
+VAR 
+  x, c: INTEGER;
 BEGIN
   tCols := Terminal.Cols();
   tRows := Terminal.Rows();
-  (* rows: 1 formula bar + 1 col header + data rows + 1 help bar *)
+  
+  (* Rows: 1 formula bar + 1 col header + data rows + 1 help bar *)
   visRows := tRows - 3;
   IF visRows < 1 THEN visRows := 1 END;
-  (* cols: ROWW+1 for row number, then (COLW+1) per data col *)
-  visCols := (tCols - ROWW - 1) DIV (COLW + 1);
+
+  (* Cols: Start after the row-number gutter *)
+  x := ROWW + 1; 
+  visCols := 0;
+  c := scrCol;
+  
+  (* Add columns until we run out of horizontal space *)
+  WHILE (x < tCols) & (c < DataFrame.MAXCOLS) DO
+    (* Width of the current column + the '|' separator *)
+    IF (x + colWidths[c] + 1) <= tCols THEN
+      x := x + colWidths[c] + 1;
+      INC(visCols);
+      INC(c);
+    ELSE
+      (* This column won't fit; stop here *)
+      x := tCols + 1 
+    END
+  END;
+
   IF visCols < 1 THEN visCols := 1 END
 END CalcVis;
 
@@ -350,10 +370,6 @@ BEGIN
   IF scrRow < 0 THEN scrRow := 0 END;
   IF scrCol < 0 THEN scrCol := 0 END
 END ClampScroll;
-
-(* ── screen: x position of left edge of data column c (0-based abs) *)
-PROCEDURE ColX(c: INTEGER): INTEGER;
-BEGIN RETURN ROWW + 1 + (c - scrCol) * (COLW + 1) + 1 END ColX;
 
 (* ── screen: y position of data row r (0-based abs) ─────────────── *)
 PROCEDURE RowY(r: INTEGER): INTEGER;
@@ -369,46 +385,105 @@ BEGIN
   FOR i := len TO w - 1 DO Out.Char(' ') END
 END PadPrint;
 
+PROCEDURE RecalcColWidth(c: INTEGER);
+VAR 
+  r, total, count, avg, nr: INTEGER;
+  val: ARRAY DataFrame.CELLLEN OF CHAR;
+BEGIN
+  nr := DataFrame.NRows(df);
+  total := 0;
+  count := 0;
+  
+  FOR r := 0 TO nr - 1 DO
+    CellDisplay(r, c, val); (* Get what the user actually sees *)
+    total := total + Strings.Length(val);
+    INC(count);
+  END;
+  
+  IF count > 0 THEN
+    avg := total DIV count;
+  ELSE
+    avg := 8; (* Default for empty sheet *)
+  END;
+
+  (* Clamp the width to reasonable human-readable bounds *)
+  IF avg < 5  THEN avg := 5  END;
+  IF avg > 30 THEN avg := 30 END;
+  
+  colWidths[c] := avg + 2
+END RecalcColWidth;
+
+PROCEDURE ColX(targetCol: INTEGER): INTEGER;
+VAR c, x: INTEGER;
+BEGIN
+  x := ROWW + 1;
+  FOR c := scrCol TO targetCol - 1 DO
+    x := x + colWidths[c] + 1;
+  END;
+  RETURN x + 1
+END ColX;
+
 (* ── draw column-header row ─────────────────────────────────────── *)
 PROCEDURE DrawColHeaders();
-VAR c, x: INTEGER; lbl: ARRAY 4 OF CHAR;
+VAR 
+  c, x, i: INTEGER; 
+  lbl: ARRAY 4 OF CHAR;
 BEGIN
   Graphics.Goto(1, 2);
   Graphics.Color256(CLR_HDR, BG_HDR);
-  (* row-number gutter *)
-  FOR x := 1 TO ROWW DO Out.Char(' ') END;
+  
+  (* 1. Draw row-number gutter padding *)
+  FOR i := 1 TO ROWW DO Out.Char(' ') END;
   Out.Char('|');
+  x := ROWW + 1;
+
+  (* 2. Draw each visible column header *)
   FOR c := scrCol TO scrCol + visCols - 1 DO
     ColLabel(c, lbl);
-    PadPrint(lbl, COLW);
-    Out.Char('|')
+    PadPrint(lbl, colWidths[c]);
+    Out.Char('|');
+    x := x + colWidths[c] + 1;
   END;
-  (* pad to edge *)
-  x := ROWW + 1 + visCols * (COLW + 1) + 1;
-  WHILE x <= tCols DO Out.Char(' '); INC(x) END;
+
+  (* 3. Pad the rest of the terminal width with the header background color *)
+  WHILE x <= tCols DO 
+    Out.Char(' '); 
+    INC(x) 
+  END;
+  
   Graphics.Reset
 END DrawColHeaders;
 
 (* ── draw one data row ──────────────────────────────────────────── *)
 PROCEDURE DrawDataRow(r: INTEGER);
-VAR c, y: INTEGER;
-    val: ARRAY DataFrame.CELLLEN OF CHAR;
-    raw: ARRAY DataFrame.CELLLEN OF CHAR;
-    rn:  ARRAY 8 OF CHAR;
-    isFormula, isSel: BOOLEAN;
+VAR 
+  c, y, x, i: INTEGER;
+  val: ARRAY DataFrame.CELLLEN OF CHAR;
+  raw: ARRAY DataFrame.CELLLEN OF CHAR;
+  rn:  ARRAY 8 OF CHAR;
+  isFormula, isSel: BOOLEAN;
 BEGIN
   y := RowY(r);
+  (* Check if row is within the visible vertical pane *)
   IF (y < 3) OR (y > tRows - 1) THEN RETURN END;
+  
   Graphics.Goto(1, y);
-  (* row number *)
+  
+  (* 1. Draw Row Number Gutter *)
   Graphics.Color256(CLR_ROW, BG_ROW);
   Strings.IntToStr(r + 1, rn);
-  FOR c := Strings.Length(rn) TO ROWW - 2 DO Out.Char(' ') END;
-  Out.String(rn); Out.Char('|');
-  (* cells *)
+  (* Right-align the row number within ROWW spaces *)
+  FOR i := Strings.Length(rn) TO ROWW - 2 DO Out.Char(' ') END;
+  Out.String(rn); 
+  Out.Char('|');
+  x := ROWW + 1;
+
+  (* 2. Draw Visible Cells *)
   FOR c := scrCol TO scrCol + visCols - 1 DO
     isSel := (r = curRow) & (c = curCol);
     isFormula := FALSE;
+    
+    (* Get display content *)
     IF (r < DataFrame.NRows(df)) & (c < DataFrame.NCols(df)) THEN
       DataFrame.GetStr(df, r, c, raw);
       isFormula := (raw[0] = '=');
@@ -416,6 +491,8 @@ BEGIN
     ELSE
       val[0] := 0X
     END;
+
+    (* Apply dynamic styling *)
     IF isSel THEN
       Graphics.Color256(CLR_SEL, BG_SEL)
     ELSIF isFormula THEN
@@ -423,14 +500,25 @@ BEGIN
     ELSE
       Graphics.Color256(CLR_NORM, BG_NORM)
     END;
-    PadPrint(val, COLW);
+
+    (* Render the cell content with its specific width *)
+    PadPrint(val, colWidths[c]);
+    
+    (* Reset color for the vertical grid line *)
     Graphics.Color256(CLR_HDR, BG_HDR);
-    Out.Char('|')
+    Out.Char('|');
+    
+    (* Track horizontal progress *)
+    x := x + colWidths[c] + 1;
   END;
-  (* pad remainder of line *)
+
+  (* 3. Clear the rest of the line (to the terminal edge) *)
   Graphics.Color256(CLR_NORM, BG_NORM);
-  c := ROWW + 1 + visCols * (COLW + 1) + 1;
-  WHILE c <= tCols DO Out.Char(' '); INC(c) END;
+  WHILE x <= tCols DO 
+    Out.Char(' '); 
+    INC(x) 
+  END;
+  
   Graphics.Reset
 END DrawDataRow;
 
@@ -744,26 +832,57 @@ END HandleNormal;
 
 (* ── handle mouse click ─────────────────────────────────────────── *)
 PROCEDURE HandleMouse();
-VAR mx, my, btn, c, r: INTEGER;
+VAR 
+  mx, my, btn, c, r, x: INTEGER;
+  found: BOOLEAN;
 BEGIN
   mx  := Terminal.MouseX();
   my  := Terminal.MouseY();
   btn := Terminal.MouseBtn();
-  IF btn = 3 THEN RETURN END;  (* release *)
-  IF my = 1 THEN  (* click on formula bar → enter edit mode *)
+  
+  IF btn = 3 THEN RETURN END;  (* Ignore mouse release *)
+  
+  IF my = 1 THEN  (* Click on formula bar *)
     IF mode = NORMAL THEN StartEdit(FALSE) END;
     RETURN
   END;
-  IF my < 3 THEN RETURN END;  (* column header or formula bar *)
-  (* map terminal coords → data row/col *)
+  
+  IF my < 3 THEN RETURN END;  (* Ignore clicks on header or empty space above *)
+
+  (* 1. Map Y coordinate to Data Row *)
   r := scrRow + (my - 3);
-  c := scrCol + (mx - ROWW - 2) DIV (COLW + 1);
-  IF c < 0 THEN c := 0 END;
+  
+  (* 2. Map X coordinate to Data Column *)
+  (* Start at the edge of the row-number gutter *)
+  x := ROWW + 2; 
+  c := scrCol;
+  found := FALSE;
+  
+  (* Walk through visible columns to see which one was clicked *)
+  WHILE (c < scrCol + visCols) & (~found) DO
+    IF (mx >= x) & (mx < x + colWidths[c] + 1) THEN
+      found := TRUE
+    ELSE
+      x := x + colWidths[c] + 1;
+      INC(c)
+    END
+  END;
+
+  (* Fallback/Clamping *)
+  IF ~found THEN 
+    IF mx < ROWW + 2 THEN c := 0 ELSE c := curCol END
+  END;
   IF r < 0 THEN r := 0 END;
+
+  (* 3. Handle the Click Action *)
   IF mode = EDIT THEN CommitEdit() END;
-  MoveTo(r, c);
-  IF btn = 64 THEN MoveTo(curRow - 3, curCol)  (* scroll up *)
-  ELSIF btn = 65 THEN MoveTo(curRow + 3, curCol) (* scroll down *)
+  
+  IF btn = 64 THEN     (* Scroll wheel up *)
+    MoveTo(curRow - 3, curCol)
+  ELSIF btn = 65 THEN  (* Scroll wheel down *)
+    MoveTo(curRow + 3, curCol)
+  ELSE                 (* Normal click *)
+    MoveTo(r, c)
   END
 END HandleMouse;
 
@@ -813,6 +932,9 @@ BEGIN
   (* sheet starts empty — EnsureSize expands on first edit *)
 
   curRow := 0; curCol := 0; scrRow := 0; scrCol := 0;
+  FOR k := 0 TO DataFrame.MAXCOLS - 1 DO
+    colWidths[k] := 10; 
+  END;
   mode := NORMAL; dirty := FALSE; running := TRUE;
   Terminal.MouseOn();
   CalcVis();
