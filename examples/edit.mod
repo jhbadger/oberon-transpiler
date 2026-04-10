@@ -805,7 +805,7 @@ BEGIN
 
   FOR row := 0 TO EROWS - 1 DO
     li := topLine + row;
-    Terminal.Goto(1, row + 2);
+    Terminal.Goto(1, row + 1);
     IF li < nlines THEN
       RenderLine(li, leftCol, COLS, lineState[li])
     ELSE
@@ -816,32 +816,25 @@ BEGIN
     END
   END;
 
-  (* title bar *)
-  Terminal.Goto(1, 1);
-  Graphics.Color256(15, 4);
-  FOR col := 1 TO COLS DO  Out.Char(' ')  END;
-  Terminal.Goto(1, 1);
-  IF filename[0] = 0X THEN  Out.String("  [No Name]")
-  ELSE  Out.String("  ");  Out.String(filename)
-  END;
-  IF modified THEN  Out.String(" [+]")  END;
-  IF statusMsg[0] # 0X THEN
-    Out.String("  |  ");  Out.String(statusMsg)
-  ELSE
-    wc := WordCount();
-    Out.String("  |  Words: ");  Out.Int(wc, 1)
-  END;
-
-  Terminal.Goto(COLS - 17, 1);
-  Out.String("Ln:");  Out.Int(cy + 1, 4);
-  Out.String(" Col:");  Out.Int(cx + 1, 3);
-
-  (* help bar *)
+  (* status bar *)
   Terminal.Goto(1, ROWS);
   Graphics.Color256(15, 239);
   FOR col := 1 TO COLS DO  Out.Char(' ')  END;
   Terminal.Goto(1, ROWS);
-  Out.String(" ^O Open  ^S Save  ^Q Quit  ^F Find  ^K Kill  ^Y Yank  ^G Goto  ^R Shell | Home/End  Ctrl+Arrows  PgUp/Dn | Mouse");
+  IF filename[0] = 0X THEN  Out.String(" [No Name]")
+  ELSE  Out.Char(' ');  Out.String(filename)
+  END;
+  IF modified THEN  Out.String(" [+]")  END;
+  IF statusMsg[0] # 0X THEN
+    Out.String("  ");  Out.String(statusMsg)
+  ELSE
+    wc := WordCount();
+    Out.String("  Ln:");  Out.Int(cy + 1, 1);
+    Out.String(" Col:");  Out.Int(cx + 1, 1);
+    Out.String("  Words:");  Out.Int(wc, 1)
+  END;
+  Terminal.Goto(COLS - 42, ROWS);
+  Out.String("^O ^S ^Q ^F ^K ^Y ^G ^R Shell");
 
   Graphics.Reset;
   Terminal.Goto(cx - leftCol + 1, cy - topLine + 1)
@@ -850,7 +843,7 @@ END Render;
 BEGIN
   COLS  := Terminal.Cols();
   ROWS  := Terminal.Rows();
-  EROWS := ROWS - 2;
+  EROWS := ROWS - 1;
   Terminal.Clear;
   Terminal.MouseOn();
   Terminal.ShowCursor;
