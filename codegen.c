@@ -162,27 +162,45 @@ static Node *lookup_proc_params(const char *name) {
 
 /* Cross-module proc signatures — indexed by "RealModule.ProcName".
  * Accumulated across all codegen() calls (never reset) so that when
- * compiling the main module we can look up VAR-param info for imported procs. */
-#define MAX_XMOD_PROCSIGS 512
-typedef struct { char key[MAX_IDENT*2]; Node *params; } XModProcSig;
+ * compiling the main module we can look up VAR-param info for imported procs.
+ *
+ * We store a compact per-slot array rather than AST node pointers, because
+ * ast_free_all() is called after each dependency module is codegen'd and would
+ * leave dangling pointers into the freed arena. */
+#define MAX_XMOD_PROCSIGS  512
+#define MAX_PARAMS_PER_PROC 64
+typedef struct { int8_t is_var; int8_t is_open_array; } XParamSlot;
+typedef struct {
+    char       key[MAX_IDENT*2];
+    int        nslots;
+    XParamSlot slots[MAX_PARAMS_PER_PROC];
+} XModProcSig;
 static XModProcSig g_xmod_procsigs[MAX_XMOD_PROCSIGS];
 static int g_n_xmod_procsigs = 0;
 
 static void collect_xmod_proc_sigs(Node *decls, const char *modname) {
     for (Node *d = decls; d; d = d->next) {
-        if (d->kind == ND_PROC_DECL && g_n_xmod_procsigs < MAX_XMOD_PROCSIGS) {
-            snprintf(g_xmod_procsigs[g_n_xmod_procsigs].key, MAX_IDENT*2,
-                     "%s.%s", modname, d->str);
-            g_xmod_procsigs[g_n_xmod_procsigs].params = d->c0;
-            g_n_xmod_procsigs++;
+        if (d->kind != ND_PROC_DECL) continue;
+        if (g_n_xmod_procsigs >= MAX_XMOD_PROCSIGS) continue;
+        XModProcSig *sig = &g_xmod_procsigs[g_n_xmod_procsigs++];
+        snprintf(sig->key, sizeof(sig->key), "%s.%s", modname, d->str);
+        sig->nslots = 0;
+        for (Node *fp = d->c0; fp && sig->nslots < MAX_PARAMS_PER_PROC; fp = fp->next) {
+            int isv = (fp->flags & FLAG_VAR_PARAM) != 0;
+            int ioa = is_open_array(fp->c1);
+            for (Node *id = fp->c0; id && sig->nslots < MAX_PARAMS_PER_PROC; id = id->next) {
+                sig->slots[sig->nslots].is_var        = (int8_t)isv;
+                sig->slots[sig->nslots].is_open_array = (int8_t)ioa;
+                sig->nslots++;
+            }
         }
     }
 }
-static Node *lookup_xmod_proc_params(const char *modname, const char *procname) {
+static XModProcSig *lookup_xmod_proc_params(const char *modname, const char *procname) {
     char key[MAX_IDENT*2];
     snprintf(key, sizeof(key), "%s.%s", modname, procname);
     for (int i = 0; i < g_n_xmod_procsigs; i++)
-        if (!strcmp(g_xmod_procsigs[i].key, key)) return g_xmod_procsigs[i].params;
+        if (!strcmp(g_xmod_procsigs[i].key, key)) return &g_xmod_procsigs[i];
     return NULL;
 }
 
@@ -800,19 +818,16 @@ static int try_emit_import(CG *g, Node *fa, Node *args) {
     const char *real = import_realname(mod);
     emit(g,"%s_%s(",real,proc);
     {
-        Node *params = lookup_xmod_proc_params(real, proc);
-        Node *fp    = params;
-        Node *fp_id = fp ? fp->c0 : NULL;
+        XModProcSig *sig = lookup_xmod_proc_params(real, proc);
+        int slot = 0;
         for (Node *a=args;a;a=a->next) {
             if (a!=args) emit(g,",");
-            int is_var = fp ? (fp->flags & FLAG_VAR_PARAM) != 0 : 0;
+            int is_var = (sig && slot < sig->nslots) ? sig->slots[slot].is_var        : 0;
+            int ioa    = (sig && slot < sig->nslots) ? sig->slots[slot].is_open_array  : 0;
             if (is_var) emit_addr_of(g, a);
             else        emit_expr(g, a);
-            if (fp && is_open_array(fp->c1)) { emit(g,","); emit_open_array_len(g,a); }
-            if (fp) {
-                fp_id = fp_id ? fp_id->next : NULL;
-                if (!fp_id) { fp = fp->next; fp_id = fp ? fp->c0 : NULL; }
-            }
+            if (ioa) { emit(g,","); emit_open_array_len(g,a); }
+            slot++;
         }
     }
     emit(g,")");

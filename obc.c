@@ -74,47 +74,61 @@ static int compile_module(const char *modfile, int is_main,
 static int compile_module(const char *modfile, int is_main,
                           const char *searchdir)
 {
-    FILE *in = fopen(modfile, "r");
-    if (!in) {
-        fprintf(stderr, "obc: cannot open %s\n", modfile);
-        return 1;
+    /* ── Pass 1: parse to collect user-module imports ───────────── */
+    {
+        FILE *in = fopen(modfile, "r");
+        if (!in) { fprintf(stderr, "obc: cannot open %s\n", modfile); return 1; }
+        Parser p;
+        parser_init(&p, in);
+        p.filename = modfile;
+        Node *ast = parse_module(&p);
+        fclose(in);
+        if (p.errors) {
+            fprintf(stderr, "obc: %d parse error(s) in %s\n", p.errors, modfile);
+            ast_free_all();
+            return 1;
+        }
+
+        /* Save import names before freeing the AST */
+        char imports[64][256];
+        int  n_imports = 0;
+        for (Node *imp = ast->c0; imp && n_imports < 64; imp = imp->next) {
+            const char *real = ((imp->flags & FLAG_HAS_ALIAS) && imp->c0)
+                               ? imp->c0->str : imp->str;
+            if (is_builtin(real) || already_compiled(real)) continue;
+            strncpy(imports[n_imports], real, 255);
+            imports[n_imports][255] = '\0';
+            n_imports++;
+        }
+        ast_free_all();  /* safe — we saved what we need */
+
+        /* ── Recursively compile user-imported modules ───────────── */
+        for (int i = 0; i < n_imports; i++) {
+            if (already_compiled(imports[i])) continue;
+            char depfile[512];
+            if (searchdir && searchdir[0])
+                snprintf(depfile, sizeof(depfile), "%s/%s.mod", searchdir, imports[i]);
+            else
+                snprintf(depfile, sizeof(depfile), "%s.mod", imports[i]);
+            if (compile_module(depfile, 0, searchdir) != 0) return 1;
+        }
     }
 
+    /* ── Pass 2: re-parse (fresh arena) and codegen ─────────────── */
+    FILE *in = fopen(modfile, "r");
+    if (!in) { fprintf(stderr, "obc: cannot open %s\n", modfile); return 1; }
     Parser p;
     parser_init(&p, in);
     p.filename = modfile;
     Node *ast = parse_module(&p);
     fclose(in);
-
     if (p.errors) {
         fprintf(stderr, "obc: %d parse error(s) in %s\n", p.errors, modfile);
         ast_free_all();
         return 1;
     }
 
-    /* ── Recursively compile user-imported modules first ────────── */
-    for (Node *imp = ast->c0; imp; imp = imp->next) {
-        /* Real module name: if aliased, it's in c0; otherwise it's str */
-        const char *real = ((imp->flags & FLAG_HAS_ALIAS) && imp->c0)
-                           ? imp->c0->str : imp->str;
-        if (is_builtin(real)) continue;
-        if (already_compiled(real)) continue;
-
-        /* Build path: searchdir/RealName.mod */
-        char depfile[512];
-        if (searchdir && searchdir[0])
-            snprintf(depfile, sizeof(depfile), "%s/%s.mod", searchdir, real);
-        else
-            snprintf(depfile, sizeof(depfile), "%s.mod", real);
-
-        if (compile_module(depfile, 0, searchdir) != 0) {
-            ast_free_all();
-            return 1;
-        }
-    }
-
     /* ── Derive output file paths ────────────────────────────────── */
-    /* Strip .mod → use same stem for .c (and .h for library) */
     char cfile[512];
     strncpy(cfile, modfile, sizeof(cfile)-5);
     char *dot = strrchr(cfile, '.');
@@ -187,31 +201,54 @@ int main(int argc, char *argv[]) {
     strncpy(dirbuf, mainfile, sizeof(dirbuf)-1);
     char *searchdir = dirname(dirbuf);
 
-    /* ── Parse the main module to find its imports ───────────────── */
-    FILE *in = fopen(mainfile, "r");
-    if (!in) { perror(mainfile); return 1; }
-    Parser p;
-    parser_init(&p, in);
-    p.filename = mainfile;
-    Node *ast = parse_module(&p);
-    fclose(in);
-    if (p.errors) {
-        fprintf(stderr, "obc: %d parse error(s) in %s\n", p.errors, mainfile);
-        ast_free_all();
-        return 1;
+    /* ── Pass 1: parse main module to collect imports ────────────── */
+    {
+        FILE *in = fopen(mainfile, "r");
+        if (!in) { perror(mainfile); return 1; }
+        Parser p;
+        parser_init(&p, in);
+        p.filename = mainfile;
+        Node *ast = parse_module(&p);
+        fclose(in);
+        if (p.errors) {
+            fprintf(stderr, "obc: %d parse error(s) in %s\n", p.errors, mainfile);
+            ast_free_all();
+            return 1;
+        }
+
+        char imports[64][256];
+        int  n_imports = 0;
+        for (Node *imp = ast->c0; imp && n_imports < 64; imp = imp->next) {
+            const char *real = ((imp->flags & FLAG_HAS_ALIAS) && imp->c0)
+                               ? imp->c0->str : imp->str;
+            if (is_builtin(real) || already_compiled(real)) continue;
+            strncpy(imports[n_imports], real, 255);
+            imports[n_imports][255] = '\0';
+            n_imports++;
+        }
+        ast_free_all();  /* safe — imports saved */
+
+        /* ── Compile each user-imported dependency ────────────────── */
+        for (int i = 0; i < n_imports; i++) {
+            if (already_compiled(imports[i])) continue;
+            char depfile[512];
+            snprintf(depfile, sizeof(depfile), "%s/%s.mod", searchdir, imports[i]);
+            if (compile_module(depfile, 0, searchdir) != 0) return 1;
+        }
     }
 
-    /* ── Compile each user-imported dependency ────────────────────── */
-    for (Node *imp = ast->c0; imp; imp = imp->next) {
-        const char *real = ((imp->flags & FLAG_HAS_ALIAS) && imp->c0)
-                           ? imp->c0->str : imp->str;
-        if (is_builtin(real)) continue;
-        if (already_compiled(real)) continue;
-
-        char depfile[512];
-        snprintf(depfile, sizeof(depfile), "%s/%s.mod", searchdir, real);
-
-        if (compile_module(depfile, 0, searchdir) != 0) {
+    /* ── Pass 2: re-parse main module and codegen ─────────────────── */
+    Node *ast;
+    {
+        FILE *in = fopen(mainfile, "r");
+        if (!in) { perror(mainfile); return 1; }
+        Parser p;
+        parser_init(&p, in);
+        p.filename = mainfile;
+        ast = parse_module(&p);
+        fclose(in);
+        if (p.errors) {
+            fprintf(stderr, "obc: %d parse error(s) in %s\n", p.errors, mainfile);
             ast_free_all();
             return 1;
         }
