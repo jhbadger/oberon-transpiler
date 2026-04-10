@@ -464,3 +464,34 @@ Keys and values are strings (max 255 characters each). The table uses 256-bucket
 | `Dict.Has(VAR d: Dict.Table; key: ARRAY OF CHAR): BOOLEAN` | Returns TRUE if `key` exists. |
 | `Dict.Remove(VAR d: Dict.Table; key: ARRAY OF CHAR)` | Delete `key` from the table. No-op if absent. |
 | `Dict.Clear(VAR d: Dict.Table)` | Remove all entries and free memory. |
+
+---
+
+## Zip - ZIP Archive Reading
+
+```
+IMPORT Zip;
+```
+
+Read-only access to ZIP archives (the format used by `.epub`, `.jar`, `.odt`, etc.).
+Supports both stored (method 0) and deflated (method 8) entries.  Backed by zlib;
+links with `-lz` automatically.
+
+### Types
+
+| Type | Description |
+|------|-------------|
+| `Zip.Archive` | Opaque handle to an open ZIP archive.  NIL means no archive / error. |
+
+### Procedures and Functions
+
+| Procedure / Function | Description |
+|----------------------|-------------|
+| `Zip.Open(path: ARRAY OF CHAR): Archive` | Open a ZIP file for reading.  Parses the Central Directory on open.  Returns NIL on error. |
+| `Zip.Count(z: Archive): INTEGER` | Number of entries in the archive. |
+| `Zip.EntryName(z: Archive; i: INTEGER; VAR name: ARRAY OF CHAR)` | Copy the name of entry `i` (0-based) into `name`.  Sets `name` to empty string if out of range. |
+| `Zip.EntrySize(z: Archive; i: INTEGER): INTEGER` | Uncompressed size in bytes of entry `i`. |
+| `Zip.Find(z: Archive; name: ARRAY OF CHAR): INTEGER` | Linear search for an entry by exact name.  Returns its index, or -1 if not found. |
+| `Zip.Extract(z: Archive; i: INTEGER; VAR buf: ARRAY OF CHAR): INTEGER` | Decompress entry `i` into `buf`.  Returns the number of bytes written, or -1 on error.  The buffer size limits how much is read. |
+| `Zip.ExtractFile(z: Archive; i: INTEGER; dest: ARRAY OF CHAR): BOOLEAN` | Decompress entry `i` and write it to the file path `dest`.  Returns TRUE on success. |
+| `Zip.Close(z: Archive)` | Close the archive and free all resources. |

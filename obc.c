@@ -17,7 +17,7 @@
  * Built-in module names (handled by codegen, not as .mod files)
  * ----------------------------------------------------------------------- */
 static const char *g_builtins[] = {
-    "Out","In","Random","Terminal","Graphics","Math","Strings","Files","Args","Dict",NULL
+    "Out","In","Random","Terminal","Graphics","Math","Strings","Files","Args","Dict","Zip",NULL
 };
 static int is_builtin(const char *s) {
     for (int i=0;g_builtins[i];i++) if (!strcmp(g_builtins[i],s)) return 1;
@@ -276,7 +276,7 @@ int main(int argc, char *argv[]) {
     /* Library modules first (in compilation order), then main */
     for (int i=0; i<g_ncfiles; i++)
         pos += snprintf(cmd+pos, sizeof(cmd)-pos, " %s", g_cfiles[i]);
-    pos += snprintf(cmd+pos, sizeof(cmd)-pos, " %s -lm", maincfile);
+    pos += snprintf(cmd+pos, sizeof(cmd)-pos, " %s -lm -lz", maincfile);
 
     int rc = system(cmd);
     if (rc == 0) {

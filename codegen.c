@@ -298,7 +298,7 @@ static const char *import_realname(const char *alias) {
  * Built-in module list
  * ----------------------------------------------------------------------- */
 static const char *g_builtins[] = {
-    "Out","In","Random","Terminal","Graphics","Math","Strings","Files","Args","Dict",NULL
+    "Out","In","Random","Terminal","Graphics","Math","Strings","Files","Args","Dict","Zip",NULL
 };
 static int is_builtin_module(const char *s) {
     for (int i=0;g_builtins[i];i++) if (!strcmp(g_builtins[i],s)) return 1;
@@ -355,6 +355,7 @@ static const char *ctype(const char *name) {
     if (!strcmp(name,"SET"))          return "unsigned int";
     if (!strcmp(name,"Files.File"))   return "Files_File";
     if (!strcmp(name,"Files.Rider"))  return "Files_Rider";
+    if (!strcmp(name,"Zip.Archive"))  return "Zip_Archive";
     /* General qualified name: Alias.Type → RealModule_Type */
     {
         const char *dot = strchr(name, '.');
@@ -806,6 +807,18 @@ static int try_emit_import(CG *g, Node *fa, Node *args) {
         if (!strcmp(proc,"Has"))    { emit(g,"Dict_Has(&");    emit_expr(g,a0); emit(g,","); emit_as_string(g,a1); emit(g,")"); return 1; }
         if (!strcmp(proc,"Remove")) { emit(g,"Dict_Remove(&"); emit_expr(g,a0); emit(g,","); emit_as_string(g,a1); emit(g,")"); return 1; }
         if (!strcmp(proc,"Clear"))  { emit(g,"Dict_Clear(&");  emit_expr(g,a0); emit(g,")"); return 1; }
+    }
+    /* Zip module — ZIP archive reading */
+    if (!strcmp(mod,"Zip")) {
+        Node *a2 = a1 ? a1->next : NULL;
+        if (!strcmp(proc,"Open"))        { emit(g,"Zip_Open(");        emit_as_string(g,a0); emit(g,")"); return 1; }
+        if (!strcmp(proc,"Count"))       { emit(g,"Zip_Count(");       emit_expr(g,a0); emit(g,")"); return 1; }
+        if (!strcmp(proc,"EntryName"))   { emit(g,"Zip_EntryName(");   emit_expr(g,a0); emit(g,","); emit_expr(g,a1); emit(g,","); emit_expr(g,a2); emit(g,")"); return 1; }
+        if (!strcmp(proc,"EntrySize"))   { emit(g,"Zip_EntrySize(");   emit_expr(g,a0); emit(g,","); emit_expr(g,a1); emit(g,")"); return 1; }
+        if (!strcmp(proc,"Find"))        { emit(g,"Zip_Find(");        emit_expr(g,a0); emit(g,","); emit_as_string(g,a1); emit(g,")"); return 1; }
+        if (!strcmp(proc,"Extract"))     { emit(g,"Zip_Extract(");     emit_expr(g,a0); emit(g,","); emit_expr(g,a1); emit(g,","); emit_expr(g,a2); emit(g,","); emit_open_array_len(g,a2); emit(g,")"); return 1; }
+        if (!strcmp(proc,"ExtractFile")) { emit(g,"Zip_ExtractFile("); emit_expr(g,a0); emit(g,","); emit_expr(g,a1); emit(g,","); emit_as_string(g,a2); emit(g,")"); return 1; }
+        if (!strcmp(proc,"Close"))       { emit(g,"Zip_Close(");       emit_expr(g,a0); emit(g,")"); return 1; }
     }
     /* Terminal.Shell — restore terminal, run command, wait, reinit */
     if (!strcmp(mod,"Terminal") && !strcmp(proc,"Shell")) {
@@ -1669,6 +1682,8 @@ void codegen(Node *module, FILE *out, int is_main) {
     for (int i=0;i<g_nimports;i++) if (!strcmp(g_imports[i],"Args"))     { has_args=1;     break; }
     int has_dict = 0;
     for (int i=0;i<g_nimports;i++) if (!strcmp(g_imports[i],"Dict"))     { has_dict=1;     break; }
+    int has_zip = 0;
+    for (int i=0;i<g_nimports;i++) if (!strcmp(g_imports[i],"Zip"))      { has_zip=1;      break; }
 
     if (has_random && !has_terminal)
         emit(g,"#include <time.h>\n");
@@ -2233,6 +2248,104 @@ void codegen(Node *module, FILE *out, int is_main) {
         emit(g,"}\n\n");
     }
 
+    /* ── Zip module runtime — ZIP archive reading using zlib ─────── */
+    if (has_zip) {
+        emit(g,"/* Zip module — ZIP archive reading (zlib) */\n");
+        emit(g,"#include <zlib.h>\n");
+        emit(g,"#include <stdint.h>\n");
+        emit(g,"#ifndef OBC_ZIP_TYPES_H_\n#define OBC_ZIP_TYPES_H_\n");
+        emit(g,"#define ZIP_MAX_ENTRIES 2048\n");
+        emit(g,"#define ZIP_MAX_NAME 512\n");
+        emit(g,"typedef struct { char name[ZIP_MAX_NAME]; uint32_t cmethod; uint32_t csize; uint32_t usize; uint32_t offset; } Zip_Entry;\n");
+        emit(g,"typedef struct { FILE *fp; int count; Zip_Entry entries[ZIP_MAX_ENTRIES]; } Zip_Rec;\n");
+        emit(g,"typedef Zip_Rec *Zip_Archive;\n");
+        emit(g,"#endif\n");
+        emit(g,"static uint16_t _zip_u16(unsigned char *b){return(uint16_t)(b[0]|(b[1]<<8));}\n");
+        emit(g,"static uint32_t _zip_u32(unsigned char *b){return(uint32_t)(b[0]|(b[1]<<8)|(b[2]<<16)|((uint32_t)b[3]<<24));}\n");
+        emit(g,"static Zip_Archive Zip_Open(const char *path) {\n");
+        emit(g,"    FILE *fp=fopen(path,\"rb\"); if(!fp) return NULL;\n");
+        emit(g,"    fseek(fp,0,SEEK_END); long fsz=ftell(fp); int eocd=-1;\n");
+        emit(g,"    unsigned char buf[22];\n");
+        emit(g,"    for(long i=fsz-22;i>=0&&i>=fsz-65558;i--) {\n");
+        emit(g,"        fseek(fp,i,SEEK_SET);\n");
+        emit(g,"        if(fread(buf,1,4,fp)!=4) break;\n");
+        emit(g,"        if(_zip_u32(buf)==0x06054b50u){eocd=(int)i;break;}\n");
+        emit(g,"    }\n");
+        emit(g,"    if(eocd<0){fclose(fp);return NULL;}\n");
+        emit(g,"    fseek(fp,eocd,SEEK_SET);\n");
+        emit(g,"    if(fread(buf,1,22,fp)!=22){fclose(fp);return NULL;}\n");
+        emit(g,"    int nent=(int)_zip_u16(buf+8); uint32_t cdoff=_zip_u32(buf+16);\n");
+        emit(g,"    Zip_Rec *z=(Zip_Rec*)calloc(1,sizeof(Zip_Rec));\n");
+        emit(g,"    if(!z){fclose(fp);return NULL;}\n");
+        emit(g,"    z->fp=fp; z->count=0;\n");
+        emit(g,"    fseek(fp,cdoff,SEEK_SET);\n");
+        emit(g,"    unsigned char cd[46];\n");
+        emit(g,"    for(int i=0;i<nent&&z->count<ZIP_MAX_ENTRIES;i++) {\n");
+        emit(g,"        if(fread(cd,1,46,fp)!=46) break;\n");
+        emit(g,"        if(_zip_u32(cd)!=0x02014b50u) break;\n");
+        emit(g,"        uint16_t nl=_zip_u16(cd+28),xl=_zip_u16(cd+30),cl=_zip_u16(cd+32);\n");
+        emit(g,"        Zip_Entry *e=&z->entries[z->count++];\n");
+        emit(g,"        e->cmethod=_zip_u16(cd+10); e->csize=_zip_u32(cd+20);\n");
+        emit(g,"        e->usize=_zip_u32(cd+24);   e->offset=_zip_u32(cd+42);\n");
+        emit(g,"        int nn=nl<ZIP_MAX_NAME-1?(int)nl:ZIP_MAX_NAME-1;\n");
+        emit(g,"        if(fread(e->name,1,nn,fp)!=(size_t)nn) break;\n");
+        emit(g,"        e->name[nn]=0;\n");
+        emit(g,"        fseek(fp,xl+cl,SEEK_CUR);\n");
+        emit(g,"    }\n");
+        emit(g,"    return z;\n");
+        emit(g,"}\n");
+        emit(g,"static int Zip_Count(Zip_Archive z){return z?z->count:0;}\n");
+        emit(g,"static void Zip_EntryName(Zip_Archive z,int i,char *name){\n");
+        emit(g,"    if(z&&i>=0&&i<z->count){strncpy(name,z->entries[i].name,ZIP_MAX_NAME-1);name[ZIP_MAX_NAME-1]=0;}\n");
+        emit(g,"    else name[0]=0;\n");
+        emit(g,"}\n");
+        emit(g,"static int Zip_EntrySize(Zip_Archive z,int i){\n");
+        emit(g,"    return(z&&i>=0&&i<z->count)?(int)z->entries[i].usize:0;\n");
+        emit(g,"}\n");
+        emit(g,"static int Zip_Find(Zip_Archive z,const char *name){\n");
+        emit(g,"    if(!z) return -1;\n");
+        emit(g,"    for(int i=0;i<z->count;i++) if(!strcmp(z->entries[i].name,name)) return i;\n");
+        emit(g,"    return -1;\n");
+        emit(g,"}\n");
+        emit(g,"static int Zip_Extract(Zip_Archive z,int idx,char *buf,int buflen){\n");
+        emit(g,"    if(!z||idx<0||idx>=z->count) return -1;\n");
+        emit(g,"    Zip_Entry *e=&z->entries[idx];\n");
+        emit(g,"    unsigned char lfh[30];\n");
+        emit(g,"    fseek(z->fp,e->offset,SEEK_SET);\n");
+        emit(g,"    if(fread(lfh,1,30,z->fp)!=30) return -1;\n");
+        emit(g,"    if(_zip_u32(lfh)!=0x04034b50u) return -1;\n");
+        emit(g,"    fseek(z->fp,_zip_u16(lfh+26)+_zip_u16(lfh+28),SEEK_CUR);\n");
+        emit(g,"    if(e->cmethod==0){\n");
+        emit(g,"        int n=(int)e->csize<buflen?(int)e->csize:buflen;\n");
+        emit(g,"        return(int)fread(buf,1,n,z->fp);\n");
+        emit(g,"    } else if(e->cmethod==8){\n");
+        emit(g,"        unsigned char *cb=(unsigned char*)malloc(e->csize);\n");
+        emit(g,"        if(!cb) return -1;\n");
+        emit(g,"        if(fread(cb,1,e->csize,z->fp)!=e->csize){free(cb);return -1;}\n");
+        emit(g,"        z_stream s={0}; s.next_in=cb; s.avail_in=(uInt)e->csize;\n");
+        emit(g,"        s.next_out=(unsigned char*)buf; s.avail_out=(uInt)buflen;\n");
+        emit(g,"        if(inflateInit2(&s,-15)!=Z_OK){free(cb);return -1;}\n");
+        emit(g,"        int r=inflate(&s,Z_FINISH); inflateEnd(&s); free(cb);\n");
+        emit(g,"        return(r==Z_STREAM_END||r==Z_OK)?(int)s.total_out:-1;\n");
+        emit(g,"    }\n");
+        emit(g,"    return -1;\n");
+        emit(g,"}\n");
+        emit(g,"static int Zip_ExtractFile(Zip_Archive z,int idx,const char *dest){\n");
+        emit(g,"    if(!z||idx<0||idx>=z->count) return 0;\n");
+        emit(g,"    Zip_Entry *e=&z->entries[idx];\n");
+        emit(g,"    if(e->usize==0){FILE *fp=fopen(dest,\"wb\");if(!fp)return 0;fclose(fp);return 1;}\n");
+        emit(g,"    unsigned char *buf=(unsigned char*)malloc(e->usize);\n");
+        emit(g,"    if(!buf) return 0;\n");
+        emit(g,"    int n=Zip_Extract(z,idx,(char*)buf,(int)e->usize);\n");
+        emit(g,"    if(n<0){free(buf);return 0;}\n");
+        emit(g,"    FILE *fp=fopen(dest,\"wb\");\n");
+        emit(g,"    if(!fp){free(buf);return 0;}\n");
+        emit(g,"    int ok=((int)fwrite(buf,1,n,fp)==n);\n");
+        emit(g,"    fclose(fp); free(buf); return ok;\n");
+        emit(g,"}\n");
+        emit(g,"static void Zip_Close(Zip_Archive z){if(z){if(z->fp)fclose(z->fp);free(z);}}\n\n");
+    }
+
     /* ── Helper: set range ───────────────────────────────────────── */
     emit(g,"static unsigned int _obc_range(int lo, int hi) {\n");
     emit(g,"    unsigned int m=0; for(int i=lo;i<=hi;i++) m|=(1u<<i); return m;\n");
@@ -2408,6 +2521,19 @@ void codegen_header(Node *module, FILE *out) {
         fprintf(out,"#define DICT_BUCKETS 256\n");
         fprintf(out,"typedef struct Dict_Node_s { char key[256]; char val[256]; struct Dict_Node_s *next; } Dict_Node;\n");
         fprintf(out,"typedef struct { Dict_Node *buckets[DICT_BUCKETS]; } Dict_Table;\n");
+        fprintf(out,"#endif\n\n");
+    }
+
+    int has_zip_h = 0;
+    for (int i=0;i<g_nimports;i++) if (!strcmp(g_import_real[i],"Zip")) { has_zip_h=1; break; }
+    if (has_zip_h) {
+        fprintf(out,"#ifndef OBC_ZIP_TYPES_H_\n#define OBC_ZIP_TYPES_H_\n");
+        fprintf(out,"#include <stdint.h>\n");
+        fprintf(out,"#define ZIP_MAX_ENTRIES 2048\n");
+        fprintf(out,"#define ZIP_MAX_NAME 512\n");
+        fprintf(out,"typedef struct { char name[ZIP_MAX_NAME]; uint32_t cmethod; uint32_t csize; uint32_t usize; uint32_t offset; } Zip_Entry;\n");
+        fprintf(out,"typedef struct { FILE *fp; int count; Zip_Entry entries[ZIP_MAX_ENTRIES]; } Zip_Rec;\n");
+        fprintf(out,"typedef Zip_Rec *Zip_Archive;\n");
         fprintf(out,"#endif\n\n");
     }
 
