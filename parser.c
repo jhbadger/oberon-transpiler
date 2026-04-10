@@ -7,7 +7,7 @@
 /* -----------------------------------------------------------------------
  * Arena allocator — 1 MB pool, reset between files
  * ----------------------------------------------------------------------- */
-#define ARENA_SIZE (1 * 1024 * 1024)
+#define ARENA_SIZE (4 * 1024 * 1024)
 static char   g_arena[ARENA_SIZE];
 static size_t g_arena_used = 0;
 
