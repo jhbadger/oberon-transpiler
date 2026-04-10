@@ -16,7 +16,7 @@ CONST
   KEY_CTRL_F = 6;
   KEY_CTRL_O = 15;
   KEY_CTRL_Q = 17;
-  KEY_CTRL_W = 23;
+  KEY_CTRL_S = 19;
   KEY_CTRL_R = 18;
   KEY_CTRL_Y = 25;
   KEY_HOME   = 256;  KEY_END    = 257;
@@ -841,7 +841,7 @@ BEGIN
   Graphics.Color256(15, 239);
   FOR col := 1 TO COLS DO  Out.Char(' ')  END;
   Terminal.Goto(1, ROWS);
-  Out.String(" ^O Open  ^W Save  ^Q Quit  ^F Find  ^K Kill  ^Y Yank  ^G Goto  ^R Shell | Home/End  Ctrl+Arrows  PgUp/Dn | Mouse");
+  Out.String(" ^O Open  ^S Save  ^Q Quit  ^F Find  ^K Kill  ^Y Yank  ^G Goto  ^R Shell | Home/End  Ctrl+Arrows  PgUp/Dn | Mouse");
 
   Graphics.Reset;
   Terminal.Goto(cx - leftCol + 1, cy - topLine + 2)
@@ -905,7 +905,7 @@ BEGIN
     ELSIF k = KEY_CTRL_G THEN  GotoLine
     ELSIF k = KEY_CTRL_F THEN
       IF Prompt("Find: ", searchQuery) THEN  DoFind  END
-    ELSIF k = KEY_CTRL_W THEN
+    ELSIF k = KEY_CTRL_S THEN
       IF (filename[0] = 0X) & Prompt("Save as: ", tmpname) THEN  COPY(tmpname, filename)  END;
       IF (filename[0] # 0X) & SaveFile() THEN  COPY("Saved.", statusMsg)  END
     ELSIF k = KEY_CTRL_O THEN
