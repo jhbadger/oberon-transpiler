@@ -386,32 +386,48 @@ BEGIN
 END PadPrint;
 
 PROCEDURE RecalcColWidth(c: INTEGER);
-VAR 
-  r, total, count, avg, nr: INTEGER;
+VAR
+  r, total, count, avg, nr, hdrLen: INTEGER;
   val: ARRAY DataFrame.CELLLEN OF CHAR;
+  lbl: ARRAY 4 OF CHAR;
 BEGIN
-  nr := DataFrame.NRows(df);
+  nr    := DataFrame.NRows(df);
   total := 0;
   count := 0;
-  
+
   FOR r := 0 TO nr - 1 DO
-    CellDisplay(r, c, val); (* Get what the user actually sees *)
+    CellDisplay(r, c, val);
     total := total + Strings.Length(val);
-    INC(count);
-  END;
-  
-  IF count > 0 THEN
-    avg := total DIV count;
-  ELSE
-    avg := 8; (* Default for empty sheet *)
+    INC(count)
   END;
 
-  (* Clamp the width to reasonable human-readable bounds *)
+  IF count > 0 THEN avg := total DIV count ELSE avg := 8 END;
+
+  (* floor: never narrower than the first row (header) string *)
+  IF nr > 0 THEN
+    CellDisplay(0, c, val);
+    hdrLen := Strings.Length(val);
+    IF avg < hdrLen THEN avg := hdrLen END
+  END;
+
+  (* keep the column label floor too *)
+  ColLabel(c, lbl);
+  IF avg < Strings.Length(lbl) THEN avg := Strings.Length(lbl) END;
+
   IF avg < 5  THEN avg := 5  END;
   IF avg > 30 THEN avg := 30 END;
-  
+
   colWidths[c] := avg + 2
 END RecalcColWidth;
+									
+(* Call this to recalc all columns at once *)
+PROCEDURE RecalcAllColWidths();
+VAR c: INTEGER;
+BEGIN
+  FOR c := 0 TO DataFrame.NCols(df) - 1 DO
+    RecalcColWidth(c)
+  END
+END RecalcAllColWidths;
 
 PROCEDURE ColX(targetCol: INTEGER): INTEGER;
 VAR c, x: INTEGER;
@@ -426,34 +442,30 @@ END ColX;
 (* ── draw column-header row ─────────────────────────────────────── *)
 PROCEDURE DrawColHeaders();
 VAR 
-  c, x, i: INTEGER; 
+  c, x, i, pad, llen: INTEGER; 
   lbl: ARRAY 4 OF CHAR;
 BEGIN
   Graphics.Goto(1, 2);
   Graphics.Color256(CLR_HDR, BG_HDR);
-  
-  (* 1. Draw row-number gutter padding *)
   FOR i := 1 TO ROWW DO Out.Char(' ') END;
   Out.Char('|');
   x := ROWW + 1;
 
-  (* 2. Draw each visible column header *)
   FOR c := scrCol TO scrCol + visCols - 1 DO
     ColLabel(c, lbl);
-    PadPrint(lbl, colWidths[c]);
+    llen := Strings.Length(lbl);
+    pad := (colWidths[c] - llen) DIV 2;
+    FOR i := 0 TO pad - 1 DO Out.Char(' ') END;
+    Out.String(lbl);
+    FOR i := llen + pad TO colWidths[c] - 1 DO Out.Char(' ') END;
     Out.Char('|');
     x := x + colWidths[c] + 1;
   END;
 
-  (* 3. Pad the rest of the terminal width with the header background color *)
-  WHILE x <= tCols DO 
-    Out.Char(' '); 
-    INC(x) 
-  END;
-  
+  WHILE x <= tCols DO Out.Char(' '); INC(x) END;
   Graphics.Reset
 END DrawColHeaders;
-
+									
 (* ── draw one data row ──────────────────────────────────────────── *)
 PROCEDURE DrawDataRow(r: INTEGER);
 VAR 
@@ -464,17 +476,15 @@ VAR
   isFormula, isSel: BOOLEAN;
 BEGIN
   y := RowY(r);
-  (* Check if row is within the visible vertical pane *)
   IF (y < 3) OR (y > tRows - 1) THEN RETURN END;
   
   Graphics.Goto(1, y);
   
-  (* 1. Draw Row Number Gutter *)
+  (* 1. Draw Row Number Gutter — must be exactly ROWW chars before the '|' *)
   Graphics.Color256(CLR_ROW, BG_ROW);
   Strings.IntToStr(r + 1, rn);
-  (* Right-align the row number within ROWW spaces *)
-  FOR i := Strings.Length(rn) TO ROWW - 2 DO Out.Char(' ') END;
-  Out.String(rn); 
+  FOR i := Strings.Length(rn) TO ROWW - 1 DO Out.Char(' ') END;  (* pad to ROWW *)
+  Out.String(rn);
   Out.Char('|');
   x := ROWW + 1;
 
@@ -483,7 +493,6 @@ BEGIN
     isSel := (r = curRow) & (c = curCol);
     isFormula := FALSE;
     
-    (* Get display content *)
     IF (r < DataFrame.NRows(df)) & (c < DataFrame.NCols(df)) THEN
       DataFrame.GetStr(df, r, c, raw);
       isFormula := (raw[0] = '=');
@@ -492,7 +501,6 @@ BEGIN
       val[0] := 0X
     END;
 
-    (* Apply dynamic styling *)
     IF isSel THEN
       Graphics.Color256(CLR_SEL, BG_SEL)
     ELSIF isFormula THEN
@@ -501,23 +509,17 @@ BEGIN
       Graphics.Color256(CLR_NORM, BG_NORM)
     END;
 
-    (* Render the cell content with its specific width *)
     PadPrint(val, colWidths[c]);
     
-    (* Reset color for the vertical grid line *)
     Graphics.Color256(CLR_HDR, BG_HDR);
     Out.Char('|');
     
-    (* Track horizontal progress *)
     x := x + colWidths[c] + 1;
   END;
 
-  (* 3. Clear the rest of the line (to the terminal edge) *)
+  (* 3. Clear the rest of the line *)
   Graphics.Color256(CLR_NORM, BG_NORM);
-  WHILE x <= tCols DO 
-    Out.Char(' '); 
-    INC(x) 
-  END;
+  WHILE x <= tCols DO Out.Char(' '); INC(x) END;
   
   Graphics.Reset
 END DrawDataRow;
@@ -667,6 +669,7 @@ PROCEDURE CommitEdit();
 BEGIN
   EnsureSize(curRow, curCol);
   DataFrame.SetStr(df, curRow, curCol, editBuf);
+	RecalcColWidth(curCol);
   dirty := TRUE;
   mode := NORMAL
 END CommitEdit;
@@ -800,6 +803,7 @@ BEGIN
       IF df = NIL THEN df := DataFrame.Create() END;
       dirty := FALSE; curRow := 0; curCol := 0;
       scrRow := 0; scrCol := 0;
+			RecalcAllColWidths(); 
       COPY("Reloaded.", statusMsg)
     END
   ELSIF k = KEY_CTRL_N THEN
@@ -816,7 +820,8 @@ BEGIN
       END;
       IF df = NIL THEN df := DataFrame.Create(); COPY("New file.", statusMsg)
       ELSE dirty := FALSE; curRow := 0; curCol := 0;
-        scrRow := 0; scrCol := 0; COPY("Opened.", statusMsg)
+				scrRow := 0; scrCol := 0; COPY("Opened.", statusMsg);
+				RecalcAllColWidths();
       END
     ELSE
       fname[0] := 0X
@@ -930,11 +935,11 @@ BEGIN
   END;
 
   (* sheet starts empty — EnsureSize expands on first edit *)
-
-  curRow := 0; curCol := 0; scrRow := 0; scrCol := 0;
-  FOR k := 0 TO DataFrame.MAXCOLS - 1 DO
+	FOR k := 0 TO DataFrame.MAXCOLS - 1 DO
     colWidths[k] := 10; 
   END;
+  curRow := 0; curCol := 0; scrRow := 0; scrCol := 0;
+  RecalcAllColWidths();
   mode := NORMAL; dirty := FALSE; running := TRUE;
   Terminal.MouseOn();
   CalcVis();

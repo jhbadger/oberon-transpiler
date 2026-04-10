@@ -26,10 +26,10 @@ IMPORT Files, Strings, Out;
 
 CONST
   MAXCOLS*  = 32;    (* maximum number of columns              *)
-  MAXROWS*  = 1024;  (* maximum number of rows                 *)
+  MAXROWS*  = 32768;  (* maximum number of rows                 *)
   CNAMELEN* = 64;    (* max column-name length in bytes        *)
   CELLLEN*  = 64;    (* max string cell length in bytes        *)
-  SDATASZ   = 65536; (* MAXROWS * CELLLEN — flat cell storage  *)
+  SDATASZ   = 2097152; (* MAXROWS * CELLLEN — flat cell storage  *)
 
   OK*       = 0;   (* success                                  *)
   ERR_COL*  = 1;   (* column index out of range                *)
