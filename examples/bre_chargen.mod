@@ -622,7 +622,174 @@ BEGIN
   S(" and "); SL(miracles[pick2-1])
 END PrintDPMiracles;
 
-(* ── Main character generation ─────────────────────────────── *)
+(* ── Adventure generator tables ────────────────────────────── *)
+
+PROCEDURE AdvPerson(roll : INTEGER; VAR s : ARRAY OF CHAR);
+BEGIN
+  IF    roll = 1  THEN COPY("Mutant",   s)
+  ELSIF roll = 2  THEN COPY("Child",    s)
+  ELSIF roll = 3  THEN COPY("Merchant", s)
+  ELSIF roll = 4  THEN COPY("Sorcerer", s)
+  ELSIF roll = 5  THEN COPY("Wise Man", s)
+  ELSIF roll = 6  THEN COPY("Princess", s)
+  ELSIF roll = 7  THEN COPY("Raider",   s)
+  ELSIF roll = 8  THEN COPY("Cultist",  s)
+  ELSIF roll = 9  THEN COPY("Beastman", s)
+  ELSIF roll = 10 THEN COPY("Croc-man", s)
+  ELSIF roll = 11 THEN COPY("Vek",      s)
+  ELSE                 COPY("Priest",   s)
+  END
+END AdvPerson;
+
+PROCEDURE AdvAction(roll : INTEGER; VAR s : ARRAY OF CHAR);
+BEGIN
+  IF    roll = 1  THEN COPY("Kidnap",    s)
+  ELSIF roll = 2  THEN COPY("Rescue",    s)
+  ELSIF roll = 3  THEN COPY("Kill",      s)
+  ELSIF roll = 4  THEN COPY("Protect",   s)
+  ELSIF roll = 5  THEN COPY("Find",      s)
+  ELSIF roll = 6  THEN COPY("Threaten",  s)
+  ELSIF roll = 7  THEN COPY("Aid",       s)
+  ELSIF roll = 8  THEN COPY("Thwart",    s)
+  ELSIF roll = 9  THEN COPY("Harass",    s)
+  ELSIF roll = 10 THEN COPY("Spy",       s)
+  ELSIF roll = 11 THEN COPY("Transport", s)
+  ELSE                 COPY("Persuade",  s)
+  END
+END AdvAction;
+
+PROCEDURE AdvLocation(roll : INTEGER; VAR s : ARRAY OF CHAR);
+BEGIN
+  IF    roll = 1  THEN COPY("Abandoned Metal Factory",        s)
+  ELSIF roll = 2  THEN COPY("Ruined School",                  s)
+  ELSIF roll = 3  THEN COPY("Sorcerer's Metal War Vehicle",   s)
+  ELSIF roll = 4  THEN COPY("Dilapidated Shopping Mall",      s)
+  ELSIF roll = 5  THEN COPY("Floating Landmass",              s)
+  ELSIF roll = 6  THEN COPY("Broken Down Museum",             s)
+  ELSIF roll = 7  THEN COPY("Series of Catacombs",            s)
+  ELSIF roll = 8  THEN COPY("Shutdown Science Station",       s)
+  ELSIF roll = 9  THEN COPY("Mutated Rodent Infested Sewer",  s)
+  ELSIF roll = 10 THEN COPY("Raider Occupied Amusement Park", s)
+  ELSIF roll = 11 THEN COPY("Old Firearms Factory",           s)
+  ELSE                 COPY("Eerie Ancient Earth Graveyard",  s)
+  END
+END AdvLocation;
+
+PROCEDURE AdvObject(roll : INTEGER; VAR s : ARRAY OF CHAR);
+BEGIN
+  IF    roll = 1  THEN COPY("Mind Control Rod",                    s)
+  ELSIF roll = 2  THEN COPY("Solar Sword",                         s)
+  ELSIF roll = 3  THEN COPY("Helmet of Power",                     s)
+  ELSIF roll = 4  THEN COPY("Vicious Whip of Subjugation",         s)
+  ELSIF roll = 5  THEN COPY("Ring of Healing",                     s)
+  ELSIF roll = 6  THEN COPY("Computer of Tactical Competence",     s)
+  ELSIF roll = 7  THEN COPY("The Wizard's Ride",                   s)
+  ELSIF roll = 8  THEN COPY("The Vest of Deflection",              s)
+  ELSIF roll = 9  THEN COPY("Clamps of Holding",                   s)
+  ELSIF roll = 10 THEN COPY("Cask of Drinking",                    s)
+  ELSIF roll = 11 THEN COPY("Staff of Vengeance",                  s)
+  ELSE                 COPY("The Heavy Metal Throne of the Eclipse",s)
+  END
+END AdvObject;
+
+PROCEDURE AdvSecondPerson(roll : INTEGER; VAR s : ARRAY OF CHAR);
+BEGIN
+  IF    roll = 1  THEN COPY("Chieftain",            s)
+  ELSIF roll = 2  THEN COPY("Witch",                s)
+  ELSIF roll = 3  THEN COPY("Band of Warriors",     s)
+  ELSIF roll = 4  THEN COPY("Bandit Leader",        s)
+  ELSIF roll = 5  THEN COPY("Savage",               s)
+  ELSIF roll = 6  THEN COPY("Hawk-man",             s)
+  ELSIF roll = 7  THEN COPY("Vek",                  s)
+  ELSIF roll = 8  THEN COPY("Wastelander",          s)
+  ELSIF roll = 9  THEN COPY("Sorcerer",             s)
+  ELSIF roll = 10 THEN COPY("Group of Humans",      s)
+  ELSIF roll = 11 THEN COPY("Healer",               s)
+  ELSE                 COPY("Stupendous Scientist",  s)
+  END
+END AdvSecondPerson;
+
+PROCEDURE AdvTwist(roll : INTEGER; VAR s : ARRAY OF CHAR);
+BEGIN
+  IF    roll = 1  THEN COPY("Secret Raider Hideout",                       s)
+  ELSIF roll = 2  THEN COPY("Home to Ancient Earth Technology",             s)
+  ELSIF roll = 3  THEN COPY("Person Not Who They Appear to Be",             s)
+  ELSIF roll = 4  THEN COPY("Malfunctioning Magic",                         s)
+  ELSIF roll = 5  THEN COPY("No Twist",                                     s)
+  ELSIF roll = 6  THEN COPY("Stupendous Science at Work!",                  s)
+  ELSIF roll = 7  THEN COPY("Third Party Complicates Matters",              s)
+  ELSIF roll = 8  THEN COPY("Killer Robots Activated",                      s)
+  ELSIF roll = 9  THEN COPY("Natural Disaster",                             s)
+  ELSIF roll = 10 THEN COPY("Object is Not What it is Believed to Be",      s)
+  ELSIF roll = 11 THEN COPY("Doomsday Weapon Discovered",                   s)
+  ELSE                 COPY("Large Cache of Treasure Discovered",            s)
+  END
+END AdvTwist;
+
+PROCEDURE AdvCrazy(roll : INTEGER; VAR s : ARRAY OF CHAR);
+BEGIN
+  IF    roll = 1  THEN COPY("Techno-infused zombies",                                   s)
+  ELSIF roll = 2  THEN COPY("Pterodactyls with missile launchers",                      s)
+  ELSIF roll = 3  THEN COPY("Enslaved elementals powering Stupendous Science devices",  s)
+  ELSIF roll = 4  THEN COPY("Active volcano with slumbering Cosmic Being",              s)
+  ELSIF roll = 5  THEN COPY("Chasm to underground city of Molemen at war with bats",    s)
+  ELSIF roll = 6  THEN COPY("Roving mechanical prison built by a Sorcerer",             s)
+  ELSIF roll = 7  THEN COPY("Crashed alien ship – aliens still lurking",                s)
+  ELSIF roll = 8  THEN COPY("Sentient AI with digital body; curious but wary",          s)
+  ELSIF roll = 9  THEN COPY("Village controlled by slugs burrowed into inhabitants",    s)
+  ELSIF roll = 10 THEN COPY("Being of pure sunlight (and radiation)",                   s)
+  ELSIF roll = 11 THEN COPY("Tower resembling a circuit board",                         s)
+  ELSIF roll = 12 THEN COPY("Anthropomorphic tree-people enraged at nature's abuse",    s)
+  ELSIF roll = 13 THEN COPY("Old train delivering alchemical supplies to a Sorcerer",   s)
+  ELSIF roll = 14 THEN COPY("Swamp creatures infected by a fungal plague",              s)
+  ELSIF roll = 15 THEN COPY("Gyrocopter-riding raiders",                                s)
+  ELSIF roll = 16 THEN COPY("Forest of crystalline trees; nightmare creatures within",  s)
+  ELSIF roll = 17 THEN COPY("Ancient Earth factory full of robots",                     s)
+  ELSIF roll = 18 THEN COPY("Pig raiders on demon-powered motorcycles",                 s)
+  ELSIF roll = 19 THEN COPY("Massive creature of solar panels, metal, and concrete",    s)
+  ELSE                 COPY("Sports stadium turned cult shrine for petrified Sorcerer",  s)
+  END
+END AdvCrazy;
+
+PROCEDURE GenerateAdventure;
+VAR
+  buf  : ARRAY 64 OF CHAR;
+  abuf : ARRAY 64 OF CHAR;  (* long-entry buffer *)
+  c    : CHAR;
+BEGIN
+  Separator;
+  SL("ADVENTURE GENERATOR");
+  Separator;
+  AdvPerson(d12(), buf);
+  S("  Person:        "); SL(buf);
+  AdvAction(d12(), buf);
+  S("  Action:        "); SL(buf);
+  AdvLocation(d12(), abuf);
+  S("  Location:      "); SL(abuf);
+  AdvObject(d12(), abuf);
+  S("  Object:        "); SL(abuf);
+  AdvSecondPerson(d12(), buf);
+  S("  Second Person: "); SL(buf);
+  AdvTwist(d12(), abuf);
+  S("  Twist:         "); SL(abuf);
+  Separator;
+  S("Add a Bring the Crazy entry? [y/n]: ");
+  In.Read(c);
+  WHILE (c = ' ') OR (c = 0AX) DO In.Read(c) END;
+  IF (c = 'y') OR (c = 'Y') THEN
+    (* flush rest of line *)
+    In.Read(c);
+    WHILE (c # 0AX) & (c # 0X) DO In.Read(c) END;
+    AdvCrazy(d20(), abuf);
+    S("  Bring the Crazy: "); SL(abuf)
+  ELSE
+    (* flush rest of line *)
+    WHILE (c # 0AX) & (c # 0X) DO In.Read(c) END
+  END;
+  Separator
+END GenerateAdventure;
+
+(* ── Main generation loop ───────────────────────────────────── *)
 
 VAR
   str, dex, con, int_, wis, cha : INTEGER;
@@ -631,17 +798,28 @@ VAR
   buf : ARRAY 64 OF CHAR;
   buf2 : ARRAY 64 OF CHAR;
   robotModel, urchinRoll, animalRoll, speciesRoll : INTEGER;
-  staffRoll, skinRoll : INTEGER;
-  again : CHAR;
+  staffRoll, skinRoll, mode : INTEGER;
 
 BEGIN
   LOOP
     Ln;
-    SL("╔════════════════════════════════════════════════╗");
-    SL("║   BARBARIANS OF THE RUINED EARTH               ║");
-    SL("║          Character Generator                   ║");
-    SL("╚════════════════════════════════════════════════╝");
+    SL("╔════════════════════════════════════════╗");
+    SL("║    BARBARIANS OF THE RUINED EARTH      ║");
+    SL("╚════════════════════════════════════════╝");
     Ln;
+    SL("  1) Generate a Character");
+    SL("  2) Generate an Adventure");
+    SL("  3) Quit");
+    mode := PickOption(3);
+    IF mode = 3 THEN
+      SL("May your steel never dull and your enemies be many!");
+      EXIT
+    END;
+    Ln;
+
+    IF mode = 2 THEN
+      GenerateAdventure
+    ELSE (* mode = 1 *)
 
     (* ── Roll stats ── *)
     SL("Rolling ability scores (3d6 each; 2d6+2 after any 15+)...");
@@ -822,16 +1000,10 @@ BEGIN
     ELSE                        SL("    1d6 / 1d4 unarmed; claws = class dmg")
     END;
 
-    Separator;
-    SL("Generate another character? (y/n)");
-    S("> ");
-    In.Read(again);
-    (* flush rest of line *)
-    WHILE (again = 0AX) OR (again = ' ') DO In.Read(again) END;
-    IF (again = 'n') OR (again = 'N') THEN
-      SL("May your steel never dull and your enemies be many!");
-      EXIT
-    END;
+    Separator
+
+    END; (* IF mode = 1 *)
+
     Ln
   END
 END BRECharGen.
