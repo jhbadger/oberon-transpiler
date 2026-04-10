@@ -637,8 +637,8 @@ static void emit_open_array_len(CG *g, Node *arg) {
             return;
         }
     }
-    emit(g, "(int)(sizeof("); emit_expr(g, arg);
-    emit(g, ")/sizeof(");     emit_expr(g, arg); emit(g, "[0]))");
+    emit(g, "(int)(sizeof("); emit_as_string(g, arg);
+    emit(g, ")/sizeof(");     emit_as_string(g, arg); emit(g, "[0]))");
 }
 
 static void emit_addr_of(CG *g, Node *e) {
@@ -798,6 +798,11 @@ static int try_emit_import(CG *g, Node *fa, Node *args) {
             emit(g,"Args_Get("); emit_expr(g,a0); emit(g,","); emit_expr(g,a1); emit(g,")");
             return 1;
         }
+        if (!strcmp(proc,"GetEnv")) {
+            emit(g,"Args_GetEnv("); emit_as_string(g,a0); emit(g,","); emit_expr(g,a1);
+            emit(g,","); emit_open_array_len(g,a1); emit(g,")");
+            return 1;
+        }
     }
     /* Dict module — string-keyed hash table */
     if (!strcmp(mod,"Dict")) {
@@ -837,8 +842,9 @@ static int try_emit_import(CG *g, Node *fa, Node *args) {
             if (a!=args) emit(g,",");
             int is_var = (sig && slot < sig->nslots) ? sig->slots[slot].is_var        : 0;
             int ioa    = (sig && slot < sig->nslots) ? sig->slots[slot].is_open_array  : 0;
-            if (is_var) emit_addr_of(g, a);
-            else        emit_expr(g, a);
+            if (is_var)   emit_addr_of(g, a);
+            else if (ioa) emit_as_string(g, a);
+            else          emit_expr(g, a);
             if (ioa) { emit(g,","); emit_open_array_len(g,a); }
             slot++;
         }
@@ -868,6 +874,7 @@ static void emit_expr(CG *g, Node *e) {
         else if (e->ival==10) emit(g,"'\\n'");
         else if (e->ival==13) emit(g,"'\\r'");
         else if (e->ival==9)  emit(g,"'\\t'");
+        else if (e->ival==39)  emit(g,"'\\''");
         else if (e->ival>=32 && e->ival<127) emit(g,"'%c'",(char)e->ival);
         else emit(g,"'\\x%02X'",(unsigned)e->ival);
         break;
@@ -1010,9 +1017,11 @@ static void emit_expr(CG *g, Node *e) {
             if (!first_arg) emit(g,",");
             first_arg = 0;
             int is_var = fp ? (fp->flags & FLAG_VAR_PARAM) != 0 : 0;
+            int ioa    = fp ? is_open_array(fp->c1) : 0;
             if (is_var) emit_addr_of(g, a);
-            else        emit_expr(g, a);
-            if (fp && is_open_array(fp->c1)) { emit(g,","); emit_open_array_len(g,a); }
+            else if (ioa) emit_as_string(g, a);
+            else          emit_expr(g, a);
+            if (fp && ioa) { emit(g,","); emit_open_array_len(g,a); }
             if (fp) {
                 fp_id = fp_id ? fp_id->next : NULL;
                 if (!fp_id) { fp = fp->next; fp_id = fp ? fp->c0 : NULL; }
@@ -2202,6 +2211,10 @@ void codegen(Node *module, FILE *out, int is_main) {
         emit(g,"        int i=0; const char *src=_args_argv[n];\n");
         emit(g,"        while(src[i] && i<255){s[i]=src[i];i++;} s[i]=0;\n");
         emit(g,"    } else { s[0]=0; }\n");
+        emit(g,"}\n");
+        emit(g,"static void Args_GetEnv(const char *name, char *val, int val_len) {\n");
+        emit(g,"    const char *v=getenv(name);\n");
+        emit(g,"    if(v){strncpy(val,v,(size_t)(val_len-1));val[val_len-1]=0;} else val[0]=0;\n");
         emit(g,"}\n\n");
     }
 
