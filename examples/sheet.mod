@@ -10,6 +10,7 @@ MODULE sheet;
  *   Ctrl+S             save CSV or TSV (by extension; prompts if no filename)
  *   Ctrl+L             reload from disk
  *   Ctrl+N             new empty sheet
+ *   Ctrl+F             freeze/unfreeze top row
  *   Esc / Ctrl+Q       quit
  *
  * Formulas (start with =):
@@ -36,6 +37,7 @@ CONST
   CLR_ROW   = 244;  BG_ROW  = 0;    (* grey row numbers *)
   CLR_BAR   = 15;   BG_BAR  = 236;  (* white on dark *)
   CLR_HELP  = 250;  BG_HELP = 238;  (* light grey on dark *)
+  CLR_FRZ   = 15;   BG_FRZ  = 22;   (* white on dark green — frozen row *)
 
   KEY_UP    = 1;   KEY_DOWN  = 2;
   KEY_LEFT  = 3;   KEY_RIGHT = 4;
@@ -45,18 +47,20 @@ CONST
   KEY_PGUP  = 258; KEY_PGDN  = 259;
   KEY_HOME  = 256; KEY_END   = 257;
   KEY_DEL   = 260;
-  KEY_F2    = 265; (* mapped below from ORD 265 … handled via terminal *)
+  KEY_F2    = 265;
   KEY_CTRL_O = 15;
   KEY_CTRL_S = 19;
   KEY_CTRL_L = 12;
   KEY_CTRL_N = 14;
   KEY_CTRL_Q = 17;
+  KEY_CTRL_F = 6;
 
 VAR
   df        : DataFrame.DataFrame;
   fname     : ARRAY 256 OF CHAR;
   colWidths : ARRAY DataFrame.MAXCOLS OF INTEGER;
   dirty     : BOOLEAN;
+  freezeTop : BOOLEAN;
   curRow    : INTEGER;  (* 0-based cursor *)
   curCol    : INTEGER;
   scrRow    : INTEGER;  (* 0-based scroll offset *)
@@ -132,7 +136,6 @@ BEGIN
      (c < 0) OR (c >= DataFrame.NCols(df)) THEN RETURN 0.0 END;
   DataFrame.GetStr(df, r, c, raw);
   IF raw[0] = '=' THEN
-    (* save parser state — formulas can be nested *)
     COPY(fmStr, saved); savedPos := fmPos; savedErr := fmErr;
     COPY(raw, fmStr); fmPos := 1; fmErr := FALSE;
     INC(fmDepth);
@@ -170,7 +173,7 @@ BEGIN
   WHILE (fmStr[fmPos] >= '0') & (fmStr[fmPos] <= '9') DO
     r1 := r1 * 10 + ORD(fmStr[fmPos]) - ORD('0'); INC(fmPos)
   END;
-  DEC(r1);  (* 1-based → 0-based *)
+  DEC(r1);
   FmSkipWS();
   IF FmGet() # ':' THEN fmErr := TRUE; RETURN 0.0 END;
   FmSkipWS();
@@ -182,7 +185,6 @@ BEGIN
   DEC(r2);
   FmSkipWS();
   IF FmGet() # ')' THEN fmErr := TRUE; RETURN 0.0 END;
-  (* evaluate range *)
   acc := 0.0; n := 0;
   IF kind = 2 THEN acc := 1.0E30  END;
   IF kind = 3 THEN acc := -1.0E30 END;
@@ -193,8 +195,7 @@ BEGIN
       IF kind = 0 THEN acc := acc + v END;
       IF kind = 1 THEN acc := acc + v END;
       IF (kind = 2) & (v < acc) THEN acc := v END;
-      IF (kind = 3) & (v > acc) THEN acc := v END;
-      IF kind = 4 THEN (* n counts *) END
+      IF (kind = 3) & (v > acc) THEN acc := v END
     END
   END;
   IF kind = 1 THEN IF n > 0 THEN acc := acc / n ELSE acc := 0.0 END END;
@@ -219,7 +220,6 @@ BEGIN
     FmSkipWS();
     IF FmPeek() = ')' THEN FmGet() ELSE fmErr := TRUE END
   ELSIF (FmPeek() >= 'A') & (FmPeek() <= 'Z') THEN
-    (* function name or cell reference *)
     ni := 0;
     WHILE (FmPeek() >= 'A') & (FmPeek() <= 'Z') & (ni < 14) DO
       name[ni] := FmGet(); INC(ni)
@@ -227,11 +227,8 @@ BEGIN
     name[ni] := 0X;
     FmSkipWS();
     IF FmPeek() = '(' THEN
-      (* function call *)
       v := RangeFunc(name)
     ELSIF (FmPeek() >= '0') & (FmPeek() <= '9') THEN
-      (* looks like a cell ref — reparse the column from name *)
-      (* col is encoded in name (1 or 2 chars already parsed) *)
       IF (ni = 1) THEN col := ORD(name[0]) - ORD('A')
       ELSIF (ni = 2) THEN
         col := (ORD(name[0]) - ORD('A') + 1) * 26 + ORD(name[1]) - ORD('A')
@@ -241,13 +238,12 @@ BEGIN
       WHILE (FmPeek() >= '0') & (FmPeek() <= '9') DO
         row := row * 10 + ORD(FmGet()) - ORD('0')
       END;
-      DEC(row);  (* 1-based → 0-based *)
+      DEC(row);
       v := EvalCell(row, col, fmDepth)
     ELSE
-      v := 0.0  (* unknown identifier *)
+      v := 0.0
     END
   ELSIF ((FmPeek() >= '0') & (FmPeek() <= '9')) OR (FmPeek() = '.') THEN
-    (* numeric literal *)
     ni := 0;
     WHILE (ni < 30) & ((FmPeek() >= '0') & (FmPeek() <= '9') OR
           (FmPeek() = '.') OR (FmPeek() = 'e') OR (FmPeek() = 'E') OR
@@ -305,7 +301,6 @@ BEGIN
   IF raw[0] # '=' THEN
     COPY(raw, out); RETURN
   END;
-  (* evaluate *)
   COPY(raw, fmStr); fmPos := 1; fmErr := FALSE; fmDepth := 1;
   val := ParseAdd();
   IF fmErr THEN COPY("#ERR", out)
@@ -329,34 +324,28 @@ END EnsureSize;
 
 (* ── set visible dimensions from terminal size ───────────────────── *)
 PROCEDURE CalcVis();
-VAR 
-  x, c: INTEGER;
+VAR x, c: INTEGER;
 BEGIN
   tCols := Terminal.Cols();
   tRows := Terminal.Rows();
-  
+
   (* Rows: 1 formula bar + 1 col header + data rows + 1 help bar *)
+  (* When frozen, row 0 occupies one extra screen line              *)
   visRows := tRows - 3;
+  IF freezeTop THEN DEC(visRows) END;
   IF visRows < 1 THEN visRows := 1 END;
 
-  (* Cols: Start after the row-number gutter *)
-  x := ROWW + 1; 
+  x := ROWW + 1;
   visCols := 0;
   c := scrCol;
-  
-  (* Add columns until we run out of horizontal space *)
   WHILE (x < tCols) & (c < DataFrame.MAXCOLS) DO
-    (* Width of the current column + the '|' separator *)
     IF (x + colWidths[c] + 1) <= tCols THEN
       x := x + colWidths[c] + 1;
-      INC(visCols);
-      INC(c);
+      INC(visCols); INC(c)
     ELSE
-      (* This column won't fit; stop here *)
-      x := tCols + 1 
+      x := tCols + 1
     END
   END;
-
   IF visCols < 1 THEN visCols := 1 END
 END CalcVis;
 
@@ -368,12 +357,18 @@ BEGIN
   IF curCol < scrCol THEN scrCol := curCol END;
   IF curCol >= scrCol + visCols THEN scrCol := curCol - visCols + 1 END;
   IF scrRow < 0 THEN scrRow := 0 END;
-  IF scrCol < 0 THEN scrCol := 0 END
+  IF scrCol < 0 THEN scrCol := 0 END;
+  (* when top row is frozen it is drawn separately — don't scroll to it *)
+  IF freezeTop & (scrRow < 1) THEN scrRow := 1 END
 END ClampScroll;
 
-(* ── screen: y position of data row r (0-based abs) ─────────────── *)
+(* ── screen y of data row r ─────────────────────────────────────── *)
 PROCEDURE RowY(r: INTEGER): INTEGER;
-BEGIN RETURN (r - scrRow) + 3 END RowY;
+BEGIN
+  IF freezeTop THEN RETURN (r - scrRow) + 4
+  ELSE RETURN (r - scrRow) + 3
+  END
+END RowY;
 
 (* ── draw one padded cell ───────────────────────────────────────── *)
 PROCEDURE PadPrint(s: ARRAY OF CHAR; w: INTEGER);
@@ -385,6 +380,7 @@ BEGIN
   FOR i := len TO w - 1 DO Out.Char(' ') END
 END PadPrint;
 
+(* ── recalc one column's display width from its data ────────────── *)
 PROCEDURE RecalcColWidth(c: INTEGER);
 VAR
   r, total, count, avg, nr, hdrLen: INTEGER;
@@ -394,33 +390,34 @@ BEGIN
   nr    := DataFrame.NRows(df);
   total := 0;
   count := 0;
-
   FOR r := 0 TO nr - 1 DO
     CellDisplay(r, c, val);
     total := total + Strings.Length(val);
     INC(count)
   END;
-
   IF count > 0 THEN avg := total DIV count ELSE avg := 8 END;
 
-  (* floor: never narrower than the first row (header) string *)
-  IF nr > 0 THEN
-    CellDisplay(0, c, val);
-    hdrLen := Strings.Length(val);
-    IF avg < hdrLen THEN avg := hdrLen END
-  END;
-
-  (* keep the column label floor too *)
-  ColLabel(c, lbl);
-  IF avg < Strings.Length(lbl) THEN avg := Strings.Length(lbl) END;
-
+  (* clamp average to reasonable bounds *)
   IF avg < 5  THEN avg := 5  END;
   IF avg > 30 THEN avg := 30 END;
 
+  (* floor: never narrower than the first-row (header) string,
+     applied after the general clamp so headers always show fully *)
+  IF nr > 0 THEN
+    CellDisplay(0, c, val);
+    hdrLen := Strings.Length(val);
+    IF hdrLen > 40 THEN hdrLen := 40 END;
+    IF avg < hdrLen THEN avg := hdrLen END
+  END;
+
+  (* also never narrower than the column letter label *)
+  ColLabel(c, lbl);
+  IF avg < Strings.Length(lbl) THEN avg := Strings.Length(lbl) END;
+
   colWidths[c] := avg + 2
 END RecalcColWidth;
-									
-(* Call this to recalc all columns at once *)
+
+(* ── recalc all columns ─────────────────────────────────────────── *)
 PROCEDURE RecalcAllColWidths();
 VAR c: INTEGER;
 BEGIN
@@ -434,15 +431,15 @@ VAR c, x: INTEGER;
 BEGIN
   x := ROWW + 1;
   FOR c := scrCol TO targetCol - 1 DO
-    x := x + colWidths[c] + 1;
+    x := x + colWidths[c] + 1
   END;
   RETURN x + 1
 END ColX;
 
 (* ── draw column-header row ─────────────────────────────────────── *)
 PROCEDURE DrawColHeaders();
-VAR 
-  c, x, i, pad, llen: INTEGER; 
+VAR
+  c, x, i, pad, llen: INTEGER;
   lbl: ARRAY 4 OF CHAR;
 BEGIN
   Graphics.Goto(1, 2);
@@ -450,49 +447,56 @@ BEGIN
   FOR i := 1 TO ROWW DO Out.Char(' ') END;
   Out.Char('|');
   x := ROWW + 1;
-
   FOR c := scrCol TO scrCol + visCols - 1 DO
     ColLabel(c, lbl);
     llen := Strings.Length(lbl);
-    pad := (colWidths[c] - llen) DIV 2;
+    pad  := (colWidths[c] - llen) DIV 2;
     FOR i := 0 TO pad - 1 DO Out.Char(' ') END;
     Out.String(lbl);
     FOR i := llen + pad TO colWidths[c] - 1 DO Out.Char(' ') END;
     Out.Char('|');
-    x := x + colWidths[c] + 1;
+    x := x + colWidths[c] + 1
   END;
-
   WHILE x <= tCols DO Out.Char(' '); INC(x) END;
   Graphics.Reset
 END DrawColHeaders;
-									
+
 (* ── draw one data row ──────────────────────────────────────────── *)
 PROCEDURE DrawDataRow(r: INTEGER);
-VAR 
+VAR
   c, y, x, i: INTEGER;
   val: ARRAY DataFrame.CELLLEN OF CHAR;
   raw: ARRAY DataFrame.CELLLEN OF CHAR;
   rn:  ARRAY 8 OF CHAR;
   isFormula, isSel: BOOLEAN;
+  fgNorm, bgNorm: INTEGER;
 BEGIN
   y := RowY(r);
+  (* frozen row is always at screen line 3, override RowY result *)
+  IF freezeTop & (r = 0) THEN y := 3 END;
   IF (y < 3) OR (y > tRows - 1) THEN RETURN END;
-  
+
   Graphics.Goto(1, y);
-  
-  (* 1. Draw Row Number Gutter — must be exactly ROWW chars before the '|' *)
+
+  (* choose colours for frozen vs normal rows *)
+  IF freezeTop & (r = 0) THEN
+    fgNorm := CLR_FRZ; bgNorm := BG_FRZ
+  ELSE
+    fgNorm := CLR_NORM; bgNorm := BG_NORM
+  END;
+
+  (* 1. Row number gutter — exactly ROWW chars before '|' *)
   Graphics.Color256(CLR_ROW, BG_ROW);
   Strings.IntToStr(r + 1, rn);
-  FOR i := Strings.Length(rn) TO ROWW - 1 DO Out.Char(' ') END;  (* pad to ROWW *)
+  FOR i := Strings.Length(rn) TO ROWW - 1 DO Out.Char(' ') END;
   Out.String(rn);
   Out.Char('|');
   x := ROWW + 1;
 
-  (* 2. Draw Visible Cells *)
+  (* 2. Visible cells *)
   FOR c := scrCol TO scrCol + visCols - 1 DO
-    isSel := (r = curRow) & (c = curCol);
+    isSel     := (r = curRow) & (c = curCol);
     isFormula := FALSE;
-    
     IF (r < DataFrame.NRows(df)) & (c < DataFrame.NCols(df)) THEN
       DataFrame.GetStr(df, r, c, raw);
       isFormula := (raw[0] = '=');
@@ -500,27 +504,22 @@ BEGIN
     ELSE
       val[0] := 0X
     END;
-
     IF isSel THEN
       Graphics.Color256(CLR_SEL, BG_SEL)
     ELSIF isFormula THEN
       Graphics.Color256(CLR_FML, BG_FML)
     ELSE
-      Graphics.Color256(CLR_NORM, BG_NORM)
+      Graphics.Color256(fgNorm, bgNorm)
     END;
-
     PadPrint(val, colWidths[c]);
-    
     Graphics.Color256(CLR_HDR, BG_HDR);
     Out.Char('|');
-    
-    x := x + colWidths[c] + 1;
+    x := x + colWidths[c] + 1
   END;
 
-  (* 3. Clear the rest of the line *)
-  Graphics.Color256(CLR_NORM, BG_NORM);
+  (* 3. Clear rest of line *)
+  Graphics.Color256(fgNorm, bgNorm);
   WHILE x <= tCols DO Out.Char(' '); INC(x) END;
-  
   Graphics.Reset
 END DrawDataRow;
 
@@ -535,7 +534,6 @@ BEGIN
   Out.String(addr); Out.String(": ");
   x := Strings.Length(addr) + 3;
   IF mode = EDIT THEN
-    (* show edit buffer with cursor *)
     FOR i := 0 TO editPos - 1 DO Out.Char(editBuf[i]); INC(x) END;
     Out.Char('_'); INC(x);
     i := editPos;
@@ -548,7 +546,6 @@ BEGIN
   END;
   WHILE x <= tCols DO Out.Char(' '); INC(x) END;
   IF statusMsg[0] # 0X THEN
-    (* right-aligned status in formula bar *)
     Graphics.Goto(tCols - Strings.Length(statusMsg) - 1, 1);
     Out.String(statusMsg)
   END;
@@ -557,14 +554,14 @@ END DrawFormulaBar;
 
 (* ── help bar (last row) ────────────────────────────────────────── *)
 PROCEDURE DrawHelp();
-VAR x: INTEGER; s: ARRAY 128 OF CHAR;
+VAR s: ARRAY 128 OF CHAR;
 BEGIN
   Graphics.Goto(1, tRows);
   Graphics.Color256(CLR_HELP, BG_HELP);
   IF mode = EDIT THEN
     s := "Enter:confirm  Esc:cancel  Backspace:delete"
   ELSE
-    s := "Arrows/Mouse:nav  Enter:edit  Del:clear  ^O:open  ^S:save  ^L:reload  ^Q:quit"
+    s := "Arrows:nav  Enter:edit  Del:clear  ^O:open  ^S:save  ^L:reload  ^F:freeze  ^Q:quit"
   END;
   PadPrint(s, tCols - 1);
   Graphics.Reset
@@ -578,6 +575,10 @@ BEGIN
   Graphics.Clear();
   DrawFormulaBar();
   DrawColHeaders();
+  (* draw frozen row at screen line 3 before the scrollable region *)
+  IF freezeTop THEN
+    DrawDataRow(0)
+  END;
   FOR r := scrRow TO scrRow + visRows - 1 DO
     DrawDataRow(r)
   END;
@@ -605,11 +606,10 @@ BEGIN
     FOR c := 0 TO nc - 1 DO
       IF c > 0 THEN Files.Write(r2, ',') END;
       DataFrame.GetStr(df, r, c, cell);
-      (* quote field if it contains comma *)
       IF Strings.Pos(",", cell, 0) >= 0 THEN
-        Files.Write(r2, 022X);  (* " *)
+        Files.Write(r2, 022X);
         Files.WriteString(r2, cell);
-        Files.Write(r2, 022X)  (* " *)
+        Files.Write(r2, 022X)
       ELSE
         Files.WriteString(r2, cell)
       END
@@ -653,9 +653,7 @@ END IsTSV;
 
 (* ── move cursor, keeping it in sheet bounds ────────────────────── *)
 PROCEDURE MoveTo(r, c: INTEGER);
-VAR prevRow, prevCol: INTEGER;
 BEGIN
-  prevRow := curRow; prevCol := curCol;
   IF r < 0 THEN r := 0 END;
   IF c < 0 THEN c := 0 END;
   IF r >= DataFrame.MAXROWS THEN r := DataFrame.MAXROWS - 1 END;
@@ -669,9 +667,9 @@ PROCEDURE CommitEdit();
 BEGIN
   EnsureSize(curRow, curCol);
   DataFrame.SetStr(df, curRow, curCol, editBuf);
-	RecalcColWidth(curCol);
+  RecalcColWidth(curCol);
   dirty := TRUE;
-  mode := NORMAL
+  mode  := NORMAL
 END CommitEdit;
 
 (* ── enter edit mode ─────────────────────────────────────────────── *)
@@ -724,7 +722,6 @@ BEGIN
   ELSIF k = KEY_END THEN
     editPos := Strings.Length(editBuf)
   ELSIF (k >= 32) & (k < 127) THEN
-    (* insert printable character *)
     len := Strings.Length(editBuf);
     IF len < 254 THEN
       i := len;
@@ -739,7 +736,7 @@ END HandleEdit;
 PROCEDURE Prompt(prompt: ARRAY OF CHAR; VAR result: ARRAY OF CHAR): BOOLEAN;
 VAR i, j, plen, x: INTEGER;
 BEGIN
-  result[0] := 0X;  i := 0;
+  result[0] := 0X; i := 0;
   plen := Strings.Length(prompt);
   LOOP
     Graphics.Goto(1, 1);
@@ -747,7 +744,7 @@ BEGIN
     x := 1;
     WHILE x <= tCols DO Out.Char(' '); INC(x) END;
     Graphics.Goto(1, 1);
-    Out.String(prompt);  Out.String(result);
+    Out.String(prompt); Out.String(result);
     Graphics.Reset;
     Graphics.Goto(plen + i + 1, 1);
     j := GetKey();
@@ -763,7 +760,6 @@ END Prompt;
 (* ── handle a key in NORMAL mode ───────────────────────────────── *)
 PROCEDURE HandleNormal(k: INTEGER);
 VAR nr, nc: INTEGER;
-    s: ARRAY DataFrame.CELLLEN OF CHAR;
     ok: BOOLEAN;
 BEGIN
   nr := DataFrame.NRows(df); nc := DataFrame.NCols(df);
@@ -779,7 +775,19 @@ BEGIN
   ELSIF k = KEY_ENTER THEN StartEdit(FALSE)
   ELSIF k = KEY_DEL   THEN
     IF (curRow < nr) & (curCol < nc) THEN
-      DataFrame.SetStr(df, curRow, curCol, ""); dirty := TRUE
+      DataFrame.SetStr(df, curRow, curCol, "");
+      RecalcColWidth(curCol);
+      dirty := TRUE
+    END
+  ELSIF k = KEY_CTRL_F THEN
+    freezeTop := ~freezeTop;
+    IF freezeTop THEN
+      (* if cursor is on row 0, push it down so it isn't hidden behind freeze *)
+      IF curRow = 0 THEN MoveTo(1, curCol) END;
+      ClampScroll();
+      COPY("Row 1 frozen.", statusMsg)
+    ELSE
+      COPY("Unfrozen.", statusMsg)
     END
   ELSIF k = KEY_CTRL_S THEN
     IF fname[0] = 0X THEN
@@ -803,12 +811,12 @@ BEGIN
       IF df = NIL THEN df := DataFrame.Create() END;
       dirty := FALSE; curRow := 0; curCol := 0;
       scrRow := 0; scrCol := 0;
-			RecalcAllColWidths(); 
+      RecalcAllColWidths();
       COPY("Reloaded.", statusMsg)
     END
   ELSIF k = KEY_CTRL_N THEN
     df := DataFrame.Create();
-    fname[0] := 0X; dirty := FALSE;
+    fname[0] := 0X; dirty := FALSE; freezeTop := FALSE;
     curRow := 0; curCol := 0; scrRow := 0; scrCol := 0;
     COPY("New sheet.", statusMsg)
   ELSIF k = KEY_CTRL_O THEN
@@ -818,10 +826,13 @@ BEGIN
       ELSE
         df := DataFrame.LoadCSV(fname, FALSE, nc)
       END;
-      IF df = NIL THEN df := DataFrame.Create(); COPY("New file.", statusMsg)
-      ELSE dirty := FALSE; curRow := 0; curCol := 0;
-				scrRow := 0; scrCol := 0; COPY("Opened.", statusMsg);
-				RecalcAllColWidths();
+      IF df = NIL THEN
+        df := DataFrame.Create(); COPY("New file.", statusMsg)
+      ELSE
+        dirty := FALSE; curRow := 0; curCol := 0;
+        scrRow := 0; scrCol := 0;
+        RecalcAllColWidths();
+        COPY("Opened.", statusMsg)
       END
     ELSE
       fname[0] := 0X
@@ -829,7 +840,6 @@ BEGIN
   ELSIF (k = KEY_CTRL_Q) OR (k = KEY_ESC) THEN
     running := FALSE
   ELSIF (k >= 32) & (k < 127) THEN
-    (* start editing with typed char *)
     StartEdit(TRUE);
     HandleEdit(k)
   END
@@ -837,57 +847,60 @@ END HandleNormal;
 
 (* ── handle mouse click ─────────────────────────────────────────── *)
 PROCEDURE HandleMouse();
-VAR 
+VAR
   mx, my, btn, c, r, x: INTEGER;
   found: BOOLEAN;
 BEGIN
   mx  := Terminal.MouseX();
   my  := Terminal.MouseY();
   btn := Terminal.MouseBtn();
-  
-  IF btn = 3 THEN RETURN END;  (* Ignore mouse release *)
-  
-  IF my = 1 THEN  (* Click on formula bar *)
+
+  IF btn = 3 THEN RETURN END;
+
+  IF my = 1 THEN
     IF mode = NORMAL THEN StartEdit(FALSE) END;
     RETURN
   END;
-  
-  IF my < 3 THEN RETURN END;  (* Ignore clicks on header or empty space above *)
 
-  (* 1. Map Y coordinate to Data Row *)
-  r := scrRow + (my - 3);
-  
-  (* 2. Map X coordinate to Data Column *)
-  (* Start at the edge of the row-number gutter *)
-  x := ROWW + 2; 
-  c := scrCol;
-  found := FALSE;
-  
-  (* Walk through visible columns to see which one was clicked *)
-  WHILE (c < scrCol + visCols) & (~found) DO
-    IF (mx >= x) & (mx < x + colWidths[c] + 1) THEN
-      found := TRUE
-    ELSE
-      x := x + colWidths[c] + 1;
-      INC(c)
-    END
+  (* screen line 3 is the frozen header row when freeze is on *)
+  IF freezeTop & (my = 3) THEN
+    IF mode = EDIT THEN CommitEdit() END;
+    (* find column clicked *)
+    x := ROWW + 2; c := scrCol; found := FALSE;
+    WHILE (c < scrCol + visCols) & (~found) DO
+      IF (mx >= x) & (mx < x + colWidths[c] + 1) THEN found := TRUE
+      ELSE x := x + colWidths[c] + 1; INC(c)
+      END
+    END;
+    MoveTo(0, c);
+    RETURN
   END;
 
-  (* Fallback/Clamping *)
-  IF ~found THEN 
+  (* data area starts at screen line 3 (unfrozen) or 4 (frozen) *)
+  IF freezeTop THEN
+    IF my < 4 THEN RETURN END;
+    r := scrRow + (my - 4)
+  ELSE
+    IF my < 3 THEN RETURN END;
+    r := scrRow + (my - 3)
+  END;
+
+  x := ROWW + 2; c := scrCol; found := FALSE;
+  WHILE (c < scrCol + visCols) & (~found) DO
+    IF (mx >= x) & (mx < x + colWidths[c] + 1) THEN found := TRUE
+    ELSE x := x + colWidths[c] + 1; INC(c)
+    END
+  END;
+  IF ~found THEN
     IF mx < ROWW + 2 THEN c := 0 ELSE c := curCol END
   END;
   IF r < 0 THEN r := 0 END;
 
-  (* 3. Handle the Click Action *)
   IF mode = EDIT THEN CommitEdit() END;
-  
-  IF btn = 64 THEN     (* Scroll wheel up *)
-    MoveTo(curRow - 3, curCol)
-  ELSIF btn = 65 THEN  (* Scroll wheel down *)
-    MoveTo(curRow + 3, curCol)
-  ELSE                 (* Normal click *)
-    MoveTo(r, c)
+
+  IF btn = 64 THEN MoveTo(curRow - 3, curCol)
+  ELSIF btn = 65 THEN MoveTo(curRow + 3, curCol)
+  ELSE MoveTo(r, c)
   END
 END HandleMouse;
 
@@ -917,8 +930,8 @@ VAR
   prevRow, prevCol, prevScrRow, prevScrCol: INTEGER;
 
 BEGIN
-  (* load file if given on command line, else new empty sheet *)
   fname[0] := 0X;
+  freezeTop := FALSE;
   IF Args.Count() >= 1 THEN
     Args.Get(1, fname);
     IF IsTSV(fname) THEN
@@ -934,9 +947,8 @@ BEGIN
     df := DataFrame.Create()
   END;
 
-  (* sheet starts empty — EnsureSize expands on first edit *)
-	FOR k := 0 TO DataFrame.MAXCOLS - 1 DO
-    colWidths[k] := 10; 
+  FOR k := 0 TO DataFrame.MAXCOLS - 1 DO
+    colWidths[k] := 10
   END;
   curRow := 0; curCol := 0; scrRow := 0; scrCol := 0;
   RecalcAllColWidths();
@@ -956,9 +968,6 @@ BEGIN
       DrawAll()
     ELSIF mode = EDIT THEN
       HandleEdit(k);
-      (* Enter commits and moves the cursor — full redraw so every formula
-         cell that depends on the changed value updates immediately.
-         For in-progress typing the cursor stays put, so cheap partial draw. *)
       IF (curRow # prevRow) OR (curCol # prevCol) THEN
         DrawAll()
       ELSE
@@ -967,14 +976,13 @@ BEGIN
       END
     ELSE
       HandleNormal(k);
-      (* full redraw if scroll changed, otherwise just repaint affected rows *)
       IF (scrRow # prevScrRow) OR (scrCol # prevScrCol) THEN
         DrawAll()
       ELSIF (curRow # prevRow) OR (curCol # prevCol) THEN
-        DrawDataRow(prevRow);   (* un-highlight old cell *)
-        RedrawCur()             (* highlight new cell + formula bar *)
+        DrawDataRow(prevRow);
+        RedrawCur()
       ELSE
-        DrawAll()               (* data changed or status updated *)
+        DrawAll()
       END
     END
   END;
