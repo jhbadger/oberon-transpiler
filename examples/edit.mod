@@ -844,7 +844,7 @@ BEGIN
   Out.String(" ^O Open  ^S Save  ^Q Quit  ^F Find  ^K Kill  ^Y Yank  ^G Goto  ^R Shell | Home/End  Ctrl+Arrows  PgUp/Dn | Mouse");
 
   Graphics.Reset;
-  Terminal.Goto(cx - leftCol + 1, cy - topLine + 2)
+  Terminal.Goto(cx - leftCol + 1, cy - topLine + 1)
 END Render;
 
 BEGIN
