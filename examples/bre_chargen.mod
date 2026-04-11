@@ -33,6 +33,9 @@ BEGIN RETURN d6() + d6() + d6() END d3d6;
 PROCEDURE d2d6p2() : INTEGER;
 BEGIN RETURN d6() + d6() + 2 END d2d6p2;
 
+PROCEDURE d2d6p5() : INTEGER;
+BEGIN RETURN d6() + d6() + 5 END d2d6p5;
+
 (* ── Output helpers ────────────────────────────────────────── *)
 
 PROCEDURE Ln;
@@ -98,6 +101,17 @@ BEGIN
   wis  := vals[4];
   cha  := vals[5]
 END RollStats;
+
+PROCEDURE RollStatsSMC(VAR str, dex, con, int_, wis, cha : INTEGER);
+(* Saturday Morning Cartoon method: 2d6+5 per stat. *)
+BEGIN
+  str  := d2d6p5();
+  dex  := d2d6p5();
+  con  := d2d6p5();
+  int_ := d2d6p5();
+  wis  := d2d6p5();
+  cha  := d2d6p5()
+END RollStatsSMC;
 
 (* ── Print one stat line ───────────────────────────────────── *)
 
@@ -822,8 +836,18 @@ BEGIN
     ELSE (* mode = 1 *)
 
     (* ── Roll stats ── *)
-    SL("Rolling ability scores (3d6 each; 2d6+2 after any 15+)...");
-    RollStats(str, dex, con, int_, wis, cha);
+    Separator;
+    SL("STAT ROLLING METHOD");
+    SL("  1) Traditional  (3d6 each; 2d6+2 after any 15+)");
+    SL("  2) Saturday Morning Cartoon  (2d6+5 each – heroic feel,");
+    SL("       no scores below 7, striving for 18+)");
+    IF PickOption(2) = 2 THEN
+      SL("Rolling ability scores (2d6+5 each)...");
+      RollStatsSMC(str, dex, con, int_, wis, cha)
+    ELSE
+      SL("Rolling ability scores (3d6 each; 2d6+2 after any 15+)...");
+      RollStats(str, dex, con, int_, wis, cha)
+    END;
     Separator;
     SL("ABILITY SCORES");
     PrintStat("STR", str);
