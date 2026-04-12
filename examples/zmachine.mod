@@ -13,7 +13,7 @@ IMPORT Terminal, Args, Strings, Files, Out;
 CONST
   MEMSIZE   = 524288;   (* 512 KB *)
   STACKSZ   = 2048;
-  MAXFRAMES = 64;
+  MAXFRAMES = 128;
 
   (* Keys *)
   KEY_BS    =  8;
@@ -71,11 +71,16 @@ VAR
   upperX    : INTEGER;
   upperY    : INTEGER;
 
-  (* Output stream 3 buffer (for TOKENISE) *)
-  strm3     : INTEGER;   (* base address in Z-mem; 0=inactive *)
-  strm3len  : INTEGER;
+  (* Output stream 3 stack (nested output_stream 3 support) *)
+  strm3Stk  : ARRAY 16 OF INTEGER;  (* base addresses *)
+  strm3Len  : ARRAY 16 OF INTEGER;  (* bytes written to each level *)
+  strm3Top  : INTEGER;              (* # active levels; 0=inactive *)
+  strm3     : INTEGER;              (* = strm3Stk[strm3Top-1] or 0 *)
+  strm3len  : INTEGER;              (* = strm3Len[strm3Top-1] or 0 *)
 
-  saveFile  : ARRAY 16 OF CHAR;
+  (* Word-wrap buffer for lower window *)
+  wrapBuf : ARRAY 256 OF CHAR;
+  wrapLen : INTEGER;
 
   (* Bit-shift table *)
   pw2 : ARRAY 17 OF INTEGER;  (* pw2[i] = 2^i *)
@@ -88,21 +93,29 @@ VAR
    ══════════════════════════════════════════════════════════════ *)
 
 PROCEDURE RB(addr: INTEGER): INTEGER;
-VAR b: INTEGER;
-BEGIN b := mem[addr]; RETURN b END RB;
+BEGIN
+  IF (addr < 0) OR (addr >= MEMSIZE) THEN RETURN 0 END;
+  RETURN mem[addr]
+END RB;
 
 PROCEDURE RW(addr: INTEGER): INTEGER;
-VAR a, b: INTEGER;
-BEGIN a := mem[addr]; b := mem[addr+1]; RETURN a * 256 + b END RW;
+BEGIN
+  IF (addr < 0) OR (addr >= MEMSIZE - 1) THEN RETURN 0 END;
+  RETURN mem[addr] * 256 + mem[addr+1]
+END RW;
 
 PROCEDURE WB(addr, val: INTEGER);
-BEGIN mem[addr] := val MOD 256 END WB;
+BEGIN
+  IF (addr >= 0) & (addr < MEMSIZE) THEN mem[addr] := val MOD 256 END
+END WB;
 
 PROCEDURE WW(addr, val: INTEGER);
 BEGIN
-  val := val MOD 65536;
-  mem[addr] := val DIV 256;
-  mem[addr+1] := val MOD 256
+  IF (addr >= 0) & (addr < MEMSIZE - 1) THEN
+    val := val MOD 65536;
+    mem[addr] := val DIV 256;
+    mem[addr+1] := val MOD 256
+  END
 END WW;
 
 PROCEDURE S16(v: INTEGER): INTEGER;
@@ -170,10 +183,15 @@ BEGIN RETURN ODD(v DIV pw2[bit]) END BitTst;
    ══════════════════════════════════════════════════════════════ *)
 
 PROCEDURE Push(v: INTEGER);
-BEGIN stk[sp] := v;  INC(sp) END Push;
+BEGIN
+  IF sp < STACKSZ THEN stk[sp] := v;  INC(sp) END
+END Push;
 
 PROCEDURE Pop(): INTEGER;
-BEGIN DEC(sp);  RETURN stk[sp] END Pop;
+BEGIN
+  IF sp > 0 THEN DEC(sp);  RETURN stk[sp] END;
+  RETURN 0
+END Pop;
 
 (* ══════════════════════════════════════════════════════════════
    Variable access
@@ -182,7 +200,9 @@ BEGIN DEC(sp);  RETURN stk[sp] END Pop;
 PROCEDURE GetVar(v: INTEGER): INTEGER;
 BEGIN
   IF v = 0 THEN RETURN Pop()
-  ELSIF v <= 15 THEN RETURN frames[fp].locals[v]
+  ELSIF v <= 15 THEN
+    IF fp >= 0 THEN RETURN frames[fp].locals[v] END;
+    RETURN 0
   ELSE RETURN RW(globBase + (v - 16) * 2)
   END
 END GetVar;
@@ -190,7 +210,8 @@ END GetVar;
 PROCEDURE SetVar(v, val: INTEGER);
 BEGIN
   IF v = 0 THEN Push(val)
-  ELSIF v <= 15 THEN frames[fp].locals[v] := val
+  ELSIF v <= 15 THEN
+    IF fp >= 0 THEN frames[fp].locals[v] := val END
   ELSE WW(globBase + (v - 16) * 2, val)
   END
 END SetVar;
@@ -216,14 +237,56 @@ END IndSet;
    Output
    ══════════════════════════════════════════════════════════════ *)
 
+PROCEDURE FlushWord;
+(* Output the buffered word, wrapping to next line first if needed *)
+VAR i: INTEGER;
+BEGIN
+  IF wrapLen = 0 THEN RETURN END;
+  IF curCol + wrapLen > screenW THEN
+    Out.Char(0DX);  Out.Char(0AX);
+    curCol := 1
+  END;
+  FOR i := 0 TO wrapLen - 1 DO
+    Out.Char(wrapBuf[i]);
+    INC(curCol)
+  END;
+  wrapLen := 0
+END FlushWord;
+
 PROCEDURE EmitChar(c: CHAR);
 BEGIN
-  Out.Char(c);
+  (* Stream 3 (memory): capture output, suppress screen *)
+  IF strm3 > 0 THEN
+    WB(strm3 + 2 + strm3len, ORD(c));
+    INC(strm3len);
+    strm3Len[strm3Top - 1] := strm3len;
+    RETURN
+  END;
   IF curWin = 0 THEN
-    IF c = 0AX THEN curCol := 1
-    ELSE INC(curCol)
+    IF c = 0AX THEN
+      FlushWord;
+      Out.Char(0DX);  Out.Char(0AX);
+      curCol := 1
+    ELSIF c = ' ' THEN
+      FlushWord;
+      IF curCol < screenW THEN
+        Out.Char(' ');
+        INC(curCol)
+      END
+      (* space at end of line is swallowed *)
+    ELSE
+      IF wrapLen < 255 THEN
+        wrapBuf[wrapLen] := c;
+        INC(wrapLen)
+      ELSE
+        (* word too long to buffer: flush then output directly *)
+        FlushWord;
+        Out.Char(c);
+        INC(curCol)
+      END
     END
   ELSE
+    Out.Char(c);
     INC(upperX)
   END
 END EmitChar;
@@ -231,6 +294,7 @@ END EmitChar;
 PROCEDURE EmitNewline;
 BEGIN
   IF curWin = 0 THEN
+    FlushWord;
     Out.Char(0DX);  Out.Char(0AX);
     curCol := 1
   END
@@ -348,24 +412,51 @@ END SkipZStr;
    ══════════════════════════════════════════════════════════════ *)
 
 PROCEDURE ObjBase(obj: INTEGER): INTEGER;
-(* byte address of object record *)
-BEGIN RETURN objAddr + 62 + (obj - 1) * 9 END ObjBase;
+(* byte address of object record
+   v1-3: 31 default props (62 bytes) + 9-byte records
+   v4+:  63 default props (126 bytes) + 14-byte records *)
+BEGIN
+  IF zver <= 3 THEN RETURN objAddr + 62 + (obj - 1) * 9
+  ELSE RETURN objAddr + 126 + (obj - 1) * 14
+  END
+END ObjBase;
 
 PROCEDURE GetParent(obj: INTEGER): INTEGER;
-BEGIN RETURN RB(ObjBase(obj) + 4) END GetParent;
+BEGIN
+  IF zver <= 3 THEN RETURN RB(ObjBase(obj) + 4)
+  ELSE RETURN RW(ObjBase(obj) + 6) END
+END GetParent;
 PROCEDURE GetSibling(obj: INTEGER): INTEGER;
-BEGIN RETURN RB(ObjBase(obj) + 5) END GetSibling;
+BEGIN
+  IF zver <= 3 THEN RETURN RB(ObjBase(obj) + 5)
+  ELSE RETURN RW(ObjBase(obj) + 8) END
+END GetSibling;
 PROCEDURE GetChild(obj: INTEGER): INTEGER;
-BEGIN RETURN RB(ObjBase(obj) + 6) END GetChild;
+BEGIN
+  IF zver <= 3 THEN RETURN RB(ObjBase(obj) + 6)
+  ELSE RETURN RW(ObjBase(obj) + 10) END
+END GetChild;
 PROCEDURE GetPropAddr(obj: INTEGER): INTEGER;
-BEGIN RETURN RW(ObjBase(obj) + 7) END GetPropAddr;
+BEGIN
+  IF zver <= 3 THEN RETURN RW(ObjBase(obj) + 7)
+  ELSE RETURN RW(ObjBase(obj) + 12) END
+END GetPropAddr;
 
 PROCEDURE SetParent(obj, val: INTEGER);
-BEGIN WB(ObjBase(obj) + 4, val) END SetParent;
+BEGIN
+  IF zver <= 3 THEN WB(ObjBase(obj) + 4, val)
+  ELSE WW(ObjBase(obj) + 6, val) END
+END SetParent;
 PROCEDURE SetSibling(obj, val: INTEGER);
-BEGIN WB(ObjBase(obj) + 5, val) END SetSibling;
+BEGIN
+  IF zver <= 3 THEN WB(ObjBase(obj) + 5, val)
+  ELSE WW(ObjBase(obj) + 8, val) END
+END SetSibling;
 PROCEDURE SetChild(obj, val: INTEGER);
-BEGIN WB(ObjBase(obj) + 6, val) END SetChild;
+BEGIN
+  IF zver <= 3 THEN WB(ObjBase(obj) + 6, val)
+  ELSE WW(ObjBase(obj) + 10, val) END
+END SetChild;
 
 PROCEDURE TestAttr(obj, attr: INTEGER): BOOLEAN;
 BEGIN
@@ -424,47 +515,109 @@ BEGIN
   SetParent(obj, dest)
 END InsertObj;
 
+(* v4+ property helpers.
+   Size byte format:
+     bit7=0: bit6=0 → 1 byte data, bit6=1 → 2 bytes; bits 5-0 = prop num
+     bit7=1: bits 5-0 of first byte = prop num; second byte bits 5-0 = length (0→64) *)
+PROCEDURE Prop4Num(pa: INTEGER): INTEGER;
+BEGIN RETURN RB(pa) MOD 64 END Prop4Num;
+
+(* Returns data length; sets dataOff to number of size bytes (1 or 2) *)
+PROCEDURE Prop4Len(pa: INTEGER; VAR dataOff: INTEGER): INTEGER;
+VAR sb, len: INTEGER;
+BEGIN
+  sb := RB(pa);
+  IF ODD(sb DIV 128) THEN
+    dataOff := 2;
+    len := RB(pa + 1) MOD 64;
+    IF len = 0 THEN len := 64 END
+  ELSE
+    dataOff := 1;
+    IF ODD(sb DIV 64) THEN len := 2 ELSE len := 1 END
+  END;
+  RETURN len
+END Prop4Len;
+
 (* Return property data address for obj's property prop, or 0 if not found *)
 PROCEDURE GetProp(obj, prop: INTEGER): INTEGER;
-VAR pa, pnum, plen: INTEGER;
+VAR pa, pnum, plen, dataOff: INTEGER;
 BEGIN
   pa := GetPropAddr(obj);
   INC(pa, RB(pa) * 2 + 1);  (* skip count byte + short-name z-bytes *)
-  LOOP
-    IF RB(pa) = 0 THEN RETURN 0 END;  (* end of property list *)
-    pnum := RB(pa) MOD 32;
-    plen := RB(pa) DIV 32 + 1;
-    IF pnum = prop THEN RETURN pa + 1 END;
-    INC(pa, plen + 1)
+  IF zver <= 3 THEN
+    LOOP
+      IF RB(pa) = 0 THEN RETURN 0 END;
+      pnum := RB(pa) MOD 32;
+      plen := RB(pa) DIV 32 + 1;
+      IF pnum = prop THEN RETURN pa + 1 END;
+      INC(pa, plen + 1)
+    END
+  ELSE
+    LOOP
+      IF RB(pa) = 0 THEN RETURN 0 END;
+      pnum := Prop4Num(pa);
+      plen := Prop4Len(pa, dataOff);
+      IF pnum = prop THEN RETURN pa + dataOff END;
+      INC(pa, plen + dataOff)
+    END
   END
 END GetProp;
 
 PROCEDURE GetPropLen(dataAddr: INTEGER): INTEGER;
-(* dataAddr points to the data bytes; size byte is one before *)
+(* dataAddr points to the data bytes; size byte(s) are before it *)
+VAR sb: INTEGER;
 BEGIN
-  RETURN RB(dataAddr - 1) DIV 32 + 1
+  IF zver <= 3 THEN
+    RETURN RB(dataAddr - 1) DIV 32 + 1
+  ELSE
+    sb := RB(dataAddr - 1);
+    IF ODD(sb DIV 128) THEN  (* this is the second size byte *)
+      sb := sb MOD 64;
+      IF sb = 0 THEN RETURN 64 ELSE RETURN sb END
+    ELSE
+      IF ODD(sb DIV 64) THEN RETURN 2 ELSE RETURN 1 END
+    END
+  END
 END GetPropLen;
 
 PROCEDURE GetNextProp(obj, prop: INTEGER): INTEGER;
 (* Return property number after prop (or first prop if prop=0) *)
-VAR pa, pnum, plen: INTEGER;
+VAR pa, pnum, plen, dataOff: INTEGER;
 BEGIN
   pa := GetPropAddr(obj);
   INC(pa, RB(pa) * 2 + 1);  (* skip count byte + short-name z-bytes *)
-  IF prop = 0 THEN
-    IF RB(pa) = 0 THEN RETURN 0 END;
-    RETURN RB(pa) MOD 32
-  END;
-  LOOP
-    IF RB(pa) = 0 THEN RETURN 0 END;
-    pnum := RB(pa) MOD 32;
-    plen := RB(pa) DIV 32 + 1;
-    IF pnum = prop THEN
-      INC(pa, plen + 1);
+  IF zver <= 3 THEN
+    IF prop = 0 THEN
       IF RB(pa) = 0 THEN RETURN 0 END;
       RETURN RB(pa) MOD 32
     END;
-    INC(pa, plen + 1)
+    LOOP
+      IF RB(pa) = 0 THEN RETURN 0 END;
+      pnum := RB(pa) MOD 32;
+      plen := RB(pa) DIV 32 + 1;
+      IF pnum = prop THEN
+        INC(pa, plen + 1);
+        IF RB(pa) = 0 THEN RETURN 0 END;
+        RETURN RB(pa) MOD 32
+      END;
+      INC(pa, plen + 1)
+    END
+  ELSE
+    IF prop = 0 THEN
+      IF RB(pa) = 0 THEN RETURN 0 END;
+      RETURN Prop4Num(pa)
+    END;
+    LOOP
+      IF RB(pa) = 0 THEN RETURN 0 END;
+      pnum := Prop4Num(pa);
+      plen := Prop4Len(pa, dataOff);
+      IF pnum = prop THEN
+        INC(pa, plen + dataOff);
+        IF RB(pa) = 0 THEN RETURN 0 END;
+        RETURN Prop4Num(pa)
+      END;
+      INC(pa, plen + dataOff)
+    END
   END
 END GetNextProp;
 
@@ -478,7 +631,7 @@ VAR pa, plen: INTEGER;
 BEGIN
   pa := GetProp(obj, prop);
   IF pa = 0 THEN RETURN DefaultProp(prop) END;
-  plen := RB(pa - 1) DIV 32 + 1;
+  plen := GetPropLen(pa);
   IF plen = 1 THEN RETURN RB(pa)
   ELSE RETURN RW(pa)
   END
@@ -489,7 +642,7 @@ VAR pa, plen: INTEGER;
 BEGIN
   pa := GetProp(obj, prop);
   IF pa = 0 THEN RETURN END;
-  plen := RB(pa - 1) DIV 32 + 1;
+  plen := GetPropLen(pa);
   IF plen = 1 THEN WB(pa, val)
   ELSE WW(pa, val)
   END
@@ -499,17 +652,19 @@ END WriteProp;
    Dictionary & tokenisation
    ══════════════════════════════════════════════════════════════ *)
 
-(* Encode up to 6 lowercase letters of s[0..len-1] into two 16-bit Z-words *)
+(* Encode word into Z-words for dictionary lookup.
+   v1-3: 2 words (6 z-chars, terminal bit on w1)
+   v4+:  3 words (9 z-chars, terminal bit on w2) *)
 PROCEDURE EncodeWord(s: ARRAY OF CHAR; len: INTEGER;
-                     VAR w0, w1: INTEGER);
-VAR zch : ARRAY 6 OF INTEGER;
-    i, c : INTEGER;
+                     VAR w0, w1, w2: INTEGER);
+VAR zch : ARRAY 9 OF INTEGER;
+    maxZ, i, c : INTEGER;
     ch   : CHAR;
 BEGIN
-  (* fill zch with encoded z-chars, padding with 5 *)
-  FOR i := 0 TO 5 DO zch[i] := 5 END;
+  IF zver <= 3 THEN maxZ := 6 ELSE maxZ := 9 END;
+  FOR i := 0 TO maxZ - 1 DO zch[i] := 5 END;
   i := 0;
-  WHILE (i < len) & (i < 6) DO
+  WHILE (i < len) & (i < maxZ) DO
     ch := s[i];
     IF (ch >= 'a') & (ch <= 'z') THEN
       zch[i] := ORD(ch) - ORD('a') + 6
@@ -519,7 +674,7 @@ BEGIN
       (* check a2 table *)
       c := 0;
       WHILE (c < 24) & (a2tab[c] # ch) DO INC(c) END;
-      IF (c < 24) & (i < 5) THEN
+      IF (c < 24) & (i < maxZ - 1) THEN
         zch[i] := 5; INC(i); zch[i] := 8 + c
       ELSE
         zch[i] := 5
@@ -529,13 +684,18 @@ BEGIN
   END;
   w0 := zch[0] * 1024 + zch[1] * 32 + zch[2];
   w1 := zch[3] * 1024 + zch[4] * 32 + zch[5];
-  (* Set terminal bit on w1 *)
-  INC(w1, 32768)
+  IF zver <= 3 THEN
+    INC(w1, 32768);  (* terminal bit on w1 *)
+    w2 := 0
+  ELSE
+    w2 := zch[6] * 1024 + zch[7] * 32 + zch[8];
+    INC(w2, 32768)   (* terminal bit on w2 *)
+  END
 END EncodeWord;
 
 (* Binary search dictionary for encoded word; return entry addr or 0 *)
-PROCEDURE DictLookup(w0, w1: INTEGER): INTEGER;
-VAR lo, hi, mid, ea, d0, d1: INTEGER;
+PROCEDURE DictLookup(w0, w1, w2: INTEGER): INTEGER;
+VAR lo, hi, mid, ea, d0, d1, d2: INTEGER;
 BEGIN
   lo := 0;  hi := dictNEnt - 1;
   WHILE lo <= hi DO
@@ -543,9 +703,18 @@ BEGIN
     ea  := dictAddr + nTermSep + 1 + 3 + mid * dictEntSz;
     d0  := RW(ea);
     d1  := RW(ea + 2);
-    IF (d0 = w0) & (d1 = w1) THEN RETURN ea
-    ELSIF (d0 < w0) OR ((d0 = w0) & (d1 < w1)) THEN lo := mid + 1
-    ELSE hi := mid - 1
+    IF zver <= 3 THEN
+      IF (d0 = w0) & (d1 = w1) THEN RETURN ea
+      ELSIF (d0 < w0) OR ((d0 = w0) & (d1 < w1)) THEN lo := mid + 1
+      ELSE hi := mid - 1
+      END
+    ELSE
+      d2 := RW(ea + 4);
+      IF (d0 = w0) & (d1 = w1) & (d2 = w2) THEN RETURN ea
+      ELSIF (d0 < w0) OR ((d0 = w0) & (d1 < w1)) OR
+            ((d0 = w0) & (d1 = w1) & (d2 < w2)) THEN lo := mid + 1
+      ELSE hi := mid - 1
+      END
     END
   END;
   RETURN 0
@@ -559,7 +728,7 @@ VAR
   ch                        : CHAR;
   isSep                     : BOOLEAN;
   word                      : ARRAY 10 OF CHAR;
-  w0, w1, dictEnt           : INTEGER;
+  w0, w1, w2, dictEnt       : INTEGER;
   j                         : INTEGER;
 
   PROCEDURE IsSeparator(c: CHAR): BOOLEAN;
@@ -575,7 +744,8 @@ BEGIN
   maxText  := RB(textBuf);
   maxWords := RB(parseBuf);
   nWords   := 0;
-  i        := 1;  (* text starts at textBuf+1 *)
+  (* v5+: byte 1 = char count, text starts at offset 2; v1-4: text at offset 1 *)
+  IF zver >= 5 THEN i := 2 ELSE i := 1 END;
   WB(parseBuf + 1, 0);
   WHILE (RB(textBuf + i) # 0) & (nWords < maxWords) DO
     ch := CHR(RB(textBuf + i));
@@ -584,8 +754,8 @@ BEGIN
     ELSIF IsSeparator(ch) THEN
       (* separator is its own token *)
       word[0] := ch;  word[1] := 0X;
-      EncodeWord(word, 1, w0, w1);
-      dictEnt := DictLookup(w0, w1);
+      EncodeWord(word, 1, w0, w1, w2);
+      dictEnt := DictLookup(w0, w1, w2);
       j := parseBuf + 2 + nWords * 4;
       WW(j, dictEnt);
       WB(j + 2, 1);
@@ -601,8 +771,8 @@ BEGIN
         INC(wlen);  INC(i)
       END;
       word[wlen] := 0X;
-      EncodeWord(word, wlen, w0, w1);
-      dictEnt := DictLookup(w0, w1);
+      EncodeWord(word, wlen, w0, w1, w2);
+      dictEnt := DictLookup(w0, w1, w2);
       j := parseBuf + 2 + nWords * 4;
       WW(j, dictEnt);
       WB(j + 2, wlen);
@@ -710,7 +880,8 @@ BEGIN
       running := FALSE;
       EXIT
     ELSIF (k >= 32) & (k < 127) & (n < maxLen) THEN
-      Out.Char(c);
+      IF (k >= ORD('A')) & (k <= ORD('Z')) THEN k := k + 32 END;  (* lowercase *)
+      Out.Char(CHR(k));
       IF zver >= 5 THEN
         WB(textBuf + 2 + n, k)
       ELSE
@@ -763,6 +934,9 @@ BEGIN
     IF storeVar >= 0 THEN SetVar(storeVar, 0) END;
     RETURN
   END;
+  IF fp >= MAXFRAMES - 1 THEN  (* frame overflow guard *)
+    running := FALSE;  RETURN
+  END;
   INC(fp);
   frames[fp].retPC    := pc;
   frames[fp].stkBase  := sp;
@@ -770,6 +944,7 @@ BEGIN
   frames[fp].argCount := nArgs;
 
   nLocals := RB(routineAddr);
+  IF nLocals > 15 THEN nLocals := 15 END;  (* guard against garbage routine header *)
   frames[fp].nlocals := nLocals;
 
   (* Initialise locals: v1-4 have initial values in the routine header *)
@@ -833,12 +1008,44 @@ END DoBranch;
    Save / Restore  (simple: dump/load dynamic memory)
    ══════════════════════════════════════════════════════════════ *)
 
+PROCEDURE PromptFilename(prompt: ARRAY OF CHAR; VAR name: ARRAY OF CHAR);
+VAR n, k: INTEGER;  c: CHAR;
+BEGIN
+  FlushWord;
+  EmitNewline;
+  EmitStr(prompt);
+  n := 0;
+  Terminal.ShowCursor;
+  LOOP
+    c := Terminal.ReadKey();
+    k := ORD(c);
+    IF (k = KEY_ENTER) OR (k = 0AX) THEN
+      EXIT
+    ELSIF (k = KEY_BS) OR (k = 127) THEN
+      IF n > 0 THEN
+        DEC(n);
+        Out.Char(8X);  Out.Char(' ');  Out.Char(8X)
+      END
+    ELSIF (k >= 32) & (k < 127) & (n < LEN(name) - 1) THEN
+      Out.Char(c);
+      name[n] := c;
+      INC(n)
+    END
+  END;
+  Terminal.HideCursor;
+  name[n] := 0X;
+  EmitNewline;
+  IF n = 0 THEN COPY("zm.sav", name) END
+END PromptFilename;
+
 PROCEDURE DoSave(): BOOLEAN;
 VAR f: Files.File;
     r: Files.Rider;
     i: INTEGER;
+    name: ARRAY 64 OF CHAR;
 BEGIN
-  f := Files.New(saveFile);
+  PromptFilename("Save to file: ", name);
+  f := Files.New(name);
   IF f = NIL THEN RETURN FALSE END;
   Files.Set(r, f, 0);
   FOR i := 0 TO statBase - 1 DO
@@ -854,8 +1061,10 @@ VAR f: Files.File;
     r: Files.Rider;
     i: INTEGER;
     b: BYTE;
+    name: ARRAY 64 OF CHAR;
 BEGIN
-  f := Files.Old(saveFile);
+  PromptFilename("Restore from file: ", name);
+  f := Files.Old(name);
   IF f = NIL THEN RETURN FALSE END;
   Files.Set(r, f, 0);
   FOR i := 0 TO statBase - 1 DO
@@ -1046,7 +1255,7 @@ BEGIN
     | 12 :                                         (* jump *)
         val := S16(ops[0]) - 2;
         INC(pc, val)
-    | 13 : PrintZStr(ops[0] * 2)                   (* print_paddr (packed) *)
+    | 13 : PrintZStr(PackedStr(ops[0]))             (* print_paddr (packed) *)
     | 14 :                                         (* load *)
         storeVar := RB(pc);  INC(pc);
         SetVar(storeVar, IndGet(ops[0]))
@@ -1130,10 +1339,10 @@ BEGIN
     | 25 :                                         (* call_2s v4+ *)
         storeVar := RB(pc);  INC(pc);
         args[0] := b;
-        DoCall(a * 2, 1, args, storeVar)
+        DoCall(PackedAddr(a), 1, args, storeVar)
     | 26 :                                         (* call_2n v5+ *)
         args[0] := b;
-        DoCall(a * 2, 1, args, -1)
+        DoCall(PackedAddr(a), 1, args, -1)
     ELSE
     END
 
@@ -1159,6 +1368,7 @@ BEGIN
         IF zver <= 3 THEN
           ShowStatus
         END;
+        FlushWord;
         Out.String("> ");
         curCol := 3;
         ReadLine(ops[0]);
@@ -1167,7 +1377,7 @@ BEGIN
         ELSE
           (* v5: aread stores terminator in storeVar *)
           storeVar := RB(pc);  INC(pc);
-          IF nops >= 2 THEN Tokenise(ops[0], ops[1]) END;
+          IF (nops >= 2) & (ops[1] # 0) THEN Tokenise(ops[0], ops[1]) END;
           SetVar(storeVar, 13)  (* Enter = 13 *)
         END
     | 5 :                                          (* print_char *)
@@ -1220,27 +1430,62 @@ BEGIN
         DoCall(PackedAddr(ops[0]), nArgs, args, storeVar)
     | 13 :                                         (* erase_window *)
         IF ops[0] = 0 THEN
-          Terminal.Goto(1, upperRows + 1);
-          (* No full clear; just home cursor in lower window *)
+          Terminal.Goto(1, upperRows + 1)
         ELSIF ops[0] = 1 THEN
+          (* clear upper window *)
+          FOR i := 1 TO upperRows DO
+            Terminal.Goto(1, i);  Esc("[2K")
+          END;
           Terminal.Goto(1, 1)
         ELSIF S16(ops[0]) = -1 THEN
-          Terminal.Clear
+          Terminal.Clear;
+          curWin := 0;  curCol := 1
+        ELSIF S16(ops[0]) = -2 THEN
+          (* unsplit, clear all, select lower window *)
+          upperRows := 0;
+          SetScrollRegion(1, screenH);
+          Terminal.Clear;
+          curWin := 0;  curCol := 1
         END
+    | 14 :                                         (* erase_line *)
+        FlushWord;
+        Esc("[K")
     | 15 :                                         (* set_cursor *)
         IF curWin = 1 THEN
           upperY := ops[0];  upperX := ops[1];
           Terminal.Goto(upperX, upperY)
         END
+    | 16 :                                         (* get_cursor *)
+        (* store [row, col] into table at ops[0] *)
+        IF curWin = 1 THEN
+          WW(ops[0], upperY);  WW(ops[0] + 2, upperX)
+        ELSE
+          WW(ops[0], screenH);  WW(ops[0] + 2, curCol)
+        END
     | 17 :                                         (* set_text_style: ignore *)
     | 18 :                                         (* buffer_mode: ignore *)
     | 19 :                                         (* output_stream *)
-        IF ops[0] = 3 THEN
-          strm3 := ops[1];  strm3len := 0;
-          WW(strm3, 0)  (* initial length = 0 *)
-        ELSIF ops[0] = -3 THEN
-          WW(strm3, strm3len);
-          strm3 := 0
+        IF S16(ops[0]) = 3 THEN
+          IF (strm3Top < 16) & (ops[1] > 0) THEN
+            strm3Stk[strm3Top] := ops[1];
+            strm3Len[strm3Top] := 0;
+            INC(strm3Top);
+            strm3    := ops[1];
+            strm3len := 0;
+            WW(strm3, 0)  (* initial length word = 0 *)
+          END
+        ELSIF S16(ops[0]) = -3 THEN
+          IF strm3Top > 0 THEN
+            WW(strm3, strm3len);  (* write final length *)
+            DEC(strm3Top);
+            IF strm3Top > 0 THEN
+              strm3    := strm3Stk[strm3Top - 1];
+              strm3len := strm3Len[strm3Top - 1]
+            ELSE
+              strm3    := 0;
+              strm3len := 0
+            END
+          END
         END
     | 20 :                                         (* input_stream: ignore *)
     | 21 :                                         (* sound_effect: ignore *)
@@ -1282,16 +1527,17 @@ BEGIN
         FOR i := 0 TO nArgs - 1 DO args[i] := ops[i+1] END;
         DoCall(PackedAddr(ops[0]), nArgs, args, -1)
     | 27 :                                         (* tokenise (v5+) *)
-        Tokenise(ops[0], ops[1])
+        IF ops[1] # 0 THEN Tokenise(ops[0], ops[1]) END
     | 29 :                                         (* copy_table (v5+) *)
+        val := S16(ops[2]);  (* signed: positive = safe backward copy, negative = forward *)
         IF ops[1] = 0 THEN
-          FOR i := 0 TO ops[2] - 1 DO WB(ops[0] + i, 0) END
-        ELSIF ops[2] > 0 THEN
-          FOR i := ops[2] - 1 TO 0 BY -1 DO
+          FOR i := 0 TO ABS(val) - 1 DO WB(ops[0] + i, 0) END
+        ELSIF val >= 0 THEN
+          FOR i := val - 1 TO 0 BY -1 DO
             WB(ops[1] + i, RB(ops[0] + i))
           END
         ELSE
-          FOR i := 0 TO ABS(ops[2]) - 1 DO
+          FOR i := 0 TO (-val) - 1 DO
             WB(ops[1] + i, RB(ops[0] + i))
           END
         END
@@ -1315,7 +1561,17 @@ BEGIN
   (* ── EXT (v5+) ───────────────────────────────────────────── *)
   ELSIF form = 3 THEN
     CASE opcode OF
-      2 :                                          (* log_shift *)
+      0 :                                          (* save (extended) *)
+        storeVar := RB(pc);  INC(pc);
+        IF DoSave() THEN SetVar(storeVar, 1)
+        ELSE SetVar(storeVar, 0)
+        END
+    | 1 :                                          (* restore (extended) *)
+        storeVar := RB(pc);  INC(pc);
+        IF DoRestore() THEN SetVar(storeVar, 2)
+        ELSE SetVar(storeVar, 0)
+        END
+    | 2 :                                          (* log_shift *)
         storeVar := RB(pc);  INC(pc);
         a := ops[0];  b := S16(ops[1]);
         IF b >= 0 THEN
@@ -1338,6 +1594,7 @@ BEGIN
     | 4 :                                          (* set_font: return 1 *)
         storeVar := RB(pc);  INC(pc);
         SetVar(storeVar, 1)
+    | 5 :                                          (* set_colour: ignore *)
     | 9 :                                          (* save_undo *)
         storeVar := RB(pc);  INC(pc);
         SetVar(storeVar, -1)   (* unsupported *)
@@ -1403,7 +1660,10 @@ BEGIN
   curWin   := 0;
   upperX   := 1;
   upperY   := 1;
+  strm3Top := 0;
   strm3    := 0;
+  strm3len := 0;
+  wrapLen  := 0;
 
   (* Set flags in header for terminal capabilities *)
   WB(1, BitClr(RB(1), 4));  (* no status line split needed *)
@@ -1411,8 +1671,16 @@ BEGIN
   IF zver >= 4 THEN
     WB(1, BitSet(RB(1), 0))  (* colours available *)
   END;
-  WB(32, screenW);   (* screen width (byte) *)
-  WB(33, screenH);   (* screen height (byte) *)
+  WB(32, screenW);   (* screen width in chars (byte) *)
+  WB(33, screenH);   (* screen height in lines (byte) *)
+  IF zver >= 5 THEN
+    WW(34, screenW);   (* screen width in units *)
+    WW(36, screenH);   (* screen height in units *)
+    WB(38, 1);         (* font width in units *)
+    WB(39, 1);         (* font height in units *)
+    WB(44, 1);         (* default background colour: black *)
+    WB(45, 9)          (* default foreground colour: white *)
+  END;
 
   (* v1-4: header word 6 is initial byte PC directly.
      v5+: header word 6 is initial byte PC (main routine entry point). *)
@@ -1440,8 +1708,6 @@ BEGIN
   a2tab[15] := '#';  a2tab[16] := "'";  a2tab[17] := '"';
   a2tab[18] := '/';  a2tab[19] := 5CH;  a2tab[20] := '-';
   a2tab[21] := ':';  a2tab[22] := '(';  a2tab[23] := ')';
-
-  COPY("zm.sav", saveFile);
 
   screenW := Terminal.Cols();
   screenH := Terminal.Rows();
@@ -1474,6 +1740,17 @@ BEGIN
     Step
   END;
 
+  (* Restore full-screen scroll region and clear status line *)
+  SetScrollRegion(1, screenH);
+  curWin := 1;
+  Terminal.Goto(1, 1);
+  Esc("[2K");        (* erase entire line *)
+  Esc("[0m");        (* reset attributes *)
+  curWin := 0;
+  Terminal.Goto(1, upperRows + 1);
+  Esc("[u");
+
+  FlushWord;
   EmitNewline;
   Out.String("[Game over]");
   EmitNewline
