@@ -87,6 +87,7 @@ VAR
   pammo  : INTEGER;   (* blaster ammo charges *)
   pfiring : BOOLEAN;  (* waiting for direction after 'f' *)
   dead  : BOOLEAN;
+  healTimer : INTEGER;  (* counts turns; heal 1 HP every 15 turns *)
 
   msg  : ARRAY 80 OF CHAR;
   stmp : ARRAY 16 OF CHAR;
@@ -542,6 +543,14 @@ BEGIN
         END
       END
     END
+  END;
+  (* Natural regeneration: +1 HP every 15 turns *)
+  INC(healTimer);
+  IF healTimer >= 15 THEN
+    healTimer := 0;
+    IF php < pmaxhp THEN
+      INC(php)
+    END
   END
 END MonsterTurn;
 
@@ -742,7 +751,7 @@ BEGIN
   pgold := 0;  pxp := 0;  pxpnext := 20;
   plevel := 1;  depth := 1;
   pammo := 0;  pfiring := FALSE;
-  dead := FALSE;
+  dead := FALSE;  healTimer := 0;
 
   GenLevel;
   Msg("Ruined Earth!  Find the elevator (>).  hjkl=move  f+dir=fire blaster");
