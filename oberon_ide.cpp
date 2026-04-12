@@ -41,6 +41,7 @@
 #define Uses_TColorAttr
 #define Uses_TListBox
 #define Uses_TStringCollection
+#define Uses_TText
 #include <tvision/tv.h>
 
 #include <cstring>
@@ -400,13 +401,28 @@ public:
             uint lineEnd = lineStart;
             while (lineEnd < bufLen && gapChar(lineEnd) != '\n') lineEnd++;
 
-            auto recolour = [&](uint offset, char ch, TColorAttr ca) {
+            auto recolour = [&](uint offset, TColorAttr ca) {
                 if (offset >= selLo && offset < selHi) return;
-                int sc = (int)(offset - lineStart) - firstCol;
+                char c = gapChar(offset);
+                unsigned char uc = (unsigned char)c;
+                // Skip UTF-8 continuation bytes — already painted with their leading byte
+                if (uc >= 0x80 && uc < 0xC0) return;
+                int sc = charPos(lineStart, offset) - firstCol;
                 if (sc < 0 || sc >= visCols) return;
                 TDrawBuffer b;
-                b.moveChar(0, ch, ca, 1);
-                writeBuf(sc, row, 1, 1, b);
+                if (uc < 0x80) {
+                    b.moveChar(0, c, ca, 1);
+                    writeBuf(sc, row, 1, 1, b);
+                } else {
+                    uint seqLen = (uc >= 0xF0) ? 4u : (uc >= 0xE0) ? 3u : 2u;
+                    char seq[5] = {};
+                    for (uint k = 0; k < seqLen; k++) seq[k] = gapChar(offset + k);
+                    TStringView sv(seq, seqLen);
+                    ushort w = (ushort)TText::width(sv);
+                    if (w == 0) w = 1;
+                    b.moveStr(0, sv, ca);
+                    writeBuf(sc, row, w, 1, b);
+                }
             };
 
             TColorAttr commentColor = TColorAttr(TColorRGB(0x55FFFF), TColorRGB(0x000080));
@@ -416,13 +432,13 @@ public:
             if (inBlockComment) {
                 while (i < lineEnd) {
                     if (gapChar(i) == '*' && i + 1 < lineEnd && gapChar(i + 1) == ')') {
-                        recolour(i,   gapChar(i),   commentColor);
-                        recolour(i+1, gapChar(i+1), commentColor);
+                        recolour(i,   commentColor);
+                        recolour(i+1, commentColor);
                         i += 2;
                         inBlockComment = false;
                         break;
                     }
-                    recolour(i, gapChar(i), commentColor);
+                    recolour(i, commentColor);
                     i++;
                 }
                 if (inBlockComment) {
@@ -437,7 +453,7 @@ public:
                     uint start = i++;
                     while (i < lineEnd && gapChar(i) != '}') i++;
                     if (i < lineEnd) i++;
-                    for (uint j = start; j < i; j++) recolour(j, gapChar(j), commentColor);
+                    for (uint j = start; j < i; j++) recolour(j, commentColor);
                     continue;
                 }
                 if (c == '(' && i+1 < lineEnd && gapChar(i+1) == '*') {
@@ -450,11 +466,11 @@ public:
                         i++;
                     }
                     if (!closed) inBlockComment = true;
-                    for (uint j = start; j < i; j++) recolour(j, gapChar(j), commentColor);
+                    for (uint j = start; j < i; j++) recolour(j, commentColor);
                     continue;
                 }
                 if (c == '/' && i+1 < lineEnd && gapChar(i+1) == '/') {
-                    for (uint j = i; j < lineEnd; j++) recolour(j, gapChar(j), commentColor);
+                    for (uint j = i; j < lineEnd; j++) recolour(j, commentColor);
                     i = lineEnd;
                     continue;
                 }
@@ -462,21 +478,21 @@ public:
                     uint start = i++;
                     while (i < lineEnd) { if (gapChar(i++) == '\'') break; }
                     TColorAttr ca = TColorAttr(TColorRGB(0x55FF55), TColorRGB(0x000080));
-                    for (uint j = start; j < i; j++) recolour(j, gapChar(j), ca);
+                    for (uint j = start; j < i; j++) recolour(j, ca);
                     continue;
                 }
                 if (c == '"') {
                     uint start = i++;
                     while (i < lineEnd) { if (gapChar(i++) == '"') break; }
                     TColorAttr ca = TColorAttr(TColorRGB(0x55FF55), TColorRGB(0x000080));
-                    for (uint j = start; j < i; j++) recolour(j, gapChar(j), ca);
+                    for (uint j = start; j < i; j++) recolour(j, ca);
                     continue;
                 }
                 if (isdigit((unsigned char)c) ||
                     (c == '$' && i+1 < lineEnd && isxdigit((unsigned char)gapChar(i+1)))) {
                     uint start = i;
                     while (i < lineEnd && (isalnum((unsigned char)gapChar(i)) || gapChar(i) == '.')) i++;
-                    for (uint j = start; j < i; j++) recolour(j, gapChar(j), commentColor);
+                    for (uint j = start; j < i; j++) recolour(j, commentColor);
                     continue;
                 }
                 if (isalpha((unsigned char)c) || c == '_') {
@@ -487,7 +503,7 @@ public:
                     word[wlen] = '\0';
                     if (isOberonKeyword(word, wlen)) {
                         TColorAttr ca = TColorAttr(TColorRGB(0xFFFF55), TColorRGB(0x000080));
-                        for (uint j = start; j < i; j++) recolour(j, gapChar(j), ca);
+                        for (uint j = start; j < i; j++) recolour(j, ca);
                     }
                     continue;
                 }
@@ -516,21 +532,26 @@ public:
                 uint i2 = ls;
                 int contentEnd = 0;
                 while (i2 < le) {
-                    int logCol = (int)(i2 - ls);
-                    if (logCol < delta.x) { i2++; continue; }
-                    int sc = logCol - delta.x;
+                    int sc = charPos(ls, i2) - delta.x;
+                    if (sc < 0) {
+                        // Advance past this character (may be multi-byte)
+                        unsigned char uc0 = (unsigned char)gapChar(i2);
+                        i2 += (uc0 >= 0xF0) ? 4 : (uc0 >= 0xE0) ? 3 : (uc0 >= 0xC0) ? 2 : 1;
+                        continue;
+                    }
                     if (sc >= size.x) break;
 
                     char ch = gapChar(i2);
+                    unsigned char uch = (unsigned char)ch;
                     TColorAttr ca = errNorm;
-                    if (isalpha((unsigned char)ch) || ch == '_') {
+                    if (isalpha(uch) || ch == '_') {
                         uint ws = i2;
                         while (i2 < le && (isalnum((unsigned char)gapChar(i2)) || gapChar(i2) == '_')) i2++;
                         char w[64]; int wl = std::min((int)(i2-ws), 63);
                         for (int k = 0; k < wl; k++) w[k] = gapChar(ws+k); w[wl] = 0;
                         ca = isOberonKeyword(w, wl) ? errKw : errNorm;
                         for (uint j = ws; j < i2; j++) {
-                            int sc2 = (int)(j - ls) - delta.x;
+                            int sc2 = charPos(ls, j) - delta.x;
                             if (sc2 >= 0 && sc2 < size.x) {
                                 b.moveChar(sc2, gapChar(j), ca, 1);
                                 contentEnd = sc2 + 1;
@@ -538,8 +559,21 @@ public:
                         }
                         continue;
                     }
-                    b.moveChar(sc, ch, ca, 1);
-                    contentEnd = sc + 1;
+                    if (uch < 0x80) {
+                        b.moveChar(sc, ch, ca, 1);
+                        contentEnd = sc + 1;
+                    } else if (uch >= 0xC0) {
+                        // Multi-byte UTF-8 leading byte
+                        uint seqLen = (uch >= 0xF0) ? 4u : (uch >= 0xE0) ? 3u : 2u;
+                        char seq[5] = {};
+                        for (uint k = 0; k < seqLen; k++) seq[k] = gapChar(i2 + k);
+                        TStringView sv(seq, seqLen);
+                        b.moveStr(sc, sv, ca);
+                        int visW = (int)TText::width(sv);
+                        contentEnd = sc + (visW > 0 ? visW : 1);
+                        i2 += seqLen - 1; // -1 because i2++ follows
+                    }
+                    // continuation bytes (0x80–0xBF) are skipped implicitly
                     i2++;
                 }
 
