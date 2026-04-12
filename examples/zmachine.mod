@@ -429,7 +429,7 @@ PROCEDURE GetProp(obj, prop: INTEGER): INTEGER;
 VAR pa, pnum, plen: INTEGER;
 BEGIN
   pa := GetPropAddr(obj);
-  pa := SkipZStr(pa);     (* skip short name *)
+  INC(pa, RB(pa) * 2 + 1);  (* skip count byte + short-name z-bytes *)
   LOOP
     IF RB(pa) = 0 THEN RETURN 0 END;  (* end of property list *)
     pnum := RB(pa) MOD 32;
@@ -450,7 +450,7 @@ PROCEDURE GetNextProp(obj, prop: INTEGER): INTEGER;
 VAR pa, pnum, plen: INTEGER;
 BEGIN
   pa := GetPropAddr(obj);
-  pa := SkipZStr(pa);
+  INC(pa, RB(pa) * 2 + 1);  (* skip count byte + short-name z-bytes *)
   IF prop = 0 THEN
     IF RB(pa) = 0 THEN RETURN 0 END;
     RETURN RB(pa) MOD 32

@@ -1740,6 +1740,7 @@ void codegen(Node *module, FILE *out, int is_main) {
         emit(g,"    raw.c_cc[VDISCARD] = _POSIX_VDISABLE;\n");
         emit(g,"#endif\n");
         emit(g,"    tcsetattr(STDIN_FILENO, TCSANOW, &raw);\n");
+        emit(g,"    setvbuf(stdout, NULL, _IONBF, 0);\n");
         emit(g,"    printf(\"\\033[?25l\"); fflush(stdout);\n");
         emit(g,"    atexit(_term_restore);\n");
         emit(g,"    srand((unsigned)time(NULL));\n");
