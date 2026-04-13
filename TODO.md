@@ -5,7 +5,6 @@
 - **`expr_type()` is incomplete** (`codegen.c:390,392`): returns `NULL` for `ND_FIELD_ACCESS` and
   `ND_CALL`. This means string comparison via `=`/`#` can silently fall back to pointer comparison
   when the LHS is a record field or function call result.
-- **`Args.GetEnv` is not in stdlib.md** — it's implemented in codegen but undocumented.
 - **Hard limits** that could be hit in large programs:
   - Nested proc frame capped at 64 vars (`build_frame`)
   - Max 16 nested procedures per outer proc
@@ -39,7 +38,7 @@
 
 ## Documentation
 
-- **`Args.GetEnv` is undocumented** — missing from stdlib.md entirely.
 - **README examples table** is missing newer examples (`BRErogue`, `rogue`, `sheet`, `videopoker`,
   `zodiac`, `epub`, etc.).
+
 
