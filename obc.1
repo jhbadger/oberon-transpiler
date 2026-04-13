@@ -1,0 +1,98 @@
+.\" Man page header metadata (optional, but good practice)
+.\" These lines are often added by tooling but help structure the file.
+.TH obc 1 10 Oct 2023 obc 1.0 \"Oberon-to-C Transpiler\"
+.SH NAME
+obc - Oberon-to-C Transpiler
+.SH SYNOPSIS
+obc [options] <main.mod> ...
+.SH DESCRIPTION
+obc is a transpiler designed to convert source code written in the Oberon 
+language into standard C source code. It handles multi-module projects 
+by automatically traversing dependencies, compiling all required modules, 
+and linking the resulting C files into a single executable binary.
+
+The core philosophy of obc is to treat Oberon modules as first-class 
+citizens, generating both primary source files (.c) and necessary 
+header files (.h) for library modules.
+
+.PP MODULES.
+obc expects the main module name as the last positional argument. All 
+required dependencies should be available on the module search path 
+(see options).
+
+.SH OPTIONS
+.var
+-o OUTFILE
+    Specify the name of the final output binary executable. 
+    If omitted, the binary name is derived from the main 
+    module file name (with the extension removed).
+
+.var
+--emit-c
+    If specified, obc will leave the generated .c and 
+    .h source files in the current directory instead of 
+    deleting them upon successful compilation.
+
+.var
+--warnings
+    Enable stricter C compiler warning flags (e.g., -Wall) 
+    during the final linking stage. This is generally 
+    recommended for library code.
+
+.var
+--mod-path DIR1:DIR2: ...
+    Sets the module search path for all subsequent 
+    module lookups. Modules can be found in any directory 
+    listed, separated by colons (:).
+
+.var
+-I DIR
+    A shorthand for --mod-path. Specifies an additional 
+    include directory for module resolution. Multiple -I 
+    flags can be used.
+
+.var
+OBC_MOD_PATH
+    Environment variable that sets the default module search path. 
+    This variable acts identically to --mod-path and is used 
+    if no module path is provided via the command line.
+
+.SH EXAMPLES
+To compile a simple main program named `my_app` requiring the 
+`strings` and `filesystem` libraries, and outputting an executable 
+named `my_program`:
+
+.nf
+obc --mod-path /opt/modules -o my_program my_app.mod
+.fi
+
+To compile and explicitly keep the generated source files:
+
+.nf
+obc --emit-c my_main.mod
+.fi
+
+To include a custom library directory and enable strict warnings:
+
+.nf
+obc -I /usr/local/lib/mods --warnings main.mod
+.fi
+
+.SH SEE ALSO
+Makefile(1), gcc(1), preprocessor(1)
+
+.SH NOTES
+.b
+.b1 Dependency Order: obc operates in two passes. First, it detects 
+all user-defined dependencies recursively. All detected modules 
+are compiled into C source files before the main module is processed.
+.b2 Compilation Process: The final executable is built by calling 
+`gcc` with all generated `.c` files and necessary include 
+paths (`-I`). Linking usually requires `-lm` (math) and `-lz` 
+(compression).
+.b3 Module Resolution: obc searches for a module named `ModName` 
+in the following order: 
+a) In the directory of the calling module.
+b) In the current working directory.
+c) In any directory specified by --mod-path or -I.
+.end
