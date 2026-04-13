@@ -54,7 +54,8 @@ CONST
   KEY_CTRL_N = 14;
   KEY_CTRL_Q = 17;
   KEY_CTRL_F = 6;
-
+  KEY_SLASH = 47;
+  
 VAR
   df        : DataFrame.DataFrame;
   fname     : ARRAY 256 OF CHAR;
@@ -151,6 +152,30 @@ BEGIN
     RETURN 0.0
   END
 END EvalCell;
+
+PROCEDURE FindBelowInColumn();
+VAR
+  query: ARRAY 256 OF CHAR;
+  cell : ARRAY DataFrame.CELLLEN OF CHAR;
+  addr : ARRAY 8 OF CHAR;
+  r, nr: INTEGER;
+BEGIN
+  IF ~Prompt("Find: ", query) THEN RETURN END;
+
+  nr := DataFrame.NRows(df);
+  FOR r := curRow + 1 TO nr - 1 DO
+    CellDisplay(r, curCol, cell);
+    IF Strings.Pos(query, cell, 0) >= 0 THEN
+      MoveTo(r, curCol);
+      CellAddr(r, curCol, addr);
+      COPY("Found at ", statusMsg);
+      Strings.Append(addr, statusMsg);
+      RETURN
+    END
+  END;
+
+  COPY("Not found below cursor.", statusMsg)
+END FindBelowInColumn;
 
 (* ── range: collect cells A1:B3 into a result ───────────────────── *)
 PROCEDURE RangeFunc(fname2: ARRAY OF CHAR): REAL;
@@ -561,7 +586,7 @@ BEGIN
   IF mode = EDIT THEN
     s := "Enter:confirm  Esc:cancel  Backspace:delete"
   ELSE
-    s := "Arrows:nav  Enter:edit  Del:clear  ^O:open  ^S:save  ^L:reload  ^F:freeze  ^Q:quit"
+    s := "Arrows:nav  Enter:edit  Del:clear  ^O:open  ^S:save  ^L:reload  ^F:freeze  /:search ^Q:quit"
   END;
   PadPrint(s, tCols - 1);
   Graphics.Reset
@@ -839,6 +864,8 @@ BEGIN
     END
   ELSIF (k = KEY_CTRL_Q) OR (k = KEY_ESC) THEN
     running := FALSE
+  ELSIF k = KEY_SLASH THEN
+    FindBelowInColumn()
   ELSIF (k >= 32) & (k < 127) THEN
     StartEdit(TRUE);
     HandleEdit(k)
