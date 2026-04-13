@@ -1,6 +1,6 @@
 MODULE Easter;
 
-IMPORT In, Out;
+IMPORT Args, Strings, Out;
 
 TYPE
 Date = RECORD
@@ -50,11 +50,22 @@ After an algorithm by C.F. Gauss (1816).*)
 	
 VAR d: Date;
     year: INTEGER;
-	
+    arg: ARRAY 10 OF CHAR;
+    	
 BEGIN
-  Out.String("Enter Year: ");
-  In.Int(year);
-  EasterDate(year, d);
-  Out.Int(d.month); Out.Char('/'); Out.Int(d.day);
-  Out.Ln; 
+  Args.Get(1, arg);
+  IF Args.Count() < 1 OR ~Strings.StrToInt(arg, year) THEN
+    Out.String("easter: year"); Out.Ln;
+  ELSE 
+    EasterDate(year, d);
+    Out.String("Easter "); Out.Int(year);
+    Out.String(" is on Sunday, ");
+    IF d.month = 3 THEN
+      Out.String("March "); 
+    ELSE
+      Out.String("April ");
+    END;
+    Out.Int(d.day);
+    Out.Ln;
+  END; 
 END Easter.
