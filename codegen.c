@@ -299,7 +299,8 @@ static const char *import_realname(const char *alias) {
  * Built-in module list
  * ----------------------------------------------------------------------- */
 static const char *g_builtins[] = {
-    "Out","In","Random","Terminal","Graphics","Math","Strings","Files","Args","Dict","Zip",NULL
+    "Out","In","Random","Terminal","Graphics","Math","Strings","Files","Args","Dict","Zip",
+    "Env","OS","Time",NULL
 };
 static int is_builtin_module(const char *s) {
     for (int i=0;g_builtins[i];i++) if (!strcmp(g_builtins[i],s)) return 1;
@@ -705,6 +706,7 @@ static int try_emit_import(CG *g, Node *fa, Node *args) {
         if (!strcmp(proc,"Real"))   { emit(g,"scanf(\"%%lf\",&"); emit_expr(g,a0); emit(g,")"); return 1; }
         if (!strcmp(proc,"Char"))   { emit(g,"("); emit_expr(g,a0); emit(g," = (char)getchar())"); return 1; }
         if (!strcmp(proc,"String")) { emit(g,"scanf(\"%%255s\","); emit_expr(g,a0); emit(g,")"); return 1; }
+        if (!strcmp(proc,"Line"))   { emit(g,"In_Line("); emit_expr(g,a0); emit(g,")"); return 1; }
     }
     /* Random module */
     if (!strcmp(mod,"Random")) {
@@ -721,6 +723,7 @@ static int try_emit_import(CG *g, Node *fa, Node *args) {
     }
     /* Math module */
     if (!strcmp(mod,"Math")) {
+        Node *a2 = a1 ? a1->next : NULL;
         /* one-argument functions */
         if (!strcmp(proc,"sqrt"))   { emit(g,"sqrt(");  emit_expr(g,a0); emit(g,")"); return 1; }
         if (!strcmp(proc,"exp"))    { emit(g,"exp(");   emit_expr(g,a0); emit(g,")"); return 1; }
@@ -740,6 +743,14 @@ static int try_emit_import(CG *g, Node *fa, Node *args) {
         /* two-argument functions */
         if (!strcmp(proc,"arctan2")) { emit(g,"atan2("); emit_expr(g,a0); emit(g,","); emit_expr(g,a1); emit(g,")"); return 1; }
         if (!strcmp(proc,"power"))   { emit(g,"pow(");   emit_expr(g,a0); emit(g,","); emit_expr(g,a1); emit(g,")"); return 1; }
+        if (!strcmp(proc,"min"))     { emit(g,"fmin(");  emit_expr(g,a0); emit(g,","); emit_expr(g,a1); emit(g,")"); return 1; }
+        if (!strcmp(proc,"max"))     { emit(g,"fmax(");  emit_expr(g,a0); emit(g,","); emit_expr(g,a1); emit(g,")"); return 1; }
+        if (!strcmp(proc,"clamp"))   {
+            /* clamp(x,lo,hi) = fmin(fmax(x,lo),hi) */
+            emit(g,"fmin(fmax("); emit_expr(g,a0); emit(g,","); emit_expr(g,a1); emit(g,"),"); emit_expr(g,a2); emit(g,")");
+            return 1;
+        }
+        (void)a2;
     }
     /* Strings module */
     if (!strcmp(mod,"Strings")) {
@@ -759,8 +770,14 @@ static int try_emit_import(CG *g, Node *fa, Node *args) {
         if (!strcmp(proc,"Trim"))      { emit(g,"Strings_Trim(");       emit_expr(g,a0); emit(g,")"); return 1; }
         if (!strcmp(proc,"IntToStr"))  { emit(g,"Strings_IntToStr(");   emit_expr(g,a0); emit(g,","); emit_expr(g,a1); emit(g,","); emit_open_array_len(g,a1); emit(g,")"); return 1; }
         if (!strcmp(proc,"RealToStr")) { emit(g,"Strings_RealToStr(");  emit_expr(g,a0); emit(g,","); emit_expr(g,a1); emit(g,","); emit_open_array_len(g,a1); emit(g,")"); return 1; }
-        if (!strcmp(proc,"StrToInt"))  { emit(g,"Strings_StrToInt(");   emit_as_string(g,a0); emit(g,",&"); emit_expr(g,a1); emit(g,")"); return 1; }
-        if (!strcmp(proc,"StrToReal")) { emit(g,"Strings_StrToReal(");  emit_as_string(g,a0); emit(g,",&"); emit_expr(g,a1); emit(g,")"); return 1; }
+        if (!strcmp(proc,"StrToInt"))    { emit(g,"Strings_StrToInt(");    emit_as_string(g,a0); emit(g,",&"); emit_expr(g,a1); emit(g,")"); return 1; }
+        if (!strcmp(proc,"StrToReal"))   { emit(g,"Strings_StrToReal(");   emit_as_string(g,a0); emit(g,",&"); emit_expr(g,a1); emit(g,")"); return 1; }
+        if (!strcmp(proc,"StartsWith"))  { emit(g,"Strings_StartsWith(");  emit_as_string(g,a0); emit(g,","); emit_as_string(g,a1); emit(g,")"); return 1; }
+        if (!strcmp(proc,"EndsWith"))    { emit(g,"Strings_EndsWith(");    emit_as_string(g,a0); emit(g,","); emit_as_string(g,a1); emit(g,")"); return 1; }
+        if (!strcmp(proc,"Split")) {
+            Node *a3 = a2 ? a2->next : NULL;
+            emit(g,"Strings_Split("); emit_as_string(g,a0); emit(g,","); emit_expr(g,a1); emit(g,","); emit_expr(g,a2); emit(g,","); emit_expr(g,a3); emit(g,")"); return 1;
+        }
         (void)a2;
     }
     /* Files module — standard Oberon Files API */
@@ -772,6 +789,9 @@ static int try_emit_import(CG *g, Node *fa, Node *args) {
         if (!strcmp(proc,"Register"))    { emit(g,"Files_Register(");    emit_expr(g,a0); emit(g,")"); return 1; }
         if (!strcmp(proc,"Close"))       { emit(g,"Files_Close(");       emit_expr(g,a0); emit(g,")"); return 1; }
         if (!strcmp(proc,"Length"))      { emit(g,"Files_Length(");      emit_expr(g,a0); emit(g,")"); return 1; }
+        if (!strcmp(proc,"Delete"))      { emit(g,"Files_Delete(");      emit_as_string(g,a0); emit(g,")"); return 1; }
+        if (!strcmp(proc,"Rename"))      { emit(g,"Files_Rename(");      emit_as_string(g,a0); emit(g,","); emit_as_string(g,a1); emit(g,")"); return 1; }
+        if (!strcmp(proc,"Exists"))      { emit(g,"Files_Exists(");      emit_as_string(g,a0); emit(g,")"); return 1; }
         /* Rider operations: Set(VAR r, f, pos)  Pos(VAR r)  Base(VAR r) */
         if (!strcmp(proc,"Set"))         { emit(g,"Files_Set(");  emit_addr_of(g,a0); emit(g,","); emit_expr(g,a1); emit(g,","); emit_expr(g,a2); emit(g,")"); return 1; }
         if (!strcmp(proc,"Pos"))         { emit(g,"Files_Pos(");  emit_addr_of(g,a0); emit(g,")"); return 1; }
@@ -782,6 +802,7 @@ static int try_emit_import(CG *g, Node *fa, Node *args) {
         if (!strcmp(proc,"ReadBool"))    { emit(g,"Files_ReadBool(");    emit_addr_of(g,a0); emit(g,","); emit_addr_of(g,a1); emit(g,")"); return 1; }
         if (!strcmp(proc,"ReadReal"))    { emit(g,"Files_ReadReal(");    emit_addr_of(g,a0); emit(g,","); emit_addr_of(g,a1); emit(g,")"); return 1; }
         if (!strcmp(proc,"ReadString"))  { emit(g,"Files_ReadString(");  emit_addr_of(g,a0); emit(g,","); emit_expr(g,a1); emit(g,")"); return 1; }
+        if (!strcmp(proc,"ReadLine"))    { emit(g,"Files_ReadLine(");    emit_addr_of(g,a0); emit(g,","); emit_expr(g,a1); emit(g,")"); return 1; }
         if (!strcmp(proc,"ReadNum"))     { emit(g,"Files_ReadNum(");     emit_addr_of(g,a0); emit(g,","); emit_addr_of(g,a1); emit(g,")"); return 1; }
         /* Write procedures — VAR r, x by value  (string: const char*) */
         if (!strcmp(proc,"Write"))       { emit(g,"Files_Write(");       emit_addr_of(g,a0); emit(g,","); emit_expr(g,a1); emit(g,")"); return 1; }
@@ -789,6 +810,7 @@ static int try_emit_import(CG *g, Node *fa, Node *args) {
         if (!strcmp(proc,"WriteBool"))   { emit(g,"Files_WriteBool(");   emit_addr_of(g,a0); emit(g,","); emit_expr(g,a1); emit(g,")"); return 1; }
         if (!strcmp(proc,"WriteReal"))   { emit(g,"Files_WriteReal(");   emit_addr_of(g,a0); emit(g,","); emit_expr(g,a1); emit(g,")"); return 1; }
         if (!strcmp(proc,"WriteString")) { emit(g,"Files_WriteString("); emit_addr_of(g,a0); emit(g,","); emit_as_string(g,a1); emit(g,")"); return 1; }
+        if (!strcmp(proc,"WriteLine"))   { emit(g,"Files_WriteLine(");   emit_addr_of(g,a0); emit(g,","); emit_as_string(g,a1); emit(g,")"); return 1; }
         if (!strcmp(proc,"WriteNum"))    { emit(g,"Files_WriteNum(");    emit_addr_of(g,a0); emit(g,","); emit_expr(g,a1); emit(g,")"); return 1; }
     }
     /* Args module */
@@ -807,12 +829,15 @@ static int try_emit_import(CG *g, Node *fa, Node *args) {
     }
     /* Dict module — string-keyed hash table */
     if (!strcmp(mod,"Dict")) {
+        Node *a2 = a1 ? a1->next : NULL;
         if (!strcmp(proc,"Init"))   { emit(g,"Dict_Init(&");   emit_expr(g,a0); emit(g,")"); return 1; }
         if (!strcmp(proc,"Put"))    { emit(g,"Dict_Put(&");    emit_expr(g,a0); emit(g,","); emit_as_string(g,a1); emit(g,","); emit_as_string(g,a1->next); emit(g,")"); return 1; }
         if (!strcmp(proc,"Get"))    { emit(g,"Dict_Get(&");    emit_expr(g,a0); emit(g,","); emit_as_string(g,a1); emit(g,","); emit_expr(g,a1->next); emit(g,")"); return 1; }
         if (!strcmp(proc,"Has"))    { emit(g,"Dict_Has(&");    emit_expr(g,a0); emit(g,","); emit_as_string(g,a1); emit(g,")"); return 1; }
         if (!strcmp(proc,"Remove")) { emit(g,"Dict_Remove(&"); emit_expr(g,a0); emit(g,","); emit_as_string(g,a1); emit(g,")"); return 1; }
         if (!strcmp(proc,"Clear"))  { emit(g,"Dict_Clear(&");  emit_expr(g,a0); emit(g,")"); return 1; }
+        if (!strcmp(proc,"First"))  { emit(g,"Dict_First(&");  emit_expr(g,a0); emit(g,","); emit_expr(g,a1); emit(g,","); emit_expr(g,a2); emit(g,")"); return 1; }
+        if (!strcmp(proc,"Next"))   { emit(g,"Dict_Next(&");   emit_expr(g,a0); emit(g,","); emit_expr(g,a1); emit(g,","); emit_expr(g,a2); emit(g,")"); return 1; }
     }
     /* Zip module — ZIP archive reading */
     if (!strcmp(mod,"Zip")) {
@@ -825,6 +850,32 @@ static int try_emit_import(CG *g, Node *fa, Node *args) {
         if (!strcmp(proc,"Extract"))     { emit(g,"Zip_Extract(");     emit_expr(g,a0); emit(g,","); emit_expr(g,a1); emit(g,","); emit_expr(g,a2); emit(g,","); emit_open_array_len(g,a2); emit(g,")"); return 1; }
         if (!strcmp(proc,"ExtractFile")) { emit(g,"Zip_ExtractFile("); emit_expr(g,a0); emit(g,","); emit_expr(g,a1); emit(g,","); emit_as_string(g,a2); emit(g,")"); return 1; }
         if (!strcmp(proc,"Close"))       { emit(g,"Zip_Close(");       emit_expr(g,a0); emit(g,")"); return 1; }
+    }
+    /* Env module — environment variable access */
+    if (!strcmp(mod,"Env")) {
+        if (!strcmp(proc,"Get")) {
+            emit(g,"Env_Get("); emit_as_string(g,a0); emit(g,","); emit_expr(g,a1); emit(g,","); emit_open_array_len(g,a1); emit(g,")"); return 1;
+        }
+    }
+    /* OS module — basic OS calls */
+    if (!strcmp(mod,"OS")) {
+        Node *a2 = a1 ? a1->next : NULL; (void)a2;
+        if (!strcmp(proc,"Exec"))   { emit(g,"OS_Exec(");   emit_as_string(g,a0); emit(g,")"); return 1; }
+        if (!strcmp(proc,"Exit"))   { emit(g,"exit(");      emit_expr(g,a0);      emit(g,")"); return 1; }
+        if (!strcmp(proc,"GetCwd")) { emit(g,"OS_GetCwd("); emit_expr(g,a0); emit(g,","); emit_open_array_len(g,a0); emit(g,")"); return 1; }
+        if (!strcmp(proc,"ChDir"))  { emit(g,"OS_ChDir(");  emit_as_string(g,a0); emit(g,")"); return 1; }
+    }
+    /* Time module — time, formatting, sleep */
+    if (!strcmp(mod,"Time")) {
+        Node *a2 = a1 ? a1->next : NULL;
+        if (!strcmp(proc,"Now"))    { emit(g,"Time_Now()"); return 1; }
+        if (!strcmp(proc,"Sleep"))  { emit(g,"Time_Sleep("); emit_expr(g,a0); emit(g,")"); return 1; }
+        if (!strcmp(proc,"Format")) {
+            /* Format(t, fmt, VAR s) */
+            emit(g,"Time_Format("); emit_expr(g,a0); emit(g,","); emit_as_string(g,a1); emit(g,","); emit_expr(g,a2); emit(g,","); emit_open_array_len(g,a2); emit(g,")");
+            return 1;
+        }
+        (void)a2;
     }
     /* Terminal.Shell — restore terminal, run command, wait, reinit */
     if (!strcmp(mod,"Terminal") && !strcmp(proc,"Shell")) {
@@ -1694,6 +1745,14 @@ void codegen(Node *module, FILE *out, int is_main) {
     for (int i=0;i<g_nimports;i++) if (!strcmp(g_imports[i],"Dict"))     { has_dict=1;     break; }
     int has_zip = 0;
     for (int i=0;i<g_nimports;i++) if (!strcmp(g_imports[i],"Zip"))      { has_zip=1;      break; }
+    int has_in = 0;
+    for (int i=0;i<g_nimports;i++) if (!strcmp(g_imports[i],"In"))       { has_in=1;       break; }
+    int has_env = 0;
+    for (int i=0;i<g_nimports;i++) if (!strcmp(g_imports[i],"Env"))      { has_env=1;      break; }
+    int has_os = 0;
+    for (int i=0;i<g_nimports;i++) if (!strcmp(g_imports[i],"OS"))       { has_os=1;       break; }
+    int has_time = 0;
+    for (int i=0;i<g_nimports;i++) if (!strcmp(g_imports[i],"Time"))     { has_time=1;     break; }
 
     if (has_random && !has_terminal)
         emit(g,"#include <time.h>\n");
@@ -2007,8 +2066,103 @@ void codegen(Node *module, FILE *out, int is_main) {
         emit(g,"    }\n");
         emit(g,"    printf(\"\\033[0m\"); fflush(stdout);\n");
         emit(g,"}\n");
+        /* Bresenham line in pixel buffer */
+        emit(g,"static void Graphics_Line(int x0, int y0, int x1, int y1, int color) {\n");
+        emit(g,"    int dx=x1-x0; if(dx<0)dx=-dx;\n");
+        emit(g,"    int dy=y1-y0; if(dy<0)dy=-dy;\n");
+        emit(g,"    int sx=x0<x1?1:-1, sy=y0<y1?1:-1, err=dx-dy;\n");
+        emit(g,"    while(1) {\n");
+        emit(g,"        Graphics_Plot(x0,y0,color);\n");
+        emit(g,"        if(x0==x1 && y0==y1) break;\n");
+        emit(g,"        int e2=2*err;\n");
+        emit(g,"        if(e2>-dy){err-=dy;x0+=sx;}\n");
+        emit(g,"        if(e2< dx){err+=dx;y0+=sy;}\n");
+        emit(g,"    }\n");
+        emit(g,"}\n");
+        /* Filled circle in pixel buffer (Bresenham scan-fill) */
+        emit(g,"static void Graphics_FillCircle(int cx, int cy, int r, int color) {\n");
+        emit(g,"    int x=0,y=r,d=1-r,i;\n");
+        emit(g,"    while(x<=y) {\n");
+        emit(g,"        for(i=cx-x;i<=cx+x;i++){Graphics_Plot(i,cy-y,color);Graphics_Plot(i,cy+y,color);}\n");
+        emit(g,"        for(i=cx-y;i<=cx+y;i++){Graphics_Plot(i,cy-x,color);Graphics_Plot(i,cy+x,color);}\n");
+        emit(g,"        if(d<0)d+=2*x+3;else{d+=2*(x-y)+5;y--;} x++;\n");
+        emit(g,"    }\n");
+        emit(g,"}\n");
+        /* Fill entire pixel buffer with one color */
+        emit(g,"static void Graphics_FillBuf(int color) {\n");
+        emit(g,"    for(int r=0;r<_GFX_H;r++) for(int c=0;c<_GFX_W;c++) _gfx_buf[r][c]=color;\n");
+        emit(g,"}\n");
+        /* Map RGB (0-255 each) to nearest xterm-256 color index */
+        emit(g,"static int Graphics_RGBColor(int r, int g, int b) {\n");
+        emit(g,"    if(r==g && g==b) {\n");
+        emit(g,"        if(r<8)return 16; if(r>248)return 231;\n");
+        emit(g,"        return (int)((r-8)/247.0*24.0+232.5);\n");
+        emit(g,"    }\n");
+        emit(g,"    int ri=(int)(r/255.0*5.0+0.5);\n");
+        emit(g,"    int gi=(int)(g/255.0*5.0+0.5);\n");
+        emit(g,"    int bi=(int)(b/255.0*5.0+0.5);\n");
+        emit(g,"    return 16+36*ri+6*gi+bi;\n");
+        emit(g,"}\n");
     }
     emit(g,"\n");
+
+    /* ── In module runtime (In.Line needs a helper function) ─────── */
+    if (has_in) {
+        emit(g,"static void In_Line(char *s) {\n");
+        emit(g,"    int i=0, c;\n");
+        emit(g,"    while ((c=getchar())!=EOF && c!='\\n') { if(i<255) s[i++]=(char)c; }\n");
+        emit(g,"    s[i]=0;\n");
+        emit(g,"}\n\n");
+    }
+
+    /* ── Env module runtime ──────────────────────────────────────── */
+    if (has_env) {
+        /* Env_Get(name, val, val_len): BOOLEAN — get environment variable */
+        emit(g,"static int Env_Get(const char *name, char *val, int val_len) {\n");
+        emit(g,"    const char *v=getenv(name);\n");
+        emit(g,"    if(v){strncpy(val,v,(size_t)(val_len-1));val[val_len-1]=0;return 1;}\n");
+        emit(g,"    val[0]=0; return 0;\n");
+        emit(g,"}\n\n");
+    }
+
+    /* ── OS module runtime ───────────────────────────────────────── */
+    if (has_os) {
+        emit(g,"#include <unistd.h>\n");
+        /* OS_Exec(cmd): INTEGER — run command, return exit code */
+        emit(g,"static int OS_Exec(const char *cmd) {\n");
+        emit(g,"    int r=system(cmd); return (r==-1)?-1:(r>>8)&0xff;\n");
+        emit(g,"}\n");
+        /* OS_GetCwd(VAR s, len) */
+        emit(g,"static void OS_GetCwd(char *s, int len) {\n");
+        emit(g,"    if(!getcwd(s,(size_t)len)) s[0]=0;\n");
+        emit(g,"}\n");
+        /* OS_ChDir(path): BOOLEAN */
+        emit(g,"static int OS_ChDir(const char *path) { return chdir(path)==0; }\n");
+        emit(g,"\n");
+    }
+
+    /* ── Time module runtime ─────────────────────────────────────── */
+    if (has_time) {
+        emit(g,"#include <time.h>\n");
+        emit(g,"#ifndef _POSIX_C_SOURCE\n#define _POSIX_C_SOURCE 199309L\n#endif\n");
+        /* Time_Now(): LONGINT — milliseconds since Unix epoch */
+        emit(g,"static long Time_Now(void) {\n");
+        emit(g,"    struct timespec ts;\n");
+        emit(g,"    clock_gettime(CLOCK_REALTIME,&ts);\n");
+        emit(g,"    return (long)ts.tv_sec*1000L + ts.tv_nsec/1000000L;\n");
+        emit(g,"}\n");
+        /* Time_Sleep(ms) — sleep for ms milliseconds */
+        emit(g,"static void Time_Sleep(int ms) {\n");
+        emit(g,"    struct timespec ts; ts.tv_sec=ms/1000; ts.tv_nsec=(ms%%1000)*1000000L;\n");
+        emit(g,"    nanosleep(&ts,NULL);\n");
+        emit(g,"}\n");
+        /* Time_Format(t_ms, fmt, VAR s, slen) — format a millisecond timestamp */
+        emit(g,"static void Time_Format(long t_ms, const char *fmt, char *s, int slen) {\n");
+        emit(g,"    time_t sec=(time_t)(t_ms/1000);\n");
+        emit(g,"    struct tm *tm=localtime(&sec);\n");
+        emit(g,"    if(tm) strftime(s,(size_t)slen,fmt,tm); else s[0]=0;\n");
+        emit(g,"}\n\n");
+    }
 
     /* ── Strings module runtime ─────────────────────────────────── */
     if (has_strings) {
@@ -2093,6 +2247,28 @@ void codegen(Node *module, FILE *out, int is_main) {
         emit(g,"static void Strings_RealToStr(double x, char *s, int s_len) { snprintf(s,(size_t)s_len,\"%%g\",x); }\n");
         emit(g,"static int Strings_StrToInt(const char *s, int *n) { return sscanf(s,\"%%d\",n)==1; }\n");
         emit(g,"static int Strings_StrToReal(const char *s, double *x) { return sscanf(s,\"%%lf\",x)==1; }\n");
+        emit(g,"static int Strings_StartsWith(const char *s, const char *prefix) {\n");
+        emit(g,"    size_t pl=strlen(prefix); return strncmp(s,prefix,pl)==0;\n");
+        emit(g,"}\n");
+        emit(g,"static int Strings_EndsWith(const char *s, const char *suffix) {\n");
+        emit(g,"    size_t sl=strlen(s), xl=strlen(suffix);\n");
+        emit(g,"    if (xl>sl) return 0; return strcmp(s+sl-xl,suffix)==0;\n");
+        emit(g,"}\n");
+        /* Split(s, sep, n, VAR part): BOOLEAN — extract nth (0-based) field delimited by sep */
+        emit(g,"static int Strings_Split(const char *s, char sep, int n, char *dst) {\n");
+        emit(g,"    int field=0; const char *p=s;\n");
+        emit(g,"    while (1) {\n");
+        emit(g,"        if (field==n) {\n");
+        emit(g,"            int j=0;\n");
+        emit(g,"            while (*p && *p!=sep && j<255) dst[j++]=*p++;\n");
+        emit(g,"            dst[j]=0; return 1;\n");
+        emit(g,"        }\n");
+        emit(g,"        while (*p && *p!=sep) p++;\n");
+        emit(g,"        if (!*p) break;\n");
+        emit(g,"        p++; field++;\n");
+        emit(g,"    }\n");
+        emit(g,"    dst[0]=0; return 0;\n");
+        emit(g,"}\n");
         emit(g,"\n");
     }
 
@@ -2199,6 +2375,27 @@ void codegen(Node *module, FILE *out, int is_main) {
         emit(g,"    unsigned int n=(unsigned int)x;\n");
         emit(g,"    do{unsigned char b=n&0x7F;n>>=7;if(n)b|=0x80;Files_Write(r,b);}while(n);\n");
         emit(g,"}\n");
+        /* ReadLine(VAR r, VAR x: ARRAY OF CHAR) — reads until \n or EOF, strips \n */
+        emit(g,"static void Files_ReadLine(Files_Rider *r, char *x) {\n");
+        emit(g,"    int i=0,c;\n");
+        emit(g,"    if(!r->f||r->eof){x[0]=0;r->eof=1;return;}\n");
+        emit(g,"    while((c=fgetc(r->f->fp))!=EOF&&c!='\\n'){x[i++]=(char)c;r->pos++;}\n");
+        emit(g,"    if(c=='\\n')r->pos++;else if(i==0)r->eof=1;\n");
+        emit(g,"    x[i]=0;\n");
+        emit(g,"}\n");
+        /* WriteLine(VAR r, x: ARRAY OF CHAR) — writes string followed by \n */
+        emit(g,"static void Files_WriteLine(Files_Rider *r, const char *x) {\n");
+        emit(g,"    while(*x)Files_Write(r,(unsigned char)*x++);\n");
+        emit(g,"    Files_Write(r,'\\n');\n");
+        emit(g,"}\n");
+        /* Delete(name) — delete a file by name */
+        emit(g,"static void Files_Delete(const char *name) { remove(name); }\n");
+        /* Rename(old, new) — rename/move a file */
+        emit(g,"static void Files_Rename(const char *old, const char *n) { rename(old,n); }\n");
+        /* Exists(name): BOOLEAN — check if file exists */
+        emit(g,"static int Files_Exists(const char *name) {\n");
+        emit(g,"    FILE *fp=fopen(name,\"rb\"); if(!fp)return 0; fclose(fp); return 1;\n");
+        emit(g,"}\n");
         emit(g,"\n");
     }
 
@@ -2225,7 +2422,7 @@ void codegen(Node *module, FILE *out, int is_main) {
         emit(g,"/* Dict module — string-keyed hash table */\n");
         emit(g,"#define DICT_BUCKETS 256\n");
         emit(g,"typedef struct Dict_Node_s { char key[256]; char val[256]; struct Dict_Node_s *next; } Dict_Node;\n");
-        emit(g,"typedef struct { Dict_Node *buckets[DICT_BUCKETS]; } Dict_Table;\n");
+        emit(g,"typedef struct { Dict_Node *buckets[DICT_BUCKETS]; int _ci; Dict_Node *_cn; } Dict_Table;\n");
         emit(g,"static unsigned int Dict_hash(const char *s) {\n");
         emit(g,"    unsigned int h=5381; while(*s) h=((h<<5)+h)^(unsigned char)*s++; return h%%DICT_BUCKETS;\n");
         emit(g,"}\n");
@@ -2260,6 +2457,36 @@ void codegen(Node *module, FILE *out, int is_main) {
         emit(g,"        while (n) { Dict_Node *t=n->next; free(n); n=t; }\n");
         emit(g,"        d->buckets[i]=NULL;\n");
         emit(g,"    }\n");
+        emit(g,"}\n");
+        /* First(VAR d, VAR key, VAR val): BOOLEAN — init iterator, return first entry */
+        emit(g,"static int Dict_First(Dict_Table *d, char *key, char *val) {\n");
+        emit(g,"    d->_ci=0; d->_cn=NULL;\n");
+        emit(g,"    for (int i=0;i<DICT_BUCKETS;i++) {\n");
+        emit(g,"        if (d->buckets[i]) {\n");
+        emit(g,"            d->_ci=i; d->_cn=d->buckets[i]->next;\n");
+        emit(g,"            strncpy(key,d->buckets[i]->key,255); key[255]=0;\n");
+        emit(g,"            strncpy(val,d->buckets[i]->val,255); val[255]=0;\n");
+        emit(g,"            return 1;\n");
+        emit(g,"        }\n");
+        emit(g,"    }\n");
+        emit(g,"    return 0;\n");
+        emit(g,"}\n");
+        /* Next(VAR d, VAR key, VAR val): BOOLEAN — advance iterator, return next entry */
+        emit(g,"static int Dict_Next(Dict_Table *d, char *key, char *val) {\n");
+        emit(g,"    if (d->_cn) {\n");
+        emit(g,"        strncpy(key,d->_cn->key,255); key[255]=0;\n");
+        emit(g,"        strncpy(val,d->_cn->val,255); val[255]=0;\n");
+        emit(g,"        d->_cn=d->_cn->next; return 1;\n");
+        emit(g,"    }\n");
+        emit(g,"    for (int i=d->_ci+1;i<DICT_BUCKETS;i++) {\n");
+        emit(g,"        if (d->buckets[i]) {\n");
+        emit(g,"            d->_ci=i; d->_cn=d->buckets[i]->next;\n");
+        emit(g,"            strncpy(key,d->buckets[i]->key,255); key[255]=0;\n");
+        emit(g,"            strncpy(val,d->buckets[i]->val,255); val[255]=0;\n");
+        emit(g,"            return 1;\n");
+        emit(g,"        }\n");
+        emit(g,"    }\n");
+        emit(g,"    return 0;\n");
         emit(g,"}\n\n");
     }
 
@@ -2535,7 +2762,7 @@ void codegen_header(Node *module, FILE *out) {
         fprintf(out,"#ifndef OBC_DICT_TYPES_H_\n#define OBC_DICT_TYPES_H_\n");
         fprintf(out,"#define DICT_BUCKETS 256\n");
         fprintf(out,"typedef struct Dict_Node_s { char key[256]; char val[256]; struct Dict_Node_s *next; } Dict_Node;\n");
-        fprintf(out,"typedef struct { Dict_Node *buckets[DICT_BUCKETS]; } Dict_Table;\n");
+        fprintf(out,"typedef struct { Dict_Node *buckets[DICT_BUCKETS]; int _ci; Dict_Node *_cn; } Dict_Table;\n");
         fprintf(out,"#endif\n\n");
     }
 

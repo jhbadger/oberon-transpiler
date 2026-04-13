@@ -1,41 +1,5 @@
 # Oberon Transpiler — Todo List
 
-## Stdlib — Missing Procedures/Functions
-
-### Files module
-- `Files.Delete(name)` — delete a file by name
-- `Files.Rename(old, new)` — rename/move a file
-- `Files.Exists(name): BOOLEAN` — check if a file exists
-- Text-mode I/O: `Files.ReadLine` / `Files.WriteLine` (currently only raw binary riders)
-
-### In module
-- `In.Line(VAR s)` — read a full line from stdin (currently only word-by-word with `In.String`)
-
-### Dict module
-- Iteration support — no way to enumerate keys/values (e.g. `Dict.First`, `Dict.Next`, or a `Keys` procedure)
-
-### Graphics module
-- `Graphics.Line(x1, y1, x2, y2, color)` — diagonal line in pixel buffer (Bresenham; only HLine/VLine exist)
-- `Graphics.FillCircle(cx, cy, r, color)` — filled circle (only outline `Circle` exists)
-- `Graphics.FillBuf(color)` — flood-fill the entire pixel buffer with one color
-- `Graphics.RGBColor(r, g, b): INTEGER` — map RGB to nearest 256-color index
-
-### Strings module
-- `Strings.StartsWith(s, prefix): BOOLEAN`
-- `Strings.EndsWith(s, suffix): BOOLEAN`
-- `Strings.Split` or similar (currently requires manual `NextWord`/`Pos` loops)
-
-### Math module
-- `Math.min(a, b)` / `Math.max(a, b)` as real functions (currently users must write IF-chains)
-- `Math.clamp(x, lo, hi)` — useful in graphics/games
-
-### New modules to consider
-- `Env` — read environment variables (currently buried in `Args.GetEnv` which isn't in stdlib.md)
-- `OS` — basic OS calls: `OS.Exec`, `OS.Exit`, `OS.GetCwd`, `OS.ChDir`
-- `Time` — `Time.Now(): LONGINT`, `Time.Format`, `Time.Sleep(ms)`
-
----
-
 ## Transpiler — Language/Compiler Issues
 
 - **`expr_type()` is incomplete** (`codegen.c:390,392`): returns `NULL` for `ND_FIELD_ACCESS` and
@@ -78,3 +42,4 @@
 - **`Args.GetEnv` is undocumented** — missing from stdlib.md entirely.
 - **README examples table** is missing newer examples (`BRErogue`, `rogue`, `sheet`, `videopoker`,
   `zodiac`, `epub`, etc.).
+

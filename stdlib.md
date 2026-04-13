@@ -74,6 +74,7 @@ IMPORT In;
 | `In.Int(VAR n: INTEGER)` | Read a decimal integer from stdin. |
 | `In.Real(VAR x: REAL)` | Read a floating-point number from stdin. |
 | `In.String(VAR s: ARRAY OF CHAR)` | Read a whitespace-delimited word from stdin (max 255 chars). |
+| `In.Line(VAR s: ARRAY OF CHAR)` | Read a full line from stdin (up to 255 chars); the newline is consumed but not stored. |
 
 ---
 
@@ -128,6 +129,52 @@ All functions take and return REAL unless noted.
 | `Math.round(x)` | Nearest integer, as REAL. |
 | `Math.entier(x)` | Floor as INTEGER. |
 | `Math.abs(x)` | Absolute value (real). |
+| `Math.min(a, b)` | Smaller of `a` and `b`. Works for both REAL and INTEGER arguments. |
+| `Math.max(a, b)` | Larger of `a` and `b`. Works for both REAL and INTEGER arguments. |
+| `Math.clamp(x, lo, hi)` | Clamp `x` to `[lo, hi]`: returns `lo` if `x < lo`, `hi` if `x > hi`, else `x`. |
+
+---
+
+## Env - Environment Variables
+
+```
+IMPORT Env;
+```
+
+| Procedure / Function | Description |
+|----------------------|-------------|
+| `Env.Get(name: ARRAY OF CHAR; VAR val: ARRAY OF CHAR): BOOLEAN` | Look up environment variable `name`. Copies the value into `val` and returns TRUE, or sets `val` to the empty string and returns FALSE if the variable is not set. |
+
+---
+
+## OS - Operating System Calls
+
+```
+IMPORT OS;
+```
+
+| Procedure / Function | Description |
+|----------------------|-------------|
+| `OS.Exec(cmd: ARRAY OF CHAR): INTEGER` | Run `cmd` via the system shell. Returns the command's exit code (0 = success), or -1 on error. |
+| `OS.Exit(code: INTEGER)` | Terminate the program immediately with exit code `code`. |
+| `OS.GetCwd(VAR s: ARRAY OF CHAR)` | Copy the current working directory path into `s`. Sets `s` to the empty string on error. |
+| `OS.ChDir(path: ARRAY OF CHAR): BOOLEAN` | Change the working directory to `path`. Returns TRUE on success. |
+
+---
+
+## Time - Date and Time
+
+```
+IMPORT Time;
+```
+
+Timestamps are milliseconds since the Unix epoch, stored as `LONGINT`.
+
+| Procedure / Function | Description |
+|----------------------|-------------|
+| `Time.Now(): LONGINT` | Current time as milliseconds since the Unix epoch. |
+| `Time.Sleep(ms: INTEGER)` | Pause execution for `ms` milliseconds. |
+| `Time.Format(t: LONGINT; fmt: ARRAY OF CHAR; VAR s: ARRAY OF CHAR)` | Format timestamp `t` into `s` using `strftime`-style `fmt` (e.g. `"%Y-%m-%d %H:%M:%S"`). Uses local time. |
 
 ---
 
@@ -159,6 +206,9 @@ String variables are `ARRAY OF CHAR` (or the `STRING` alias), capped at 256 byte
 | `Strings.RealToStr(x: REAL; VAR s: ARRAY OF CHAR)` | Format real `x` into string `s` (`%g` format). |
 | `Strings.StrToInt(s: ARRAY OF CHAR; VAR n: INTEGER): BOOLEAN` | Parse integer from `s` into `n`. Returns FALSE if `s` is not a valid integer. |
 | `Strings.StrToReal(s: ARRAY OF CHAR; VAR x: REAL): BOOLEAN` | Parse real from `s` into `x`. Returns FALSE if `s` is not a valid number. |
+| `Strings.StartsWith(s, prefix: ARRAY OF CHAR): BOOLEAN` | Returns TRUE if `s` begins with `prefix`. |
+| `Strings.EndsWith(s, suffix: ARRAY OF CHAR): BOOLEAN` | Returns TRUE if `s` ends with `suffix`. |
+| `Strings.Split(s: ARRAY OF CHAR; sep: CHAR; n: INTEGER; VAR part: ARRAY OF CHAR): BOOLEAN` | Extract the `n`-th (0-based) field of `s` split by delimiter `sep` into `part`. Returns FALSE if there is no `n`-th field. |
 
 ---
 
@@ -190,6 +240,9 @@ null-terminated byte sequence.  For integers it is the native C `int` representa
 | `Files.Register(f)` | Make a new file permanent (flushes buffer; files are on-disk from creation here). |
 | `Files.Close(f)` | Close `f` and free its resources. |
 | `Files.Length(f): INTEGER` | File size in bytes. |
+| `Files.Delete(name)` | Delete the file with the given name. No-op if it does not exist. |
+| `Files.Rename(old, new)` | Rename (or move) a file from `old` to `new`. |
+| `Files.Exists(name): BOOLEAN` | Returns TRUE if the named file exists and can be opened. |
 
 ### Rider Operations
 
@@ -211,6 +264,7 @@ of file is reached or an error occurs.
 | `Files.ReadBool(VAR r; VAR x: BOOLEAN)` | Read a boolean (1 byte: 0=FALSE, non-zero=TRUE). |
 | `Files.ReadReal(VAR r; VAR x: REAL)` | Read a binary `double`. |
 | `Files.ReadString(VAR r; VAR x: ARRAY OF CHAR)` | Read a null-terminated string. |
+| `Files.ReadLine(VAR r; VAR x: ARRAY OF CHAR)` | Read one text line (up to `\n` or EOF); the newline is consumed but not stored. Sets `r.eof` when no characters are available. |
 | `Files.ReadNum(VAR r; VAR x: INTEGER)` | Read a LEB128-compressed integer. |
 
 ### Write Procedures
@@ -224,6 +278,7 @@ All write procedures advance the rider position.  `r.eof` is set TRUE on write e
 | `Files.WriteBool(VAR r; x: BOOLEAN)` | Write a boolean (1 byte). |
 | `Files.WriteReal(VAR r; x: REAL)` | Write a binary `double`. |
 | `Files.WriteString(VAR r; x: ARRAY OF CHAR)` | Write a null-terminated string. |
+| `Files.WriteLine(VAR r; x: ARRAY OF CHAR)` | Write a string followed by a newline character. |
 | `Files.WriteNum(VAR r; x: INTEGER)` | Write a LEB128-compressed integer. |
 
 ---
@@ -314,6 +369,10 @@ Colors are ANSI indices 1-7 (0 = transparent/off).
 | `Graphics.ClearBuf()` | Clear the pixel buffer (all pixels off). |
 | `Graphics.Plot(x, y, color: INTEGER)` | Set pixel at `(x, y)` to `color` (1-255, same palette as `Color256`). |
 | `Graphics.Circle(cx, cy, r, color: INTEGER)` | Draw a circle outline using Bresenham's algorithm. |
+| `Graphics.FillCircle(cx, cy, r, color: INTEGER)` | Draw a filled circle using Bresenham scan-fill. |
+| `Graphics.Line(x0, y0, x1, y1, color: INTEGER)` | Draw a line between `(x0, y0)` and `(x1, y1)` using Bresenham's algorithm. |
+| `Graphics.FillBuf(color: INTEGER)` | Fill the entire pixel buffer with `color`. |
+| `Graphics.RGBColor(r, g, b: INTEGER): INTEGER` | Map an RGB triple (0–255 each) to the nearest xterm-256 color index. Useful for passing to `Graphics.Plot` or `Graphics.Color256`. |
 | `Graphics.Flush()` | Render the pixel buffer to the terminal using half-block characters. |
 
 ---
@@ -444,6 +503,7 @@ Arguments are numbered from 1 (argument 0 is the program name and is not accessi
 |----------------------|-------------|
 | `Args.Count(): INTEGER` | Number of command-line arguments (not counting the program name). |
 | `Args.Get(n: INTEGER; VAR s: ARRAY OF CHAR)` | Copy argument `n` (1-based) into `s`. `s` is set to the empty string if `n` is out of range. |
+| `Args.GetEnv(name: ARRAY OF CHAR; VAR val: ARRAY OF CHAR)` | Copy environment variable `name` into `val`. Sets `val` to the empty string if the variable is not set. (Prefer `Env.Get` for new code, which also returns a BOOLEAN.) |
 
 ---
 
@@ -464,6 +524,8 @@ Keys and values are strings (max 255 characters each). The table uses 256-bucket
 | `Dict.Has(VAR d: Dict.Table; key: ARRAY OF CHAR): BOOLEAN` | Returns TRUE if `key` exists. |
 | `Dict.Remove(VAR d: Dict.Table; key: ARRAY OF CHAR)` | Delete `key` from the table. No-op if absent. |
 | `Dict.Clear(VAR d: Dict.Table)` | Remove all entries and free memory. |
+| `Dict.First(VAR d: Dict.Table; VAR key, value: ARRAY OF CHAR): BOOLEAN` | Initialise an iteration and retrieve the first key/value pair. Returns FALSE if the table is empty. The order is unspecified (hash order). |
+| `Dict.Next(VAR d: Dict.Table; VAR key, value: ARRAY OF CHAR): BOOLEAN` | Advance the iterator and retrieve the next key/value pair. Returns FALSE when all entries have been visited. Only one active iteration per table is supported at a time. |
 
 ---
 
