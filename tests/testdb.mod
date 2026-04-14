@@ -1,45 +1,66 @@
 MODULE TestDB;
 
-IMPORT DBF, Out, Strings;
+IMPORT DBF, Out;
 
 PROCEDURE Run*;
 VAR
-  db: DBF.Database;
+  db:     DBF.Database;
   fields: ARRAY 2 OF DBF.Field;
-  recordData: ARRAY 256 OF CHAR;
-  title, author: ARRAY 32 OF CHAR;
+  packed: ARRAY 256 OF CHAR;
+  found:  INTEGER;
+  vr:     DBF.ValidationResult;
 BEGIN
-  (* 1. Define the Schema *)
-  fields[0].name := "TITLE";
-  fields[0].type := "C"; (* Character *)
-  fields[0].len  := 30;
-  
-  fields[1].name := "AUTHOR";
-  fields[1].type := "C";
-  fields[1].len  := 20;
+  Out.String("Step 1: define schema"); Out.Ln;
+  DBF.MakeField(fields[0], "TITLE",  DBF.TypeChar, 30, 0);
+  DBF.MakeField(fields[1], "AUTHOR", DBF.TypeChar, 20, 0);
 
-  (* 2. Create the Database *)
-  Out.String("Creating library.dbf..."); Out.Ln;
+  Out.String("Step 2: create"); Out.Ln;
   DBF.Create(db, "library.dbf", fields, 2);
+  IF db.f = NIL THEN
+    Out.String("ERROR: could not create library.dbf"); Out.Ln;
+    RETURN
+  END;
 
-  (* 3. Prepare and Append a Record *)
-  (* DBF records are fixed-width. We pad the strings with spaces. *)
-  title := "The Olymeron Guide";
-  author := "N. Wirth";
-  
-  (* Clear buffer and copy data *)
-  recordData := "";
-  Strings.Append(title, recordData);
-  (* Fill remaining field width with spaces manually or via helper *)
-  (* For this example, we assume the data is correctly sized for simplicity *)
-  Strings.Append("                ", recordData); 
-  Strings.Append(author, recordData);
+  Out.String("Step 3: append"); Out.Ln;
+  DBF.AppendFields(db, "The Olymeron Guide|N. Wirth");
+  Out.String("  appended 1"); Out.Ln;
+  DBF.AppendFields(db, "Programming in Oberon|M. Reiser");
+  Out.String("  appended 2"); Out.Ln;
+  DBF.AppendFields(db, "Compiler Construction|N. Wirth");
+  Out.String("  appended 3"); Out.Ln;
 
-  DBF.AppendRecord(db, recordData);
-  Out.String("Record added."); Out.Ln;
+  Out.String("Step 4: find"); Out.Ln;
+  found := DBF.Find(db, 1, "N. Wirth");
+  IF found >= 0 THEN
+    DBF.GetRecord(db, found, packed);
+    Out.String("First Wirth book: "); Out.String(packed); Out.Ln;
+  END;
 
-  (* 4. Close the file *)
+  Out.String("Step 5: update"); Out.Ln;
+  DBF.UpdateField(db, 0, 0, "Programming with Oberon");
+
+  Out.String("Step 6: delete"); Out.Ln;
+  DBF.Delete(db, 1);
+
+  Out.String("Step 7: validate"); Out.Ln;
+  DBF.Validate(db, vr);
+  IF vr.ok THEN
+    Out.String("Validation passed."); Out.Ln;
+  ELSE
+    Out.String("Validation failed at record ");
+    Out.Int(vr.recNum, 0); Out.String(": "); Out.String(vr.msg); Out.Ln;
+  END;
+
+  Out.String("Step 8: export CSV"); Out.Ln;
+  DBF.ExportCSV(db, "library.csv");
+
+  Out.String("Step 9: pack"); Out.Ln;
+  DBF.Pack(db, "library.dbf");
+  Out.String("Records remaining: "); Out.Int(DBF.RecordCount(db), 0); Out.Ln;
+
+  Out.String("Step 10: close"); Out.Ln;
   DBF.Close(db);
+  Out.String("Done."); Out.Ln;
 END Run;
 
 BEGIN
