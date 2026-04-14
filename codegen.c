@@ -1808,6 +1808,7 @@ void codegen(Node *module, FILE *out, int is_main) {
     if (!is_main) collect_modsyms(module->c1);
 
     /* ── Standard includes ───────────────────────────────────────── */
+		emit(g,"#define _POSIX_C_SOURCE 199309L\n");
     emit(g,"#include <stdio.h>\n");
     emit(g,"#include <stdlib.h>\n");
     emit(g,"#include <string.h>\n");
@@ -2268,8 +2269,7 @@ void codegen(Node *module, FILE *out, int is_main) {
 
     /* ── Time module runtime ─────────────────────────────────────── */
     if (has_time) {
-        emit(g,"#include <time.h>\n");
-        emit(g,"#ifndef _POSIX_C_SOURCE\n#define _POSIX_C_SOURCE 199309L\n#endif\n");
+				emit(g,"#include <time.h>\n");
         /* Time_Now(): LONGINT — milliseconds since Unix epoch */
         emit(g,"static long Time_Now(void) {\n");
         emit(g,"    struct timespec ts;\n");
