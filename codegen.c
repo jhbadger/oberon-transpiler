@@ -116,10 +116,36 @@ static int is_ptr_type(const char *name) {
 }
 static void ptr_types_reset(void) { g_n_ptr_types = 0; }
 
-/* Find a TYPE_DECL node by name */
+/* Forward declaration — defined later with the import table. */
+static const char *import_realname(const char *alias);
+
+/* Cross-module type decl lookup table — variables declared here so
+ * find_type_decl() can reference them; populated later by
+ * collect_xmod_type_decls() which is defined after the node pool. */
+#define MAX_XMOD_TYPEDECLS 256
+static Node *g_xmod_typedecls[MAX_XMOD_TYPEDECLS];
+static int   g_n_xmod_typedecls = 0;
+
+/* Find a TYPE_DECL node by name.  First searches the current module's decl
+ * list; then falls back to the cross-module persistent table, resolving a
+ * qualified "Alias.TypeName" to the C-style "RealModule_TypeName" key. */
 static Node *find_type_decl(const char *name) {
     for (Node *d=g_module_decls; d; d=d->next)
         if (d->kind==ND_TYPE_DECL && !strcmp(d->str,name)) return d;
+    /* Cross-module fallback: resolve "Alias.TypeName" → "RealMod_TypeName" */
+    {
+        const char *dot = strchr(name, '.');
+        if (dot) {
+            char alias[MAX_IDENT];
+            int modlen = (int)(dot - name);
+            if (modlen >= MAX_IDENT) modlen = MAX_IDENT - 1;
+            strncpy(alias, name, modlen); alias[modlen] = '\0';
+            char ckey[MAX_IDENT];
+            snprintf(ckey, sizeof(ckey), "%s_%s", import_realname(alias), dot + 1);
+            for (int i = 0; i < g_n_xmod_typedecls; i++)
+                if (!strcmp(g_xmod_typedecls[i]->str, ckey)) return g_xmod_typedecls[i];
+        }
+    }
     return NULL;
 }
 
@@ -153,6 +179,7 @@ static void collect_proc_sigs(Node *decls) {
             g_procsigs[g_nprocsigs].params  = d->c0;
             g_procsigs[g_nprocsigs].rettype = d->c1;
             g_nprocsigs++;
+            collect_proc_sigs(d->c2);  /* recurse into nested procedures */
         }
     }
 }
@@ -209,6 +236,84 @@ static XModProcSig *lookup_xmod_proc_params(const char *modname, const char *pro
     for (int i = 0; i < g_n_xmod_procsigs; i++)
         if (!strcmp(g_xmod_procsigs[i].key, key)) return &g_xmod_procsigs[i];
     return NULL;
+}
+
+/* -----------------------------------------------------------------------
+ * Cross-module type declaration table.
+ * Node structures here live in a static pool (not the arena), so they
+ * survive ast_free_all() and can be referenced by find_type_decl().
+ * Populated during codegen() of each library module.
+ * ----------------------------------------------------------------------- */
+#define XMOD_NODE_POOL_SIZE 2048
+static Node g_xmod_node_pool[XMOD_NODE_POOL_SIZE];
+static int  g_n_xmod_nodes = 0;
+
+static Node *xmod_node_alloc(NodeKind kind) {
+    if (g_n_xmod_nodes >= XMOD_NODE_POOL_SIZE) return NULL;
+    Node *n = &g_xmod_node_pool[g_n_xmod_nodes++];
+    memset(n, 0, sizeof(Node));
+    n->kind = kind;
+    return n;
+}
+
+/* Forward declaration */
+static Node *xmod_copy_typetree(Node *t);
+
+static Node *xmod_copy_nodelist(Node *head) {
+    Node *result = NULL, *tail = NULL;
+    for (Node *src = head; src; src = src->next) {
+        Node *dst = xmod_copy_typetree(src);
+        if (!dst) break;
+        if (tail) tail->next = dst; else result = dst;
+        tail = dst;
+    }
+    return result;
+}
+
+static Node *xmod_copy_typetree(Node *t) {
+    if (!t) return NULL;
+    Node *n = xmod_node_alloc(t->kind);
+    if (!n) return NULL;
+    strncpy(n->str, t->str, MAX_IDENT-1);
+    n->flags = t->flags;
+    n->ival  = t->ival;
+    switch (t->kind) {
+    case ND_TARRAY:
+        /* Preserve open vs. fixed (c0 present/absent) with a dummy bound node */
+        if (t->c0) { Node *dummy = xmod_node_alloc(ND_INTEGER); n->c0 = dummy; }
+        n->c1 = xmod_copy_typetree(t->c1);
+        break;
+    case ND_TPOINTER:
+        n->c0 = xmod_copy_typetree(t->c0);
+        break;
+    case ND_TRECORD:
+        n->c0 = xmod_copy_nodelist(t->c0);  /* field list */
+        break;
+    case ND_FIELD:
+        n->c0 = xmod_copy_nodelist(t->c0);  /* ident list */
+        n->c1 = xmod_copy_typetree(t->c1);  /* field type */
+        break;
+    case ND_TNAME:
+    case ND_IDENT:
+    default:
+        break;
+    }
+    return n;
+}
+
+/* Collect type declarations from a library module into the persistent table.
+ * Types are keyed by "RealModuleName_TypeName" so find_type_decl() can resolve
+ * qualified references like "Alias.TypeName" via import_realname(). */
+static void collect_xmod_type_decls(Node *decls, const char *modname) {
+    for (Node *d = decls; d; d = d->next) {
+        if (d->kind != ND_TYPE_DECL || !d->c0) continue;
+        if (g_n_xmod_typedecls >= MAX_XMOD_TYPEDECLS) break;
+        Node *td = xmod_node_alloc(ND_TYPE_DECL);
+        if (!td) break;
+        snprintf(td->str, MAX_IDENT, "%s_%s", modname, d->str);
+        td->c0 = xmod_copy_typetree(d->c0);
+        g_xmod_typedecls[g_n_xmod_typedecls++] = td;
+    }
 }
 
 /* -----------------------------------------------------------------------
@@ -1135,8 +1240,8 @@ static void emit_expr(CG *g, Node *e) {
         /* Normal call */
         emit_expr(g,e->c0); emit(g,"(");
         int first_arg = 1;
-        /* Nested proc call: prepend frame pointer */
-        if (e->c0 && e->c0->kind==ND_IDENT && is_nested_call(g, e->c0->str)) {
+        /* Nested proc call: prepend frame pointer (only when frame exists) */
+        if (e->c0 && e->c0->kind==ND_IDENT && is_nested_call(g, e->c0->str) && g->n_frame > 0) {
             if (g->in_nested_proc) emit(g,"_frame");
             else                   emit(g,"&_frame");
             first_arg = 0;
@@ -1257,7 +1362,7 @@ static void emit_stmt(CG *g, Node *s) {
         iemit(g,""); emit_expr(g,s->c0); emit(g,"(");
         {
             int first_s = 1;
-            if (s->c0 && s->c0->kind==ND_IDENT && is_nested_call(g,s->c0->str)) {
+            if (s->c0 && s->c0->kind==ND_IDENT && is_nested_call(g,s->c0->str) && g->n_frame > 0) {
                 if (g->in_nested_proc) emit(g,"_frame");
                 else                   emit(g,"&_frame");
                 first_s = 0;
@@ -1791,7 +1896,10 @@ void codegen(Node *module, FILE *out, int is_main) {
     type_tags_reset(); ptr_types_reset();
     g_module_decls = module->c1;
     collect_proc_sigs(module->c1);
-    if (!is_main) collect_xmod_proc_sigs(module->c1, module->str);
+    if (!is_main) {
+        collect_xmod_proc_sigs(module->c1, module->str);
+        collect_xmod_type_decls(module->c1, module->str);
+    }
 
     /* ── Collect import module names (alias + real name) ─────────── */
     for (Node *imp=module->c0; imp; imp=imp->next) {
