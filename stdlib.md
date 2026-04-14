@@ -306,7 +306,7 @@ on exit.  `Random` is also seeded automatically.
 | `Terminal.ShowCursor()` | Make the cursor visible. |
 | `Terminal.HideCursor()` | Hide the cursor. |
 | `Terminal.KeyPressed(): BOOLEAN` | Returns TRUE (non-zero) if a key is waiting in the input buffer. Non-blocking. |
-| `Terminal.ReadKey(): CHAR` | Read and return the next key.  Blocks if no key is ready. Special keys are mapped to values above 127: Up=`01X`, Down=`02X`, Left=`03X`, Right=`04X`, Mouse=`05X`, PgUp=`ORD 128`, PgDn=`ORD 129`, Home=`ORD 130`, End=`ORD 131`, Del=`ORD 132`, Ctrl+Left=`ORD 133`, Ctrl+Right=`ORD 134`, Ctrl+Home=`ORD 135`, Ctrl+End=`ORD 136`. Call `MouseX/Y/Btn` immediately after a mouse event to get the details. |
+| `Terminal.ReadKey(): CHAR` | Read and return the next key.  Blocks if no key is ready. Special keys are mapped to values above 127: Up=`01X`, Down=`02X`, Left=`03X`, Right=`04X`, Mouse=`05X`, PgUp=`ORD 128`, PgDn=`ORD 129`, Home=`ORD 130`, End=`ORD 131`, Del=`ORD 132`, Ctrl+Left=`ORD 133`, Ctrl+Right=`ORD 134`, Ctrl+Home=`ORD 135`, Ctrl+End=`ORD 136`, F1=`ORD 137`, F2=`ORD 138`, F3=`ORD 139`, F4=`ORD 140`, F5=`ORD 141`, F6=`ORD 142`, F7=`ORD 143`, F8=`ORD 144`, F9=`ORD 145`, F10=`ORD 146`, F11=`ORD 147`, F12=`ORD 148`. Call `MouseX/Y/Btn` immediately after a mouse event to get the details. |
 | `Terminal.GetTickCount(): INTEGER` | Milliseconds since the Unix epoch (useful for timing). |
 | `Terminal.Cols(): INTEGER` | Returns the terminal width in columns (falls back to 80 if unavailable). |
 | `Terminal.Rows(): INTEGER` | Returns the terminal height in rows (falls back to 24 if unavailable). |

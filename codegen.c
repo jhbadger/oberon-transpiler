@@ -2027,6 +2027,27 @@ void codegen(Node *module, FILE *out, int is_main) {
         emit(g,"                    }\n");
         emit(g,"                    return '\\x1B';\n");
         emit(g,"                }\n");
+        /* Two-digit sequences: ESC[11~ = F1 .. ESC[24~ = F12 */
+        emit(g,"                if (c4>='0' && c4<='9') {\n");
+        emit(g,"                    int num=(c3-'0')*10+(c4-'0'); char term=0;\n");
+        emit(g,"                    read(STDIN_FILENO,&term,1);\n");
+        emit(g,"                    tcsetattr(STDIN_FILENO,TCSANOW,&t2);\n");
+        emit(g,"                    if (term=='~') {\n");
+        emit(g,"                        if (num==11) return (char)137;\n"); /* F1  */
+        emit(g,"                        if (num==12) return (char)138;\n"); /* F2  */
+        emit(g,"                        if (num==13) return (char)139;\n"); /* F3  */
+        emit(g,"                        if (num==14) return (char)140;\n"); /* F4  */
+        emit(g,"                        if (num==15) return (char)141;\n"); /* F5  */
+        emit(g,"                        if (num==17) return (char)142;\n"); /* F6  */
+        emit(g,"                        if (num==18) return (char)143;\n"); /* F7  */
+        emit(g,"                        if (num==19) return (char)144;\n"); /* F8  */
+        emit(g,"                        if (num==20) return (char)145;\n"); /* F9  */
+        emit(g,"                        if (num==21) return (char)146;\n"); /* F10 */
+        emit(g,"                        if (num==23) return (char)147;\n"); /* F11 */
+        emit(g,"                        if (num==24) return (char)148;\n"); /* F12 */
+        emit(g,"                    }\n");
+        emit(g,"                    return '\\x1B';\n");
+        emit(g,"                }\n");
         emit(g,"                tcsetattr(STDIN_FILENO,TCSANOW,&t2);\n");
         emit(g,"                if (c3=='5') return (char)128;\n");
         emit(g,"                if (c3=='6') return (char)129;\n");
@@ -2035,6 +2056,16 @@ void codegen(Node *module, FILE *out, int is_main) {
         emit(g,"                if (c3=='4'||c3=='8') return (char)131;\n");
         emit(g,"                return '\\x1B';\n");
         emit(g,"            }\n");
+        emit(g,"        }\n");
+        /* ESC O P/Q/R/S = F1-F4 (xterm application-cursor mode) */
+        emit(g,"        if (c2=='O') {\n");
+        emit(g,"            char co=0; read(STDIN_FILENO,&co,1);\n");
+        emit(g,"            tcsetattr(STDIN_FILENO,TCSANOW,&t2);\n");
+        emit(g,"            if (co=='P') return (char)137;\n"); /* F1 */
+        emit(g,"            if (co=='Q') return (char)138;\n"); /* F2 */
+        emit(g,"            if (co=='R') return (char)139;\n"); /* F3 */
+        emit(g,"            if (co=='S') return (char)140;\n"); /* F4 */
+        emit(g,"            return '\\x1B';\n");
         emit(g,"        }\n");
         emit(g,"        t2.c_cc[VMIN]=0; t2.c_cc[VTIME]=0;\n");
         emit(g,"        tcsetattr(STDIN_FILENO,TCSANOW,&t2);\n");
