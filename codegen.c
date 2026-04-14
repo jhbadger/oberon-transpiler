@@ -18,13 +18,13 @@ typedef struct {
     /* Nested procedure closure support */
     int   in_nested_proc;                   /* emitting a nested proc body */
     char  outer_proc_name[MAX_IDENT];       /* enclosing proc name         */
-    int   n_frame;                          /* # outer vars in frame       */
-    char  frame_names[64][MAX_IDENT];
-    Node *frame_types[64];
-    int   frame_is_var[64];                 /* 1 if was a VAR param        */
-    int   nested_sym_start;                 /* g_nsyms after nested push   */
+    int   n_frame;                           /* # outer vars in frame       */
+    char  frame_names[128][MAX_IDENT];
+    Node *frame_types[128];
+    int   frame_is_var[128];                 /* 1 if was a VAR param        */
+    int   nested_sym_start;                  /* g_nsyms after nested push   */
     int   n_nested_procs;
-    char  nested_proc_names[16][MAX_IDENT];
+    char  nested_proc_names[32][MAX_IDENT];
 } CG;
 
 static int is_open_array(Node *t);   /* forward */
@@ -61,7 +61,7 @@ static void iemit(CG *g, const char *fmt, ...) {
 /* -----------------------------------------------------------------------
  * Symbol table — flat array with scope markers
  * ----------------------------------------------------------------------- */
-#define MAX_SYMS 1024
+#define MAX_SYMS 4096
 typedef struct { char name[MAX_IDENT]; Node *type; int is_var; } Sym;
 static Sym  g_syms[MAX_SYMS];
 static int  g_nsyms = 0;
@@ -94,7 +94,7 @@ static int sym_is_var(const char *name) {
  * or by value.
  * ----------------------------------------------------------------------- */
 #define MAX_PROCSIGS 256
-typedef struct { char name[MAX_IDENT]; Node *params; } ProcSig;
+typedef struct { char name[MAX_IDENT]; Node *params; Node *rettype; } ProcSig;
 static ProcSig g_procsigs[MAX_PROCSIGS];
 static int g_nprocsigs = 0;
 
@@ -102,7 +102,7 @@ static int g_nprocsigs = 0;
 static Node *g_module_decls = NULL;
 
 /* Pointer-type registry: names that are POINTER TO ... typedefs */
-#define MAX_PTR_TYPES 128
+#define MAX_PTR_TYPES 256
 static char g_ptr_types[MAX_PTR_TYPES][MAX_IDENT];
 static int  g_n_ptr_types = 0;
 static void ptr_type_add(const char *name) {
@@ -127,7 +127,7 @@ static Node *find_type_decl(const char *name) {
  * Type-tag table — maps record type names to unique integer tags.
  * Tag 0 is reserved for "uninitialized / no type".
  * ----------------------------------------------------------------------- */
-#define MAX_TYPE_TAGS 128
+#define MAX_TYPE_TAGS 256
 static char g_type_tags[MAX_TYPE_TAGS][MAX_IDENT];
 static int  g_n_type_tags = 0;
 
@@ -150,7 +150,8 @@ static void collect_proc_sigs(Node *decls) {
     for (Node *d = decls; d; d = d->next) {
         if (d->kind == ND_PROC_DECL && g_nprocsigs < MAX_PROCSIGS) {
             strncpy(g_procsigs[g_nprocsigs].name, d->str, MAX_IDENT-1);
-            g_procsigs[g_nprocsigs].params = d->c0;
+            g_procsigs[g_nprocsigs].params  = d->c0;
+            g_procsigs[g_nprocsigs].rettype = d->c1;
             g_nprocsigs++;
         }
     }
@@ -158,6 +159,11 @@ static void collect_proc_sigs(Node *decls) {
 static Node *lookup_proc_params(const char *name) {
     for (int i = 0; i < g_nprocsigs; i++)
         if (!strcmp(g_procsigs[i].name, name)) return g_procsigs[i].params;
+    return NULL;
+}
+static Node *lookup_proc_rettype(const char *name) {
+    for (int i = 0; i < g_nprocsigs; i++)
+        if (!strcmp(g_procsigs[i].name, name)) return g_procsigs[i].rettype;
     return NULL;
 }
 
@@ -221,7 +227,7 @@ static void build_frame(CG *g, Node *proc) {
     for (Node *fp=proc->c0;fp;fp=fp->next) {
         int isv=(fp->flags&FLAG_VAR_PARAM)!=0;
         for (Node *id=fp->c0;id;id=id->next) {
-            if (g->n_frame>=64) break;
+            if (g->n_frame>=128) break;
             strncpy(g->frame_names[g->n_frame],id->str,MAX_IDENT-1);
             g->frame_types[g->n_frame]=fp->c1;
             g->frame_is_var[g->n_frame]=isv;
@@ -231,7 +237,7 @@ static void build_frame(CG *g, Node *proc) {
     for (Node *d=proc->c2;d;d=d->next) {
         if (d->kind!=ND_VAR_DECL) continue;
         for (Node *id=d->c0;id;id=id->next) {
-            if (g->n_frame>=64) break;
+            if (g->n_frame>=128) break;
             strncpy(g->frame_names[g->n_frame],id->str,MAX_IDENT-1);
             g->frame_types[g->n_frame]=d->c1;
             g->frame_is_var[g->n_frame]=0;
@@ -243,7 +249,7 @@ static void build_frame(CG *g, Node *proc) {
 static void collect_nested_names(CG *g, Node *proc) {
     g->n_nested_procs=0;
     for (Node *d=proc->c2;d;d=d->next)
-        if (d->kind==ND_PROC_DECL && g->n_nested_procs<16)
+        if (d->kind==ND_PROC_DECL && g->n_nested_procs<32)
             strncpy(g->nested_proc_names[g->n_nested_procs++],d->str,MAX_IDENT-1);
 }
 
@@ -384,16 +390,29 @@ static int is_char_array(Node *t) {
     return e && e->kind == ND_TNAME && !strcmp(e->str, "CHAR");
 }
 
-/* Best-effort type of an expression (for WRITE/assign decisions) */
+/* Walk a TRECORD's field list and return the type of field named 'fname'. */
+static Node *find_field_type(Node *rec, const char *fname) {
+    for (Node *f = rec->c0; f; f = f->next) {
+        if (f->kind != ND_FIELD) continue;
+        for (Node *id = f->c0; id; id = id->next)
+            if (!strcmp(id->str, fname)) return f->c1;
+    }
+    return NULL;
+}
+
+/* Resolve a named type to the underlying type node (one level of typedef). */
+static Node *resolve_named_type(const char *tname) {
+    Node *td = find_type_decl(tname);
+    return td ? td->c0 : NULL;
+}
+
+/* Best-effort type of an expression (for WRITE/assign/comparison decisions) */
 static Node *expr_type(Node *e) {
     if (!e) return NULL;
-    if (e->kind == ND_IDENT)        return sym_type(e->str);
-    if (e->kind == ND_FIELD_ACCESS) return NULL; /* TODO: record field types */
-    if (e->kind == ND_INDEX)        return NULL;
-    if (e->kind == ND_CALL)         return NULL; /* TODO: proc return type */
-    if (e->kind == ND_INTEGER)      { static Node t={ND_TNAME}; strcpy(t.str,"INTEGER"); return &t; }
-    if (e->kind == ND_REAL)         { static Node t={ND_TNAME}; strcpy(t.str,"REAL");    return &t; }
-    if (e->kind == ND_CHAR)         { static Node t={ND_TNAME}; strcpy(t.str,"CHAR");    return &t; }
+    if (e->kind == ND_IDENT)   return sym_type(e->str);
+    if (e->kind == ND_INTEGER) { static Node t={ND_TNAME}; strcpy(t.str,"INTEGER"); return &t; }
+    if (e->kind == ND_REAL)    { static Node t={ND_TNAME}; strcpy(t.str,"REAL");    return &t; }
+    if (e->kind == ND_CHAR)    { static Node t={ND_TNAME}; strcpy(t.str,"CHAR");    return &t; }
     if (e->kind == ND_TRUE || e->kind == ND_FALSE) {
         static Node t={ND_TNAME}; strcpy(t.str,"BOOLEAN"); return &t;
     }
@@ -401,6 +420,42 @@ static Node *expr_type(Node *e) {
         static Node arr={ND_TARRAY}, ch={ND_TNAME};
         strcpy(ch.str,"CHAR"); arr.c0=NULL; arr.c1=&ch;
         return &arr;
+    }
+    if (e->kind == ND_INDEX) {
+        Node *bt = expr_type(e->c0);
+        if (bt && bt->kind == ND_TARRAY) return bt->c1;
+        return NULL;
+    }
+    if (e->kind == ND_CALL) {
+        /* Only works for local procs registered in g_procsigs */
+        Node *proc = e->c0;
+        if (proc && proc->kind == ND_IDENT)
+            return lookup_proc_rettype(proc->str);
+        return NULL;
+    }
+    if (e->kind == ND_FIELD_ACCESS) {
+        Node *bt = expr_type(e->c0);
+        if (!bt) return NULL;
+        /* Unwrap pointer: POINTER TO Foo → look up Foo */
+        if (bt->kind == ND_TPOINTER) bt = bt->c0;
+        /* Resolve a named type to its underlying TRECORD */
+        Node *rec = NULL;
+        if (bt && bt->kind == ND_TRECORD) {
+            rec = bt;
+        } else if (bt && bt->kind == ND_TNAME) {
+            Node *ut = resolve_named_type(bt->str);
+            if (ut && ut->kind == ND_TRECORD)       rec = ut;
+            else if (ut && ut->kind == ND_TPOINTER) {
+                Node *inner = ut->c0;
+                if (inner && inner->kind == ND_TNAME)
+                    ut = resolve_named_type(inner->str);
+                else
+                    ut = inner;
+                if (ut && ut->kind == ND_TRECORD) rec = ut;
+            }
+        }
+        if (rec) return find_field_type(rec, e->str);
+        return NULL;
     }
     return NULL;
 }
@@ -500,7 +555,9 @@ static int is_builtin(const char *n) {
            !strcasecmp(n,"HALT")||!strcasecmp(n,"ASSERT")||!strcasecmp(n,"ABS")||
            !strcasecmp(n,"ODD")||!strcasecmp(n,"ORD")||!strcasecmp(n,"CHR")||
            !strcasecmp(n,"LEN")||!strcasecmp(n,"WRITE")||!strcasecmp(n,"READ")||
-           !strcasecmp(n,"WRITELN")||!strcasecmp(n,"COPY");
+           !strcasecmp(n,"WRITELN")||!strcasecmp(n,"COPY")||
+           !strcasecmp(n,"FLT")||!strcasecmp(n,"ASR")||!strcasecmp(n,"LSL")||
+           !strcasecmp(n,"ROR")||!strcasecmp(n,"PACK")||!strcasecmp(n,"UNPK");
 }
 
 /* Emit a WRITE(arg) call based on the argument's type.
@@ -588,7 +645,11 @@ static void emit_builtin(CG *g, const char *name, Node *args) {
     } else if (!strcasecmp(name,"ASSERT")) {
         emit(g,"assert("); if(a0) emit_expr(g,a0); emit(g,")");
     } else if (!strcasecmp(name,"ABS")) {
-        emit(g,"abs("); if(a0) emit_expr(g,a0); emit(g,")");
+        Node *t = a0 ? expr_type(a0) : NULL;
+        int is_real = t && t->kind==ND_TNAME &&
+                      (!strcmp(t->str,"REAL")||!strcmp(t->str,"LONGREAL"));
+        if (is_real) { emit(g,"fabs("); if(a0) emit_expr(g,a0); emit(g,")"); }
+        else         { emit(g,"abs(");  if(a0) emit_expr(g,a0); emit(g,")"); }
     } else if (!strcasecmp(name,"ODD")) {
         emit(g,"(("); if(a0) emit_expr(g,a0); emit(g,") & 1)");
     } else if (!strcasecmp(name,"ORD")) {
@@ -614,6 +675,27 @@ static void emit_builtin(CG *g, const char *name, Node *args) {
         /* COPY(src, dst) → strcpy(dst, src) */
         emit(g,"strcpy("); if(a1) emit_expr(g,a1); emit(g,", ");
         if(a0) emit_expr(g,a0); emit(g,")");
+    } else if (!strcasecmp(name,"FLT")) {
+        emit(g,"(double)("); if(a0) emit_expr(g,a0); emit(g,")");
+    } else if (!strcasecmp(name,"ASR")) {
+        /* Arithmetic shift right: (int)(x) >> (n & 31) */
+        emit(g,"((int)("); if(a0) emit_expr(g,a0);
+        emit(g,") >> (("); if(a1) emit_expr(g,a1); emit(g,") & 31))");
+    } else if (!strcasecmp(name,"LSL")) {
+        /* Logical shift left */
+        emit(g,"(int)((unsigned int)("); if(a0) emit_expr(g,a0);
+        emit(g,") << (("); if(a1) emit_expr(g,a1); emit(g,") & 31))");
+    } else if (!strcasecmp(name,"ROR")) {
+        /* Rotate right */
+        emit(g,"(int)(((unsigned int)("); if(a0) emit_expr(g,a0);
+        emit(g,") >> (("); if(a1) emit_expr(g,a1); emit(g,") & 31)) | ");
+        emit(g,"((unsigned int)("); if(a0) emit_expr(g,a0);
+        emit(g,") << ((32 - (("); if(a1) emit_expr(g,a1); emit(g,") & 31)) & 31)))");
+    } else if (!strcasecmp(name,"PACK") || !strcasecmp(name,"UNPK")) {
+        /* PACK/UNPK are proper procedures — handled in emit_stmt.
+         * Reaching here means they appeared in expression context, which is
+         * not valid Oberon; emit a best-effort no-op. */
+        if(a0) emit_expr(g,a0);
     } else {
         /* Unknown builtin — emit as-is */
         emit(g,"%s(",name);
@@ -1152,6 +1234,21 @@ static void emit_stmt(CG *g, Node *s) {
     case ND_CALL: {
         /* Check for import procedure call */
         if (s->c0 && try_emit_import(g, s->c0, s->c1)) { emit(g,";\n"); break; }
+        /* PACK(x, n) → x = ldexp(x, n)  [VAR x: REAL; n: INTEGER] */
+        if (s->c0 && s->c0->kind==ND_IDENT && !strcasecmp(s->c0->str,"PACK")) {
+            Node *a0=s->c1, *a1=a0?a0->next:NULL;
+            iemit(g,""); emit_expr(g,a0); emit(g," = ldexp(");
+            emit_expr(g,a0); emit(g,", "); if(a1) emit_expr(g,a1); emit(g,");\n");
+            break;
+        }
+        /* UNPK(x, n) → x := mantissa in [1,2), n := exponent  (frexp returns [0.5,1)) */
+        if (s->c0 && s->c0->kind==ND_IDENT && !strcasecmp(s->c0->str,"UNPK")) {
+            Node *a0=s->c1, *a1=a0?a0->next:NULL;
+            iemit(g,"{ int _obc_e; ");
+            emit_expr(g,a0); emit(g," = frexp("); emit_expr(g,a0); emit(g,", &_obc_e) * 2.0; ");
+            if(a1) emit_expr(g,a1); emit(g," = _obc_e - 1; }\n");
+            break;
+        }
         /* Built-in procedure call */
         if (s->c0 && s->c0->kind==ND_IDENT && is_builtin(s->c0->str)) {
             iemit(g,""); emit_builtin(g, s->c0->str, s->c1); emit(g,";\n"); break;
@@ -1592,7 +1689,7 @@ static void emit_proc_def(CG *g, Node *proc, int nested) {
     int save_nested_sym = g->nested_sym_start;
     char save_outer[MAX_IDENT];
     strncpy(save_outer, g->outer_proc_name, MAX_IDENT-1);
-    char save_nested_names[16][MAX_IDENT];
+    char save_nested_names[32][MAX_IDENT];
     memcpy(save_nested_names, g->nested_proc_names, sizeof(g->nested_proc_names));
 
     if (!nested && has_nested_procs(proc)) {
@@ -1714,6 +1811,7 @@ void codegen(Node *module, FILE *out, int is_main) {
     emit(g,"#include <stdio.h>\n");
     emit(g,"#include <stdlib.h>\n");
     emit(g,"#include <string.h>\n");
+    emit(g,"#include <math.h>\n");
     emit(g,"#include <assert.h>\n");
     /* Floor-division and floor-mod macros (Oberon-07 semantics) */
     emit(g,"#define _OBC_DIV(a,b) ((a)/(b)-((((a)%%(b))!=0)&&(((a)^(b))<0)))\n");
@@ -1733,8 +1831,6 @@ void codegen(Node *module, FILE *out, int is_main) {
     for (int i=0;i<g_nimports;i++) if (!strcmp(g_imports[i],"Graphics")) { has_graphics=1; break; }
     int has_random = 0;
     for (int i=0;i<g_nimports;i++) if (!strcmp(g_imports[i],"Random"))   { has_random=1;   break; }
-    int has_math = 0;
-    for (int i=0;i<g_nimports;i++) if (!strcmp(g_imports[i],"Math"))     { has_math=1;     break; }
     int has_strings = 0;
     for (int i=0;i<g_nimports;i++) if (!strcmp(g_imports[i],"Strings"))  { has_strings=1;  break; }
     int has_files = 0;
@@ -1756,8 +1852,6 @@ void codegen(Node *module, FILE *out, int is_main) {
 
     if (has_random && !has_terminal)
         emit(g,"#include <time.h>\n");
-    if (has_math)
-        emit(g,"#include <math.h>\n");
 
     /* ── Terminal module runtime (emitted when Terminal is imported) ─ */
     if (has_terminal) {

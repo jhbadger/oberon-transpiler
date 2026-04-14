@@ -22,16 +22,22 @@ These identifiers are always in scope without any IMPORT statement.
 | `HALT(code: INTEGER)` | Terminate program with exit code `code`. |
 | `ASSERT(cond: BOOLEAN)` | Abort with a C `assert` failure if `cond` is FALSE. |
 | `COPY(src: ARRAY OF CHAR; VAR dst: ARRAY OF CHAR)` | Copy string `src` into `dst` (`strcpy`). |
+| `PACK(VAR x: REAL; n: INTEGER)` | Multiply `x` by 2ⁿ in place: `x := x * 2^n`. Equivalent to adjusting the floating-point exponent by `n`. |
+| `UNPK(VAR x: REAL; VAR n: INTEGER)` | Decompose `x` into a normalised mantissa and exponent. After the call `x` is in `[1.0, 2.0)` and `n` holds the original exponent such that the previous value of `x` equals `x * 2^n`. |
 
 ### Functions
 
 | Signature | Returns | Description |
 |-----------|---------|-------------|
-| `ABS(x)` | same type | Absolute value (integer or real). |
+| `ABS(x)` | same type | Absolute value.  Uses integer `abs` for `INTEGER`/`LONGINT` arguments, `fabs` for `REAL`/`LONGREAL`. |
 | `ODD(x: INTEGER)` | BOOLEAN | TRUE if `x` is odd. |
 | `ORD(x: CHAR)` | INTEGER | Character code of `x`. |
 | `CHR(n: INTEGER)` | CHAR | Character with code `n`. |
 | `LEN(a: ARRAY)` | INTEGER | Number of elements in array `a`. |
+| `FLT(x: INTEGER)` | REAL | Convert integer `x` to a floating-point value (`(double)x`). |
+| `ASR(x: INTEGER; n: INTEGER)` | INTEGER | Arithmetic shift right: `x` shifted right by `n` bits, sign-extending the MSB. Equivalent to `x DIV 2^n` with floor semantics. `n` is masked to `[0, 31]`. |
+| `LSL(x: INTEGER; n: INTEGER)` | INTEGER | Logical shift left: `x` shifted left by `n` bits, filling zeros on the right. `n` is masked to `[0, 31]`. |
+| `ROR(x: INTEGER; n: INTEGER)` | INTEGER | Rotate right: the 32-bit pattern of `x` rotated right by `n` bit positions. `n` is masked to `[0, 31]`. |
 
 ### Legacy I/O (prefer Out/In modules)
 
