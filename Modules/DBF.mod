@@ -1,5 +1,7 @@
 MODULE DBF;
 
+(* dBASE/FoxPro database file format *)
+
 IMPORT Files, Strings, Math, Time;
 
 CONST

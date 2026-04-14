@@ -1,5 +1,7 @@
 MODULE Menu;
 
+(* Retro dBASE III/FoxPro text-based menu *)
+
 IMPORT Terminal, Graphics, Out, Strings;
 
 TYPE
