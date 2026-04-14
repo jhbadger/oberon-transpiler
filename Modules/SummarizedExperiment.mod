@@ -225,6 +225,8 @@ END GetAssay;
 PROCEDURE SetAssayByName*(se: SE; assayName: ARRAY OF CHAR; r, c: INTEGER; x: REAL; VAR err: INTEGER);
 VAR a: INTEGER;
 BEGIN
+  err := OK;
+  IF se = NIL THEN err := ERR_NIL; RETURN END;
   a := FindAssay(se, assayName);
   IF a < 0 THEN
     err := ERR_ASSAY;
@@ -236,10 +238,12 @@ END SetAssayByName;
 PROCEDURE GetAssayByName*(se: SE; assayName: ARRAY OF CHAR; r, c: INTEGER; VAR x: REAL; VAR err: INTEGER);
 VAR a: INTEGER;
 BEGIN
+  err := OK;
+  x := 0.0;
+  IF se = NIL THEN err := ERR_NIL; RETURN END;
   a := FindAssay(se, assayName);
   IF a < 0 THEN
     err := ERR_ASSAY;
-    x := 0.0;
     RETURN
   END;
   GetAssay(se, a, r, c, x, err)
@@ -370,6 +374,36 @@ BEGIN
   DataFrame.SetReal(se.rowData, r, c, val)
 END SetRowDataReal;
 
+PROCEDURE GetRowDataInt*(se: SE; r: INTEGER; colName: ARRAY OF CHAR; VAR val: INTEGER; VAR err: INTEGER);
+VAR c: INTEGER; ok: BOOLEAN;
+BEGIN
+  err := OK;
+  val := 0;
+
+  IF se = NIL THEN err := ERR_NIL; RETURN END;
+  IF ~GoodRow(se, r) THEN err := ERR_ROW; RETURN END;
+
+  c := DataFrame.FindCol(se.rowData, colName);
+  IF c < 0 THEN err := ERR_COL; RETURN END;
+
+  ok := DataFrame.GetInt(se.rowData, r, c, val)
+END GetRowDataInt;
+
+PROCEDURE GetRowDataReal*(se: SE; r: INTEGER; colName: ARRAY OF CHAR; VAR val: REAL; VAR err: INTEGER);
+VAR c: INTEGER; ok: BOOLEAN;
+BEGIN
+  err := OK;
+  val := 0.0;
+
+  IF se = NIL THEN err := ERR_NIL; RETURN END;
+  IF ~GoodRow(se, r) THEN err := ERR_ROW; RETURN END;
+
+  c := DataFrame.FindCol(se.rowData, colName);
+  IF c < 0 THEN err := ERR_COL; RETURN END;
+
+  ok := DataFrame.GetReal(se.rowData, r, c, val)
+END GetRowDataReal;
+
 (* ---------- colData ---------- *)
 
 PROCEDURE AddColDataCol*(se: SE; name: ARRAY OF CHAR; VAR err: INTEGER): INTEGER;
@@ -458,6 +492,36 @@ BEGIN
 
   DataFrame.SetReal(se.colData, cix, c, val)
 END SetColDataReal;
+
+PROCEDURE GetColDataInt*(se: SE; cix: INTEGER; colName: ARRAY OF CHAR; VAR val: INTEGER; VAR err: INTEGER);
+VAR c: INTEGER; ok: BOOLEAN;
+BEGIN
+  err := OK;
+  val := 0;
+
+  IF se = NIL THEN err := ERR_NIL; RETURN END;
+  IF ~GoodCol(se, cix) THEN err := ERR_COL; RETURN END;
+
+  c := DataFrame.FindCol(se.colData, colName);
+  IF c < 0 THEN err := ERR_COL; RETURN END;
+
+  ok := DataFrame.GetInt(se.colData, cix, c, val)
+END GetColDataInt;
+
+PROCEDURE GetColDataReal*(se: SE; cix: INTEGER; colName: ARRAY OF CHAR; VAR val: REAL; VAR err: INTEGER);
+VAR c: INTEGER; ok: BOOLEAN;
+BEGIN
+  err := OK;
+  val := 0.0;
+
+  IF se = NIL THEN err := ERR_NIL; RETURN END;
+  IF ~GoodCol(se, cix) THEN err := ERR_COL; RETURN END;
+
+  c := DataFrame.FindCol(se.colData, colName);
+  IF c < 0 THEN err := ERR_COL; RETURN END;
+
+  ok := DataFrame.GetReal(se.colData, cix, c, val)
+END GetColDataReal;
 
 (* ---------- raw DataFrame access ---------- *)
 
