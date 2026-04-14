@@ -1,23 +1,3 @@
-# Oberon Transpiler — Todo List
-
-## Transpiler — Language/Compiler Issues
-
-- **`expr_type()` is incomplete** (`codegen.c:390,392`): returns `NULL` for `ND_FIELD_ACCESS` and
-  `ND_CALL`. This means string comparison via `=`/`#` can silently fall back to pointer comparison
-  when the LHS is a record field or function call result.
-- **Hard limits** that could be hit in large programs:
-  - Nested proc frame capped at 64 vars (`build_frame`)
-  - Max 16 nested procedures per outer proc
-  - Max 128 type tags / pointer types
-  - Max 1024 symbols in the flat symbol table
-- **`FLT`, `ASR`, `LSL`, `ROR`, `PACK`, `UNPK`** — listed in IDE keywords but not in the codegen
-  builtin handler; calling them would silently emit bare C function calls.
-- **`FLOOR`** listed as keyword in IDE but it's not a language builtin (it's `Math.floor`); could
-  be confusing.
-- **Unused variable warnings** — none emitted; easy to have silent dead variables.
-
----
-
 ## IDE — Features & Polish
 
 - **Window switching**: only `Alt-2` is wired up in the menu; `Alt-1` through `Alt-9` shortcuts
@@ -40,5 +20,6 @@
 
 - **README examples table** is missing newer examples (`BRErogue`, `rogue`, `sheet`, `videopoker`,
   `zodiac`, `epub`, etc.).
+
 
 

@@ -77,8 +77,63 @@ const ushort
     cmWindowList  = 209,     // Show window list dialog
     cmWindow1     = 210,     // cmWindow1..cmWindow1+N select window N
                              // (reserve 210-249 for up to 40 windows)
-    cmCloseWindow = 250;     // Ctrl-W: close active editor window
+    cmCloseWindow = 250,     // Ctrl-W: close active editor window
+    cmRenameFile  = 251,     // File > Rename
+    cmRecentFiles = 252;     // File > Recent Files
 // cmHelp = 9 is already defined by TVision (views.h) — we reuse it.
+
+// Forward declaration (class body is below, after tvision types are complete)
+class TEditorWindow;
+
+// ── Window creation-order registry ────────────────────────────────────────
+// Stable list so Alt-1..9 always maps to the same window regardless of
+// which window is currently on top (z-order changes on every focus switch).
+static std::vector<TEditorWindow*> g_windowOrder;
+
+static void windowOrderAdd(TEditorWindow* w) {
+    g_windowOrder.push_back(w);
+}
+static void windowOrderRemove(TEditorWindow* w) {
+    g_windowOrder.erase(
+        std::remove(g_windowOrder.begin(), g_windowOrder.end(), w),
+        g_windowOrder.end());
+}
+// Prune any pointers that are no longer in the desktop (e.g. closed via X).
+static void windowOrderPrune(const std::vector<TEditorWindow*>& live) {
+    std::set<TEditorWindow*> liveSet(live.begin(), live.end());
+    g_windowOrder.erase(
+        std::remove_if(g_windowOrder.begin(), g_windowOrder.end(),
+                       [&](TEditorWindow* p){ return !liveSet.count(p); }),
+        g_windowOrder.end());
+}
+
+// ── Recent files ──────────────────────────────────────────────────────────
+static std::vector<std::string> g_recentFiles;
+static std::string              g_recentFilesPath;
+static const int                MAX_RECENT = 9;
+
+static void saveRecentFiles() {
+    if (g_recentFilesPath.empty()) return;
+    std::ofstream f(g_recentFilesPath);
+    for (const auto& p : g_recentFiles) f << p << '\n';
+}
+static void loadRecentFiles() {
+    if (g_recentFilesPath.empty()) return;
+    std::ifstream f(g_recentFilesPath);
+    std::string line;
+    while (std::getline(f, line))
+        if (!line.empty()) g_recentFiles.push_back(line);
+}
+static void addRecentFile(const std::string& path) {
+    if (path.empty()) return;
+    g_recentFiles.erase(
+        std::remove(g_recentFiles.begin(), g_recentFiles.end(), path),
+        g_recentFiles.end());
+    g_recentFiles.insert(g_recentFiles.begin(), path);
+    if ((int)g_recentFiles.size() > MAX_RECENT)
+        g_recentFiles.resize(MAX_RECENT);
+    saveRecentFiles();
+}
 
 // ── Run oberon  ────────────────────────────────────────────────
 struct RunResult { int errorLine; std::string errorText; };
@@ -492,7 +547,8 @@ public:
                     (c == '$' && i+1 < lineEnd && isxdigit((unsigned char)gapChar(i+1)))) {
                     uint start = i;
                     while (i < lineEnd && (isalnum((unsigned char)gapChar(i)) || gapChar(i) == '.')) i++;
-                    for (uint j = start; j < i; j++) recolour(j, commentColor);
+                    TColorAttr numberColor = TColorAttr(TColorRGB(0xFF9944), TColorRGB(0x000080));
+                    for (uint j = start; j < i; j++) recolour(j, numberColor);
                     continue;
                 }
                 if (isalpha((unsigned char)c) || c == '_') {
@@ -651,12 +707,16 @@ public:
     }
 
     void autoComplete() {
-        // 1. Extract partial word immediately before cursor (pre-gap only)
+        // 1. Extract partial word immediately before cursor (pre-gap only).
+        //    Include dots so that "Out.St" is treated as one prefix.
         uint end = curPtr;
         uint start = end;
         while (start > 0 &&
-               (isalnum((unsigned char)buffer[start-1]) || buffer[start-1] == '_'))
+               (isalnum((unsigned char)buffer[start-1]) || buffer[start-1] == '_' ||
+                buffer[start-1] == '.'))
             start--;
+        // Strip any leading dots (e.g. if cursor is right after a dot prefix)
+        while (start < end && buffer[start] == '.') start++;
         if (start == end) return;
         std::string partial(buffer + start, end - start);
 
@@ -677,13 +737,18 @@ public:
             }
         }
 
-        // Identifiers from buffer — case-sensitive prefix match, skip keywords
+        // Identifiers from buffer — case-sensitive prefix match, skip keywords.
+        // Also collect Module.Word tokens when partial contains a dot.
         for (uint i = 0; i < bufLen; ) {
             char c = charAt(i);
             if (isalpha((unsigned char)c) || c == '_') {
                 uint ws = i;
+                // Consume identifier chars plus dots (to capture "Mod.Name" as one token)
                 while (i < bufLen &&
-                       (isalnum((unsigned char)charAt(i)) || charAt(i) == '_')) i++;
+                       (isalnum((unsigned char)charAt(i)) || charAt(i) == '_' ||
+                        charAt(i) == '.')) i++;
+                // Strip trailing dots
+                while (i > ws && charAt(i-1) == '.') i--;
                 uint wlen = i - ws;
                 if (wlen > partial.size()) {
                     bool match = true;
@@ -693,9 +758,14 @@ public:
                     if (match) {
                         std::string word;
                         for (uint k = ws; k < ws + wlen; k++) word += charAt(k);
-                        if (!isOberonKeyword(word.c_str(), word.size()) &&
-                            seen.insert(word).second)
+                        // Only add plain identifiers or qualified Module.Name tokens
+                        size_t dotInWord = word.find('.');
+                        bool qualified = dotInWord != std::string::npos;
+                        if (!qualified && isOberonKeyword(word.c_str(), word.size())) {
+                            /* skip — already in keyword list */
+                        } else if (seen.insert(word).second) {
                             completions.push_back(word);
+                        }
                     }
                 }
             } else {
@@ -1215,6 +1285,8 @@ private:
     void openFile();
     void saveFile();
     void saveFileAs();
+    void renameFile();
+    void openRecentFiles();
     void runProgram();
     void compileOnly();
     void closeWindow();
@@ -1256,7 +1328,11 @@ TMenuBar* TOberonIDE::initMenuBar(TRect r) {
             *new TMenuItem("~N~ew", cmNewFile, kbNoKey, hcNoContext, "") +
             *new TMenuItem("~O~pen...", cmOpenFile, kbF3, hcNoContext, "F3") +
             *new TMenuItem("~S~ave", cmSaveFile, kbF2, hcNoContext, "F2") +
-            *new TMenuItem("Save ~A~s...", cmSaveFileAs, kbNoKey) + newLine() +
+            *new TMenuItem("Save ~A~s...",      cmSaveFileAs,  kbNoKey) +
+            *new TMenuItem("~R~ename...",       cmRenameFile,  kbNoKey) +
+            newLine() +
+            *new TMenuItem("Recent ~F~iles...", cmRecentFiles, kbNoKey) +
+            newLine() +
             *new TMenuItem("E~x~it", cmQuit, kbCtrlQ, hcNoContext, "Ctrl-Q") +
             *new TSubMenu("~E~dit", kbAltE) +
             *new TMenuItem("~U~ndo", cmUndo, kbCtrlU, hcNoContext,
@@ -1279,11 +1355,23 @@ TMenuBar* TOberonIDE::initMenuBar(TRect r) {
             *new TMenuItem("~R~eplace...", cmReplace, kbCtrlH, hcNoContext,
                            "Ctrl-H") +
             *new TMenuItem("~A~gain", cmSearchAgain, kbF7, hcNoContext, "F7") +
-*new TSubMenu("~W~indow", kbAltW) +
-            *new TMenuItem("~C~lose",        cmCloseWindow, kbCtrlW, hcNoContext, "Ctrl-W") +
-            *new TMenuItem("~L~ist...",      cmWindowList,  kbNoKey, hcNoContext, "") +
-            *new TMenuItem("Switch Window",  cmWindow1 + 1, kbAlt2,  hcNoContext, "Alt-2") +
-            
+        *new TSubMenu("~W~indow", kbAltW) +
+            *new TMenuItem("~C~lose",   cmCloseWindow, kbCtrlW, hcNoContext, "Ctrl-W") +
+            *new TMenuItem("~L~ist...", cmWindowList,  kbNoKey, hcNoContext, "") +
+            newLine() +
+            *new TMenuItem("~T~ile",    cmTile,    kbNoKey, hcNoContext, "") +
+            *new TMenuItem("C~a~scade", cmCascade, kbNoKey, hcNoContext, "") +
+            newLine() +
+            *new TMenuItem("Window ~1~", cmWindow1+0, kbAlt1, hcNoContext, "Alt-1") +
+            *new TMenuItem("Window ~2~", cmWindow1+1, kbAlt2, hcNoContext, "Alt-2") +
+            *new TMenuItem("Window ~3~", cmWindow1+2, kbAlt3, hcNoContext, "Alt-3") +
+            *new TMenuItem("Window ~4~", cmWindow1+3, kbAlt4, hcNoContext, "Alt-4") +
+            *new TMenuItem("Window ~5~", cmWindow1+4, kbAlt5, hcNoContext, "Alt-5") +
+            *new TMenuItem("Window ~6~", cmWindow1+5, kbAlt6, hcNoContext, "Alt-6") +
+            *new TMenuItem("Window ~7~", cmWindow1+6, kbAlt7, hcNoContext, "Alt-7") +
+            *new TMenuItem("Window ~8~", cmWindow1+7, kbAlt8, hcNoContext, "Alt-8") +
+            *new TMenuItem("Window ~9~", cmWindow1+8, kbAlt9, hcNoContext, "Alt-9") +
+
         *new TSubMenu("~H~elp", kbAltH) +
             *new TMenuItem("Help on ~K~eyword", cmHelp,  kbF1, hcNoContext, "F1") +
             newLine() +
@@ -1332,10 +1420,12 @@ if (event.message.command >= cmWindow1 && event.message.command < cmWindow1 + 40
             return;
         }    
         switch (event.message.command) {
-            case cmNewFile:    newFile();        clearEvent(event); return;
-            case cmOpenFile:   openFile();       clearEvent(event); return;
-            case cmSaveFile:   saveFile();       clearEvent(event); return;
-            case cmSaveFileAs: saveFileAs();     clearEvent(event); return;
+            case cmNewFile:     newFile();         clearEvent(event); return;
+            case cmOpenFile:    openFile();        clearEvent(event); return;
+            case cmSaveFile:    saveFile();         clearEvent(event); return;
+            case cmSaveFileAs:  saveFileAs();       clearEvent(event); return;
+            case cmRenameFile:  renameFile();        clearEvent(event); return;
+            case cmRecentFiles: openRecentFiles();   clearEvent(event); return;
             case cmRunProgram:  runProgram();     clearEvent(event); return;
             case cmCompileOnly: compileOnly();   clearEvent(event); return;
             case cmCloseWindow: closeWindow();   clearEvent(event); return;
@@ -1351,7 +1441,9 @@ if (event.message.command >= cmWindow1 && event.message.command < cmWindow1 + 40
 }
 
 void TOberonIDE::showWindowList() {
-    auto windows = getEditorWindows();
+    // Use stable creation order, pruning any windows closed via the X button
+    windowOrderPrune(getEditorWindows());
+    auto& windows = g_windowOrder;
     if (windows.empty()) {
         messageBox(" No editor windows open. ", mfInformation | mfOKButton);
         return;
@@ -1407,18 +1499,19 @@ void TOberonIDE::showWindowList() {
 }
 
 void TOberonIDE::selectWindow(int idx) {
-    auto windows = getEditorWindows();
-    if (idx < 0 || idx >= (int)windows.size()) return;
-    TEditorWindow* w = windows[idx];
-    // Bring to front and focus
+    // Prune any windows closed via the X button (not through closeWindow())
+    windowOrderPrune(getEditorWindows());
+    if (idx < 0 || idx >= (int)g_windowOrder.size()) return;
+    TEditorWindow* w = g_windowOrder[idx];
     w->select();
-    w->makeFirst();
 }
 
 void TOberonIDE::newFile() {
     TRect r = deskTop->getExtent();
     r.grow(-2, -1);
-    deskTop->insert(new TEditorWindow(r, nullptr));
+    auto* w = new TEditorWindow(r, nullptr);
+    deskTop->insert(w);
+    windowOrderAdd(w);
 }
 
 void TOberonIDE::openFile() {
@@ -1429,13 +1522,24 @@ void TOberonIDE::openFile() {
         dlg->getFileName(buf);
         TRect r = deskTop->getExtent();
         r.grow(-2, -1);
-        deskTop->insert(new TEditorWindow(r, buf));
+        auto* w = new TEditorWindow(r, buf);
+        deskTop->insert(w);
+        windowOrderAdd(w);
+        addRecentFile(buf);
     }
     TObject::destroy(dlg);
 }
 
-void TOberonIDE::saveFile()   { if (auto* w = activeEditor()) w->save(); }
-void TOberonIDE::saveFileAs() { if (auto* w = activeEditor()) w->saveAs(); }
+void TOberonIDE::saveFile() {
+    if (auto* w = activeEditor()) {
+        if (w->save() && w->filename[0]) addRecentFile(w->filename);
+    }
+}
+void TOberonIDE::saveFileAs() {
+    if (auto* w = activeEditor()) {
+        if (w->saveAs() && w->filename[0]) addRecentFile(w->filename);
+    }
+}
 
 void TOberonIDE::runProgram() {
     auto* w = activeEditor();
@@ -1512,20 +1616,32 @@ void TOberonIDE::compileOnly() {
 }
 
 void TOberonIDE::closeWindow() {
-    if (auto* w = activeEditor())
+    if (auto* w = activeEditor()) {
+        windowOrderRemove(w);
         w->close();
+    }
 }
 
 void TOberonIDE::showAbout() {
-    auto* dlg = new TDialog(TRect(0,0,50,12), " About Oberon IDE ");
+    auto* dlg = new TDialog(TRect(0,0,62,20), " About Oberon IDE ");
     dlg->options |= ofCentered;
-    dlg->insert(new TStaticText(TRect(2,2,48,3), " Oberon IDE  v1.0"));
-    dlg->insert(new TStaticText(TRect(2,3,48,4), " Built on tvision (magiblot)"));
-    dlg->insert(new TStaticText(TRect(2,5,48,6), " F2  Save   Ctrl-K Autocomplete"));
-    dlg->insert(new TStaticText(TRect(2,6,48,7), " F9  Run"));
-    
-    dlg->insert(new TStaticText(TRect(2,8,48,9), " Ctrl-Q  Exit"));
-    dlg->insert(new TButton(TRect(20,10,30,11), "  ~O~K  ", cmOK, bfDefault));
+    dlg->insert(new TStaticText(TRect(2, 1, 60, 2), " Oberon IDE  v1.0"));
+    dlg->insert(new TStaticText(TRect(2, 2, 60, 3), " Built on tvision (magiblot)"));
+    dlg->insert(new TStaticText(TRect(2, 4, 30, 5), " F1       Help"));
+    dlg->insert(new TStaticText(TRect(2, 5, 30, 6), " F2       Save"));
+    dlg->insert(new TStaticText(TRect(2, 6, 30, 7), " F3       Open"));
+    dlg->insert(new TStaticText(TRect(2, 7, 30, 8), " F7       Find Again"));
+    dlg->insert(new TStaticText(TRect(2, 8, 30, 9), " F8       Compile"));
+    dlg->insert(new TStaticText(TRect(2, 9, 30,10), " F9       Run"));
+    dlg->insert(new TStaticText(TRect(2,10, 30,11), " Ctrl-F   Find..."));
+    dlg->insert(new TStaticText(TRect(2,11, 30,12), " Ctrl-H   Replace..."));
+    dlg->insert(new TStaticText(TRect(32, 4, 60, 5), " Ctrl-K   Autocomplete"));
+    dlg->insert(new TStaticText(TRect(32, 5, 60, 6), " Ctrl-L   Go to Line"));
+    dlg->insert(new TStaticText(TRect(32, 6, 60, 7), " Ctrl-Q   Exit"));
+    dlg->insert(new TStaticText(TRect(32, 7, 60, 8), " Ctrl-U   Undo"));
+    dlg->insert(new TStaticText(TRect(32, 8, 60, 9), " Ctrl-W   Close Window"));
+    dlg->insert(new TStaticText(TRect(32, 9, 60,10), " Alt-1..9 Switch Window"));
+    dlg->insert(new TButton(TRect(26,17,36,18), "  ~O~K  ", cmOK, bfDefault));
     deskTop->execView(dlg);
     TObject::destroy(dlg);
 }
@@ -1555,6 +1671,80 @@ void TOberonIDE::showHelp() {
     if (auto* w = activeEditor()) kw = wordAtCursor(w);
     auto* dlg = new THelpDialog(kw.c_str());
     deskTop->execView(dlg);
+    TObject::destroy(dlg);
+}
+
+void TOberonIDE::renameFile() {
+    auto* w = activeEditor();
+    if (!w) { messageBox(" No editor open. ", mfError | mfOKButton); return; }
+    if (w->filename[0] == '\0') {
+        messageBox(" File has not been saved yet. Use Save As first. ",
+                   mfInformation | mfOKButton);
+        return;
+    }
+    auto* dlg = new TDialog(TRect(0,0,60,8), " Rename File ");
+    dlg->options |= ofCentered;
+    auto* inp = new TInputLine(TRect(2,3,58,4), MAXPATH-1);
+    inp->setData((void*)w->filename);
+    dlg->insert(new TLabel(TRect(2,2,14,3), "~N~ew name:", inp));
+    dlg->insert(inp);
+    dlg->insert(new TButton(TRect(10,5,22,6), " ~O~K ",     cmOK,     bfDefault));
+    dlg->insert(new TButton(TRect(28,5,40,6), " ~C~ancel ", cmCancel, bfNormal));
+    dlg->selectNext(False);
+    if (deskTop->execView(dlg) != cmCancel) {
+        char newName[MAXPATH] = {};
+        inp->getData(newName);
+        if (newName[0] && strcmp(newName, w->filename) != 0) {
+            if (rename(w->filename, newName) == 0) {
+                // Update the in-memory filename and window title
+                strncpy(w->filename, newName, MAXPATH-1);
+                addRecentFile(newName);
+                if (w->frame) w->frame->drawView();
+            } else {
+                messageBox(" Could not rename file. ", mfError | mfOKButton);
+            }
+        }
+    }
+    TObject::destroy(dlg);
+}
+
+void TOberonIDE::openRecentFiles() {
+    if (g_recentFiles.empty()) {
+        messageBox(" No recent files. ", mfInformation | mfOKButton);
+        return;
+    }
+    int count = (int)g_recentFiles.size();
+    int dlgH = count + 6;
+    int dlgW = 64;
+    auto* dlg = new TDialog(TRect(0, 0, dlgW, dlgH), " Recent Files ");
+    dlg->options |= ofCentered;
+
+    TScrollBar* sb = new TScrollBar(TRect(dlgW-2, 1, dlgW-1, dlgH-3));
+    dlg->insert(sb);
+    TListBox* lb = new TListBox(TRect(1, 1, dlgW-2, dlgH-3), 1, sb);
+    TStringCollection* sc = new TStringCollection(count + 1, 4);
+    for (const auto& p : g_recentFiles) sc->insert(newStr(p.c_str()));
+    lb->newList(sc);
+    dlg->insert(lb);
+
+    dlg->insert(new TButton(TRect(dlgW/2-12, dlgH-2, dlgW/2-2, dlgH-1),
+                            " ~O~K ",     cmOK,     bfDefault));
+    dlg->insert(new TButton(TRect(dlgW/2+2,  dlgH-2, dlgW/2+12, dlgH-1),
+                            " ~C~ancel ", cmCancel, bfNormal));
+    dlg->selectNext(False);
+    lb->select();
+
+    if (deskTop->execView(dlg) == cmOK) {
+        int sel = lb->focused;
+        if (sel >= 0 && sel < count) {
+            TRect r = deskTop->getExtent();
+            r.grow(-2, -1);
+            auto* ew = new TEditorWindow(r, g_recentFiles[sel].c_str());
+            deskTop->insert(ew);
+            windowOrderAdd(ew);
+            addRecentFile(g_recentFiles[sel]);
+        }
+    }
     TObject::destroy(dlg);
 }
 
@@ -1596,13 +1786,22 @@ int main(int argc, char* argv[]) {
         if (g_stdlibPath.empty() || access(g_stdlibPath.c_str(), R_OK) != 0)
             g_stdlibPath = "stdlib.md";
     }
+    // Recent files live next to stdlib.md (same directory)
+    {
+        const char* home = getenv("HOME");
+        if (home) g_recentFilesPath = std::string(home) + "/.oberon_ide_recent";
+        else      g_recentFilesPath = ".oberon_ide_recent";
+    }
     loadHelpTopics();
+    loadRecentFiles();
 
     TOberonIDE app;
     if (argc >= 2) {
         TRect r = app.deskTop->getExtent();
         r.grow(-2, -1);
-        app.deskTop->insert(new TEditorWindow(r, argv[1]));
+        auto* w = new TEditorWindow(r, argv[1]);
+        app.deskTop->insert(w);
+        windowOrderAdd(w);
     }
     app.run();
     return 0;
