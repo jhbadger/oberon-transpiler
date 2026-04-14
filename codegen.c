@@ -1808,7 +1808,7 @@ void codegen(Node *module, FILE *out, int is_main) {
     if (!is_main) collect_modsyms(module->c1);
 
     /* ── Standard includes ───────────────────────────────────────── */
-		emit(g,"#define _POSIX_C_SOURCE 199309L\n");
+		emit(g,"#ifdef __linux__\n#define _GNU_SOURCE\n#endif\n");
     emit(g,"#include <stdio.h>\n");
     emit(g,"#include <stdlib.h>\n");
     emit(g,"#include <string.h>\n");
