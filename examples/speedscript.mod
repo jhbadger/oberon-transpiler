@@ -11,6 +11,7 @@ CONST
   (* Integer key codes returned by GetKey() *)
   KEY_UP    = 1;   KEY_DOWN  = 2;
   KEY_LEFT  = 3;   KEY_RIGHT = 4;
+  KEY_MOUSE = 5;
   KEY_BS    = 8;   KEY_TAB   = 9;
   KEY_ENTER = 13;  KEY_ESC   = 27;
   KEY_CTRL_F = 6;   (* Find *)
@@ -58,6 +59,7 @@ BEGIN
   ELSIF ORD(c) =   2 THEN RETURN KEY_DOWN
   ELSIF ORD(c) =   3 THEN RETURN KEY_LEFT
   ELSIF ORD(c) =   4 THEN RETURN KEY_RIGHT
+  ELSIF ORD(c) =   5 THEN RETURN KEY_MOUSE
   ELSIF ORD(c) = 128 THEN RETURN KEY_PGUP
   ELSIF ORD(c) = 129 THEN RETURN KEY_PGDN
   ELSIF ORD(c) = 130 THEN RETURN KEY_HOME
@@ -197,6 +199,36 @@ BEGIN
     ComputeVis(curr, vx, vy)
   END
 END AdjustScroll;
+
+PROCEDURE HandleMouse;
+VAR mx, my, mb, i, tx, ty, w, rows: INTEGER;
+BEGIN
+  mx := Terminal.MouseX();
+  my := Terminal.MouseY();
+  mb := Terminal.MouseBtn();
+  IF mb # 0 THEN (* Button is pressed *)
+    w := Terminal.Cols(); 
+    rows := Terminal.Rows() - 1;
+    tx := 1; ty := 2; (* Starting position of text area in Refresh *)
+    i := topLin;
+    
+    (* Scan through visible text to find match for mx, my *)
+    WHILE (i <= lastLine) & (ty <= rows) DO
+      IF tx > w THEN tx := 1; INC(ty) END;
+      
+      IF (mx = tx) & (my = ty) THEN
+        curr := i; RETURN 
+      END;
+
+      IF i = lastLine THEN i := lastLine + 1
+      ELSIF text[i] = RetChar THEN
+        tx := 1; INC(ty); INC(i)
+      ELSE
+        INC(i); INC(tx)
+      END
+    END
+  END
+END HandleMouse;
 
 (* ── Display ────────────────────────────────────────────────────────── *)
 
@@ -471,22 +503,28 @@ VAR
   tmpname: ARRAY MaxName OF CHAR;
   i: INTEGER;
 BEGIN
-  IF ReadStr("Save as: ", tmpname) THEN
-    IF tmpname[0] = 0X THEN COPY(fname, tmpname) END;
-    IF tmpname[0] = 0X THEN Prompt("No filename."); RETURN END;
-    f := Files.New(tmpname);
-    IF f = NIL THEN Prompt("Cannot create file."); RETURN END;
-    Files.Set(r, f, 0);
-    FOR i := 0 TO lastLine - 1 DO
-      IF text[i] = RetChar THEN Files.Write(r, ORD(0AX))   (* LF *)
-      ELSE Files.Write(r, ORD(text[i]))
-      END
-    END;
-    Files.Register(f);
-    COPY(tmpname, fname);
-    modified := FALSE;
-    Prompt("Saved.")
-  END
+  (* Only prompt if fname is empty *)
+  IF fname[0] = 0X THEN
+    IF ReadStr("Save as: ", tmpname) THEN
+      IF tmpname[0] = 0X THEN Prompt("No filename."); RETURN END;
+      COPY(tmpname, fname)
+    ELSE
+      RETURN (* User cancelled prompt *)
+    END
+  END;
+
+  f := Files.New(fname);
+  IF f = NIL THEN Prompt("Cannot create file."); RETURN END;
+  
+  Files.Set(r, f, 0);
+  FOR i := 0 TO lastLine - 1 DO
+    IF text[i] = RetChar THEN Files.Write(r, ORD(0AX))   (* LF *)
+    ELSE Files.Write(r, ORD(text[i]))
+    END
+  END;
+  Files.Register(f);
+  modified := FALSE;
+  Prompt("Saved.")
 END SaveFile;
 
 PROCEDURE LoadFile;
@@ -678,7 +716,18 @@ BEGIN
     k := GetKey();
 
     CASE k OF
-      KEY_ESC:    running := FALSE
+      KEY_ESC:
+      IF modified THEN
+          IF ReadStr("Unsaved changes. Exit? (y/n): ", searchStr) THEN
+            IF (searchStr[0] = "y") OR (searchStr[0] = "Y") THEN
+              running := FALSE
+            END
+          END;
+          Refresh (* Restore screen after prompt *)
+        ELSE
+          running := FALSE
+        END
+    | KEY_MOUSE:  HandleMouse
     | KEY_BS:     Backspace
     | KEY_DEL:    DeleteFwd
     | KEY_ENTER:  Insert(RetChar)
@@ -718,5 +767,7 @@ BEGIN
 END Run;
 
 BEGIN
-  Run
+  Terminal.MouseOn;
+  Run;
+  Terminal.MouseOff;
 END SpeedScript.
