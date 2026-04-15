@@ -1,6 +1,6 @@
 MODULE EnzymeExplorer;
 
-IMPORT DBF, Menu, Graphics, Out, In, Strings, Terminal;
+IMPORT DBF, Menu, Out, In, Strings, Terminal;
 
 VAR
   db: DBF.Database;
@@ -23,7 +23,7 @@ VAR
 		 i, limit: INTEGER;
   ec, name: ARRAY 128 OF CHAR;
 												 BEGIN
-  Graphics.Clear();
+  Terminal.Clear();
   limit := DBF.RecordCount(db);
   IF limit > 10 THEN limit := 10 END;
   
@@ -47,7 +47,7 @@ VAR
   i, count, found: INTEGER;
   dummy: CHAR;
 	BEGIN
-    Graphics.Clear();
+    Terminal.Clear();
 		Terminal.Restore();
   Out.String("Search (Case-Insensitive): ");
   In.Line(query);
@@ -107,7 +107,7 @@ BEGIN
   Menu.Add(m, "Exit");
 
   LOOP
-    Graphics.Clear();	
+    Terminal.Clear();	
     choice := Menu.Run(m, 10, 5);
     IF choice = 0 THEN SearchData
     ELSIF choice = 1 THEN ListFirstTen
