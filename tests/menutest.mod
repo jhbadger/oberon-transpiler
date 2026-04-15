@@ -1,10 +1,11 @@
 MODULE Main;
 
-IMPORT Menu, Graphics, Out, OS;
+IMPORT Menu, Graphics, In, Out, OS;
 
 VAR
   m: Menu.MenuData;
   choice: INTEGER;
+  buf: ARRAY 100 OF CHAR;
 
 BEGIN
   Graphics.Clear();
@@ -25,7 +26,10 @@ BEGIN
 
   Graphics.Goto(1, 15);
   IF choice = 3 THEN
-    OS.Exit(0);
+			 OS.Exit(0);
+	ELSIF choice = 0 THEN
+			Out.String("Name: ");
+			In.Line(buf);			
   ELSE
     Out.String("You selected: "); Out.Int(choice + 1, 0); Out.Ln();
   END;
