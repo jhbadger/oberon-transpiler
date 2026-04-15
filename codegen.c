@@ -892,8 +892,31 @@ static int try_emit_import(CG *g, Node *fa, Node *args) {
         if (!strcmp(proc,"Int"))    { emit(g,"scanf(\"%%d\",&"); emit_expr(g,a0); emit(g,")"); return 1; }
         if (!strcmp(proc,"Real"))   { emit(g,"scanf(\"%%lf\",&"); emit_expr(g,a0); emit(g,")"); return 1; }
         if (!strcmp(proc,"Char"))   { emit(g,"("); emit_expr(g,a0); emit(g," = (char)getchar())"); return 1; }
-        if (!strcmp(proc,"String")) { emit(g,"scanf(\"%%255s\","); emit_expr(g,a0); emit(g,")"); return 1; }
-        if (!strcmp(proc,"Line"))   { emit(g,"In_Line("); emit_expr(g,a0); emit(g,")"); return 1; }
+        if (!strcmp(proc,"String")) {
+					emit(g, "({ static char _buf[256]; ");
+					emit(g, "fflush(stdout); ");
+					emit(g, "if (fgets(_buf, sizeof(_buf), stdin)) { ");
+					emit(g, "  size_t l = strlen(_buf); ");
+					emit(g, "  if (l > 0 && _buf[l-1] == '\\n') _buf[l-1] = 0; ");
+					emit(g, "  strncpy("); emit_expr(g, a0); emit(g, ", _buf, 255); ");
+					emit(g, "}})");
+					return 1;
+				}
+				if (!strcmp(proc, "Line")) {
+					/* Use an inline block to handle the buffer sync issue */
+					emit(g, "({ ");
+					emit(g, "  int c; char *p = "); emit_expr(g, a0); emit(g, "; ");
+					emit(g, "  int i = 0; fflush(stdout); ");
+					/* 1. Skip any leftover newlines or carriage returns from the menu */
+					emit(g, "  while ((c = getchar()) == '\\n' || c == '\\r'); ");
+					/* 2. Read the actual input until the next newline */
+					emit(g, "  if (c != EOF) p[i++] = (char)c; ");
+					emit(g, "  while (i < 255 && (c = getchar()) != '\\n' && c != '\\r' && c != EOF) ");
+					emit(g, "    p[i++] = (char)c; ");
+					emit(g, "  p[i] = 0; ");
+					emit(g, "})");
+					return 1;
+				}
     }
     /* Random module */
     if (!strcmp(mod,"Random")) {
@@ -2342,11 +2365,13 @@ void codegen(Node *module, FILE *out, int is_main) {
 
     /* ── In module runtime (In.Line needs a helper function) ─────── */
     if (has_in) {
-        emit(g,"static void In_Line(char *s) {\n");
-        emit(g,"    int i=0, c;\n");
-        emit(g,"    while ((c=getchar())!=EOF && c!='\\n') { if(i<255) s[i++]=(char)c; }\n");
-        emit(g,"    s[i]=0;\n");
-        emit(g,"}\n\n");
+			emit(g, "static void In_Line(char *str) {\n");
+			emit(g, "    int c, i = 0;\n");
+			emit(g, "    while ((c = getchar()) != '\\n' && c != EOF) {\n");
+			emit(g, "        if (i < 255) str[i++] = (char)c;\n");
+			emit(g, "    }\n");
+			emit(g, "    str[i] = '\\0';\n");
+			emit(g, "}\n");
     }
 
     /* ── Env module runtime ──────────────────────────────────────── */
