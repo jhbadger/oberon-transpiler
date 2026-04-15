@@ -69,6 +69,7 @@ VAR
   current, keyVal: INTEGER;
   done: BOOLEAN;
 BEGIN
+  Terminal.Init();
   current := 0;
   done := FALSE;
   Terminal.HideCursor();
@@ -94,6 +95,7 @@ BEGIN
   UNTIL done;
   
   Terminal.ShowCursor();
+	Terminal.Restore();
   RETURN current;
 END Run;
 

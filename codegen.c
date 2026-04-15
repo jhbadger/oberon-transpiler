@@ -1088,12 +1088,20 @@ static int try_emit_import(CG *g, Node *fa, Node *args) {
         (void)a2;
     }
     /* Terminal.Shell — restore terminal, run command, wait, reinit */
+		/* Terminal.Shell — restore terminal, run command, wait, reinit */
     if (!strcmp(mod,"Terminal") && !strcmp(proc,"Shell")) {
         emit(g,"(_term_restore(), system("); emit_expr(g,a0);
         emit(g,"), printf(\"\\n-- Press Enter to return --\"), fflush(stdout),"
                "(void)getchar(), _term_init())");
         return 1;
     }
+    if (!strcmp(mod,"Terminal") && !strcmp(proc,"Restore")) {
+        emit(g,"_term_restore()"); return 1;
+    }
+    if (!strcmp(mod,"Terminal") && !strcmp(proc,"Init")) {
+        emit(g,"Terminal_Init()"); return 1;
+    }
+    
     /* Unknown import call → RealModule_Proc(args)  (resolves aliases) */
     const char *real = import_realname(mod);
     emit(g,"%s_%s(",real,proc);
@@ -2030,6 +2038,23 @@ void codegen(Node *module, FILE *out, int is_main) {
         emit(g,"    atexit(_term_restore);\n");
         emit(g,"    srand((unsigned)time(NULL));\n");
         emit(g,"}\n");
+				emit(g,"static void Terminal_Restore(void) { _term_restore(); }\n");
+				emit(g,"static void Terminal_Init(void) {\n");
+				emit(g,"    struct termios raw = _term_orig;\n");
+				emit(g,"    raw.c_iflag &= ~(unsigned)(ICRNL|IXON);\n");
+				emit(g,"    raw.c_lflag &= ~(unsigned)(ECHO|ICANON|ISIG\n");
+				emit(g,"#ifdef FLUSHO\n");
+				emit(g,"        |FLUSHO\n");
+				emit(g,"#endif\n");
+				emit(g,"    );\n");
+				emit(g,"    raw.c_cc[VMIN] = 0; raw.c_cc[VTIME] = 0;\n");
+				emit(g,"#ifdef VDISCARD\n");
+				emit(g,"    raw.c_cc[VDISCARD] = _POSIX_VDISABLE;\n");
+				emit(g,"#endif\n");
+				emit(g,"    tcsetattr(STDIN_FILENO, TCSANOW, &raw);\n");
+				emit(g,"    setvbuf(stdout, NULL, _IONBF, 0);\n");
+				emit(g,"    printf(\"\\033[?25l\"); fflush(stdout);\n");
+				emit(g,"}\n");
         /* Mouse on/off */
         emit(g,"static void Terminal_MouseOn(void) {\n");
         emit(g,"    if (!_term_mouse_on) {\n");
