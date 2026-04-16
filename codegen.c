@@ -818,6 +818,18 @@ static int is_open_array(Node *t) { return t && t->kind==ND_TARRAY && !t->c0; }
 /* Emit the runtime length of an array argument being passed to an open array
  * formal parameter.  If the argument is itself an open array param, forward
  * its hidden _len; otherwise compute from sizeof at compile time. */
+/* Emit the capacity of a STRING/array arg for Strings_Append.
+ * STRING formal params decay to char* so sizeof gives pointer size (8), not 256;
+ * detect that case and emit the literal 256 instead. */
+static void emit_string_capacity(CG *g, Node *arg) {
+    if (arg && arg->kind == ND_IDENT) {
+        Node *t = sym_type(arg->str);
+        if (t && t->kind == ND_TNAME && !strcmp(t->str, "STRING"))
+            { emit(g, "256"); return; }
+    }
+    emit(g, "sizeof("); emit_expr(g, arg); emit(g, ")");
+}
+
 static void emit_open_array_len(CG *g, Node *arg) {
     if (arg && arg->kind == ND_IDENT) {
         Node *t = sym_type(arg->str);
@@ -966,7 +978,7 @@ static int try_emit_import(CG *g, Node *fa, Node *args) {
     if (!strcmp(mod,"Strings")) {
         Node *a2=a1?a1->next:NULL;
         if (!strcmp(proc,"Length"))  { emit(g,"Strings_Length(");  emit_as_string(g,a0); emit(g,")"); return 1; }
-        if (!strcmp(proc,"Append"))  { emit(g,"Strings_Append(");  emit_as_string(g,a0); emit(g,","); emit_expr(g,a1); emit(g,",sizeof("); emit_expr(g,a1); emit(g,"))"); return 1; }
+        if (!strcmp(proc,"Append"))  { emit(g,"Strings_Append(");  emit_as_string(g,a0); emit(g,","); emit_expr(g,a1); emit(g,","); emit_string_capacity(g,a1); emit(g,")"); return 1; }
         if (!strcmp(proc,"Copy"))    { emit(g,"Strings_Copy(");    emit_as_string(g,a0); emit(g,","); emit_expr(g,a1); emit(g,")"); return 1; }
         if (!strcmp(proc,"Compare")) { emit(g,"Strings_Compare("); emit_as_string(g,a0); emit(g,","); emit_as_string(g,a1); emit(g,")"); return 1; }
         if (!strcmp(proc,"Pos"))      { emit(g,"Strings_PosFrom(");   emit_as_string(g,a0); emit(g,","); emit_as_string(g,a1); emit(g,","); if (a2) emit_expr(g,a2); else emit(g,"0"); emit(g,")"); return 1; }
@@ -2459,11 +2471,12 @@ void codegen(Node *module, FILE *out, int is_main) {
         emit(g,"    return (int)strlen(s);\n");
         emit(g,"}\n");
         /* Append(extra, VAR dst, cap) — dst := dst + extra, bounded by cap */
-        emit(g,"static void Strings_Append(const char *src, char *dst, size_t cap) {\n");
+        emit(g,"static char* Strings_Append(const char *src, char *dst, size_t cap) {\n");
         emit(g,"    size_t dl=strlen(dst), sl=strlen(src);\n");
-        emit(g,"    if (cap==0) return;\n");
+        emit(g,"    if (cap==0) return dst;\n");
         emit(g,"    if (dl+sl < cap) strcat(dst, src);\n");
         emit(g,"    else { strncat(dst, src, cap-dl-1); dst[cap-1]=0; }\n");
+        emit(g,"    return dst;\n");
         emit(g,"}\n");
         /* Copy(src, VAR dst) — full string copy */
         emit(g,"static void Strings_Copy(const char *src, char *dst) {\n");
