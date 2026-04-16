@@ -15,7 +15,7 @@ MODULE epub;
  * at the last-read line.
  *)
 
-IMPORT Zip, XHTML, Terminal, Graphics, Strings, Files, Args, Dict, Out;
+IMPORT Zip, XHTML, Terminal, Graphics, Strings, Files, Args, Dict, Out, Base64;
 
 CONST
   MAXSPINE  = 256;
@@ -66,6 +66,10 @@ VAR
   running   : BOOLEAN;
 
   idMap     : Dict.Table;
+
+  (* inline image buffers *)
+  imgBuf  : ARRAY 524288 OF CHAR;  (* 512 KB raw binary image data  *)
+  b64Buf  : ARRAY 720000 OF CHAR;  (* base64 output (~4/3 * 512 KB) *)
 
   (* position-file working storage — keeps up to 128 other books' positions *)
   posPaths  : ARRAY 128 OF ARRAY 512 OF CHAR;
@@ -269,19 +273,95 @@ BEGIN
   IF (nLines > 0) & (topLine > nLines - 1) THEN topLine := nLines - 1 END
 END ClampTop;
 
+(* ── inline image support (iTerm2 protocol) ─────────────────────
+   NormalizePath removes /../ and /./ segments in-place.
+   ImgFullPath builds the ZIP-relative path for an img src.
+   EmitImage extracts the file, base64-encodes it, and emits the
+   ESC]1337;File=inline=1;...<b64>BEL sequence to the terminal.  *)
+
+PROCEDURE NormalizePath(VAR path: ARRAY OF CHAR);
+VAR i, j, n: INTEGER;
+BEGIN
+  i := 0;
+  WHILE path[i] # 0X DO
+    IF (path[i] = '/') & (path[i+1] = '.') & (path[i+2] = '.') & (path[i+3] = '/') THEN
+      (* resolve /../: remove previous component *)
+      j := i - 1;
+      WHILE (j > 0) & (path[j] # '/') DO DEC(j) END;
+      n := i + 4;
+      i := j + 1;
+      WHILE path[n] # 0X DO path[i] := path[n]; INC(i); INC(n) END;
+      path[i] := 0X;
+      i := 0  (* restart *)
+    ELSIF (path[i] = '/') & (path[i+1] = '.') & (path[i+2] = '/') THEN
+      (* remove /./: just collapse the dot segment *)
+      j := i; n := i + 2;
+      WHILE path[n] # 0X DO path[j] := path[n]; INC(j); INC(n) END;
+      path[j] := 0X;
+      i := 0  (* restart *)
+    ELSE
+      INC(i)
+    END
+  END
+END NormalizePath;
+
+PROCEDURE ImgFullPath(imgSrc: ARRAY OF CHAR; VAR result: ARRAY OF CHAR);
+VAR chapDir: ARRAY 512 OF CHAR;
+BEGIN
+  DirOf(spineHref[curChap], chapDir);
+  COPY(chapDir, result);
+  Strings.Append(imgSrc, result);
+  NormalizePath(result)
+END ImgFullPath;
+
+PROCEDURE EmitImage(imgPath: ARRAY OF CHAR);
+VAR idx, n: INTEGER;
+BEGIN
+  idx := Zip.Find(archive, imgPath);
+  IF idx < 0 THEN RETURN END;
+  n := Zip.Extract(archive, idx, imgBuf);
+  IF n <= 0 THEN RETURN END;
+  Base64.EncodeBin(imgBuf, n, b64Buf);
+  Out.Char(1BX); Out.Char(']');
+  Out.String("1337;File=inline=1;width=auto;height=auto;preserveAspectRatio=1:");
+  Out.String(b64Buf);
+  Out.Char(7X);  (* BEL *)
+  Graphics.Reset  (* flushes stdout and resets any colour state *)
+END EmitImage;
+
 (* ── drawing ─────────────────────────────────────────────────── *)
 PROCEDURE DrawLine(li, y: INTEGER);
-VAR i, len, col: INTEGER;
+VAR i, len, col, j: INTEGER;
+    imgSrc: ARRAY 512 OF CHAR;
+    imgFull: ARRAY 1024 OF CHAR;
+    isImg: BOOLEAN;
 BEGIN
   Terminal.Goto(1, y);
-  Graphics.Color256(CLR_TEXT, BG_TEXT);
-  col := 0;
-  IF (li >= 0) & (li < nLines) THEN
-    len := lineLen[li]; i := lineOff[li];
-    WHILE len > 0 DO Out.Char(wrapBuf[i]); INC(i); DEC(len); INC(col) END
+  isImg := FALSE;
+  IF (li >= 0) & (li < nLines) & (lineLen[li] > 5) THEN
+    i := lineOff[li];
+    isImg := (wrapBuf[i]   = '[') & (wrapBuf[i+1] = 'I') &
+             (wrapBuf[i+2] = 'M') & (wrapBuf[i+3] = 'G') & (wrapBuf[i+4] = ':')
   END;
-  WHILE col < tCols DO Out.Char(' '); INC(col) END;
-  Graphics.Reset
+  IF isImg THEN
+    (* extract path from [IMG:path] and display via iTerm2 *)
+    i := lineOff[li] + 5; j := 0;
+    WHILE (wrapBuf[i] # ']') & (wrapBuf[i] # 0X) & (j < 511) DO
+      imgSrc[j] := wrapBuf[i]; INC(i); INC(j)
+    END;
+    imgSrc[j] := 0X;
+    ImgFullPath(imgSrc, imgFull);
+    EmitImage(imgFull)
+  ELSE
+    Graphics.Color256(CLR_TEXT, BG_TEXT);
+    col := 0;
+    IF (li >= 0) & (li < nLines) THEN
+      len := lineLen[li]; i := lineOff[li];
+      WHILE len > 0 DO Out.Char(wrapBuf[i]); INC(i); DEC(len); INC(col) END
+    END;
+    WHILE col < tCols DO Out.Char(' '); INC(col) END;
+    Graphics.Reset
+  END
 END DrawLine;
 
 PROCEDURE DrawStatus();

@@ -184,6 +184,9 @@ END DecodeEntity;
    suppressed.                                                       *)
 PROCEDURE ToText*(src: ARRAY OF CHAR; VAR dst: ARRAY OF CHAR);
 VAR sp, dp, dl: INTEGER; c: CHAR; lastNL: BOOLEAN;
+    imgTag: ARRAY 512 OF CHAR;
+    imgSrc: ARRAY 512 OF CHAR;
+    i, j: INTEGER;
 BEGIN
   sp := 0; dp := 0; dl := LEN(dst) - 1; lastNL := TRUE;
   WHILE src[sp] # 0X DO
@@ -214,6 +217,28 @@ BEGIN
         (* opening block tag: emit newline *)
         IF ~lastNL & (dp < dl) THEN dst[dp] := 0AX; INC(dp); lastNL := TRUE END;
         SkipTag(src, sp)
+      ELSIF TagIs(src, sp, "img") THEN
+        (* capture tag text to extract src attribute *)
+        i := 0;
+        WHILE (src[sp] # 0X) & (src[sp] # '>') & (i < 511) DO
+          imgTag[i] := src[sp]; INC(i); INC(sp)
+        END;
+        imgTag[i] := 0X;
+        IF src[sp] = '>' THEN INC(sp) END;
+        IF AttrValue(imgTag, "src", imgSrc) THEN
+          (* emit newline then [IMG:path] placeholder on its own line *)
+          IF ~lastNL & (dp < dl) THEN dst[dp] := 0AX; INC(dp); lastNL := TRUE END;
+          IF dp < dl THEN dst[dp] := '['; INC(dp) END;
+          IF dp < dl THEN dst[dp] := 'I'; INC(dp) END;
+          IF dp < dl THEN dst[dp] := 'M'; INC(dp) END;
+          IF dp < dl THEN dst[dp] := 'G'; INC(dp) END;
+          IF dp < dl THEN dst[dp] := ':'; INC(dp) END;
+          j := 0;
+          WHILE (imgSrc[j] # 0X) & (dp < dl) DO dst[dp] := imgSrc[j]; INC(dp); INC(j) END;
+          IF dp < dl THEN dst[dp] := ']'; INC(dp) END;
+          IF dp < dl THEN dst[dp] := 0AX; INC(dp) END;
+          lastNL := TRUE
+        END
       ELSE
         SkipTag(src, sp)                      (* inline tag: discard *)
       END
