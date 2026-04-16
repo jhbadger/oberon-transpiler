@@ -312,6 +312,8 @@ on exit.  `Random` is also seeded automatically.
 | `Terminal.Rows(): INTEGER` | Returns the terminal height in rows (falls back to 24 if unavailable). |
 | `Terminal.Random(n: INTEGER): INTEGER` | Random integer in `[0, n)`. |
 | `Terminal.Shell(cmd: ARRAY OF CHAR)` | Suspend raw mode, run `cmd` via the system shell, print `-- Press Enter to return --`, wait for Enter, then reinitialise raw mode. Useful for invoking compilers, pagers, or any interactive command without leaving the editor. |
+| `Terminal.Restore()` | Restore the terminal to its original (cooked) mode and show the cursor. Called automatically on exit; call manually before handing control to code that expects a normal terminal. |
+| `Terminal.Init()` | Re-enter raw (non-canonical) mode and hide the cursor, matching the state established at program start. Use after `Terminal.Restore()` to return to raw mode without restarting the program. |
 
 ### Mouse Input
 

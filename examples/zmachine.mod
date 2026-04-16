@@ -10,6 +10,9 @@ MODULE ZMachine;
  *)
 IMPORT Terminal, Args, Strings, Files, Out;
 
+(* Debug: set dbgN > 0 to log first N steps to /tmp/zmdbg.txt *)
+CONST DBGMAX = 3000;
+
 CONST
   MEMSIZE   = 524288;   (* 512 KB *)
   STACKSZ   = 2048;
@@ -85,8 +88,49 @@ VAR
   (* Bit-shift table *)
   pw2 : ARRAY 17 OF INTEGER;  (* pw2[i] = 2^i *)
 
+  (* Debug *)
+  dbgF : Files.File;
+  dbgR : Files.Rider;
+  dbgN : INTEGER;
+
   (* Alphabet table (init in BEGIN) *)
   a2tab : ARRAY 25 OF CHAR;
+
+(* ══════════════════════════════════════════════════════════════
+   Debug helpers
+   ══════════════════════════════════════════════════════════════ *)
+
+PROCEDURE DbgStr(s: ARRAY OF CHAR);
+VAR i: INTEGER;
+BEGIN
+  IF dbgF = NIL THEN RETURN END;
+  i := 0;
+  WHILE s[i] # 0X DO Files.Write(dbgR, ORD(s[i])); INC(i) END
+END DbgStr;
+
+PROCEDURE DbgInt(n: INTEGER);
+VAR s: ARRAY 16 OF CHAR;
+BEGIN Strings.IntToStr(n, s); DbgStr(s) END DbgInt;
+
+PROCEDURE DbgHex(n: INTEGER);
+VAR d, shift: INTEGER;
+    c: CHAR;
+BEGIN
+  IF dbgF = NIL THEN RETURN END;
+  Files.Write(dbgR, ORD('0')); Files.Write(dbgR, ORD('x'));
+  n := n MOD 65536;  (* 4 hex digits *)
+  shift := 12;
+  WHILE shift >= 0 DO
+    d := (n DIV pw2[shift]) MOD 16;
+    IF d < 10 THEN c := CHR(ORD('0') + d)
+    ELSE c := CHR(ORD('a') + d - 10) END;
+    Files.Write(dbgR, ORD(c));
+    DEC(shift, 4)
+  END
+END DbgHex;
+
+PROCEDURE DbgNL;
+BEGIN Files.Write(dbgR, ORD(0AX)) END DbgNL;
 
 (* ══════════════════════════════════════════════════════════════
    Memory access
@@ -255,6 +299,9 @@ END FlushWord;
 
 PROCEDURE EmitChar(c: CHAR);
 BEGIN
+  IF (dbgF # NIL) & (dbgN < DBGMAX) THEN
+    DbgStr("  EMIT "); DbgInt(ORD(c)); DbgNL
+  END;
   (* Stream 3 (memory): capture output, suppress screen *)
   IF strm3 > 0 THEN
     WB(strm3 + 2 + strm3len, ORD(c));
@@ -1109,7 +1156,13 @@ VAR
     END
   END ReadOps1;
 
+VAR dbgPC : INTEGER;
 BEGIN
+  IF (dbgF # NIL) & (dbgN < DBGMAX) THEN
+    INC(dbgN);
+    DbgHex(pc); DbgStr(" ob="); DbgHex(RB(pc)); DbgNL
+  END;
+  dbgPC := pc;
   opbyte := RB(pc);  INC(pc);
 
   (* Decode form *)
@@ -1695,6 +1748,14 @@ VAR fname : ARRAY 256 OF CHAR;
     i     : INTEGER;
 
 BEGIN
+  (* Debug file *)
+  dbgF := Files.New("/tmp/zmdbg.txt");
+  IF dbgF # NIL THEN
+    Files.Set(dbgR, dbgF, 0);
+    Files.Register(dbgF)
+  END;
+  dbgN := 0;
+
   (* Build tables *)
   pw2[0] := 1;
   FOR i := 1 TO 16 DO pw2[i] := pw2[i-1] * 2 END;
