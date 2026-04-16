@@ -2,20 +2,31 @@ MODULE epub;
 (*
  * epub — terminal EPUB reader.
  *
- * Usage: epub <file.epub>
+ * Usage: epub [--img] <file.epub>
+ *
+ * Options:
+ *   --img              show inline images via iTerm2 protocol (off by default)
  *
  * Keys:
- *   Up / Down          scroll one line
- *   PgUp / PgDn        scroll one page
- *   Left / Right       previous / next chapter
+ *   Up / k             scroll one line up
+ *   Down / j           scroll one line down
+ *   PgUp               scroll one page up
+ *   PgDn               scroll one page down
+ *   Left / h           previous chapter
+ *   Right / l          next chapter
+ *   Mouse wheel        scroll three lines
+ *   v                  enter visual line-select mode
+ *   (in visual)  j/k   move selection cursor
+ *   (in visual)  Enter translate selection with trans(1)
+ *   (in visual)  Esc/v cancel selection
  *   Ctrl+F             find (forward search)
- *   Ctrl+Q / Esc       quit (saves position)
+ *   q / Ctrl+Q / Esc   quit (saves position)
  *
  * Position is saved in ~/.epub_positions so the book reopens
  * at the last-read line.
  *)
 
-IMPORT Zip, XHTML, Terminal, Graphics, Strings, Files, Args, Dict, Out, Base64;
+IMPORT Zip, XHTML, Terminal, Graphics, Strings, Files, Args, Dict, Out, Base64, OS;
 
 CONST
   MAXSPINE  = 256;
@@ -31,10 +42,20 @@ CONST
   KEY_ESC   = 27;
   KEY_CTRL_Q = 17;
   KEY_CTRL_F = 6;
+  KEY_MOUSE  = 5;   (* Terminal.ReadKey returns CHR(5) for mouse events *)
 
-  CLR_STATUS = 0;  BG_STATUS = 24;   (* black on blue   *)
-  CLR_FIND   = 0;  BG_FIND   = 226;  (* black on yellow *)
-  CLR_TEXT   = 255; BG_TEXT  = 0;
+  MOUSE_WHEEL_UP   = 64;
+  MOUSE_WHEEL_DOWN = 65;
+  MOUSE_SCROLL_LINES = 3;
+
+  CLR_STATUS = 0;   BG_STATUS = 24;   (* black on blue          *)
+  CLR_FIND   = 0;   BG_FIND   = 226;  (* black on yellow        *)
+  CLR_TEXT   = 255; BG_TEXT   = 0;
+  CLR_SEL    = 0;   BG_SEL    = 75;   (* black on sky-blue      *)
+  CLR_SELCUR = 0;   BG_SELCUR = 226;  (* black on yellow cursor *)
+  CLR_POP    = 255; BG_POP    = 18;   (* white on dark blue     *)
+  CLR_POPBDR = 226; BG_POPBDR = 18;   (* yellow on dark blue    *)
+  CLR_POPFTR = 245; BG_POPFTR = 18;   (* grey on dark blue      *)
 
 VAR
   archive   : Zip.Archive;
@@ -61,9 +82,19 @@ VAR
   tRows     : INTEGER;
   visRows   : INTEGER;
 
-  findStr   : ARRAY 128 OF CHAR;
-  statusMsg : ARRAY 128 OF CHAR;
-  running   : BOOLEAN;
+  findStr    : ARRAY 128 OF CHAR;
+  statusMsg  : ARRAY 128 OF CHAR;
+  running    : BOOLEAN;
+  showImages : BOOLEAN;
+
+  (* visual selection *)
+  selMode    : BOOLEAN;
+  selAnchor  : INTEGER;  (* line where 'v' was pressed *)
+  selCursor  : INTEGER;  (* current cursor line        *)
+
+  (* translation output buffers *)
+  transOut   : ARRAY 16384 OF CHAR;
+  cleanBuf   : ARRAY 16384 OF CHAR;
 
   idMap     : Dict.Table;
 
@@ -107,6 +138,28 @@ BEGIN
   ELSE dir[0] := 0X
   END
 END DirOf;
+
+(* ── strip ANSI escape sequences from src into dst ──────────────── *)
+PROCEDURE StripAnsi(src: ARRAY OF CHAR; VAR dst: ARRAY OF CHAR);
+VAR i, j: INTEGER;
+BEGIN
+  i := 0; j := 0;
+  WHILE (src[i] # 0X) & (j < LEN(dst) - 1) DO
+    IF src[i] = 1BX THEN
+      INC(i);
+      IF src[i] = '[' THEN  (* CSI sequence: skip until final 0x40-0x7E *)
+        INC(i);
+        WHILE (src[i] # 0X) & ((src[i] < '@') OR (src[i] > '~')) DO INC(i) END;
+        IF src[i] # 0X THEN INC(i) END
+      END
+    ELSIF src[i] = 0DX THEN  (* strip CR *)
+      INC(i)
+    ELSE
+      dst[j] := src[i]; INC(j); INC(i)
+    END
+  END;
+  dst[j] := 0X
+END StripAnsi;
 
 (* ── word-wrap helpers ──────────────────────────────────────────── *)
 PROCEDURE WFlushLine();
@@ -329,31 +382,183 @@ BEGIN
   Graphics.Reset  (* flushes stdout and resets any colour state *)
 END EmitImage;
 
+(* ── translation popup ───────────────────────────────────────────
+   ShowPopup draws a centred box, renders text inside it (wrapping
+   at the inner width), waits for any keypress, then returns so the
+   caller's normal DrawAll() repaints the screen cleanly.           *)
+
+PROCEDURE ShowPopup(text: ARRAY OF CHAR);
+VAR
+  popW, popH, popX, popY, maxCont: INTEGER;
+  i, c, r, lc: INTEGER;
+BEGIN
+  (* inner width (content area, excluding border and 1-space padding) *)
+  popW := tCols - 8;
+  IF popW > 68 THEN popW := 68 END;
+  IF popW < 20 THEN popW := 20 END;
+
+  (* count content lines needed *)
+  lc := 0; c := 0; i := 0;
+  WHILE text[i] # 0X DO
+    IF (text[i] = 0AX) OR (c = popW) THEN INC(lc); c := 0 END;
+    IF text[i] # 0AX THEN INC(c) END;
+    INC(i)
+  END;
+  IF c > 0 THEN INC(lc) END;  (* last partial line *)
+  IF lc = 0 THEN lc := 1 END;
+
+  maxCont := visRows - 6;
+  IF maxCont < 3 THEN maxCont := 3 END;
+  IF lc > maxCont THEN lc := maxCont END;
+
+  popH := lc + 3;  (* top border + content + footer + bottom border *)
+  popX := (tCols - popW - 4) DIV 2 + 1;
+  popY := (visRows - popH) DIV 2 + 1;
+
+  (* ── top border ── *)
+  Terminal.Goto(popX, popY);
+  Graphics.Color256(CLR_POPBDR, BG_POPBDR);
+  Out.Char('+');
+  c := 0; WHILE c < popW + 2 DO Out.Char('-'); INC(c) END;
+  Out.Char('+');
+
+  (* ── content lines ── *)
+  i := 0;
+  FOR r := 1 TO lc DO
+    Terminal.Goto(popX, popY + r);
+    Graphics.Color256(CLR_POPBDR, BG_POPBDR); Out.Char('|');
+    Graphics.Color256(CLR_POP,    BG_POP);    Out.Char(' ');
+    c := 0;
+    WHILE (text[i] # 0X) & (text[i] # 0AX) & (c < popW) DO
+      Out.Char(text[i]); INC(i); INC(c)
+    END;
+    IF text[i] = 0AX THEN INC(i) END;  (* consume newline *)
+    WHILE c < popW DO Out.Char(' '); INC(c) END;
+    Out.Char(' ');
+    Graphics.Color256(CLR_POPBDR, BG_POPBDR); Out.Char('|')
+  END;
+
+  (* ── footer ── *)
+  Terminal.Goto(popX, popY + lc + 1);
+  Graphics.Color256(CLR_POPBDR, BG_POPBDR); Out.Char('|');
+  Graphics.Color256(CLR_POPFTR, BG_POPFTR); Out.Char(' ');
+  Out.String("Press any key to close");
+  c := 22;
+  WHILE c < popW DO Out.Char(' '); INC(c) END;
+  Out.Char(' ');
+  Graphics.Color256(CLR_POPBDR, BG_POPBDR); Out.Char('|');
+
+  (* ── bottom border ── *)
+  Terminal.Goto(popX, popY + popH - 1);
+  Graphics.Color256(CLR_POPBDR, BG_POPBDR);
+  Out.Char('+');
+  c := 0; WHILE c < popW + 2 DO Out.Char('-'); INC(c) END;
+  Out.Char('+');
+  Graphics.Reset;
+
+  (* wait for dismiss *)
+  c := ORD(Terminal.ReadKey())
+END ShowPopup;
+
+(* ── run trans on selected lines, show result in popup ──────────── *)
+PROCEDURE TranslateSelection();
+VAR
+  lo, hi, li: INTEGER;
+  f: Files.File; r: Files.Rider;
+  i, len: INTEGER;
+BEGIN
+  lo := selAnchor; hi := selCursor;
+  IF lo > hi THEN lo := selCursor; hi := selAnchor END;
+
+  (* write selected text to temp file, skipping image placeholder lines *)
+  f := Files.New("/tmp/epub_trans_in.txt");
+  IF f = NIL THEN RETURN END;
+  Files.Set(r, f, 0);
+  li := lo;
+  WHILE li <= hi DO
+    IF (li >= 0) & (li < nLines) THEN
+      i := lineOff[li];
+      IF ~((lineLen[li] > 5) & (wrapBuf[i] = '[') & (wrapBuf[i+1] = 'I') &
+           (wrapBuf[i+2] = 'M') & (wrapBuf[i+3] = 'G') & (wrapBuf[i+4] = ':')) THEN
+        len := lineLen[li]; i := lineOff[li];
+        WHILE len > 0 DO Files.Write(r, wrapBuf[i]); INC(i); DEC(len) END;
+        Files.Write(r, 0AX)
+      END
+    END;
+    INC(li)
+  END;
+  Files.Register(f); Files.Close(f);
+
+  (* run trans, capture output *)
+  OS.Exec("trans -brief < /tmp/epub_trans_in.txt > /tmp/epub_trans_out.txt 2>&1");
+
+  (* read output into transOut *)
+  transOut[0] := 0X;
+  f := Files.Old("/tmp/epub_trans_out.txt");
+  IF f # NIL THEN
+    Files.Set(r, f, 0);
+    i := 0;
+    WHILE ~r.eof & (i < LEN(transOut) - 1) DO
+      Files.Read(r, transOut[i]); INC(i)
+    END;
+    transOut[i] := 0X;
+    Files.Close(f)
+  END;
+  IF transOut[0] = 0X THEN
+    COPY("(no output — is translate-shell installed?)", transOut)
+  END;
+
+  selMode := FALSE;
+  StripAnsi(transOut, cleanBuf);
+  ShowPopup(cleanBuf)
+END TranslateSelection;
+
 (* ── drawing ─────────────────────────────────────────────────── *)
 PROCEDURE DrawLine(li, y: INTEGER);
 VAR i, len, col, j: INTEGER;
     imgSrc: ARRAY 512 OF CHAR;
     imgFull: ARRAY 1024 OF CHAR;
-    isImg: BOOLEAN;
+    isImg, isSel: BOOLEAN;
+    lo, hi: INTEGER;
 BEGIN
   Terminal.Goto(1, y);
+
+  (* compute selection range *)
+  lo := selAnchor; hi := selCursor;
+  IF lo > hi THEN lo := selCursor; hi := selAnchor END;
+
+  isSel := selMode & (li >= 0) & (li < nLines) & (li >= lo) & (li <= hi);
+
   isImg := FALSE;
   IF (li >= 0) & (li < nLines) & (lineLen[li] > 5) THEN
     i := lineOff[li];
     isImg := (wrapBuf[i]   = '[') & (wrapBuf[i+1] = 'I') &
              (wrapBuf[i+2] = 'M') & (wrapBuf[i+3] = 'G') & (wrapBuf[i+4] = ':')
   END;
+
   IF isImg THEN
-    (* extract path from [IMG:path] and display via iTerm2 *)
-    i := lineOff[li] + 5; j := 0;
-    WHILE (wrapBuf[i] # ']') & (wrapBuf[i] # 0X) & (j < 511) DO
-      imgSrc[j] := wrapBuf[i]; INC(i); INC(j)
-    END;
-    imgSrc[j] := 0X;
-    ImgFullPath(imgSrc, imgFull);
-    EmitImage(imgFull)
+    IF showImages THEN
+      i := lineOff[li] + 5; j := 0;
+      WHILE (wrapBuf[i] # ']') & (wrapBuf[i] # 0X) & (j < 511) DO
+        imgSrc[j] := wrapBuf[i]; INC(i); INC(j)
+      END;
+      imgSrc[j] := 0X;
+      ImgFullPath(imgSrc, imgFull);
+      EmitImage(imgFull)
+    ELSE
+      IF isSel THEN Graphics.Color256(CLR_SEL, BG_SEL)
+      ELSE Graphics.Color256(CLR_TEXT, BG_TEXT) END;
+      col := 0;
+      WHILE col < tCols DO Out.Char(' '); INC(col) END;
+      Graphics.Reset
+    END
   ELSE
-    Graphics.Color256(CLR_TEXT, BG_TEXT);
+    IF isSel THEN
+      IF li = selCursor THEN Graphics.Color256(CLR_SELCUR, BG_SELCUR)
+      ELSE Graphics.Color256(CLR_SEL, BG_SEL) END
+    ELSE
+      Graphics.Color256(CLR_TEXT, BG_TEXT)
+    END;
     col := 0;
     IF (li >= 0) & (li < nLines) THEN
       len := lineLen[li]; i := lineOff[li];
@@ -379,6 +584,7 @@ BEGIN
   ELSE pct := 100
   END;
   Out.String("  "); Out.Int(pct); Out.String("%");
+  IF selMode THEN Out.String("  [VISUAL]") END;
   IF statusMsg[0] # 0X THEN Out.String("  "); Out.String(statusMsg) END;
   Graphics.Reset
 END DrawStatus;
@@ -524,41 +730,77 @@ PROCEDURE HandleKey(k: INTEGER);
 VAR found: INTEGER;
 BEGIN
   statusMsg[0] := 0X;
-  IF k = KEY_UP THEN
-    DEC(topLine); ClampTop()
-  ELSIF k = KEY_DOWN THEN
-    INC(topLine); ClampTop()
-  ELSIF k = KEY_PGUP THEN
-    DEC(topLine, visRows); ClampTop(); SavePos()
-  ELSIF k = KEY_PGDN THEN
-    INC(topLine, visRows); ClampTop(); SavePos()
-  ELSIF k = KEY_LEFT THEN
-    IF curChap > 0 THEN
-      DEC(curChap); topLine := 0; LoadChapter(); SavePos()
+
+  IF selMode THEN
+    (* ── visual selection mode ── *)
+    IF (k = KEY_UP) OR (k = ORD('k')) THEN
+      IF selCursor > 0 THEN DEC(selCursor) END;
+      IF selCursor < topLine THEN DEC(topLine); ClampTop() END
+    ELSIF (k = KEY_DOWN) OR (k = ORD('j')) THEN
+      IF selCursor < nLines - 1 THEN INC(selCursor) END;
+      IF selCursor >= topLine + visRows THEN INC(topLine); ClampTop() END
+    ELSIF k = 13 THEN  (* Enter/Return *)
+      TranslateSelection()
+    ELSIF (k = KEY_ESC) OR (k = ORD('v')) THEN
+      selMode := FALSE
     END
-  ELSIF k = KEY_RIGHT THEN
-    IF curChap < nSpine - 1 THEN
-      INC(curChap); topLine := 0; LoadChapter(); SavePos()
-    END
-  ELSIF k = KEY_CTRL_F THEN
-    IF Prompt("Find: ", findStr) THEN
-      found := FindNext(topLine + 1);
-      IF found >= 0 THEN topLine := found; ClampTop()
-      ELSE COPY("Not found.", statusMsg)
+
+  ELSE
+    (* ── normal mode ── *)
+    IF (k = KEY_UP) OR (k = ORD('k')) THEN
+      DEC(topLine); ClampTop()
+    ELSIF (k = KEY_DOWN) OR (k = ORD('j')) THEN
+      INC(topLine); ClampTop()
+    ELSIF k = KEY_PGUP THEN
+      DEC(topLine, visRows); ClampTop(); SavePos()
+    ELSIF k = KEY_PGDN THEN
+      INC(topLine, visRows); ClampTop(); SavePos()
+    ELSIF (k = KEY_LEFT) OR (k = ORD('h')) THEN
+      IF curChap > 0 THEN
+        DEC(curChap); topLine := 0; LoadChapter(); SavePos()
       END
+    ELSIF (k = KEY_RIGHT) OR (k = ORD('l')) THEN
+      IF curChap < nSpine - 1 THEN
+        INC(curChap); topLine := 0; LoadChapter(); SavePos()
+      END
+    ELSIF k = KEY_MOUSE THEN
+      IF Terminal.MouseBtn() = MOUSE_WHEEL_UP THEN
+        DEC(topLine, MOUSE_SCROLL_LINES); ClampTop()
+      ELSIF Terminal.MouseBtn() = MOUSE_WHEEL_DOWN THEN
+        INC(topLine, MOUSE_SCROLL_LINES); ClampTop()
+      END
+    ELSIF k = ORD('v') THEN
+      selMode := TRUE; selAnchor := topLine; selCursor := topLine
+    ELSIF k = KEY_CTRL_F THEN
+      IF Prompt("Find: ", findStr) THEN
+        found := FindNext(topLine + 1);
+        IF found >= 0 THEN topLine := found; ClampTop()
+        ELSE COPY("Not found.", statusMsg)
+        END
+      END
+    ELSIF (k = ORD('q')) OR (k = KEY_CTRL_Q) OR (k = KEY_ESC) THEN
+      SavePos(); running := FALSE
     END
-  ELSIF (k = KEY_CTRL_Q) OR (k = KEY_ESC) THEN
-    SavePos(); running := FALSE
   END
 END HandleKey;
 
 (* ── main ──────────────────────────────────────────────────────── *)
-VAR k: INTEGER;
+VAR k, argIdx: INTEGER; argTmp: ARRAY 512 OF CHAR;
 BEGIN
-  IF Args.Count() < 1 THEN
-    Out.String("Usage: epub <file.epub>"); Out.Ln; HALT(1)
+  showImages := FALSE; epubPath[0] := 0X;
+  argIdx := 1;
+  WHILE argIdx <= Args.Count() DO
+    Args.Get(argIdx, argTmp);
+    IF Strings.Compare(argTmp, "--img") = 0 THEN
+      showImages := TRUE
+    ELSIF epubPath[0] = 0X THEN
+      COPY(argTmp, epubPath)
+    END;
+    INC(argIdx)
   END;
-  Args.Get(1, epubPath);
+  IF epubPath[0] = 0X THEN
+    Out.String("Usage: epub [--img] <file.epub>"); Out.Ln; HALT(1)
+  END;
 
   archive := Zip.Open(epubPath);
   IF archive = NIL THEN
@@ -568,6 +810,7 @@ BEGIN
   Dict.Init(idMap);
   nSpine := 0; curChap := 0; topLine := 0;
   bookTitle[0] := 0X; findStr[0] := 0X; statusMsg[0] := 0X;
+  selMode := FALSE; selAnchor := 0; selCursor := 0;
 
   IF ~LoadContainer() THEN
     Out.String("Not a valid EPUB (missing container.xml)"); Out.Ln; HALT(1)
@@ -584,6 +827,7 @@ BEGIN
   LoadChapter(); ClampTop();
   running := TRUE;
   Terminal.Clear();
+  Terminal.MouseOn();
   DrawAll();
 
   WHILE running DO
@@ -594,5 +838,6 @@ BEGIN
     IF running THEN DrawAll() END
   END;
 
+  Terminal.MouseOff();
   Terminal.Clear()
 END epub.
