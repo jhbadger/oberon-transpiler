@@ -25,7 +25,7 @@ MODULE Aria;
  * ============================================================
  *)
 
-IMPORT In, Out, Strings, Random;
+IMPORT In, Out, Strings, Random, Args, OS;
 
 CONST
   NRULES  = 90;
@@ -44,6 +44,7 @@ VAR
   nrules   : INTEGER;
   lastRule : INTEGER;
   userName : ARRAY 64 OF CHAR;   (* remembered across turns *)
+  talkMode : BOOLEAN;             (* TRUE when --talk is active *)
 
 (* ── Knowledge-base helpers ──────────────────────────────────────── *)
 
@@ -544,6 +545,35 @@ END InitRules;
 
 (* ── Main ────────────────────────────────────────────────────────── *)
 
+PROCEDURE Say(text : ARRAY OF CHAR);
+(* Pass text to the system 'say' TTS command, escaping single quotes. *)
+VAR
+  cmd : ARRAY 1024 OF CHAR;
+  i, j, n : INTEGER;
+  c : CHAR;
+BEGIN
+  COPY("say '", cmd);
+  j := Strings.Length(cmd);
+  n := Strings.Length(text);
+  i := 0;
+  WHILE i < n DO
+    c := text[i];
+    IF c = "'" THEN
+      (* replace ' with '\'' to safely escape inside single-quoted shell arg *)
+      cmd[j] := "'";  INC(j);
+      cmd[j] := "\"; INC(j);
+      cmd[j] := "'";  INC(j);
+      cmd[j] := "'";  INC(j)
+    ELSE
+      cmd[j] := c;  INC(j)
+    END;
+    INC(i)
+  END;
+  cmd[j] := "'";  INC(j);
+  cmd[j] := 0X;
+  i := OS.Exec(cmd)
+END Say;
+
 PROCEDURE ProcessName(VAR inp : ARRAY OF CHAR);
 (* If the user introduced themselves, store the name. *)
 VAR cap : ARRAY BUFLEN OF CHAR;
@@ -560,20 +590,34 @@ VAR
   input  : ARRAY BUFLEN OF CHAR;
   reply  : ARRAY BUFLEN OF CHAR;
   norm   : ARRAY BUFLEN OF CHAR;
+  arg    : ARRAY BUFLEN OF CHAR;
   done   : BOOLEAN;
+  i      : INTEGER;
 
 BEGIN
   InitRules;
   userName[0] := 0X;
-  done := FALSE;
+  talkMode    := FALSE;
+  done        := FALSE;
+
+  (* Parse command-line arguments *)
+  i := 1;
+  WHILE i <= Args.Count() DO
+    Args.Get(i, arg);
+    IF Strings.Compare(arg, "--talk") = 0 THEN
+      talkMode := TRUE
+    END;
+    INC(i)
+  END;
 
   Out.String("╔══════════════════════════════════════╗"); Out.Ln;
   Out.String("║  ARIA - Conversational Assistant     ║"); Out.Ln;
   Out.String("║  Type 'quit' to exit.                ║"); Out.Ln;
   Out.String("╚══════════════════════════════════════╝"); Out.Ln;
   Out.Ln;
-  Out.String("ARIA: Hello! I am ARIA. What would you like to talk about?");
-  Out.Ln; Out.Ln;
+  COPY("Hello! I am ARIA. What would you like to talk about?", reply);
+  Out.String("ARIA: "); Out.String(reply); Out.Ln; Out.Ln;
+  IF talkMode THEN Say(reply) END;
 
   REPEAT
     Out.String("You : ");
@@ -591,6 +635,7 @@ BEGIN
       Out.String("ARIA: ");
       Out.String(reply);
       Out.Ln; Out.Ln;
+      IF talkMode THEN Say(reply) END;
 
       (* check for quit after generating the farewell reply *)
       IF (Strings.Compare(norm, "quit")      = 0) OR
