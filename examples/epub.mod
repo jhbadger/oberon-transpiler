@@ -466,12 +466,19 @@ VAR
   lo, hi, li: INTEGER;
   f: Files.File; r: Files.Rider;
   i, len: INTEGER;
+  home, inPath, outPath, cmd: ARRAY 512 OF CHAR;
 BEGIN
   lo := selAnchor; hi := selCursor;
   IF lo > hi THEN lo := selCursor; hi := selAnchor END;
 
-  (* write selected text to temp file, skipping image placeholder lines *)
-  f := Files.New("/tmp/epub_trans_in.txt");
+  (* build paths under $HOME so they are writable everywhere *)
+  Args.GetEnv("HOME", home);
+  IF home[0] = 0X THEN home[0] := '.'; home[1] := 0X END;
+  COPY(home, inPath);  Strings.Append("/.epub_trans_in.txt",  inPath);
+  COPY(home, outPath); Strings.Append("/.epub_trans_out.txt", outPath);
+
+  (* write selected text, skipping image placeholder lines *)
+  f := Files.New(inPath);
   IF f = NIL THEN RETURN END;
   Files.Set(r, f, 0);
   li := lo;
@@ -490,11 +497,14 @@ BEGIN
   Files.Register(f); Files.Close(f);
 
   (* run trans, capture output *)
-  OS.Exec("trans -brief < /tmp/epub_trans_in.txt > /tmp/epub_trans_out.txt 2>&1");
+  COPY("trans -brief < ", cmd); Strings.Append(inPath, cmd);
+  Strings.Append(" > ", cmd);   Strings.Append(outPath, cmd);
+  Strings.Append(" 2>&1", cmd);
+  OS.Exec(cmd);
 
   (* read output into transOut *)
   transOut[0] := 0X;
-  f := Files.Old("/tmp/epub_trans_out.txt");
+  f := Files.Old(outPath);
   IF f # NIL THEN
     Files.Set(r, f, 0);
     i := 0;
