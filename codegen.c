@@ -826,6 +826,10 @@ static void emit_string_capacity(CG *g, Node *arg) {
         Node *t = sym_type(arg->str);
         if (t && t->kind == ND_TNAME && !strcmp(t->str, "STRING"))
             { emit(g, "256"); return; }
+        /* Open-array VAR param decays to char* in C, so sizeof gives pointer
+         * size (8), not the actual buffer length.  Use the hidden _len instead. */
+        if (is_open_array(t))
+            { emit(g, "%s_len", arg->str); return; }
     }
     emit(g, "sizeof("); emit_expr(g, arg); emit(g, ")");
 }
@@ -1419,9 +1423,11 @@ static void emit_stmt(CG *g, Node *s) {
                 if (!first_s) emit(g,",");
                 first_s = 0;
                 int is_var = fp ? (fp->flags & FLAG_VAR_PARAM) != 0 : 0;
-                if (is_var) emit_addr_of(g, a);
-                else        emit_expr(g, a);
-                if (fp && is_open_array(fp->c1)) { emit(g,","); emit_open_array_len(g,a); }
+                int ioa    = fp ? is_open_array(fp->c1) : 0;
+                if (is_var)   emit_addr_of(g, a);
+                else if (ioa) emit_as_string(g, a);  /* single-char "x" must stay "x", not 'x' */
+                else          emit_expr(g, a);
+                if (fp && ioa) { emit(g,","); emit_open_array_len(g,a); }
                 if (fp) {
                     fp_id = fp_id ? fp_id->next : NULL;
                     if (!fp_id) { fp = fp->next; fp_id = fp ? fp->c0 : NULL; }
@@ -1515,7 +1521,11 @@ static void emit_stmt(CG *g, Node *s) {
         break;
 
     case ND_CASE: {
-        /* Emit as if/else if chain (switch can't handle string/range cases) */
+        /* Hoist the case expression into a temp so it is evaluated exactly once.
+         * Without this, function-call expressions (e.g. Random.Int(5)) would be
+         * re-called for every branch comparison, producing wrong results. */
+        iemit(g,"{ int _case_val_ = (int)("); emit_expr(g,s->c0); emit(g,");\n");
+        g->indent++;
         int first = 1;
         for (Node *cl=s->c1;cl;cl=cl->next) {
             /* Build condition from labels */
@@ -1526,13 +1536,10 @@ static void emit_stmt(CG *g, Node *s) {
                 if (!lf) emit(g," || ");
                 if (lb->c1) {
                     /* range: lo..hi */
-                    emit(g,"("); emit_expr(g,s->c0);
-                    emit(g,">="); emit_expr(g,lb->c0);
-                    emit(g," && "); emit_expr(g,s->c0);
-                    emit(g,"<="); emit_expr(g,lb->c1); emit(g,")");
+                    emit(g,"(_case_val_>="); emit_expr(g,lb->c0);
+                    emit(g," && _case_val_<="); emit_expr(g,lb->c1); emit(g,")");
                 } else {
-                    emit(g,"("); emit_expr(g,s->c0);
-                    emit(g,"=="); emit_expr(g,lb->c0); emit(g,")");
+                    emit(g,"(_case_val_=="); emit_expr(g,lb->c0); emit(g,")");
                 }
                 lf = 0;
             }
@@ -1550,6 +1557,8 @@ static void emit_stmt(CG *g, Node *s) {
             }
             iemit(g,"}\n");
         }
+        g->indent--;
+        iemit(g,"}\n");
         break;
     }
 
