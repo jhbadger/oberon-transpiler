@@ -966,7 +966,7 @@ static int try_emit_import(CG *g, Node *fa, Node *args) {
     if (!strcmp(mod,"Strings")) {
         Node *a2=a1?a1->next:NULL;
         if (!strcmp(proc,"Length"))  { emit(g,"Strings_Length(");  emit_as_string(g,a0); emit(g,")"); return 1; }
-        if (!strcmp(proc,"Append"))  { emit(g,"Strings_Append(");  emit_as_string(g,a0); emit(g,","); emit_expr(g,a1); emit(g,")"); return 1; }
+        if (!strcmp(proc,"Append"))  { emit(g,"Strings_Append(");  emit_as_string(g,a0); emit(g,","); emit_expr(g,a1); emit(g,",sizeof("); emit_expr(g,a1); emit(g,"))"); return 1; }
         if (!strcmp(proc,"Copy"))    { emit(g,"Strings_Copy(");    emit_as_string(g,a0); emit(g,","); emit_expr(g,a1); emit(g,")"); return 1; }
         if (!strcmp(proc,"Compare")) { emit(g,"Strings_Compare("); emit_as_string(g,a0); emit(g,","); emit_as_string(g,a1); emit(g,")"); return 1; }
         if (!strcmp(proc,"Pos"))      { emit(g,"Strings_PosFrom(");   emit_as_string(g,a0); emit(g,","); emit_as_string(g,a1); emit(g,","); if (a2) emit_expr(g,a2); else emit(g,"0"); emit(g,")"); return 1; }
@@ -1716,7 +1716,12 @@ static void emit_local_vars(CG *g, Node *decls) {
         if (d->kind != ND_VAR_DECL) continue;
         for (Node *id=d->c0; id; id=id->next) {
             sym_add(id->str, d->c1, 0);
-            iemit(g,""); emit_var_decl_raw(g, id->str, d->c1, 0); emit(g,";\n");
+            iemit(g,""); emit_var_decl_raw(g, id->str, d->c1, 0);
+            /* Oberon requires local variables to be zero-initialised */
+            if (d->c1 && (d->c1->kind==ND_TARRAY ||
+                          (d->c1->kind==ND_TNAME && !strcmp(d->c1->str,"STRING"))))
+                emit(g,"={0}");
+            emit(g,";\n");
             /* Initialise _tag for stack-allocated records */
             if (d->c1 && d->c1->kind==ND_TNAME && is_known_record_type(d->c1->str))
                 iemit(g,"%s._tag = _TAG_%s;\n", id->str, d->c1->str);
@@ -2453,9 +2458,10 @@ void codegen(Node *module, FILE *out, int is_main) {
         emit(g,"static int Strings_Length(const char *s) {\n");
         emit(g,"    return (int)strlen(s);\n");
         emit(g,"}\n");
-        /* Append(extra, VAR dst) — dst := dst + extra */
-        emit(g,"static void Strings_Append(const char *src, char *dst) {\n");
-        emit(g,"    size_t dl=strlen(dst), sl=strlen(src), cap=256;\n");
+        /* Append(extra, VAR dst, cap) — dst := dst + extra, bounded by cap */
+        emit(g,"static void Strings_Append(const char *src, char *dst, size_t cap) {\n");
+        emit(g,"    size_t dl=strlen(dst), sl=strlen(src);\n");
+        emit(g,"    if (cap==0) return;\n");
         emit(g,"    if (dl+sl < cap) strcat(dst, src);\n");
         emit(g,"    else { strncat(dst, src, cap-dl-1); dst[cap-1]=0; }\n");
         emit(g,"}\n");
