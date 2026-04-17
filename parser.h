@@ -88,7 +88,7 @@ typedef enum {
 #define FLAG_VAR_PARAM 2
 #define FLAG_HAS_ALIAS 4
 
-#define MAX_IDENT 128
+#define MAX_IDENT 256
 
 typedef struct Node Node;
 struct Node {

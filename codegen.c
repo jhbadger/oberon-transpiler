@@ -2917,15 +2917,25 @@ void codegen(Node *module, FILE *out, int is_main) {
     int has_consts = 0;
     for (Node *d=module->c1; d; d=d->next) {
         if (d->kind==ND_CONST_DECL) {
-            /* Library: exported consts get module prefix; private keep name.
-             * Use enum so the constant can serve as an array size.          */
             int exp = !is_main && (d->flags & FLAG_EXPORTED);
-            if (exp)
-                emit(g,"enum { %s_%s = ", g->modname, d->str);
-            else
-                emit(g,"enum { %s = ", d->str);
-            emit_expr(g, d->c0);
-            emit(g," };\n");
+            Node *val = d->c0;
+            if (val && val->kind == ND_STRING) {
+                /* String constant: enum can't hold strings; use static const array */
+                if (exp) emit(g,"static const char %s_%s[] = ", g->modname, d->str);
+                else     emit(g,"static const char %s[] = ", d->str);
+                emit_string_lit(g, val->str);
+                emit(g,";\n");
+            } else if (val && val->kind == ND_REAL) {
+                /* Real constant: enum can't hold floats; use static const double */
+                if (exp) emit(g,"static const double %s_%s = %s;\n", g->modname, d->str, val->str);
+                else     emit(g,"static const double %s = %s;\n", d->str, val->str);
+            } else {
+                /* Integer/char/expression: enum keeps array-size usability */
+                if (exp) emit(g,"enum { %s_%s = ", g->modname, d->str);
+                else     emit(g,"enum { %s = ", d->str);
+                emit_expr(g, d->c0);
+                emit(g," };\n");
+            }
             has_consts = 1;
         }
     }
@@ -3108,12 +3118,22 @@ void codegen_header(Node *module, FILE *out) {
     /* All constants (exported and private — both may be needed for type dimensions) */
     for (Node *d=module->c1; d; d=d->next) {
         if (d->kind==ND_CONST_DECL) {
-            if (d->flags & FLAG_EXPORTED)
-                fprintf(out,"enum { %s_%s = ", module->str, d->str);
-            else
-                fprintf(out,"enum { %s = ", d->str);
-            emit_expr(g, d->c0);
-            fprintf(out," };\n");
+            Node *val = d->c0;
+            int exp = d->flags & FLAG_EXPORTED;
+            if (val && val->kind == ND_STRING) {
+                if (exp) emit(g,"static const char %s_%s[] = ", module->str, d->str);
+                else     emit(g,"static const char %s[] = ", d->str);
+                emit_string_lit(g, val->str);
+                emit(g,";\n");
+            } else if (val && val->kind == ND_REAL) {
+                if (exp) emit(g,"static const double %s_%s = %s;\n", module->str, d->str, val->str);
+                else     emit(g,"static const double %s = %s;\n", d->str, val->str);
+            } else {
+                if (exp) fprintf(out,"enum { %s_%s = ", module->str, d->str);
+                else     fprintf(out,"enum { %s = ", d->str);
+                emit_expr(g, d->c0);
+                fprintf(out," };\n");
+            }
         }
     }
 

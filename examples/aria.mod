@@ -32,9 +32,14 @@ CONST
   MAXALT  = 5;
   BUFLEN  = 256;
 
-  (* Speech-to-text strings are inlined in the Listen procedure below.
+  (* ── Speech-to-text configuration ───────────────────────────────
    * Requires: sox (rec) and openai-whisper (whisper) on PATH.
-   * To change the STT tool, edit the STTREC/STTTRANS literals in Listen. *)
+   * To swap STT tools, change STTREC / STTTRANS here.
+   * ─────────────────────────────────────────────────────────────── *)
+  STTAUDIO = "aria_stt.wav";
+  STTTXT   = "aria_stt.txt";
+  STTREC   = "rec -q -t wav aria_stt.wav silence 1 0.1 3% 1 1.0 3%";
+  STTTRANS = "whisper aria_stt.wav --model tiny.en --output-format txt --output-dir . 2>/dev/null";
 
 TYPE
   Rule = RECORD
@@ -648,8 +653,7 @@ END Say;
 
 PROCEDURE Listen(VAR input : ARRAY OF CHAR);
 (* Record one utterance via sox, transcribe via whisper, return the text.
- * To swap STT tools, change the two string literals passed to OS.Exec
- * and the filename passed to Files.Old. *)
+ * To swap STT tools, change STTREC, STTTRANS, STTTXT in CONST above. *)
 VAR
   f  : Files.File;
   r  : Files.Rider;
@@ -658,9 +662,9 @@ VAR
 BEGIN
   input[0] := 0X;
   Out.String("  (listening...)"); Out.Ln;
-  IF OS.Exec("rec -q -t wav aria_stt.wav silence 1 0.1 3% 1 1.0 3%") = 0 THEN
-    IF OS.Exec("whisper aria_stt.wav --model tiny.en --output-format txt --output-dir . 2>/dev/null") = 0 THEN
-      f := Files.Old("aria_stt.txt");
+  IF OS.Exec(STTREC) = 0 THEN
+    IF OS.Exec(STTTRANS) = 0 THEN
+      f := Files.Old(STTTXT);
       IF f # NIL THEN
         Files.Set(r, f, 0);
         n := 0;
