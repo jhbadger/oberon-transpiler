@@ -17,7 +17,10 @@ MODULE epub;
  *   Mouse wheel        scroll three lines
  *   t                  table of contents browser
  *   r                  switch to a recently opened book
+ *   i                  show book metadata (author, publisher, date, language)
  *   f                  show footnote for first [#ref] on screen
+ *   n                  repeat last search forward
+ *   N                  repeat last search backward
  *   v                  enter visual line-select mode
  *   (in visual)  j/k   move selection cursor
  *   (in visual)  Enter translate selection with trans(1)
@@ -123,6 +126,12 @@ VAR
   posChaps  : ARRAY 128 OF ARRAY 16  OF CHAR;
   posLines  : ARRAY 128 OF ARRAY 16  OF CHAR;
   nPosOther : INTEGER;
+
+  (* book metadata from OPF dc: elements *)
+  bookAuthor    : ARRAY 128 OF CHAR;
+  bookPublisher : ARRAY 128 OF CHAR;
+  bookDate      : ARRAY 32  OF CHAR;
+  bookLang      : ARRAY 16  OF CHAR;
 
   (* word-wrap working state — module level so helpers can share *)
   wWp       : INTEGER;  (* write position in wrapBuf *)
@@ -449,22 +458,34 @@ END ParseSpine;
 
 PROCEDURE LoadOPF(): BOOLEAN;
 VAR n, pos, epos: INTEGER;
+
+  (* Extract the text content of the first occurrence of <dc:tag ...>text</dc:tag> *)
+  PROCEDURE DCField(tag: ARRAY OF CHAR; VAR val: ARRAY OF CHAR);
+  VAR p, e: INTEGER; needle: ARRAY 32 OF CHAR;
+  BEGIN
+    val[0] := 0X;
+    COPY("<dc:", needle); Strings.Append(tag, needle);
+    p := Strings.Pos(needle, opfBuf, 0);
+    IF p < 0 THEN RETURN END;
+    WHILE (opfBuf[p] # 0X) & (opfBuf[p] # '>') DO INC(p) END;
+    IF opfBuf[p] = '>' THEN INC(p) END;
+    e := p;
+    WHILE (opfBuf[e] # 0X) & (opfBuf[e] # '<') DO INC(e) END;
+    Strings.Extract(opfBuf, p, e - p, val);
+    Strings.Trim(val)
+  END DCField;
+
 BEGIN
   n := ReadEntry(opfPath, opfBuf);
   IF n < 0 THEN RETURN FALSE END;
   opfBuf[n] := 0X;
 
-  pos := Strings.Pos("<dc:title", opfBuf, 0);
-  IF pos >= 0 THEN
-    WHILE (opfBuf[pos] # 0X) & (opfBuf[pos] # '>') DO INC(pos) END;
-    IF opfBuf[pos] = '>' THEN INC(pos) END;
-    epos := pos;
-    WHILE (opfBuf[epos] # 0X) & (opfBuf[epos] # '<') DO INC(epos) END;
-    Strings.Extract(opfBuf, pos, epos - pos, bookTitle);
-    Strings.Trim(bookTitle)
-  ELSE
-    COPY("(no title)", bookTitle)
-  END;
+  DCField("title",     bookTitle);
+  DCField("creator",   bookAuthor);
+  DCField("publisher", bookPublisher);
+  DCField("date",      bookDate);
+  DCField("language",  bookLang);
+  IF bookTitle[0] = 0X THEN COPY("(no title)", bookTitle) END;
 
   ParseManifest(opfBuf);
   ParseSpine(opfBuf);
@@ -761,13 +782,22 @@ BEGIN
 END DrawLine;
 
 PROCEDURE DrawStatus();
-VAR pct, i: INTEGER;
+VAR pct, i, t: INTEGER; chapTitle: ARRAY 128 OF CHAR;
 BEGIN
+  (* Find the ToC title for the current chapter *)
+  chapTitle[0] := 0X;
+  FOR t := 0 TO nToc - 1 DO
+    IF Strings.Compare(tocHref[t], spineHref[curChap]) = 0 THEN
+      COPY(tocTitle[t], chapTitle)
+    END
+  END;
+
   Terminal.Goto(1, tRows);
   Graphics.Color256(CLR_STATUS, BG_STATUS);
   i := 0; WHILE i < tCols DO Out.Char(' '); INC(i) END;
   Terminal.Goto(1, tRows);
   Out.String(bookTitle);
+  IF chapTitle[0] # 0X THEN Out.String(" \u2014 "); Out.String(chapTitle) END;
   Out.String("  ch "); Out.Int(curChap + 1); Out.String("/"); Out.Int(nSpine);
   IF nLines > 0 THEN
     pct := (topLine + visRows) * 100 DIV nLines;
@@ -1014,7 +1044,9 @@ BEGIN
     COPY(chosen, epubPath);
     Dict.Init(idMap);
     nSpine := 0; nToc := 0; curChap := 0; topLine := 0;
-    ncxHref[0] := 0X; navHref[0] := 0X; bookTitle[0] := 0X;
+    ncxHref[0] := 0X; navHref[0] := 0X;
+    bookTitle[0] := 0X; bookAuthor[0] := 0X; bookPublisher[0] := 0X;
+    bookDate[0] := 0X; bookLang[0] := 0X;
     IF ~LoadContainer() OR ~LoadOPF() THEN
       COPY("Failed to load book.", statusMsg); RETURN
     END;
@@ -1064,6 +1096,22 @@ BEGIN
   END;
   RETURN -1
 END FindNext;
+
+(* ── search wrapBuf backwards from line 'from' ───────────────── *)
+PROCEDURE FindPrev(from: INTEGER): INTEGER;
+VAR li, hit: INTEGER;
+BEGIN
+  IF findStr[0] = 0X THEN RETURN -1 END;
+  li := from;
+  WHILE li >= 0 DO
+    hit := Strings.Pos(findStr, wrapBuf, lineOff[li]);
+    IF (hit >= lineOff[li]) & (hit < lineOff[li] + lineLen[li]) THEN
+      RETURN li
+    END;
+    DEC(li)
+  END;
+  RETURN -1
+END FindPrev;
 
 (* ── ToC browser ─────────────────────────────────────────────── *)
 
@@ -1210,6 +1258,35 @@ BEGIN
   END
 END ShowFootnote;
 
+(* ── metadata popup ──────────────────────────────────────────── *)
+PROCEDURE ShowMeta();
+VAR text: ARRAY 1024 OF CHAR;
+BEGIN
+  text[0] := 0X;
+  IF bookTitle[0] # 0X THEN
+    Strings.Append("Title:     ", text); Strings.Append(bookTitle, text);
+    Strings.Append("\n", text)
+  END;
+  IF bookAuthor[0] # 0X THEN
+    Strings.Append("Author:    ", text); Strings.Append(bookAuthor, text);
+    Strings.Append("\n", text)
+  END;
+  IF bookPublisher[0] # 0X THEN
+    Strings.Append("Publisher: ", text); Strings.Append(bookPublisher, text);
+    Strings.Append("\n", text)
+  END;
+  IF bookDate[0] # 0X THEN
+    Strings.Append("Date:      ", text); Strings.Append(bookDate, text);
+    Strings.Append("\n", text)
+  END;
+  IF bookLang[0] # 0X THEN
+    Strings.Append("Language:  ", text); Strings.Append(bookLang, text);
+    Strings.Append("\n", text)
+  END;
+  IF text[0] = 0X THEN COPY("No metadata found.", text) END;
+  ShowPopup(text)
+END ShowMeta;
+
 (* ── key handler ─────────────────────────────────────────────── *)
 PROCEDURE HandleKey(k: INTEGER);
 VAR found, chapIdx: INTEGER;
@@ -1278,9 +1355,29 @@ BEGIN
       ShowFootnote()
     ELSIF k = ORD('r') THEN
       SwitchBook()
+    ELSIF k = ORD('i') THEN
+      ShowMeta()
     ELSIF k = KEY_CTRL_F THEN
       IF Prompt("Find: ", findStr) THEN
         found := FindNext(topLine + 1);
+        IF found >= 0 THEN topLine := found; ClampTop()
+        ELSE COPY("Not found.", statusMsg)
+        END
+      END
+    ELSIF k = ORD('n') THEN
+      IF findStr[0] = 0X THEN
+        COPY("No search active.", statusMsg)
+      ELSE
+        found := FindNext(topLine + 1);
+        IF found >= 0 THEN topLine := found; ClampTop()
+        ELSE COPY("Not found.", statusMsg)
+        END
+      END
+    ELSIF k = ORD('N') THEN
+      IF findStr[0] = 0X THEN
+        COPY("No search active.", statusMsg)
+      ELSE
+        found := FindPrev(topLine - 1);
         IF found >= 0 THEN topLine := found; ClampTop()
         ELSE COPY("Not found.", statusMsg)
         END
@@ -1327,7 +1424,9 @@ BEGIN
 
   Dict.Init(idMap);
   nSpine := 0; curChap := 0; topLine := 0;
-  bookTitle[0] := 0X; findStr[0] := 0X; statusMsg[0] := 0X;
+  bookTitle[0] := 0X; bookAuthor[0] := 0X; bookPublisher[0] := 0X;
+  bookDate[0] := 0X; bookLang[0] := 0X;
+  findStr[0] := 0X; statusMsg[0] := 0X;
   selMode := FALSE; selAnchor := 0; selCursor := 0;
   nToc := 0; ncxHref[0] := 0X; navHref[0] := 0X;
 
