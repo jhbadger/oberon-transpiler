@@ -3020,11 +3020,25 @@ void codegen(Node *module, FILE *out, int is_main) {
             int exp = !is_main && (d->flags & FLAG_EXPORTED);
             Node *val = d->c0;
             if (val && val->kind == ND_STRING) {
-                /* String constant: enum can't hold strings; use static const array */
+                if (strlen(val->str) == 1) {
+                    /* Single-char string constant: emit as char so it can be
+                     * assigned to CHAR variables and array elements. */
+                    char _c = val->str[0];
+                    const char *_clit = (_c=='\'') ? "'\\''" : (_c=='\\') ? "'\\\\'" : NULL;
+                    if (exp) {
+                        if (_clit) emit(g,"static const char %s_%s = %s;\n", g->modname, d->str, _clit);
+                        else emit(g,"static const char %s_%s = '%c';\n", g->modname, d->str, _c);
+                    } else {
+                        if (_clit) emit(g,"static const char %s = %s;\n", d->str, _clit);
+                        else emit(g,"static const char %s = '%c';\n", d->str, _c);
+                    }
+                } else {
+                /* Multi-char string: enum can't hold strings; use static const array */
                 if (exp) emit(g,"static const char %s_%s[] = ", g->modname, d->str);
                 else     emit(g,"static const char %s[] = ", d->str);
                 emit_string_lit(g, val->str);
                 emit(g,";\n");
+                }
             } else if (val && val->kind == ND_REAL) {
                 /* Real constant: enum can't hold floats; use static const double */
                 if (exp) emit(g,"static const double %s_%s = %s;\n", g->modname, d->str, val->str);
@@ -3229,10 +3243,22 @@ void codegen_header(Node *module, FILE *out) {
             Node *val = d->c0;
             int exp = d->flags & FLAG_EXPORTED;
             if (val && val->kind == ND_STRING) {
-                if (exp) emit(g,"static const char %s_%s[] = ", module->str, d->str);
-                else     emit(g,"static const char %s[] = ", d->str);
-                emit_string_lit(g, val->str);
-                emit(g,";\n");
+                if (strlen(val->str) == 1) {
+                    char _c = val->str[0];
+                    const char *_clit = (_c=='\'') ? "'\\''" : (_c=='\\') ? "'\\\\'" : NULL;
+                    if (exp) {
+                        if (_clit) emit(g,"static const char %s_%s = %s;\n", module->str, d->str, _clit);
+                        else emit(g,"static const char %s_%s = '%c';\n", module->str, d->str, _c);
+                    } else {
+                        if (_clit) emit(g,"static const char %s = %s;\n", d->str, _clit);
+                        else emit(g,"static const char %s = '%c';\n", d->str, _c);
+                    }
+                } else {
+                    if (exp) emit(g,"static const char %s_%s[] = ", module->str, d->str);
+                    else     emit(g,"static const char %s[] = ", d->str);
+                    emit_string_lit(g, val->str);
+                    emit(g,";\n");
+                }
             } else if (val && val->kind == ND_REAL) {
                 if (exp) emit(g,"static const double %s_%s = %s;\n", module->str, d->str, val->str);
                 else     emit(g,"static const double %s = %s;\n", d->str, val->str);

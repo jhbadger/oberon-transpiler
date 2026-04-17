@@ -27,7 +27,7 @@ VAR
   nfixed                     : INTEGER;
   b, t, v, quit              : BOOLEAN;
   playAgain, boardOk         : BOOLEAN;
-  key, yn                    : CHAR;
+  key, yesno                    : CHAR;
   M   : ARRAY 81 OF CHAR;      (* board cells                *)
   xy1 : ARRAY 81 OF INTEGER;   (* terminal x of fixed cells  *)
   xy2 : ARRAY 81 OF INTEGER;   (* terminal y of fixed cells  *)
@@ -301,9 +301,9 @@ BEGIN
     Terminal.Goto(17, 11);  Out.String("Excellent! You solved the puzzle!");
     Terminal.Goto(17, 13);  Out.String("Play again? (Y/N)");
     REPEAT
-      yn := Terminal.ReadKey()
-    UNTIL (yn = 'Y') OR (yn = 'y') OR (yn = 'N') OR (yn = 'n');
-    playAgain := (yn = 'Y') OR (yn = 'y')
+      yesno := Terminal.ReadKey()
+    UNTIL (yesno = 'Y') OR (yesno = 'y') OR (yesno = 'N') OR (yesno = 'n');
+    playAgain := (yesno = 'Y') OR (yesno = 'y')
   END
 END RunGame;
 
@@ -316,8 +316,8 @@ BEGIN
   Terminal.Goto(11, 12);  Out.String("Press ENTER to start...");
   Terminal.Goto(9,  24);  Out.String("Adapted from CrYmFoX 2016.");
   REPEAT
-    yn := Terminal.ReadKey()
-  UNTIL yn = KEnter;
+    yesno := Terminal.ReadKey()
+  UNTIL yesno = KEnter;
 
   playAgain := TRUE;
   WHILE playAgain DO
@@ -327,5 +327,5 @@ BEGIN
 
   Terminal.Clear;
   Terminal.Goto(20, 16);  Out.String("Thanks for playing! Press ENTER...");
-  REPEAT  yn := Terminal.ReadKey()  UNTIL yn = KEnter
+  REPEAT  yesno := Terminal.ReadKey()  UNTIL yesno = KEnter
 END Sudoku.
