@@ -15,12 +15,18 @@ MODULE epub;
  *   Left / h           previous chapter
  *   Right / l          next chapter
  *   Mouse wheel        scroll three lines
+ *   t                  table of contents browser
+ *   r                  switch to a recently opened book
+ *   f                  show footnote for first [#ref] on screen
  *   v                  enter visual line-select mode
  *   (in visual)  j/k   move selection cursor
  *   (in visual)  Enter translate selection with trans(1)
  *   (in visual)  Esc/v cancel selection
  *   Ctrl+F             find (forward search)
  *   q / Ctrl+Q / Esc   quit (saves position)
+ *
+ * Options:
+ *   --lang xx          translate into language code xx (e.g. ja, fr, de)
  *
  * Position is saved in ~/.epub_positions so the book reopens
  * at the last-read line.
@@ -30,6 +36,7 @@ IMPORT Zip, XHTML, Terminal, Graphics, Strings, Files, Args, Dict, Out, Base64, 
 
 CONST
   MAXSPINE  = 256;
+  MAXTOC    = 256;
   MAXLINES  = 6000;
   XHTMLSZ   = 131072;  (* 128 KB raw XHTML  *)
   TEXTSZ    = 131072;  (* 128 KB plain text *)
@@ -95,6 +102,15 @@ VAR
   (* translation output buffers *)
   transOut   : ARRAY 16384 OF CHAR;
   cleanBuf   : ARRAY 16384 OF CHAR;
+  transLang  : ARRAY 16 OF CHAR;   (* target language code, e.g. "ja" *)
+
+  (* table of contents *)
+  tocTitle   : ARRAY MAXTOC OF ARRAY 128 OF CHAR;
+  tocHref    : ARRAY MAXTOC OF ARRAY 512 OF CHAR;
+  nToc       : INTEGER;
+  ncxHref    : ARRAY 512 OF CHAR;  (* path of NCX file in ZIP  *)
+  navHref    : ARRAY 512 OF CHAR;  (* path of nav.xhtml in ZIP *)
+  tocBuf     : ARRAY 65536 OF CHAR; (* 64 KB for ToC file      *)
 
   idMap     : Dict.Table;
 
@@ -224,12 +240,157 @@ BEGIN
   wrapBuf[wWp] := 0X
 END WrapText;
 
+(* ── ToC parsing ────────────────────────────────────────────────── *)
+
+(* Parse EPUB 2 NCX (toc.ncx): extract navPoint titles and content srcs. *)
+PROCEDURE ParseNCX(buf: ARRAY OF CHAR; dir: ARRAY OF CHAR);
+VAR pos, epos, te, tp: INTEGER;
+    tag: ARRAY 512 OF CHAR;
+    title: ARRAY 128 OF CHAR;
+    href: ARRAY 512 OF CHAR;
+    full: ARRAY 512 OF CHAR;
+    i: INTEGER; hasTitle: BOOLEAN;
+BEGIN
+  pos := 0;
+  LOOP
+    pos := Strings.Pos("<navPoint", buf, pos);
+    IF pos < 0 THEN EXIT END;
+    WHILE (buf[pos] # 0X) & (buf[pos] # '>') DO INC(pos) END;
+    IF buf[pos] = '>' THEN INC(pos) END;
+
+    hasTitle := FALSE; title[0] := 0X; href[0] := 0X;
+    te := Strings.Pos("</navPoint>", buf, pos);
+    IF te < 0 THEN te := Strings.Length(buf) END;
+
+    tp := Strings.Pos("<text>", buf, pos);
+    IF (tp >= 0) & (tp < te) THEN
+      INC(tp, 6);  (* skip "<text>" *)
+      i := 0;
+      WHILE (buf[tp] # 0X) & (buf[tp] # '<') & (i < 127) DO
+        title[i] := buf[tp]; INC(i); INC(tp)
+      END;
+      title[i] := 0X; Strings.Trim(title); hasTitle := TRUE
+    END;
+
+    tp := Strings.Pos("<content ", buf, pos);
+    IF (tp >= 0) & (tp < te) THEN
+      epos := tp; i := 0;
+      WHILE (buf[epos] # 0X) & (buf[epos] # '>') & (i < 511) DO
+        tag[i] := buf[epos]; INC(i); INC(epos)
+      END;
+      tag[i] := 0X;
+      IF XHTML.AttrValue(tag, "src", href) THEN
+        i := 0; WHILE (href[i] # 0X) & (href[i] # '#') DO INC(i) END;
+        href[i] := 0X  (* strip fragment *)
+      END
+    END;
+
+    IF hasTitle & (href[0] # 0X) & (nToc < MAXTOC) THEN
+      COPY(dir, full); Strings.Append(href, full);
+      COPY(title, tocTitle[nToc]); COPY(full, tocHref[nToc]); INC(nToc)
+    END;
+    pos := te
+  END
+END ParseNCX;
+
+(* Parse EPUB 3 nav.xhtml: find <nav epub:type="toc"> and extract
+   <a href>s within it.  Uses AttrValue so multi-token epub:type
+   values like "toc chapter" work.  Scans only within the nav body
+   so links in headers/footers before the TOC are not included.    *)
+PROCEDURE ParseNav(buf: ARRAY OF CHAR; dir: ARRAY OF CHAR);
+VAR pos, epos, navStart, navEnd: INTEGER;
+    tag: ARRAY 512 OF CHAR;
+    href: ARRAY 512 OF CHAR;
+    full: ARRAY 512 OF CHAR;
+    title: ARRAY 128 OF CHAR;
+    val: ARRAY 64 OF CHAR;
+    i: INTEGER;
+BEGIN
+  (* Find <nav epub:type="...toc..."> *)
+  pos := 0; navStart := -1; navEnd := -1;
+  LOOP
+    pos := Strings.Pos("<nav", buf, pos);
+    IF pos < 0 THEN EXIT END;
+    (* Ensure it is really a <nav> tag, not e.g. <navigate> *)
+    epos := pos + 4;
+    IF (buf[epos] # ' ') & (buf[epos] # '>') & (buf[epos] # 9X) &
+       (buf[epos] # 0AX) & (buf[epos] # '/') THEN
+      pos := epos  (* not <nav>, skip *)
+    ELSE
+      i := 0;
+      WHILE (buf[epos] # 0X) & (buf[epos] # '>') & (i < 511) DO
+        tag[i] := buf[epos]; INC(i); INC(epos)
+      END;
+      tag[i] := 0X;
+      IF buf[epos] = '>' THEN INC(epos) END;
+      IF XHTML.AttrValue(tag, "epub:type", val) &
+         (Strings.Pos("toc", val, 0) >= 0) THEN
+        navStart := epos;
+        navEnd := Strings.Pos("</nav>", buf, epos);
+        IF navEnd < 0 THEN navEnd := Strings.Length(buf) END;
+        EXIT
+      END;
+      pos := epos
+    END
+  END;
+  IF navStart < 0 THEN RETURN END;
+
+  (* Scan for <a href="..."> within the nav body only *)
+  pos := navStart;
+  WHILE pos < navEnd DO
+    pos := Strings.Pos("<a ", buf, pos);
+    IF (pos < 0) OR (pos >= navEnd) THEN EXIT END;
+    epos := pos; i := 0;
+    WHILE (buf[epos] # 0X) & (buf[epos] # '>') & (i < 511) DO
+      tag[i] := buf[epos]; INC(i); INC(epos)
+    END;
+    tag[i] := 0X;
+    IF buf[epos] = '>' THEN INC(epos) END;
+    IF XHTML.AttrValue(tag, "href", href) THEN
+      i := 0;
+      WHILE (buf[epos] # 0X) & (buf[epos] # '<') & (i < 127) DO
+        title[i] := buf[epos]; INC(i); INC(epos)
+      END;
+      title[i] := 0X; Strings.Trim(title);
+      i := 0; WHILE (href[i] # 0X) & (href[i] # '#') DO INC(i) END;
+      href[i] := 0X;  (* strip fragment *)
+      IF (href[0] # 0X) & (title[0] # 0X) & (nToc < MAXTOC) THEN
+        COPY(dir, full); Strings.Append(href, full);
+        COPY(title, tocTitle[nToc]); COPY(full, tocHref[nToc]); INC(nToc)
+      END
+    END;
+    pos := epos
+  END
+END ParseNav;
+
+(* Load the ToC from whichever file the OPF points to. *)
+PROCEDURE LoadTOC();
+VAR n: INTEGER; dir: ARRAY 512 OF CHAR;
+BEGIN
+  nToc := 0;
+  IF navHref[0] # 0X THEN  (* prefer EPUB 3 nav *)
+    n := ReadEntry(navHref, tocBuf);
+    IF n > 0 THEN
+      tocBuf[n] := 0X; DirOf(navHref, dir); ParseNav(tocBuf, dir);
+      IF nToc > 0 THEN RETURN END
+    END
+  END;
+  IF ncxHref[0] # 0X THEN  (* fall back to NCX *)
+    n := ReadEntry(ncxHref, tocBuf);
+    IF n > 0 THEN
+      tocBuf[n] := 0X; DirOf(ncxHref, dir); ParseNCX(tocBuf, dir)
+    END
+  END
+END LoadTOC;
+
 (* ── OPF parsing ────────────────────────────────────────────────── *)
 PROCEDURE ParseManifest(buf: ARRAY OF CHAR);
 VAR pos, epos: INTEGER;
-    tag : ARRAY 1024 OF CHAR;
-    id  : ARRAY 256 OF CHAR;
-    href: ARRAY 512 OF CHAR;
+    tag  : ARRAY 1024 OF CHAR;
+    id   : ARRAY 256 OF CHAR;
+    href : ARRAY 512 OF CHAR;
+    mtype: ARRAY 64 OF CHAR;
+    props: ARRAY 64 OF CHAR;
 BEGIN
   pos := 0;
   LOOP
@@ -240,7 +401,17 @@ BEGIN
     IF buf[epos] = '>' THEN INC(epos) END;
     Strings.Extract(buf, pos, epos - pos, tag);
     IF XHTML.AttrValue(tag, "id", id) & XHTML.AttrValue(tag, "href", href) THEN
-      Dict.Put(idMap, id, href)
+      Dict.Put(idMap, id, href);
+      IF XHTML.AttrValue(tag, "media-type", mtype) THEN
+        IF Strings.Pos("ncx", mtype, 0) >= 0 THEN
+          COPY(opfDir, ncxHref); Strings.Append(href, ncxHref)
+        END
+      END;
+      IF XHTML.AttrValue(tag, "properties", props) THEN
+        IF Strings.Pos("nav", props, 0) >= 0 THEN
+          COPY(opfDir, navHref); Strings.Append(href, navHref)
+        END
+      END
     END;
     pos := epos
   END
@@ -252,6 +423,7 @@ VAR pos, epos: INTEGER;
     iref : ARRAY 256 OF CHAR;
     href : ARRAY 512 OF CHAR;
     full : ARRAY 512 OF CHAR;
+    lin  : ARRAY 16 OF CHAR;
 BEGIN
   pos := 0;
   LOOP
@@ -262,9 +434,13 @@ BEGIN
     IF buf[epos] = '>' THEN INC(epos) END;
     Strings.Extract(buf, pos, epos - pos, tag);
     IF XHTML.AttrValue(tag, "idref", iref) THEN
-      IF Dict.Get(idMap, iref, href) & (nSpine < MAXSPINE) THEN
-        COPY(opfDir, full); Strings.Append(href, full);
-        COPY(full, spineHref[nSpine]); INC(nSpine)
+      (* skip non-linear items — pop-up footnotes, cover pages, etc. *)
+      IF ~(XHTML.AttrValue(tag, "linear", lin) &
+           (Strings.Compare(lin, "no") = 0)) THEN
+        IF Dict.Get(idMap, iref, href) & (nSpine < MAXSPINE) THEN
+          COPY(opfDir, full); Strings.Append(href, full);
+          COPY(full, spineHref[nSpine]); INC(nSpine)
+        END
       END
     END;
     pos := epos
@@ -292,6 +468,7 @@ BEGIN
 
   ParseManifest(opfBuf);
   ParseSpine(opfBuf);
+  LoadTOC();
   RETURN nSpine > 0
 END LoadOPF;
 
@@ -497,7 +674,11 @@ BEGIN
   Files.Register(f); Files.Close(f);
 
   (* run trans, capture output *)
-  COPY("trans -brief < ", cmd); Strings.Append(inPath, cmd);
+  COPY("trans -brief ", cmd);
+  IF transLang[0] # 0X THEN
+    Strings.Append(":", cmd); Strings.Append(transLang, cmd); Strings.Append(" ", cmd)
+  END;
+  Strings.Append("< ", cmd);    Strings.Append(inPath, cmd);
   Strings.Append(" > ", cmd);   Strings.Append(outPath, cmd);
   Strings.Append(" 2>&1", cmd);
   OS.Exec(cmd);
@@ -694,6 +875,155 @@ BEGIN
   Files.Close(f)
 END RestorePos;
 
+(* ── recent books list ───────────────────────────────────────────
+   Reads all entries from ~/.epub_positions into posPaths/posChaps/
+   posLines (reusing the pos working arrays) and returns the count.
+   Entries are in file order: oldest first, current book last.      *)
+PROCEDURE LoadRecentPaths(): INTEGER;
+VAR posFile: ARRAY 512 OF CHAR;
+    f: Files.File; r: Files.Rider;
+    p, c, l: ARRAY 512 OF CHAR;
+    n: INTEGER;
+BEGIN
+  PosFilePath(posFile);
+  f := Files.Old(posFile);
+  n := 0;
+  IF f # NIL THEN
+    Files.Set(r, f, 0);
+    WHILE ~r.eof & (n < 128) DO
+      Files.ReadString(r, p);
+      IF r.eof THEN EXIT END;
+      Files.ReadString(r, c);
+      Files.ReadString(r, l);
+      IF p[0] # 0X THEN
+        COPY(p, posPaths[n]);
+        COPY(c, posChaps[n]);
+        COPY(l, posLines[n]);
+        INC(n)
+      END
+    END;
+    Files.Close(f)
+  END;
+  RETURN n
+END LoadRecentPaths;
+
+(* Extract filename component from a path. *)
+PROCEDURE BaseName(path: ARRAY OF CHAR; VAR name: ARRAY OF CHAR);
+VAR i, last: INTEGER;
+BEGIN
+  last := 0; i := 0;
+  WHILE path[i] # 0X DO
+    IF path[i] = '/' THEN last := i + 1 END;
+    INC(i)
+  END;
+  i := 0;
+  WHILE (path[last + i] # 0X) & (i < LEN(name) - 1) DO
+    name[i] := path[last + i]; INC(i)
+  END;
+  name[i] := 0X
+END BaseName;
+
+(* Interactive recent-books picker.  Returns TRUE and sets chosen if
+   the user selects an entry; returns FALSE on Esc/q or empty list.
+   Display order: most-recent book at top (file entries reversed).
+   sel  = posPaths index of highlighted entry (n-1 = most recent).
+   top  = display offset: display row r shows posPaths[n-1-top-r].   *)
+PROCEDURE ShowRecentBooks(VAR chosen: ARRAY OF CHAR): BOOLEAN;
+VAR n, sel, top, visH, r, idx, c, j: INTEGER;
+    bname: ARRAY 256 OF CHAR;
+BEGIN
+  n := LoadRecentPaths();
+  IF n = 0 THEN RETURN FALSE END;
+
+  visH := visRows - 2;
+  sel := n - 1;   (* start on most-recent = highest index *)
+  top := 0;       (* display row 0 → posPaths[n-1-top] *)
+
+  LOOP
+    Terminal.Clear();
+    Terminal.Goto(1, 1);
+    Graphics.Color256(CLR_POPBDR, BG_POPBDR);
+    Out.String("Recent books  j/k:move  Enter:open  Esc/q:cancel");
+    Graphics.Reset;
+
+    FOR r := 0 TO visH - 1 DO
+      idx := n - 1 - top - r;   (* posPaths index for this display row *)
+      Terminal.Goto(1, r + 2);
+      IF idx < 0 THEN
+        (* past end of list: blank line *)
+        Graphics.Color256(CLR_TEXT, BG_TEXT);
+        j := 0; WHILE j < tCols DO Out.Char(' '); INC(j) END
+      ELSE
+        IF idx = sel THEN
+          Graphics.Color256(CLR_SELCUR, BG_SELCUR)
+        ELSIF Strings.Compare(posPaths[idx], epubPath) = 0 THEN
+          Graphics.Color256(CLR_SEL, BG_SEL)
+        ELSE
+          Graphics.Color256(CLR_TEXT, BG_TEXT)
+        END;
+        IF Strings.Compare(posPaths[idx], epubPath) = 0 THEN
+          Out.Char('*')
+        ELSE
+          Out.Char(' ')
+        END;
+        Out.Char(' ');
+        BaseName(posPaths[idx], bname);
+        j := 2;
+        WHILE (bname[j-2] # 0X) & (j < tCols) DO
+          Out.Char(bname[j-2]); INC(j)
+        END;
+        WHILE j < tCols DO Out.Char(' '); INC(j) END
+      END;
+      Graphics.Reset
+    END;
+
+    c := ORD(Terminal.ReadKey());
+    IF (c = KEY_DOWN) OR (c = ORD('j')) THEN
+      (* down in display = older entry = lower posPaths index *)
+      IF sel > 0 THEN DEC(sel) END;
+      (* scroll: display row for sel = n-1-top-sel; if >= visH, inc top *)
+      IF n - 1 - top - sel >= visH THEN INC(top) END
+    ELSIF (c = KEY_UP) OR (c = ORD('k')) THEN
+      (* up in display = more recent = higher posPaths index *)
+      IF sel < n - 1 THEN INC(sel) END;
+      (* scroll: display row for sel = n-1-top-sel; if < 0, dec top *)
+      IF n - 1 - top - sel < 0 THEN IF top > 0 THEN DEC(top) END END
+    ELSIF c = 13 THEN  (* Enter *)
+      Terminal.Clear();
+      COPY(posPaths[sel], chosen);
+      RETURN TRUE
+    ELSIF (c = KEY_ESC) OR (c = ORD('q')) THEN
+      Terminal.Clear(); RETURN FALSE
+    END
+  END
+END ShowRecentBooks;
+
+(* Save position, show recent-books picker, and reload if user picks one. *)
+PROCEDURE SwitchBook();
+VAR chosen: ARRAY 512 OF CHAR;
+    newArchive: Zip.Archive;
+BEGIN
+  SavePos();
+  IF ShowRecentBooks(chosen) THEN
+    newArchive := Zip.Open(chosen);
+    IF newArchive = NIL THEN
+      COPY("Cannot open that book.", statusMsg); RETURN
+    END;
+    Zip.Close(archive);
+    archive := newArchive;
+    COPY(chosen, epubPath);
+    Dict.Init(idMap);
+    nSpine := 0; nToc := 0; curChap := 0; topLine := 0;
+    ncxHref[0] := 0X; navHref[0] := 0X; bookTitle[0] := 0X;
+    IF ~LoadContainer() OR ~LoadOPF() THEN
+      COPY("Failed to load book.", statusMsg); RETURN
+    END;
+    RestorePos();
+    Terminal.Clear();
+    LoadChapter(); ClampTop()
+  END
+END SwitchBook;
+
 (* ── prompt in status bar ─────────────────────────────────────── *)
 PROCEDURE Prompt(prompt: ARRAY OF CHAR; VAR result: ARRAY OF CHAR): BOOLEAN;
 VAR i, j, plen, k: INTEGER;
@@ -735,9 +1065,154 @@ BEGIN
   RETURN -1
 END FindNext;
 
+(* ── ToC browser ─────────────────────────────────────────────── *)
+
+(* Return the spine index for a given full ZIP path, or -1. *)
+PROCEDURE HrefToSpine(href: ARRAY OF CHAR): INTEGER;
+VAR i: INTEGER;
+BEGIN
+  FOR i := 0 TO nSpine - 1 DO
+    IF Strings.Compare(href, spineHref[i]) = 0 THEN RETURN i END
+  END;
+  RETURN -1
+END HrefToSpine;
+
+(* Interactive ToC list.  Returns the spine chapter to jump to, or -1. *)
+PROCEDURE ShowTOC(): INTEGER;
+VAR sel, top, visH, i, j, k, curMark: INTEGER;
+BEGIN
+  IF nToc = 0 THEN ShowPopup("No table of contents found."); RETURN -1 END;
+
+  visH := visRows - 2;  (* rows available for entries *)
+  sel := 0; top := 0;
+
+  (* pre-select the entry that matches the current chapter *)
+  FOR i := 0 TO nToc - 1 DO
+    IF Strings.Compare(tocHref[i], spineHref[curChap]) = 0 THEN sel := i END
+  END;
+  IF sel >= visH THEN top := sel - visH DIV 2 END;
+
+  LOOP
+    Terminal.Clear();
+    Terminal.Goto(1, 1);
+    Graphics.Color256(CLR_POPBDR, BG_POPBDR);
+    Out.String("Contents  j/k:move  Enter:open  Esc/q:cancel");
+    Graphics.Reset;
+
+    FOR i := 0 TO visH - 1 DO
+      j := top + i;
+      Terminal.Goto(1, i + 2);
+      IF j >= nToc THEN
+        Graphics.Color256(CLR_TEXT, BG_TEXT);
+        k := 0; WHILE k < tCols DO Out.Char(' '); INC(k) END
+      ELSE
+        curMark := HrefToSpine(tocHref[j]);
+        IF j = sel THEN
+          Graphics.Color256(CLR_SELCUR, BG_SELCUR)
+        ELSIF curMark = curChap THEN
+          Graphics.Color256(CLR_SEL, BG_SEL)
+        ELSE
+          Graphics.Color256(CLR_TEXT, BG_TEXT)
+        END;
+        IF curMark = curChap THEN Out.Char('*') ELSE Out.Char(' ') END;
+        Out.Char(' ');
+        k := 2; j := top + i;
+        WHILE (tocTitle[j][k-2] # 0X) & (k < tCols) DO
+          Out.Char(tocTitle[j][k-2]); INC(k)
+        END;
+        WHILE k < tCols DO Out.Char(' '); INC(k) END
+      END;
+      Graphics.Reset
+    END;
+
+    k := ORD(Terminal.ReadKey());
+    IF (k = KEY_DOWN) OR (k = ORD('j')) THEN
+      IF sel < nToc - 1 THEN INC(sel) END;
+      IF sel >= top + visH THEN INC(top) END
+    ELSIF (k = KEY_UP) OR (k = ORD('k')) THEN
+      IF sel > 0 THEN DEC(sel) END;
+      IF sel < top THEN DEC(top) END
+    ELSIF k = 13 THEN  (* Enter *)
+      Terminal.Clear(); RETURN HrefToSpine(tocHref[sel])
+    ELSIF (k = KEY_ESC) OR (k = ORD('q')) THEN
+      Terminal.Clear(); RETURN -1
+    END
+  END
+END ShowTOC;
+
+(* ── footnote lookup ──────────────────────────────────────────── *)
+
+(* Scan xhtmlBuf for the element with id=frag and ToText a snippet of it. *)
+PROCEDURE FindFragment(frag: ARRAY OF CHAR; VAR text: ARRAY OF CHAR);
+VAR pos, epos, i: INTEGER;
+    idVal: ARRAY 128 OF CHAR;
+    tagBuf: ARRAY 512 OF CHAR;
+    snip: ARRAY 2048 OF CHAR;
+BEGIN
+  text[0] := 0X; pos := 0;
+  WHILE xhtmlBuf[pos] # 0X DO
+    IF xhtmlBuf[pos] = '<' THEN
+      epos := pos + 1; i := 0;
+      WHILE (xhtmlBuf[epos] # 0X) & (xhtmlBuf[epos] # '>') & (i < 511) DO
+        tagBuf[i] := xhtmlBuf[epos]; INC(i); INC(epos)
+      END;
+      tagBuf[i] := 0X;
+      IF XHTML.AttrValue(tagBuf, "id", idVal) &
+         (Strings.Compare(idVal, frag) = 0) THEN
+        IF xhtmlBuf[epos] = '>' THEN INC(epos) END;
+        i := 0;
+        WHILE (xhtmlBuf[epos] # 0X) & (i < 2047) DO
+          snip[i] := xhtmlBuf[epos]; INC(i); INC(epos)
+        END;
+        snip[i] := 0X;
+        XHTML.ToText(snip, text);
+        RETURN
+      END;
+      pos := epos
+    ELSE
+      INC(pos)
+    END
+  END
+END FindFragment;
+
+(* Find the first [#frag] marker on the visible screen and show its content. *)
+PROCEDURE ShowFootnote();
+VAR li, i, len, j: INTEGER;
+    frag: ARRAY 128 OF CHAR;
+    fnText: ARRAY 4096 OF CHAR;
+    found: BOOLEAN;
+BEGIN
+  found := FALSE;
+  li := topLine;
+  WHILE (li < topLine + visRows) & ~found DO
+    IF (li >= 0) & (li < nLines) THEN
+      i := lineOff[li]; len := lineLen[li];
+      WHILE (len > 1) & ~found DO
+        IF (wrapBuf[i] = '[') & (wrapBuf[i+1] = '#') THEN
+          j := 0; INC(i, 2);
+          WHILE (wrapBuf[i] # ']') & (wrapBuf[i] # 0X) & (j < 127) DO
+            frag[j] := wrapBuf[i]; INC(j); INC(i)
+          END;
+          frag[j] := 0X; found := TRUE
+        ELSE
+          INC(i); DEC(len)
+        END
+      END
+    END;
+    INC(li)
+  END;
+  IF found THEN
+    FindFragment(frag, fnText);
+    IF fnText[0] = 0X THEN COPY("(footnote content not found in this chapter)", fnText) END;
+    ShowPopup(fnText)
+  ELSE
+    COPY("No footnote references on this page.", statusMsg)
+  END
+END ShowFootnote;
+
 (* ── key handler ─────────────────────────────────────────────── *)
 PROCEDURE HandleKey(k: INTEGER);
-VAR found: INTEGER;
+VAR found, chapIdx: INTEGER;
 BEGIN
   statusMsg[0] := 0X;
 
@@ -762,9 +1237,22 @@ BEGIN
     ELSIF (k = KEY_DOWN) OR (k = ORD('j')) THEN
       INC(topLine); ClampTop()
     ELSIF k = KEY_PGUP THEN
-      DEC(topLine, visRows); ClampTop(); SavePos()
+      DEC(topLine, visRows);
+      IF (topLine < 0) & (curChap > 0) THEN
+        DEC(curChap); LoadChapter();
+        topLine := nLines - visRows; ClampTop()
+      ELSE
+        ClampTop()
+      END;
+      SavePos()
     ELSIF k = KEY_PGDN THEN
-      INC(topLine, visRows); ClampTop(); SavePos()
+      INC(topLine, visRows);
+      IF (topLine >= nLines) & (curChap < nSpine - 1) THEN
+        INC(curChap); topLine := 0; LoadChapter()
+      ELSE
+        ClampTop()
+      END;
+      SavePos()
     ELSIF (k = KEY_LEFT) OR (k = ORD('h')) THEN
       IF curChap > 0 THEN
         DEC(curChap); topLine := 0; LoadChapter(); SavePos()
@@ -781,6 +1269,15 @@ BEGIN
       END
     ELSIF k = ORD('v') THEN
       selMode := TRUE; selAnchor := topLine; selCursor := topLine
+    ELSIF k = ORD('t') THEN
+      chapIdx := ShowTOC();
+      IF chapIdx >= 0 THEN
+        curChap := chapIdx; topLine := 0; LoadChapter(); SavePos()
+      END
+    ELSIF k = ORD('f') THEN
+      ShowFootnote()
+    ELSIF k = ORD('r') THEN
+      SwitchBook()
     ELSIF k = KEY_CTRL_F THEN
       IF Prompt("Find: ", findStr) THEN
         found := FindNext(topLine + 1);
@@ -797,19 +1294,30 @@ END HandleKey;
 (* ── main ──────────────────────────────────────────────────────── *)
 VAR k, argIdx: INTEGER; argTmp: ARRAY 512 OF CHAR;
 BEGIN
-  showImages := FALSE; epubPath[0] := 0X;
+  showImages := FALSE; epubPath[0] := 0X; transLang[0] := 0X;
   argIdx := 1;
   WHILE argIdx <= Args.Count() DO
     Args.Get(argIdx, argTmp);
     IF Strings.Compare(argTmp, "--img") = 0 THEN
       showImages := TRUE
+    ELSIF Strings.Compare(argTmp, "--lang") = 0 THEN
+      INC(argIdx);
+      IF argIdx <= Args.Count() THEN Args.Get(argIdx, transLang) END
     ELSIF epubPath[0] = 0X THEN
       COPY(argTmp, epubPath)
     END;
     INC(argIdx)
   END;
   IF epubPath[0] = 0X THEN
-    Out.String("Usage: epub [--img] <file.epub>"); Out.Ln; HALT(1)
+    (* No file given — show recent-books picker if positions exist *)
+    tCols := Terminal.Cols(); tRows := Terminal.Rows();
+    visRows := tRows - 1;
+    Terminal.Clear();
+    IF ~ShowRecentBooks(epubPath) OR (epubPath[0] = 0X) THEN
+      Terminal.Clear();
+      Out.String("Usage: epub [--img] [--lang xx] <file.epub>"); Out.Ln;
+      HALT(1)
+    END
   END;
 
   archive := Zip.Open(epubPath);
@@ -821,6 +1329,7 @@ BEGIN
   nSpine := 0; curChap := 0; topLine := 0;
   bookTitle[0] := 0X; findStr[0] := 0X; statusMsg[0] := 0X;
   selMode := FALSE; selAnchor := 0; selCursor := 0;
+  nToc := 0; ncxHref[0] := 0X; navHref[0] := 0X;
 
   IF ~LoadContainer() THEN
     Out.String("Not a valid EPUB (missing container.xml)"); Out.Ln; HALT(1)

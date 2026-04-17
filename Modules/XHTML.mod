@@ -95,14 +95,22 @@ END SkipComment;
 (* ── IsBlock: is the tag name at src[pos] a block-level element?  *)
 PROCEDURE IsBlock(src: ARRAY OF CHAR; pos: INTEGER): BOOLEAN;
 BEGIN
-  RETURN TagIs(src, pos, "p")          OR TagIs(src, pos, "br")  OR
-         TagIs(src, pos, "div")        OR TagIs(src, pos, "li")  OR
-         TagIs(src, pos, "h1")         OR TagIs(src, pos, "h2")  OR
-         TagIs(src, pos, "h3")         OR TagIs(src, pos, "h4")  OR
-         TagIs(src, pos, "h5")         OR TagIs(src, pos, "h6")  OR
-         TagIs(src, pos, "tr")         OR TagIs(src, pos, "hr")  OR
-         TagIs(src, pos, "ul")         OR TagIs(src, pos, "ol")  OR
-         TagIs(src, pos, "blockquote") OR TagIs(src, pos, "pre")
+  RETURN TagIs(src, pos, "p")          OR TagIs(src, pos, "br")         OR
+         TagIs(src, pos, "div")        OR TagIs(src, pos, "li")         OR
+         TagIs(src, pos, "h1")         OR TagIs(src, pos, "h2")         OR
+         TagIs(src, pos, "h3")         OR TagIs(src, pos, "h4")         OR
+         TagIs(src, pos, "h5")         OR TagIs(src, pos, "h6")         OR
+         TagIs(src, pos, "tr")         OR TagIs(src, pos, "hr")         OR
+         TagIs(src, pos, "ul")         OR TagIs(src, pos, "ol")         OR
+         TagIs(src, pos, "blockquote") OR TagIs(src, pos, "pre")        OR
+         TagIs(src, pos, "section")    OR TagIs(src, pos, "article")    OR
+         TagIs(src, pos, "figure")     OR TagIs(src, pos, "figcaption") OR
+         TagIs(src, pos, "aside")      OR TagIs(src, pos, "header")     OR
+         TagIs(src, pos, "footer")     OR TagIs(src, pos, "nav")        OR
+         TagIs(src, pos, "main")       OR TagIs(src, pos, "table")      OR
+         TagIs(src, pos, "dt")         OR TagIs(src, pos, "dd")         OR
+         TagIs(src, pos, "details")    OR TagIs(src, pos, "summary")    OR
+         TagIs(src, pos, "caption")
 END IsBlock;
 
 (* ── DecodeEntity: decode the HTML entity starting at src[pos].
@@ -186,9 +194,11 @@ PROCEDURE ToText*(src: ARRAY OF CHAR; VAR dst: ARRAY OF CHAR);
 VAR sp, dp, dl: INTEGER; c: CHAR; lastNL: BOOLEAN;
     imgTag: ARRAY 512 OF CHAR;
     imgSrc: ARRAY 512 OF CHAR;
+    fnFrag: ARRAY 128 OF CHAR;
+    inFNLink: BOOLEAN;
     i, j: INTEGER;
 BEGIN
-  sp := 0; dp := 0; dl := LEN(dst) - 1; lastNL := TRUE;
+  sp := 0; dp := 0; dl := LEN(dst) - 1; lastNL := TRUE; inFNLink := FALSE; fnFrag[0] := 0X;
   WHILE src[sp] # 0X DO
     IF src[sp] = '<' THEN
       INC(sp);
@@ -203,10 +213,17 @@ BEGIN
         WHILE (src[sp] # 0X) & (src[sp] # '>') DO INC(sp) END;
         IF src[sp] = '>' THEN INC(sp) END
       ELSIF src[sp] = '/' THEN
-        (* closing tag: emit newline for block elements *)
+        (* closing tag: emit newline for block elements; close footnote links *)
         INC(sp);
         IF IsBlock(src, sp) THEN
           IF ~lastNL & (dp < dl) THEN dst[dp] := 0AX; INC(dp); lastNL := TRUE END
+        ELSIF inFNLink & TagIs(src, sp, "a") THEN
+          IF dp < dl THEN dst[dp] := '['; INC(dp) END;
+          IF dp < dl THEN dst[dp] := '#'; INC(dp) END;
+          j := 0;
+          WHILE (fnFrag[j] # 0X) & (dp < dl) DO dst[dp] := fnFrag[j]; INC(dp); INC(j) END;
+          IF dp < dl THEN dst[dp] := ']'; INC(dp) END;
+          lastNL := FALSE; inFNLink := FALSE
         END;
         DEC(sp); SkipTag(src, sp)
       ELSIF TagIs(src, sp, "script") THEN
@@ -217,6 +234,21 @@ BEGIN
         (* opening block tag: emit newline *)
         IF ~lastNL & (dp < dl) THEN dst[dp] := 0AX; INC(dp); lastNL := TRUE END;
         SkipTag(src, sp)
+      ELSIF TagIs(src, sp, "a") THEN
+        (* capture the tag to check for same-doc href="#frag" *)
+        i := 0;
+        WHILE (src[sp] # 0X) & (src[sp] # '>') & (i < 511) DO
+          imgTag[i] := src[sp]; INC(i); INC(sp)
+        END;
+        imgTag[i] := 0X;
+        IF src[sp] = '>' THEN INC(sp) END;
+        IF AttrValue(imgTag, "href", imgSrc) & (imgSrc[0] = '#') THEN
+          (* same-document footnote/endnote link — remember the fragment *)
+          inFNLink := TRUE;
+          j := 0; i := 1;  (* skip leading '#' *)
+          WHILE (imgSrc[i] # 0X) & (j < 127) DO fnFrag[j] := imgSrc[i]; INC(j); INC(i) END;
+          fnFrag[j] := 0X
+        END
       ELSIF TagIs(src, sp, "img") THEN
         (* capture tag text to extract src attribute *)
         i := 0;
