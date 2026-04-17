@@ -1,3 +1,77 @@
+Oberon TUI IDE (rewrite oberon_ide.cpp in Oberon)
+
+  Goal: eliminate the tvision dependency by building a TUI framework and IDE
+  entirely in Oberon, using the FFI mechanism for any C-backed pieces.
+
+  Phase 1 — Foundation (C-backed, FFI-wrapped)
+
+  - [ ] Write Editor.c: gap-buffer text editor in C
+          gap buffer with insert/delete, cursor movement, undo stack
+          find/replace (forward, with wrap)
+          file load/save
+          API named Editor_* to match Oberon convention (no .ffi remapping needed)
+  - [ ] Write Editor.mod stub: procedure signatures + opaque handle type
+          so the type checker and codegen know the interface
+  - [ ] Write Editor.h (or generate from Editor.mod):
+          declares Editor_Open, Editor_Insert, Editor_Delete, Editor_Save, etc.
+
+  Phase 2 — TUI framework in Oberon (Modules/TUI.mod)
+
+  Builds on the existing Terminal and Graphics modules.
+
+  - [ ] Screen cell model: RECORD with char + fg + bg; double-buffered
+          only redraw cells that changed (avoids flicker)
+  - [ ] Event loop: parse ANSI escape sequences for arrow keys, function
+          keys, Ctrl-chords, and mouse (click + drag)
+  - [ ] Base View type: bounds (x, y, w, h), draw procedure variable,
+          handleEvent procedure variable, next/child pointers
+  - [ ] Focus management: single focused view, Tab cycles forward
+  - [ ] Window type (extends View): title bar, border, moveable
+  - [ ] Desktop: z-ordered list of windows; hit-test for mouse; tile/cascade
+  - [ ] Modal dialog execution: push event loop, return command code
+
+  Phase 3 — Standard widgets in Oberon (Modules/Widgets.mod)
+
+  - [ ] Label: static text
+  - [ ] Button: focusable, fires command on Enter/Space
+  - [ ] InputLine: single-line text entry with cursor, insert/delete
+  - [ ] ListBox: scrollable list, keyboard + mouse navigation
+  - [ ] ScrollBar: vertical and horizontal, connected to a scroller
+  - [ ] CheckBox / RadioButton group
+  - [ ] StaticText: multi-line read-only text area (for output dialogs)
+  - [ ] MenuBar + MenuItem + SubMenu
+  - [ ] StatusLine: bottom bar with hotkey hints
+
+  Phase 4 — File dialog in Oberon
+
+  - [ ] Read directory entries (needs OS.ReadDir or a small C helper)
+  - [ ] FileDialog: path input, scrollable file list, filter (*.mod)
+
+  Phase 5 — IDE application in Oberon (ide.mod)
+
+  Uses Editor (C FFI), TUI framework, and Widgets — replaces oberon_ide.cpp.
+
+  - [ ] EditorView: wraps the C Editor handle, renders buffer via TUI screen
+          syntax highlighting (Oberon keywords, comments, strings, numbers)
+          line number gutter
+          error line highlight with inline annotation
+  - [ ] EditorWindow: Window containing an EditorView + scrollbars + indicator
+  - [ ] Multi-window desktop: window registry, Alt-1..9 switching, tile/cascade
+  - [ ] Menu bar: File / Edit / Run / Search / Window / Help
+  - [ ] Run/Compile: fork obc, capture stderr, parse error line, jump to it
+  - [ ] Help system: load stdlib.md, searchable topic list + description panel
+  - [ ] Autocomplete: keyword + identifier prefix match, picker dialog
+  - [ ] Recent files: persist to ~/.oberon_ide_recent
+  - [ ] Goto line, Find, Replace dialogs
+
+  Phase 6 — Build integration
+
+  - [ ] Update Makefile: compile Editor.c alongside the Oberon sources
+  - [ ] Confirm IDE binary works on macOS and Linux (Termux stretch goal)
+  - [ ] Remove tvision directory and oberon_ide.cpp once IDE is stable
+
+----
+
 Z-machine v5 crash investigation
 
   Symptom
