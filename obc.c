@@ -63,16 +63,32 @@ static void mark_compiled(const char *modname) {
 }
 
 /* -----------------------------------------------------------------------
- * Generated C file list (fed to the final gcc link command)
+ * C file lists fed to the final gcc link command.
+ *
+ * g_cfiles[]     — generated from .mod (deleted after link unless --emit-c)
+ * g_csrcfiles[]  — provided via CSRC in .ffi (never deleted)
  * ----------------------------------------------------------------------- */
 static char g_cfiles[MAX_COMPILED][512];
 static int  g_ncfiles = 0;
+
+static char g_csrcfiles[MAX_COMPILED][512];
+static int  g_ncsrcfiles = 0;
 
 static void add_cfile(const char *path) {
     if (g_ncfiles < MAX_COMPILED) {
         strncpy(g_cfiles[g_ncfiles], path, sizeof(g_cfiles[0]) - 1);
         g_cfiles[g_ncfiles][sizeof(g_cfiles[0]) - 1] = '\0';
         g_ncfiles++;
+    }
+}
+
+static void add_csrcfile(const char *path) {
+    for (int i = 0; i < g_ncsrcfiles; i++)
+        if (!strcmp(g_csrcfiles[i], path)) return;   /* deduplicate */
+    if (g_ncsrcfiles < MAX_COMPILED) {
+        strncpy(g_csrcfiles[g_ncsrcfiles], path, sizeof(g_csrcfiles[0]) - 1);
+        g_csrcfiles[g_ncsrcfiles][sizeof(g_csrcfiles[0]) - 1] = '\0';
+        g_ncsrcfiles++;
     }
 }
 
@@ -347,6 +363,23 @@ static int parse_ffi_file(const char *ffifile, const char *modname)
             maps[nmaps].cname[sizeof(maps[0].cname)-1] = '\0';
             nmaps++;
 
+        } else if (strncmp(p, "CSRC", 4) == 0 && (p[4] == ' ' || p[4] == '\t')) {
+            p += 5;
+            while (*p == ' ' || *p == '\t') p++;
+            trim_trailing(p);
+            if (*p) {
+                char cpath[512];
+                if (*p == '/') {
+                    strncpy(cpath, p, sizeof(cpath)-1);
+                    cpath[sizeof(cpath)-1] = '\0';
+                } else {
+                    char ffidir[512];
+                    get_dirname_str(ffifile, ffidir, sizeof(ffidir));
+                    snprintf(cpath, sizeof(cpath), "%s/%s", ffidir, p);
+                }
+                add_csrcfile(cpath);
+            }
+
         } else {
             fprintf(stderr, "obc: %s: unrecognised directive: %s\n", ffifile, p);
         }
@@ -602,6 +635,11 @@ int main(int argc, char *argv[]) {
         for (int i = 0; i < g_ncfiles && pos < (int)sizeof(cmd); i++) {
             pos += snprintf(cmd + pos, sizeof(cmd) - (size_t)pos,
                             " %s", g_cfiles[i]);
+        }
+
+        for (int i = 0; i < g_ncsrcfiles && pos < (int)sizeof(cmd); i++) {
+            pos += snprintf(cmd + pos, sizeof(cmd) - (size_t)pos,
+                            " %s", g_csrcfiles[i]);
         }
 
         for (int i = 0; i < g_nldflags && pos < (int)sizeof(cmd); i++) {

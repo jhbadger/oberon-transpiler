@@ -3,17 +3,19 @@ Oberon TUI IDE (rewrite oberon_ide.cpp in Oberon)
   Goal: eliminate the tvision dependency by building a TUI framework and IDE
   entirely in Oberon, using the FFI mechanism for any C-backed pieces.
 
-  Phase 1 — Foundation (C-backed, FFI-wrapped)
+  Phase 1 — Foundation (C-backed, FFI-wrapped) ✓
 
-  - [ ] Write Editor.c: gap-buffer text editor in C
+  - [x] Write Editor.c: gap-buffer text editor in C
           gap buffer with insert/delete, cursor movement, undo stack
           find/replace (forward, with wrap)
           file load/save
           API named Editor_* to match Oberon convention (no .ffi remapping needed)
-  - [ ] Write Editor.mod stub: procedure signatures + opaque handle type
+  - [x] Write Editor.mod stub: procedure signatures + opaque handle type
           so the type checker and codegen know the interface
-  - [ ] Write Editor.h (or generate from Editor.mod):
+  - [x] Write Editor.h (or generate from Editor.mod):
           declares Editor_Open, Editor_Insert, Editor_Delete, Editor_Save, etc.
+  - [x] FFI mechanism: .ffi file format (HEADER/LINK/MAP/CSRC), parsed by obc;
+          CSRC files tracked separately so obc never deletes them after linking
 
   Phase 2 — TUI framework in Oberon (Modules/TUI.mod)
 
