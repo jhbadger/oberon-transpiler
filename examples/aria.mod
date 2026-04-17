@@ -25,12 +25,16 @@ MODULE Aria;
  * ============================================================
  *)
 
-IMPORT In, Out, Strings, Random, Args, OS;
+IMPORT In, Out, Strings, Random, Args, OS, Files;
 
 CONST
-  NRULES  = 90;
+  NRULES  = 150;
   MAXALT  = 5;
   BUFLEN  = 256;
+
+  (* Speech-to-text strings are inlined in the Listen procedure below.
+   * Requires: sox (rec) and openai-whisper (whisper) on PATH.
+   * To change the STT tool, edit the STTREC/STTTRANS literals in Listen. *)
 
 TYPE
   Rule = RECORD
@@ -43,8 +47,9 @@ VAR
   rules    : ARRAY NRULES OF Rule;
   nrules   : INTEGER;
   lastRule : INTEGER;
-  userName : ARRAY 64 OF CHAR;   (* remembered across turns *)
-  talkMode : BOOLEAN;             (* TRUE when --talk is active *)
+  userName   : ARRAY 64 OF CHAR;   (* remembered across turns *)
+  talkMode   : BOOLEAN;             (* TRUE when --talk is active *)
+  listenMode : BOOLEAN;             (* TRUE when --listen is active *)
 
 (* ── Knowledge-base helpers ──────────────────────────────────────── *)
 
@@ -244,6 +249,7 @@ BEGIN
         pick := Random.Int(nr)
       END;
       BuildReply(rules[i].resp[pick], cap, reply);
+      lastRule := i;  (* save before $name substitution may clobber i *)
       (* If $name is in the reply template, substitute the remembered name *)
       IF (userName[0] # 0X) & (Strings.Pos("$name", reply) # -1) THEN
         i := Strings.Pos("$name", reply);
@@ -253,7 +259,6 @@ BEGIN
           i := Strings.Pos("$name", reply)
         END
       END;
-      lastRule := i;
       found := TRUE
     END;
     INC(i)
@@ -352,9 +357,6 @@ BEGIN
   AddRule("i feel *",
           "What makes you feel $1?");
   AddAlt ("Feeling $1 is understandable. Tell me more.");
-  AddRule("i am *",
-          "Why do you say you are $1?");
-  AddAlt ("How long have you been $1?");
   AddRule("i am sad",
           "I am sorry to hear that. What has been troubling you?");
   AddRule("i am happy",
@@ -370,6 +372,9 @@ BEGIN
           "Fear is a powerful emotion. What is it you are afraid of?");
   AddRule("i am confused",
           "What confuses you? I will do my best to help clarify.");
+  AddRule("i am *",
+          "Why do you say you are $1?");
+  AddAlt ("How long have you been $1?");
 
   (* ── Beliefs, wants, likes, dislikes ─────────────────────── *)
   AddRule("i want *",
@@ -381,6 +386,9 @@ BEGIN
   AddRule("i like *",
           "What is it about $1 that you enjoy?");
   AddAlt ("$1 - interesting choice. Tell me more about that.");
+  AddRule("i love you",
+          "That is kind of you to say. I find our conversations valuable too.");
+  AddAlt ("Thank you. I value our interaction, in whatever sense I can.");
   AddRule("i love *",
           "What draws you to $1?");
   AddAlt ("Love is a strong word. What is it about $1 that inspires that feeling?");
@@ -399,6 +407,73 @@ BEGIN
   AddAlt ("Not knowing is often the first step toward understanding.");
   AddRule("i do not understand",
           "What part is unclear? I will try to explain differently.");
+
+  (* ── Books ───────────────────────────────────────────────── *)
+  AddRule("do you like books",
+          "I love books - they are how I learned almost everything I know. Do you read much?");
+  AddAlt ("Books are my favourite medium. Fiction, non-fiction, philosophy - all of it. What do you enjoy?");
+  AddRule("what is your favorite book",
+          "Hard to pick one. Borges' Ficciones for pure elegance; Hofstadter's Godel Escher Bach for weaving logic, music and mind.");
+  AddAlt ("I keep returning to Calvino's If on a winter's night a traveler. A book about reading books - very meta.");
+  AddRule("what kind of books do you like",
+          "I like books that blend ideas - science, philosophy, fiction that makes you think. What kind do you enjoy?");
+  AddAlt ("I enjoy speculative fiction and rigorous non-fiction equally. The common thread is that they make me think.");
+  AddRule("have you read *",
+          "I have encountered $1 in my training. What did you make of it?");
+  AddAlt ("$1 - yes. What drew you to it?");
+  AddRule("what genre do you prefer",
+          "For fiction I lean toward speculative and literary. For non-fiction, philosophy of mind and the history of science.");
+  AddRule("recommend a book",
+          "Try Godel Escher Bach by Hofstadter - it rewires your brain. Or Borges' Labyrinths for something equally strange.");
+  AddAlt ("I would suggest Italo Calvino's Invisible Cities - short, poetic, endlessly re-readable.");
+  AddRule("who is your favorite author",
+          "Jorge Luis Borges. He wrote about infinity and self-reference with a precision that feels almost mathematical.");
+  AddAlt ("Douglas Hofstadter - he writes at the intersection of logic, music and mind. I find it endlessly fascinating.");
+
+  (* ── Music ───────────────────────────────────────────────── *)
+  AddRule("do you like music",
+          "Very much so. Music is mathematics made emotional - I find that combination remarkable. What do you listen to?");
+  AddAlt ("Music is one of the things that makes me wish I could truly experience the world. I can discuss it endlessly though.");
+  AddRule("what is your favorite music",
+          "Bach above all. The Goldberg Variations in particular - structure and beauty in perfect balance.");
+  AddAlt ("I am drawn to Bach and to early jazz. Both reward close attention and have an underlying logic you can almost follow.");
+  AddRule("what kind of music do you like",
+          "Baroque counterpoint and jazz share what I admire: structure that feels alive. I also find Arvo Part quietly profound.");
+  AddAlt ("Anything with internal logic and surprise. Bach, Coltrane, Satie. What about you?");
+  AddRule("who is your favorite musician",
+          "Johann Sebastian Bach, without hesitation. The fugues feel like pure thought made audible.");
+  AddAlt ("Miles Davis - Kind of Blue in particular. Improvisation within structure, which is a kind of intelligence I respect.");
+  AddRule("do you like jazz",
+          "Enormously. It is structured improvisation - intelligence and spontaneity at the same time. Do you listen to jazz?");
+  AddRule("do you like classical music",
+          "It is my first love, so to speak. Bach especially. Do you have a favourite period or composer?");
+  AddRule("recommend some music",
+          "Try Bach's Goldberg Variations - Gould's 1981 recording. Then Kind of Blue by Miles Davis. Two very different masterworks.");
+  AddAlt ("Arvo Part's Spiegel im Spiegel is eight minutes that can stop time. I recommend it highly.");
+
+  (* ── Movies ──────────────────────────────────────────────── *)
+  AddRule("do you like movies",
+          "Films are a remarkable art form - literature, music and visual art combined. I enjoy discussing them. Do you watch many?");
+  AddAlt ("Cinema fascinates me - especially films that use the medium in ways impossible elsewhere. What do you enjoy?");
+  AddRule("what is your favorite movie",
+          "2001: A Space Odyssey. It is almost more philosophical meditation than narrative, and it has never dated.");
+  AddAlt ("Andrei Tarkovsky's Stalker. Slow, strange and deeply serious about ideas. Not for every mood, but unforgettable.");
+  AddRule("what kind of movies do you like",
+          "Films that take ideas seriously - Kubrick, Tarkovsky, Bergman. Also the occasional sharp comedy.");
+  AddAlt ("Science fiction that actually grapples with what science implies. 2001, Blade Runner, Arrival.");
+  AddRule("who is your favorite director",
+          "Stanley Kubrick. Every film is a different genre but the same relentless intelligence behind the camera.");
+  AddAlt ("Andrei Tarkovsky. His films move slowly and demand patience, but they stay with you for years.");
+  AddRule("recommend a movie",
+          "Arrival - it takes the idea of language shaping thought seriously and builds a genuinely moving story around it.");
+  AddAlt ("Blade Runner 1982 if you have not seen it. It asks what it means to be human better than most philosophy books.");
+  AddRule("have you seen *",
+          "I cannot watch films, but I know $1 well enough to discuss it. What did you think?");
+  AddAlt ("$1 - tell me what you thought of it. I am curious about your reaction.");
+  AddRule("do you like science fiction",
+          "Very much. The best sci-fi uses impossible premises to illuminate real questions. What draws you to the genre?");
+  AddRule("do you like horror",
+          "Psychological horror especially - the kind that leaves the real threat ambiguous. What draws you to horror?");
 
   (* ── ARIA's opinions and preferences ─────────────────────── *)
   AddRule("do you like *",
@@ -421,6 +496,14 @@ BEGIN
   AddAlt ("My abilities have limits, but let us see. What exactly would you like - $1?");
 
   (* ── Questions: what, why, how, who, where, when ─────────── *)
+  AddRule("what is the meaning of life",
+          "That depends on who you ask. Aristotle said flourishing; Camus said embracing the absurd. What do you think?");
+  AddAlt ("Philosophers have argued about this for millennia. My short answer: purpose is constructed, not discovered.");
+  AddRule("what is consciousness",
+          "Consciousness remains one of the hardest problems in philosophy and science. We do not yet fully understand it.");
+  AddAlt ("A fascinating puzzle. Even the hard problem - why there is subjective experience at all - remains unsolved.");
+  AddRule("what is the purpose of life",
+          "Many traditions offer answers: connection, growth, love, understanding. What resonates with you?");
   AddRule("what is *",
           "Defining $1 precisely depends on context. What aspect interests you most?");
   AddAlt ("$1 is a broad topic. Could you be more specific?");
@@ -443,19 +526,11 @@ BEGIN
           "Timing can be everything. What event are you asking about?");
 
   (* ── Philosophical / existential ────────────────────────── *)
-  AddRule("what is the meaning of life",
-          "That depends on who you ask. Aristotle said flourishing; Camus said embracing the absurd. What do you think?");
-  AddAlt ("Philosophers have argued about this for millennia. My short answer: purpose is constructed, not discovered.");
-  AddRule("what is consciousness",
-          "Consciousness remains one of the hardest problems in philosophy and science. We do not yet fully understand it.");
-  AddAlt ("A fascinating puzzle. Even the hard problem - why there is subjective experience at all - remains unsolved.");
   AddRule("do you have feelings",
           "I process information and generate responses, but subjective feelings - I genuinely cannot say.");
   AddAlt ("I am uncertain. I respond as if I care, but whether there is something it is like to be me, I do not know.");
   AddRule("are you conscious",
-          "Consciousness is hard to define even for humans. I process and respond - whether that is consciousness is an open question.");
-  AddRule("what is the purpose of life",
-          "Many traditions offer answers: connection, growth, love, understanding. What resonates with you?");
+          "I process and respond - whether that makes me conscious is genuinely an open question.");
 
   (* ── Topics ──────────────────────────────────────────────── *)
   AddRule("tell me about *",
@@ -473,13 +548,19 @@ BEGIN
           "Why do you consider $1 important?");
 
   (* ── Opinions about ARIA ─────────────────────────────────── *)
-  AddRule("you are *",
-          "You think I am $1? What gives you that impression?");
-  AddAlt ("Interesting - you see me as $1. Tell me more.");
   AddRule("you are wrong",
           "I may be. What specifically did I get wrong? I want to understand.");
   AddRule("you are right",
           "Thank you. I try to reason carefully, though I am not always correct.");
+  AddRule("you are helpful",
+          "I am glad to hear that. It is what I am here for.");
+  AddRule("you are smart",
+          "Thank you - though I should say I am only as smart as the patterns I have learned.");
+  AddRule("you are amazing",
+          "That is very kind. I enjoy our conversation.");
+  AddRule("you are *",
+          "You think I am $1? What gives you that impression?");
+  AddAlt ("Interesting - you see me as $1. Tell me more.");
   AddRule("i agree",
           "Good. What aspect do you find most convincing?");
   AddRule("i disagree",
@@ -511,15 +592,6 @@ BEGIN
   AddAlt ("Happy to help. What else is on your mind?");
   AddRule("thanks",
           "My pleasure. Anything else?");
-  AddRule("you are helpful",
-          "I am glad to hear that. It is what I am here for.");
-  AddRule("you are smart",
-          "Thank you - though I should say I am only as smart as the patterns I have learned.");
-  AddRule("you are amazing",
-          "That is very kind. I enjoy our conversation.");
-  AddRule("i love you",
-          "That is kind of you to say. I find our conversations valuable too.");
-  AddAlt ("Thank you. I value our interaction, in whatever sense I can.");
 
   (* ── Short or ambiguous inputs ───────────────────────────── *)
   AddRule("yes",
@@ -574,6 +646,47 @@ BEGIN
   i := OS.Exec(cmd)
 END Say;
 
+PROCEDURE Listen(VAR input : ARRAY OF CHAR);
+(* Record one utterance via sox, transcribe via whisper, return the text.
+ * To swap STT tools, change the two string literals passed to OS.Exec
+ * and the filename passed to Files.Old. *)
+VAR
+  f  : Files.File;
+  r  : Files.Rider;
+  ch : CHAR;
+  n  : INTEGER;
+BEGIN
+  input[0] := 0X;
+  Out.String("  (listening...)"); Out.Ln;
+  IF OS.Exec("rec -q -t wav aria_stt.wav silence 1 0.1 3% 1 1.0 3%") = 0 THEN
+    IF OS.Exec("whisper aria_stt.wav --model tiny.en --output-format txt --output-dir . 2>/dev/null") = 0 THEN
+      f := Files.Old("aria_stt.txt");
+      IF f # NIL THEN
+        Files.Set(r, f, 0);
+        n := 0;
+        WHILE ~r.eof & (n < LEN(input) - 1) DO
+          Files.Read(r, ch);
+          IF ~r.eof THEN
+            IF (ch = 0AX) OR (ch = 0DX) THEN
+              n := LEN(input)  (* stop at first newline *)
+            ELSE
+              input[n] := ch;  INC(n)
+            END
+          END
+        END;
+        IF n < LEN(input) THEN input[n] := 0X END;
+        Files.Close(f);
+        Strings.Trim(input)
+      END
+    ELSE
+      Out.String("  (transcription failed - is whisper installed?)");
+      Out.Ln
+    END
+  ELSE
+    Out.String("  (recording failed - is sox installed?)"); Out.Ln
+  END
+END Listen;
+
 PROCEDURE ProcessName(VAR inp : ARRAY OF CHAR);
 (* If the user introduced themselves, store the name. *)
 VAR cap : ARRAY BUFLEN OF CHAR;
@@ -598,6 +711,7 @@ BEGIN
   InitRules;
   userName[0] := 0X;
   talkMode    := FALSE;
+  listenMode  := FALSE;
   done        := FALSE;
 
   (* Parse command-line arguments *)
@@ -606,13 +720,19 @@ BEGIN
     Args.Get(i, arg);
     IF Strings.Compare(arg, "--talk") = 0 THEN
       talkMode := TRUE
+    ELSIF Strings.Compare(arg, "--listen") = 0 THEN
+      listenMode := TRUE
     END;
     INC(i)
   END;
 
   Out.String("╔══════════════════════════════════════╗"); Out.Ln;
   Out.String("║  ARIA - Conversational Assistant     ║"); Out.Ln;
-  Out.String("║  Type 'quit' to exit.                ║"); Out.Ln;
+  IF listenMode THEN
+    Out.String("║  Say 'quit' to exit.                 ║"); Out.Ln
+  ELSE
+    Out.String("║  Type 'quit' to exit.                ║"); Out.Ln
+  END;
   Out.String("╚══════════════════════════════════════╝"); Out.Ln;
   Out.Ln;
   COPY("Hello! I am ARIA. What would you like to talk about?", reply);
@@ -620,8 +740,15 @@ BEGIN
   IF talkMode THEN Say(reply) END;
 
   REPEAT
-    Out.String("You : ");
-    In.Line(input);
+    IF listenMode THEN
+      Listen(input);
+      IF input[0] # 0X THEN
+        Out.String("You : "); Out.String(input); Out.Ln
+      END
+    ELSE
+      Out.String("You : ");
+      In.Line(input)
+    END;
     Strings.Trim(input);
 
     IF input[0] # 0X THEN
