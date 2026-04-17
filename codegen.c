@@ -27,6 +27,50 @@ typedef struct {
     char  nested_proc_names[32][MAX_IDENT];
 } CG;
 
+/* -----------------------------------------------------------------------
+ * FFI module registry
+ * ----------------------------------------------------------------------- */
+#define MAX_FFI_MODS 64
+
+typedef struct {
+    char modname[64];
+    char header[256];              /* full include arg: "<foo.h>" or "\"foo.h\"" */
+    OBCFfiMap maps[OBC_FFI_MAP_MAX];
+    int  nmaps;
+} FfiMod;
+
+static FfiMod g_ffi_mods[MAX_FFI_MODS];
+static int    g_n_ffi_mods = 0;
+
+void ffi_register(const char *modname, const char *header,
+                  const OBCFfiMap *maps, int nmaps)
+{
+    if (g_n_ffi_mods >= MAX_FFI_MODS) {
+        fprintf(stderr, "obc: too many FFI modules (max %d)\n", MAX_FFI_MODS);
+        return;
+    }
+    FfiMod *m = &g_ffi_mods[g_n_ffi_mods++];
+    strncpy(m->modname, modname, sizeof(m->modname)-1);
+    m->modname[sizeof(m->modname)-1] = '\0';
+    strncpy(m->header, header, sizeof(m->header)-1);
+    m->header[sizeof(m->header)-1] = '\0';
+    int n = nmaps < OBC_FFI_MAP_MAX ? nmaps : OBC_FFI_MAP_MAX;
+    for (int i = 0; i < n; i++) m->maps[i] = maps[i];
+    m->nmaps = n;
+}
+
+int ffi_is_registered(const char *modname) {
+    for (int i = 0; i < g_n_ffi_mods; i++)
+        if (!strcmp(g_ffi_mods[i].modname, modname)) return 1;
+    return 0;
+}
+
+static const FfiMod *ffi_lookup(const char *modname) {
+    for (int i = 0; i < g_n_ffi_mods; i++)
+        if (!strcmp(g_ffi_mods[i].modname, modname)) return &g_ffi_mods[i];
+    return NULL;
+}
+
 static int is_open_array(Node *t);   /* forward */
 
 static void emit(CG *g, const char *fmt, ...) {
@@ -1986,8 +2030,16 @@ void codegen(Node *module, FILE *out, int is_main) {
     /* ── Include headers for user-imported modules ───────────────── */
     for (int i=0;i<g_nimports;i++) {
         const char *real = g_import_real[i];
-        if (!is_builtin_module(real))
+        if (is_builtin_module(real)) continue;
+        const FfiMod *ffi = ffi_lookup(real);
+        if (ffi) {
+            emit(g,"#include %s\n", ffi->header);
+            for (int j = 0; j < ffi->nmaps; j++)
+                emit(g,"#define %s_%s %s\n",
+                     real, ffi->maps[j].oberon, ffi->maps[j].cname);
+        } else {
             emit(g,"#include \"%s.h\"\n", real);
+        }
     }
 
     /* ── Detect imported modules ─────────────────────────────────── */
@@ -2977,7 +3029,7 @@ void codegen(Node *module, FILE *out, int is_main) {
         /* ── Main program: extern + call each user-imported init() ── */
         for (int i=0;i<g_nimports;i++) {
             const char *real = g_import_real[i];
-            if (!is_builtin_module(real))
+            if (!is_builtin_module(real) && !ffi_is_registered(real))
                 emit(g,"extern void %s_init(void);\n", real);
         }
         if (has_args)
@@ -2994,7 +3046,7 @@ void codegen(Node *module, FILE *out, int is_main) {
         if (has_random && !has_terminal) iemit(g,"srand((unsigned)time(NULL));\n");
         for (int i=0;i<g_nimports;i++) {
             const char *real = g_import_real[i];
-            if (!is_builtin_module(real))
+            if (!is_builtin_module(real) && !ffi_is_registered(real))
                 iemit(g,"%s_init();\n", real);
         }
         for (Node *s=module->c2; s; s=s->next) emit_stmt(g,s);
@@ -3006,7 +3058,7 @@ void codegen(Node *module, FILE *out, int is_main) {
         /* Extern declarations for this module's own user-module deps */
         for (int i=0;i<g_nimports;i++) {
             const char *real = g_import_real[i];
-            if (!is_builtin_module(real))
+            if (!is_builtin_module(real) && !ffi_is_registered(real))
                 emit(g,"extern void %s_init(void);\n", real);
         }
         emit(g,"\nvoid %s_init(void) {\n", g->modname);
@@ -3019,7 +3071,7 @@ void codegen(Node *module, FILE *out, int is_main) {
         /* Call each user-module dependency's init */
         for (int i=0;i<g_nimports;i++) {
             const char *real = g_import_real[i];
-            if (!is_builtin_module(real))
+            if (!is_builtin_module(real) && !ffi_is_registered(real))
                 iemit(g,"%s_init();\n", real);
         }
         for (Node *s=module->c2; s; s=s->next) emit_stmt(g,s);
@@ -3103,8 +3155,16 @@ void codegen_header(Node *module, FILE *out) {
     /* Include headers for user-imported modules */
     for (int i=0;i<g_nimports;i++) {
         const char *real = g_import_real[i];
-        if (!is_builtin_module(real))
+        if (is_builtin_module(real)) continue;
+        const FfiMod *ffi = ffi_lookup(real);
+        if (ffi) {
+            fprintf(out,"#include %s\n", ffi->header);
+            for (int j = 0; j < ffi->nmaps; j++)
+                fprintf(out,"#define %s_%s %s\n",
+                        real, ffi->maps[j].oberon, ffi->maps[j].cname);
+        } else {
             fprintf(out,"#include \"%s.h\"\n", real);
+        }
     }
 
     /* #define aliases so bare type/proc names expand to prefixed versions */

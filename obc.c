@@ -26,6 +26,23 @@ static int is_builtin(const char *s) {
 }
 
 /* -----------------------------------------------------------------------
+ * FFI link flags collected from .ffi files
+ * ----------------------------------------------------------------------- */
+#define MAX_LDFLAGS 64
+static char g_ldflags[MAX_LDFLAGS][64];
+static int  g_nldflags = 0;
+
+static void add_ldflag(const char *lib) {
+    for (int i = 0; i < g_nldflags; i++)
+        if (!strcmp(g_ldflags[i], lib)) return;   /* deduplicate */
+    if (g_nldflags < MAX_LDFLAGS) {
+        strncpy(g_ldflags[g_nldflags], lib, sizeof(g_ldflags[0])-1);
+        g_ldflags[g_nldflags][sizeof(g_ldflags[0])-1] = '\0';
+        g_nldflags++;
+    }
+}
+
+/* -----------------------------------------------------------------------
  * Compiled-module registry (avoids compiling the same module twice)
  * ----------------------------------------------------------------------- */
 #define MAX_COMPILED 64
@@ -216,6 +233,136 @@ static int resolve_module_file(const char *importer_dir,
 }
 
 /* -----------------------------------------------------------------------
+ * FFI: resolve and parse .ffi binding files
+ * ----------------------------------------------------------------------- */
+
+/* Search for Module.ffi using the same dirs as resolve_module_file. */
+static int resolve_ffi_file(const char *importer_dir, const char *modname,
+                             char *out, size_t outsz)
+{
+    char cand[512];
+
+    if (importer_dir && *importer_dir) {
+        snprintf(cand, sizeof(cand), "%s/%s.ffi", importer_dir, modname);
+        if (file_exists(cand)) {
+            strncpy(out, cand, outsz-1); out[outsz-1] = '\0'; return 1;
+        }
+    }
+
+    snprintf(cand, sizeof(cand), "%s.ffi", modname);
+    if (file_exists(cand)) {
+        strncpy(out, cand, outsz-1); out[outsz-1] = '\0'; return 1;
+    }
+
+    {
+        const char *mp = effective_mod_path();
+        if (mp && *mp) {
+            const char *p = mp;
+            while (*p) {
+                const char *q = p;
+                while (*q && *q != ':') q++;
+                char dir[512];
+                size_t n = (size_t)(q - p);
+                if (n >= sizeof(dir)) n = sizeof(dir)-1;
+                memcpy(dir, p, n); dir[n] = '\0';
+                if (n > 0)
+                    snprintf(cand, sizeof(cand), "%s/%s.ffi", dir, modname);
+                else
+                    snprintf(cand, sizeof(cand), "%s.ffi", modname);
+                if (file_exists(cand)) {
+                    strncpy(out, cand, outsz-1); out[outsz-1] = '\0'; return 1;
+                }
+                p = (*q == ':') ? q+1 : q;
+            }
+        }
+    }
+
+    return 0;
+}
+
+static void trim_trailing(char *s) {
+    char *e = s + strlen(s) - 1;
+    while (e >= s && (*e == ' ' || *e == '\t' || *e == '\r')) *e-- = '\0';
+}
+
+/* Parse Module.ffi, register with codegen, collect link flags.
+ * Returns 1 on success, 0 on error. */
+static int parse_ffi_file(const char *ffifile, const char *modname)
+{
+    FILE *f = fopen(ffifile, "r");
+    if (!f) {
+        fprintf(stderr, "obc: cannot open %s\n", ffifile);
+        return 0;
+    }
+
+    char header[256] = "";
+    OBCFfiMap maps[OBC_FFI_MAP_MAX];
+    int nmaps = 0;
+    char line[512];
+
+    while (fgets(line, sizeof(line), f)) {
+        /* strip newline */
+        char *nl = strchr(line, '\n'); if (nl) *nl = '\0';
+        /* skip leading whitespace */
+        char *p = line;
+        while (*p == ' ' || *p == '\t') p++;
+        /* skip blank lines and comments */
+        if (!*p || *p == '#') continue;
+
+        if (strncmp(p, "HEADER", 6) == 0 && (p[6] == ' ' || p[6] == '\t')) {
+            p += 7;
+            while (*p == ' ' || *p == '\t') p++;
+            trim_trailing(p);
+            /* wrap bare names in double quotes */
+            if (*p != '<' && *p != '"') {
+                char tmp[256];
+                snprintf(tmp, sizeof(tmp), "\"%s\"", p);
+                strncpy(header, tmp, sizeof(header)-1);
+            } else {
+                strncpy(header, p, sizeof(header)-1);
+            }
+            header[sizeof(header)-1] = '\0';
+
+        } else if (strncmp(p, "LINK", 4) == 0 && (p[4] == ' ' || p[4] == '\t')) {
+            p += 5;
+            while (*p == ' ' || *p == '\t') p++;
+            trim_trailing(p);
+            if (*p) add_ldflag(p);
+
+        } else if (strncmp(p, "MAP", 3) == 0 && (p[3] == ' ' || p[3] == '\t')) {
+            p += 4;
+            while (*p == ' ' || *p == '\t') p++;
+            if (nmaps >= OBC_FFI_MAP_MAX) continue;
+            /* "OberonName CName" */
+            char *sep = p;
+            while (*sep && *sep != ' ' && *sep != '\t') sep++;
+            size_t nlen = (size_t)(sep - p);
+            if (nlen == 0 || nlen >= sizeof(maps[0].oberon)) continue;
+            strncpy(maps[nmaps].oberon, p, nlen);
+            maps[nmaps].oberon[nlen] = '\0';
+            while (*sep == ' ' || *sep == '\t') sep++;
+            trim_trailing(sep);
+            if (!*sep) continue;
+            strncpy(maps[nmaps].cname, sep, sizeof(maps[0].cname)-1);
+            maps[nmaps].cname[sizeof(maps[0].cname)-1] = '\0';
+            nmaps++;
+
+        } else {
+            fprintf(stderr, "obc: %s: unrecognised directive: %s\n", ffifile, p);
+        }
+    }
+    fclose(f);
+
+    if (!header[0]) {
+        fprintf(stderr, "obc: %s: missing HEADER directive\n", ffifile);
+        return 0;
+    }
+
+    ffi_register(modname, header, maps, nmaps);
+    return 1;
+}
+
+/* -----------------------------------------------------------------------
  * Core: compile one module file.
  *
  * modfile  — absolute or relative path to the .mod source
@@ -269,6 +416,14 @@ static int compile_module(const char *modfile, int is_main)
             char depfile[512];
 
             if (already_compiled(imports[i])) continue;
+
+            /* Check for a .ffi binding before looking for a .mod file */
+            char ffifile[512];
+            if (resolve_ffi_file(moddir, imports[i], ffifile, sizeof(ffifile))) {
+                if (!parse_ffi_file(ffifile, imports[i])) return 1;
+                mark_compiled(imports[i]);   /* don't try to compile as Oberon */
+                continue;
+            }
 
             if (!resolve_module_file(moddir, imports[i], depfile, sizeof(depfile))) {
                 fprintf(stderr,
@@ -447,6 +602,11 @@ int main(int argc, char *argv[]) {
         for (int i = 0; i < g_ncfiles && pos < (int)sizeof(cmd); i++) {
             pos += snprintf(cmd + pos, sizeof(cmd) - (size_t)pos,
                             " %s", g_cfiles[i]);
+        }
+
+        for (int i = 0; i < g_nldflags && pos < (int)sizeof(cmd); i++) {
+            pos += snprintf(cmd + pos, sizeof(cmd) - (size_t)pos,
+                            " -l%s", g_ldflags[i]);
         }
 
         if (pos < (int)sizeof(cmd)) {
