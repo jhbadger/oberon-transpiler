@@ -153,15 +153,24 @@ static void ptr_type_add(const char *name) {
     if (g_n_ptr_types < MAX_PTR_TYPES)
         strncpy(g_ptr_types[g_n_ptr_types++], name, MAX_IDENT-1);
 }
+/* Forward declarations — defined later in this file. */
+static const char *import_realname(const char *alias);
+static Node *find_type_decl(const char *name);
+static Node *expr_type(Node *e);
+
 static int is_ptr_type(const char *name) {
     for (int i=0;i<g_n_ptr_types;i++)
         if (!strcmp(g_ptr_types[i],name)) return 1;
+    /* Cross-module fallback: look up the type decl and check if it is
+     * a POINTER TO declaration.  find_type_decl handles "Alias.TypeName"
+     * resolution via the xmod table. */
+    {
+        Node *td = find_type_decl(name);
+        if (td && td->c0 && td->c0->kind == ND_TPOINTER) return 1;
+    }
     return 0;
 }
 static void ptr_types_reset(void) { g_n_ptr_types = 0; }
-
-/* Forward declaration — defined later with the import table. */
-static const char *import_realname(const char *alias);
 
 /* Cross-module type decl lookup table — variables declared here so
  * find_type_decl() can reference them; populated later by
@@ -216,6 +225,20 @@ static int type_tag_add(const char *name) {
 }
 static int is_known_record_type(const char *name) { return type_tag_of(name)!=0; }
 
+/* Convert a possibly-qualified type name "Mod.Type" to its C tag name
+ * "Mod_Type" (replacing the dot with underscore).  For unqualified names
+ * the input is returned unchanged.  Result is written into buf[buflen]. */
+static const char *tag_cname(const char *name, char *buf, int buflen) {
+    const char *dot = strchr(name, '.');
+    if (!dot) return name;
+    /* "Alias.TypeName" → resolve alias to real module name then "_TypeName" */
+    int modlen = (int)(dot - name);
+    char alias[MAX_IDENT]; if (modlen >= MAX_IDENT) modlen = MAX_IDENT-1;
+    strncpy(alias, name, modlen); alias[modlen] = '\0';
+    snprintf(buf, buflen, "%s_%s", import_realname(alias), dot + 1);
+    return buf;
+}
+
 static void collect_proc_sigs(Node *decls) {
     for (Node *d = decls; d; d = d->next) {
         if (d->kind == ND_PROC_DECL && g_nprocsigs < MAX_PROCSIGS) {
@@ -235,6 +258,29 @@ static Node *lookup_proc_params(const char *name) {
 static Node *lookup_proc_rettype(const char *name) {
     for (int i = 0; i < g_nprocsigs; i++)
         if (!strcmp(g_procsigs[i].name, name)) return g_procsigs[i].rettype;
+    return NULL;
+}
+
+/* Return the formal parameter list for any callee expression.
+ * For named procedures, checks g_procsigs.  For procedure variables and
+ * field accesses, resolves the callee's PROCEDURE type via expr_type() so
+ * that VAR-param status is known even when calling through a proc variable. */
+static Node *lookup_callee_params(Node *callee) {
+    if (!callee) return NULL;
+    /* Named procedure: signature table has the definitive answer */
+    if (callee->kind == ND_IDENT) {
+        Node *p = lookup_proc_params(callee->str);
+        if (p) return p;
+    }
+    /* Procedure variable or field access: derive from the expression's type */
+    Node *t = expr_type(callee);
+    /* Resolve a named alias (e.g. HandleProc → TPROC) */
+    if (t && t->kind == ND_TNAME) {
+        Node *td = find_type_decl(t->str);
+        if (td && td->c0) t = td->c0;
+    }
+    /* c0 of a TPROC node is the formal-parameter list */
+    if (t && t->kind == ND_TPROC) return t->c0;
     return NULL;
 }
 
@@ -1273,11 +1319,15 @@ static void emit_expr(CG *g, Node *e) {
         break;
     case ND_IS:
         /* v IS T — runtime type test via _tag */
-        emit(g,"(");
-        emit_addr_of(g,e->c0);
-        emit(g," && (");
-        emit_addr_of(g,e->c0);
-        emit(g,")->_tag == _TAG_%s)", e->c1->str);
+        {
+            char _tbuf[MAX_IDENT*2];
+            const char *_tn = tag_cname(e->c1->str, _tbuf, sizeof(_tbuf));
+            emit(g,"(");
+            emit_addr_of(g,e->c0);
+            emit(g," && (");
+            emit_addr_of(g,e->c0);
+            emit(g,")->_tag == _TAG_%s)", _tn);
+        }
         break;
     case ND_DEREF: emit(g,"(*"); emit_expr(g,e->c0); emit(g,")"); break;
     case ND_INDEX:
@@ -1338,9 +1388,7 @@ static void emit_expr(CG *g, Node *e) {
             first_arg = 0;
         }
         /* Use the proc signature table to know which args are VAR params */
-        Node *params = NULL;
-        if (e->c0 && e->c0->kind == ND_IDENT)
-            params = lookup_proc_params(e->c0->str);
+        Node *params = lookup_callee_params(e->c0);
         Node *fp    = params;
         Node *fp_id = fp ? fp->c0 : NULL;
         for (Node *a=e->c1;a;a=a->next) {
@@ -1458,9 +1506,7 @@ static void emit_stmt(CG *g, Node *s) {
                 else                   emit(g,"&_frame");
                 first_s = 0;
             }
-            Node *params = NULL;
-            if (s->c0 && s->c0->kind == ND_IDENT)
-                params = lookup_proc_params(s->c0->str);
+            Node *params = lookup_callee_params(s->c0);
             Node *fp    = params;
             Node *fp_id = fp ? fp->c0 : NULL;
             for (Node *a=s->c1;a;a=a->next) {
@@ -1611,12 +1657,14 @@ static void emit_stmt(CG *g, Node *s) {
          * Emits as if/else if chain based on runtime _tag check.          */
         int first = 1;
         for (Node *cl=s->c0; cl; cl=cl->next) {
+            char _wtbuf[MAX_IDENT*2];
+            const char *_wtn = tag_cname(cl->str, _wtbuf, sizeof(_wtbuf));
             if (first) { iemit(g,"if ("); first=0; }
             else         iemit(g,"} else if (");
             emit_addr_of(g, cl->c0);
             emit(g," && (");
             emit_addr_of(g, cl->c0);
-            emit(g,")->_tag == _TAG_%s) {\n", cl->str);
+            emit(g,")->_tag == _TAG_%s) {\n", _wtn);
             g->indent++;
             /* Shadow the variable with the narrowed pointer type.
              * Use a void* temp to avoid the C scoping trap where the
@@ -3201,6 +3249,12 @@ void codegen_header(Node *module, FILE *out) {
     for (Node *d=module->c1; d; d=d->next) {
         if (d->kind==ND_TYPE_DECL && (d->flags & FLAG_EXPORTED))
             emit_type_decl(g, d);
+    }
+    /* Emit prefixed _TAG_ModName_TypeName defines so that importing modules
+     * can perform IS/WITH type tests on this module's exported record types. */
+    for (int _ti = 0; _ti < g_n_type_tags; _ti++) {
+        fprintf(out,"#define _TAG_%s_%s %d\n",
+                module->str, g_type_tags[_ti], _ti + 1);
     }
     fprintf(out,"\n");
 
