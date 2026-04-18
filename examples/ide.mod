@@ -262,31 +262,43 @@ END DoUndo;
    ════════════════════════════════════════════════════════════════ *)
 
 PROCEDURE DoEnter(ew: EditorWin);
-VAR len, rest, indent, i: INTEGER;
+VAR len, rest, baseIndent, extra, totalIndent, i: INTEGER;
 BEGIN
   PushUndo(ew, UOpSplit, ew.cy);
   len  := LineLen(ew, ew.cy);
   rest := len - ew.cx;
-  (* Measure leading whitespace on the current line for auto-indent *)
-  indent := 0;
-  WHILE (indent < ew.cx) & ((ew.lines[ew.cy][indent] = ' ') OR (ew.lines[ew.cy][indent] = 09X)) DO
-    INC(indent)
+  (* Measure leading whitespace on the current line for auto-indent.
+     baseIndent = number of leading space/tab bytes in the current line,
+     capped at the cursor position. *)
+  baseIndent := 0;
+  WHILE (baseIndent < ew.cx) &
+        ((ew.lines[ew.cy][baseIndent] = ' ') OR (ew.lines[ew.cy][baseIndent] = 09X)) DO
+    INC(baseIndent)
   END;
+  (* Smart indent: opener keywords add one extra level *)
+  extra := 0;
+  IF LineEndsWithOpener(ew, ew.cy, ew.cx) THEN  extra := 4  END;
+  totalIndent := baseIndent + extra;
   InsertLineAt(ew, ew.cy + 1);
   (* Copy the rest of the current line after the split point *)
   FOR i := 0 TO rest - 1 DO  ew.lines[ew.cy + 1][i] := ew.lines[ew.cy][ew.cx + i]  END;
   ew.lines[ew.cy + 1][rest] := 0X;
   ew.lines[ew.cy][ew.cx]   := 0X;
   INC(ew.cy);  ew.cx := 0;
-  (* Prepend indentation from the previous line *)
-  IF (indent > 0) & (indent + rest < LLEN) THEN
-    FOR i := rest - 1 TO 0 BY -1 DO  (* shift rest rightward *)
-      ew.lines[ew.cy][indent + i] := ew.lines[ew.cy][i]
+  (* Prepend indentation onto the new line *)
+  IF (totalIndent > 0) & (totalIndent + rest < LLEN) THEN
+    FOR i := rest - 1 TO 0 BY -1 DO  (* shift existing content rightward *)
+      ew.lines[ew.cy][totalIndent + i] := ew.lines[ew.cy][i]
     END;
-    FOR i := 0 TO indent - 1 DO
-      ew.lines[ew.cy][i] := ew.lines[ew.cy - 1][i]  (* copy indent chars *)
+    (* Copy base indent chars from the previous line (they may be tabs or spaces) *)
+    FOR i := 0 TO baseIndent - 1 DO
+      ew.lines[ew.cy][i] := ew.lines[ew.cy - 1][i]
     END;
-    ew.cx := indent
+    (* Fill the extra indent level with spaces *)
+    FOR i := baseIndent TO totalIndent - 1 DO
+      ew.lines[ew.cy][i] := ' '
+    END;
+    ew.cx := totalIndent
   END;
   ew.modified := TRUE
 END DoEnter;
@@ -499,6 +511,70 @@ BEGIN
     (Strings.Compare(kw, "ROR")       = 0) OR (Strings.Compare(kw, "ASH")       = 0)
 END IsKeyword;
 
+(* Returns TRUE if the content of ew.lines[li] trimmed to the first atByte
+   bytes ends (ignoring trailing spaces) with a block-opening keyword:
+   BEGIN  THEN  ELSE  DO  REPEAT  RECORD  OF  WITH  LOOP *)
+PROCEDURE LineEndsWithOpener(ew: EditorWin; li, atByte: INTEGER): BOOLEAN;
+VAR i, wEnd, wStart, wLen, k: INTEGER;
+    kw: ARRAY 10 OF CHAR;
+BEGIN
+  i := atByte - 1;
+  WHILE (i >= 0) & (ew.lines[li][i] = ' ') DO  DEC(i)  END;
+  wEnd := i + 1;   (* exclusive end of word *)
+  WHILE (i >= 0) &
+        (((ew.lines[li][i] >= 'A') & (ew.lines[li][i] <= 'Z')) OR
+         ((ew.lines[li][i] >= 'a') & (ew.lines[li][i] <= 'z'))) DO
+    DEC(i)
+  END;
+  wStart := i + 1;
+  wLen   := wEnd - wStart;
+  IF (wLen <= 0) OR (wLen > 9) THEN  RETURN FALSE  END;
+  FOR k := 0 TO wLen - 1 DO  kw[k] := ew.lines[li][wStart + k]  END;
+  kw[wLen] := 0X;
+  RETURN
+    (Strings.Compare(kw, "BEGIN")  = 0) OR
+    (Strings.Compare(kw, "THEN")   = 0) OR
+    (Strings.Compare(kw, "ELSE")   = 0) OR
+    (Strings.Compare(kw, "DO")     = 0) OR
+    (Strings.Compare(kw, "REPEAT") = 0) OR
+    (Strings.Compare(kw, "RECORD") = 0) OR
+    (Strings.Compare(kw, "OF")     = 0) OR
+    (Strings.Compare(kw, "WITH")   = 0) OR
+    (Strings.Compare(kw, "LOOP")   = 0)
+END LineEndsWithOpener;
+
+(* If the current line is of the form <spaces><END|UNTIL|ELSE|ELSIF> with
+   nothing else, remove one indent level (4 spaces) from the front and
+   adjust cx accordingly.  Called after each printable character is inserted. *)
+PROCEDURE CheckAutoDeindent(ew: EditorWin);
+VAR i, indent, len, kwLen, removed: INTEGER;
+    kw: ARRAY 10 OF CHAR;
+BEGIN
+  len := LineLen(ew, ew.cy);
+  indent := 0;
+  WHILE (indent < len) & (ew.lines[ew.cy][indent] = ' ') DO  INC(indent)  END;
+  IF indent = 0 THEN  RETURN  END;
+  kwLen := 0;  i := indent;
+  WHILE (i < len) &
+        (((ew.lines[ew.cy][i] >= 'A') & (ew.lines[ew.cy][i] <= 'Z')) OR
+         ((ew.lines[ew.cy][i] >= 'a') & (ew.lines[ew.cy][i] <= 'z'))) DO
+    IF kwLen < 9 THEN  kw[kwLen] := ew.lines[ew.cy][i];  INC(kwLen)  END;
+    INC(i)
+  END;
+  kw[kwLen] := 0X;
+  (* Line must be exactly <spaces><keyword> — nothing more *)
+  IF i # len THEN  RETURN  END;
+  IF (Strings.Compare(kw, "END")   = 0) OR
+     (Strings.Compare(kw, "UNTIL") = 0) OR
+     (Strings.Compare(kw, "ELSE")  = 0) OR
+     (Strings.Compare(kw, "ELSIF") = 0) THEN
+    removed := 4;
+    IF removed > indent THEN  removed := indent  END;
+    DeleteBytesAt(ew, ew.cy, 0, removed);
+    DEC(ew.cx, removed)
+  END
+END CheckAutoDeindent;
+
 (* ════════════════════════════════════════════════════════════════
    Rendering
    ════════════════════════════════════════════════════════════════ *)
@@ -682,7 +758,8 @@ BEGIN
         PushUndo(v, UOpEdit, v.cy);
         bytes[0] := ch;
         InsertBytesAt(v, v.cy, v.cx, bytes, 1);
-        INC(v.cx)
+        INC(v.cx);
+        CheckAutoDeindent(v)
       END;
       ScrollToCursor(v);
       RETURN TRUE
