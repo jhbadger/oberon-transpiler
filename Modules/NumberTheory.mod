@@ -2,7 +2,7 @@ MODULE NumberTheory;
 
 (* Module to handle various problems in number theory *)
 
-IMPORT Math;
+IMPORT Math,Out;
 
 PROCEDURE IsPrime*(N: INTEGER): BOOLEAN;
 VAR
@@ -33,4 +33,12 @@ BEGIN
   RETURN isPrime
 END IsPrime;
 
+PROCEDURE GCD*(a, b: LONGINT): LONGINT;
+BEGIN
+  IF b = 0 THEN RETURN a
+  ELSE RETURN GCD(b, a MOD b);
+  END;
+END GCD;
+
 END NumberTheory.
+
