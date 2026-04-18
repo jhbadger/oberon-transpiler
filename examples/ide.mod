@@ -34,15 +34,30 @@ CONST
   MaxLines = 2000;
   LLEN     = 512;    (* bytes per line — wide enough for UTF-8 *)
   MaxWins  = 8;
+  MaxUndo  = 100;    (* undo history depth per editor window *)
+
+  (* ── Undo operation types ── *)
+  UOpEdit  = 1;   (* one line modified in place *)
+  UOpSplit = 2;   (* line split into two by Enter *)
+  UOpJoin  = 3;   (* two lines joined into one by Backspace/Delete at boundary *)
 
   (* ── Menu command codes ── *)
   CmdNew     = 10;   CmdOpen    = 11;   CmdSave    = 12;
   CmdSaveAs  = 13;   CmdClose   = 14;   CmdQuit    = 15;
+  CmdUndo    = 19;
   CmdFind    = 20;   CmdFindNext= 21;   CmdGoto    = 22;
   CmdCompile = 30;   CmdRun     = 31;   CmdCompRun = 32;
   CmdNextWin = 40;   CmdTile    = 41;
 
 TYPE
+  UndoEntry = RECORD
+    op:       INTEGER;          (* UOpEdit / UOpSplit / UOpJoin *)
+    cy, cx:   INTEGER;          (* cursor position before the edit *)
+    fromLine: INTEGER;          (* first affected line index *)
+    line0:    ARRAY LLEN OF CHAR;  (* saved content of fromLine *)
+    line1:    ARRAY LLEN OF CHAR   (* saved content of fromLine+1 (UOpJoin only) *)
+  END;
+
   EditorWin  = POINTER TO EditorWinRec;
   EditorWinRec = RECORD (TUI.WindowRec)
     (* text buffer *)
@@ -56,7 +71,11 @@ TYPE
     killBuf:  ARRAY LLEN OF CHAR;
     srchBuf:  ARRAY 128  OF CHAR;
     (* comment nesting depth at start of each line (for syntax colour) *)
-    cmtDepth: ARRAY MaxLines + 1 OF INTEGER
+    cmtDepth: ARRAY MaxLines + 1 OF INTEGER;
+    (* undo stack (circular buffer) *)
+    undo:      ARRAY MaxUndo OF UndoEntry;
+    undoTop:   INTEGER;   (* next write slot *)
+    undoCount: INTEGER    (* number of valid entries *)
   END;
 
 (* ════════════════════════════════════════════════════════════════
@@ -70,9 +89,10 @@ VAR
   statusMsg: ARRAY 128 OF CHAR;
   wins:      ARRAY MaxWins OF EditorWin;
   winCount:  INTEGER;
-  lastEditor: EditorWin;   (* last editor that held focus — used when menu is active *)
-  (* inline find/goto prompt state *)
-  promptMode: INTEGER;   (* 0=none 1=find 2=goto *)
+  lastEditor: EditorWin;       (* last editor that held focus — used when menu is active *)
+  pendingCloseWin: EditorWin; (* editor awaiting close confirmation *)
+  (* inline prompt state *)
+  promptMode: INTEGER;   (* 0=none 1=find 2=goto 3=confirmClose 4=confirmQuit *)
   promptBuf:  ARRAY 128 OF CHAR;
   promptPos:  INTEGER;
 
@@ -175,19 +195,99 @@ BEGIN
 END RemoveLine;
 
 (* ════════════════════════════════════════════════════════════════
+   Undo
+   ════════════════════════════════════════════════════════════════ *)
+
+(* Push an undo entry before performing an edit.
+   op        — UOpEdit, UOpSplit, or UOpJoin
+   fromLine  — first line affected (saves lines[fromLine] always;
+               also saves lines[fromLine+1] for UOpJoin) *)
+PROCEDURE PushUndo(ew: EditorWin; op, fromLine: INTEGER);
+VAR e, i: INTEGER;
+BEGIN
+  e := ew.undoTop;
+  ew.undo[e].op       := op;
+  ew.undo[e].cy       := ew.cy;
+  ew.undo[e].cx       := ew.cx;
+  ew.undo[e].fromLine := fromLine;
+  FOR i := 0 TO LLEN - 1 DO
+    ew.undo[e].line0[i] := ew.lines[fromLine][i]
+  END;
+  IF (op = UOpJoin) & (fromLine + 1 < ew.nlines) THEN
+    FOR i := 0 TO LLEN - 1 DO
+      ew.undo[e].line1[i] := ew.lines[fromLine + 1][i]
+    END
+  END;
+  ew.undoTop := (e + 1) MOD MaxUndo;
+  IF ew.undoCount < MaxUndo THEN  INC(ew.undoCount)  END
+END PushUndo;
+
+PROCEDURE DoUndo(ew: EditorWin);
+VAR e, i, fromLine: INTEGER;
+BEGIN
+  IF ew.undoCount = 0 THEN  RETURN  END;
+  DEC(ew.undoCount);
+  ew.undoTop := (ew.undoTop - 1 + MaxUndo) MOD MaxUndo;
+  e        := ew.undoTop;
+  fromLine := ew.undo[e].fromLine;
+  IF ew.undo[e].op = UOpEdit THEN
+    FOR i := 0 TO LLEN - 1 DO
+      ew.lines[fromLine][i] := ew.undo[e].line0[i]
+    END;
+    ew.modified := TRUE
+  ELSIF ew.undo[e].op = UOpSplit THEN
+    (* Reverse a line split: remove the extra line, restore the original *)
+    IF fromLine + 1 < ew.nlines THEN  RemoveLine(ew, fromLine + 1)  END;
+    FOR i := 0 TO LLEN - 1 DO
+      ew.lines[fromLine][i] := ew.undo[e].line0[i]
+    END
+  ELSE  (* UOpJoin *)
+    (* Reverse a line join: restore original line, re-insert the removed one *)
+    FOR i := 0 TO LLEN - 1 DO
+      ew.lines[fromLine][i] := ew.undo[e].line0[i]
+    END;
+    InsertLineAt(ew, fromLine + 1);
+    FOR i := 0 TO LLEN - 1 DO
+      ew.lines[fromLine + 1][i] := ew.undo[e].line1[i]
+    END
+  END;
+  ew.cy := ew.undo[e].cy;
+  ew.cx := ew.undo[e].cx;
+  ClampCursor(ew);
+  ScrollToCursor(ew)
+END DoUndo;
+
+(* ════════════════════════════════════════════════════════════════
    Editing operations (take EditorWin, modify in place)
    ════════════════════════════════════════════════════════════════ *)
 
 PROCEDURE DoEnter(ew: EditorWin);
-VAR len, rest, i: INTEGER;
+VAR len, rest, indent, i: INTEGER;
 BEGIN
+  PushUndo(ew, UOpSplit, ew.cy);
   len  := LineLen(ew, ew.cy);
   rest := len - ew.cx;
+  (* Measure leading whitespace on the current line for auto-indent *)
+  indent := 0;
+  WHILE (indent < ew.cx) & ((ew.lines[ew.cy][indent] = ' ') OR (ew.lines[ew.cy][indent] = 09X)) DO
+    INC(indent)
+  END;
   InsertLineAt(ew, ew.cy + 1);
+  (* Copy the rest of the current line after the split point *)
   FOR i := 0 TO rest - 1 DO  ew.lines[ew.cy + 1][i] := ew.lines[ew.cy][ew.cx + i]  END;
   ew.lines[ew.cy + 1][rest] := 0X;
   ew.lines[ew.cy][ew.cx]   := 0X;
   INC(ew.cy);  ew.cx := 0;
+  (* Prepend indentation from the previous line *)
+  IF (indent > 0) & (indent + rest < LLEN) THEN
+    FOR i := rest - 1 TO 0 BY -1 DO  (* shift rest rightward *)
+      ew.lines[ew.cy][indent + i] := ew.lines[ew.cy][i]
+    END;
+    FOR i := 0 TO indent - 1 DO
+      ew.lines[ew.cy][i] := ew.lines[ew.cy - 1][i]  (* copy indent chars *)
+    END;
+    ew.cx := indent
+  END;
   ew.modified := TRUE
 END DoEnter;
 
@@ -195,11 +295,13 @@ PROCEDURE DoBackspace(ew: EditorWin);
 VAR len1, len2, prev, i: INTEGER;
 BEGIN
   IF ew.cx > 0 THEN
+    PushUndo(ew, UOpEdit, ew.cy);
     prev := ew.cx;
     Utf8Back(ew.lines[ew.cy], prev);
     DeleteBytesAt(ew, ew.cy, prev, ew.cx - prev);
     ew.cx := prev
   ELSIF ew.cy > 0 THEN
+    PushUndo(ew, UOpJoin, ew.cy - 1);
     len1 := LineLen(ew, ew.cy - 1);
     len2 := LineLen(ew, ew.cy);
     IF len1 + len2 < LLEN THEN
@@ -216,10 +318,12 @@ VAR len1, len2, next, i: INTEGER;
 BEGIN
   len1 := LineLen(ew, ew.cy);
   IF ew.cx < len1 THEN
+    PushUndo(ew, UOpEdit, ew.cy);
     next := ew.cx;
     Utf8Fwd(ew.lines[ew.cy], next);
     DeleteBytesAt(ew, ew.cy, ew.cx, next - ew.cx)
   ELSIF ew.cy < ew.nlines - 1 THEN
+    PushUndo(ew, UOpJoin, ew.cy);
     len2 := LineLen(ew, ew.cy + 1);
     IF len1 + len2 < LLEN THEN
       FOR i := 0 TO len2 - 1 DO  ew.lines[ew.cy][len1 + i] := ew.lines[ew.cy + 1][i]  END;
@@ -235,6 +339,7 @@ VAR len, i: INTEGER;
 BEGIN
   len := LineLen(ew, ew.cy);
   IF ew.cx < len THEN
+    PushUndo(ew, UOpEdit, ew.cy);
     i := 0;
     WHILE ew.cx + i < len DO  ew.killBuf[i] := ew.lines[ew.cy][ew.cx + i];  INC(i)  END;
     ew.killBuf[i] := 0X;
@@ -242,7 +347,7 @@ BEGIN
     ew.modified := TRUE
   ELSIF ew.cy < ew.nlines - 1 THEN
     ew.killBuf[0] := 0X;
-    DoDelete(ew)
+    DoDelete(ew)   (* DoDelete pushes its own undo *)
   END
 END DoKillLine;
 
@@ -251,6 +356,7 @@ VAR klen: INTEGER;
 BEGIN
   klen := Strings.Length(ew.killBuf);
   IF klen > 0 THEN
+    PushUndo(ew, UOpEdit, ew.cy);
     InsertBytesAt(ew, ew.cy, ew.cx, ew.killBuf, klen);
     INC(ew.cx, klen)
   END
@@ -557,11 +663,13 @@ BEGIN
       ELSIF ch = TUI.KDel    THEN  DoDelete(v)
       ELSIF ch = TUI.KTab    THEN
         (* Insert 4 spaces *)
+        PushUndo(v, UOpEdit, v.cy);
         bytes[0] := ' ';  bytes[1] := ' ';  bytes[2] := ' ';  bytes[3] := ' ';
         InsertBytesAt(v, v.cy, v.cx, bytes, 4);
         INC(v.cx, 4)
       ELSIF ORD(ch) = 11 THEN  DoKillLine(v)   (* Ctrl+K *)
       ELSIF ORD(ch) = 25 THEN  DoYank(v)       (* Ctrl+Y *)
+      ELSIF ORD(ch) = 26 THEN  DoUndo(v)       (* Ctrl+Z *)
       ELSIF ORD(ch) = 6  THEN                  (* Ctrl+F *)
         promptMode := 1;
         promptBuf[0] := 0X;  promptPos := 0;
@@ -571,6 +679,7 @@ BEGIN
         promptBuf[0] := 0X;  promptPos := 0;
         Strings.Copy("Go to line: ", statusMsg)
       ELSIF (ORD(ch) >= 32) & (ORD(ch) < 127) THEN
+        PushUndo(v, UOpEdit, v.cy);
         bytes[0] := ch;
         InsertBytesAt(v, v.cy, v.cx, bytes, 1);
         INC(v.cx)
@@ -663,6 +772,7 @@ BEGIN
   ew.modified := FALSE;
   ew.killBuf[0] := 0X;
   ew.srchBuf[0] := 0X;
+  ew.undoTop := 0;  ew.undoCount := 0;
   (* Find a free slot *)
   i := 0;
   WHILE (i < MaxWins) & (wins[i] # NIL) DO  INC(i)  END;
@@ -768,6 +878,7 @@ BEGIN
   ew.cx := 0;  ew.cy := 0;
   ew.topLine := 0;  ew.leftCol := 0;
   ew.modified := FALSE;
+  ew.undoTop := 0;  ew.undoCount := 0;
   RETURN TRUE
 END LoadFile;
 
@@ -903,6 +1014,22 @@ VAR ch: CHAR;
 BEGIN
   IF ev.kind # TUI.EvKey THEN  RETURN  END;
   ch := ev.key;
+
+  (* Confirm-close / confirm-quit prompts — single key Y or anything-else *)
+  IF (promptMode = 3) OR (promptMode = 4) THEN
+    IF (ch = 'Y') OR (ch = 'y') THEN
+      IF promptMode = 3 THEN
+        CloseEditorWin(pendingCloseWin);
+        pendingCloseWin := NIL
+      ELSE
+        running := FALSE
+      END
+    END;
+    promptMode := 0;  promptBuf[0] := 0X;  statusMsg[0] := 0X;
+    IF (promptMode = 0) & (lastEditor # NIL) THEN  TUI.SetFocus(lastEditor)  END;
+    RETURN
+  END;
+
   ew := FocusedEditor();
   IF ew = NIL THEN  ew := lastEditor  END;
   IF ch = TUI.KEsc THEN
@@ -956,6 +1083,15 @@ END HandlePrompt;
 (* ════════════════════════════════════════════════════════════════
    Menu command handler
    ════════════════════════════════════════════════════════════════ *)
+
+PROCEDURE AnyModified(): BOOLEAN;
+VAR i: INTEGER;
+BEGIN
+  FOR i := 0 TO MaxWins - 1 DO
+    IF (wins[i] # NIL) & wins[i].modified THEN  RETURN TRUE  END
+  END;
+  RETURN FALSE
+END AnyModified;
 
 PROCEDURE OnMenuCmd(cmd: INTEGER);
 VAR ew: EditorWin;
@@ -1023,10 +1159,26 @@ BEGIN
     END
 
   ELSIF cmd = CmdClose THEN
-    IF ew # NIL THEN  CloseEditorWin(ew)  END
+    IF ew # NIL THEN
+      IF ew.modified THEN
+        pendingCloseWin := ew;
+        promptMode := 3;
+        Strings.Copy("Modified. Close without saving? (Y/N)", statusMsg)
+      ELSE
+        CloseEditorWin(ew)
+      END
+    END
 
   ELSIF cmd = CmdQuit THEN
-    running := FALSE
+    IF AnyModified() THEN
+      promptMode := 4;
+      Strings.Copy("Unsaved changes. Quit without saving? (Y/N)", statusMsg)
+    ELSE
+      running := FALSE
+    END
+
+  ELSIF cmd = CmdUndo THEN
+    IF ew # NIL THEN  DoUndo(ew)  END
 
   ELSIF cmd = CmdFind THEN
     promptMode := 1;
@@ -1129,6 +1281,8 @@ BEGIN
 
   (* Edit menu *)
   Widgets.MenuBarAddMenu(mbar, "Edit");
+  Widgets.MenuBarAddItem(mbar, 1, "Undo          Ctrl+Z", CmdUndo);
+  Widgets.MenuBarAddSep (mbar, 1);
   Widgets.MenuBarAddItem(mbar, 1, "Find...       Ctrl+F", CmdFind);
   Widgets.MenuBarAddItem(mbar, 1, "Find Next     F3",     CmdFindNext);
   Widgets.MenuBarAddItem(mbar, 1, "Go to Line... Ctrl+G", CmdGoto);
@@ -1234,7 +1388,7 @@ BEGIN
       ELSIF ORD(ch) = 23 THEN    (* Ctrl+W *)
         OnMenuCmd(CmdClose)
       ELSIF ORD(ch) = 17 THEN    (* Ctrl+Q *)
-        running := FALSE
+        OnMenuCmd(CmdQuit)
       ELSIF ORD(ch) = 9  THEN    (* Ctrl+Tab — ORD(TUI.KTab)=9, handled below *)
         (* actually Tab goes to editor; Ctrl+Tab would be different... *)
         (* Route Tab to the focused view via dispatch *)

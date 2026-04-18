@@ -73,24 +73,40 @@ Oberon TUI IDE (rewrite oberon_ide.cpp in Oberon)
 
   Uses Editor (C FFI), TUI framework, and Widgets — replaces oberon_ide.cpp.
 
-  - [ ] EditorView: wraps the C Editor handle, renders buffer via TUI screen
+  - [x] EditorView: wraps the C Editor handle, renders buffer via TUI screen
           syntax highlighting (Oberon keywords, comments, strings, numbers)
           line number gutter
           error line highlight with inline annotation
-  - [ ] EditorWindow: Window containing an EditorView + scrollbars + indicator
-  - [ ] Multi-window desktop: window registry, Alt-1..9 switching, tile/cascade
+  - [x] EditorWindow: Window containing an EditorView + scrollbars + indicator
+  - [x] Multi-window desktop: window registry, Alt-1..9 switching, tile/cascade
   - [ ] Menu bar: File / Edit / Run / Search / Window / Help
-  - [ ] Run/Compile: fork obc, capture stderr, parse error line, jump to it
+  - [x] Run/Compile: fork obc, capture stderr, parse error line, jump to it
   - [ ] Help system: load stdlib.md, searchable topic list + description panel
   - [ ] Autocomplete: keyword + identifier prefix match, picker dialog
   - [ ] Recent files: persist to ~/.oberon_ide_recent
-  - [ ] Goto line, Find, Replace dialogs
+  - [x] Goto line, Find, Replace dialogs
 
-  Phase 6 — Build integration
+High impact / frequently needed
+  1. Undo  the most glaring absence; any accidental edit or paste is permanent
+  2. Auto-indent  Enter should carry forward the leading whitespace of the
+  current line; essential for Oberon's block structure
+  3. Save prompt on close/quit  currently silently discards unsaved changes
+  (modified = TRUE is tracked but never checked on close)
+  4. Jump to error line  when compile fails, parse the error message (e.g.
+  file.mod:42:) and move the cursor there
 
-  - [ ] Update Makefile: compile Editor.c alongside the Oberon sources
-  - [ ] Confirm IDE binary works on macOS and Linux (Termux stretch goal)
-  - [ ] Remove tvision directory and oberon_ide.cpp once IDE is stable
+  Useful quality-of-life
+  5. Line numbers  gutter showing line numbers alongside the text
+  6. Find & Replace  currently only Find
+  7. Copy to system clipboard / paste from it  kill/yank works within one
+  window but not across windows or with external programs
+  8. Bracket/BEGINEND matching  highlight the matching delimiter
+
+  Nice to have eventually
+  9. Recent files menu
+  10. Word wrap toggle
+  11. Configurable tab width
+  12. Help/keybindings viewer
 
 ----
 
