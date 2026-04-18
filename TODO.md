@@ -17,20 +17,30 @@ Oberon TUI IDE (rewrite oberon_ide.cpp in Oberon)
   - [x] FFI mechanism: .ffi file format (HEADER/LINK/MAP/CSRC), parsed by obc;
           CSRC files tracked separately so obc never deletes them after linking
 
-  Phase 2 — TUI framework in Oberon (Modules/TUI.mod)
+  Phase 2 — TUI framework in Oberon (Modules/TUI.mod) ✓
 
   Builds on the existing Terminal and Graphics modules.
 
-  - [ ] Screen cell model: RECORD with char + fg + bg; double-buffered
+  - [x] Screen cell model: RECORD with char + fg + bg; double-buffered
           only redraw cells that changed (avoids flicker)
-  - [ ] Event loop: parse ANSI escape sequences for arrow keys, function
-          keys, Ctrl-chords, and mouse (click + drag)
-  - [ ] Base View type: bounds (x, y, w, h), draw procedure variable,
+          Box-drawing chars stored as 0xC0–0xC5 pseudo-bytes; Flush
+          maps them to UTF-8 sequences to avoid multi-byte CHAR issues.
+  - [x] Event loop: parse ANSI escape sequences for arrow keys, function
+          keys, Ctrl-chords, and mouse (click + drag) — delegates to
+          Terminal.ReadKey; PollEvent/WaitEvent wrap it.
+  - [x] Base View type: bounds (x, y, w, h), draw procedure variable,
           handleEvent procedure variable, next/child pointers
-  - [ ] Focus management: single focused view, Tab cycles forward
-  - [ ] Window type (extends View): title bar, border, moveable
-  - [ ] Desktop: z-ordered list of windows; hit-test for mouse; tile/cascade
-  - [ ] Modal dialog execution: push event loop, return command code
+  - [x] Focus management: single focused view (Focused*), Tab cycles forward
+  - [x] Window type (extends View): title bar, border, moveable flag
+          DrawWindow auto-draws border + centred title, then calls draw proc.
+  - [x] Desktop: z-ordered list of windows; hit-test for mouse; TileWindows
+  - [x] Modal dialog execution: RunModal — push event loop, return command code
+
+  Two transpiler bugs were fixed to support cross-module IS/WITH and
+  pointer-field access on imported pointer types (codegen.c):
+    - is_ptr_type: cross-module fallback via find_type_decl
+    - _TAG_Mod.Type → _TAG_Mod_Type in IS/WITH emission
+    - Prefixed _TAG_Mod_TypeName exported in module headers
 
   Phase 3 — Standard widgets in Oberon (Modules/Widgets.mod)
 

@@ -819,6 +819,7 @@ static void emit_builtin(CG *g, const char *name, Node *args) {
         /* Set _tag if we can determine the pointed-to record type */
         if (a0 && a0->kind==ND_IDENT) {
             const char *recname = NULL;
+            int is_xmod_rec = 0;
             Node *pt = sym_type(a0->str);
             if (pt && pt->kind==ND_TPOINTER && pt->c0 && pt->c0->kind==ND_TNAME)
                 recname = pt->c0->str;
@@ -826,10 +827,25 @@ static void emit_builtin(CG *g, const char *name, Node *args) {
                 /* Resolve type alias: Dog → POINTER TO DogRec */
                 Node *alias = find_type_decl(pt->str);
                 if (alias && alias->c0 && alias->c0->kind==ND_TPOINTER &&
-                    alias->c0->c0 && alias->c0->c0->kind==ND_TNAME)
-                    recname = alias->c0->c0->str;
+                    alias->c0->c0 && alias->c0->c0->kind==ND_TNAME) {
+                    const char *dot = strchr(pt->str, '.');
+                    if (dot) {
+                        /* Cross-module: build "RealMod_RecordName" for tag */
+                        char modalias[MAX_IDENT];
+                        int modlen = (int)(dot - pt->str);
+                        if (modlen >= MAX_IDENT) modlen = MAX_IDENT - 1;
+                        strncpy(modalias, pt->str, modlen); modalias[modlen] = '\0';
+                        static char xmod_recname[MAX_IDENT*2];
+                        snprintf(xmod_recname, sizeof(xmod_recname), "%s_%s",
+                                 import_realname(modalias), alias->c0->c0->str);
+                        recname = xmod_recname;
+                        is_xmod_rec = 1;
+                    } else {
+                        recname = alias->c0->c0->str;
+                    }
+                }
             }
-            if (recname && is_known_record_type(recname)) {
+            if (recname && (is_xmod_rec || is_known_record_type(recname))) {
                 emit(g,"; if("); emit_expr(g,a0);
                 emit(g,") ("); emit_expr(g,a0);
                 emit(g,")->_tag = _TAG_%s", recname);
@@ -1073,7 +1089,7 @@ static int try_emit_import(CG *g, Node *fa, Node *args) {
         Node *a2=a1?a1->next:NULL;
         if (!strcmp(proc,"Length"))  { emit(g,"Strings_Length(");  emit_as_string(g,a0); emit(g,")"); return 1; }
         if (!strcmp(proc,"Append"))  { emit(g,"Strings_Append(");  emit_as_string(g,a0); emit(g,","); emit_expr(g,a1); emit(g,","); emit_string_capacity(g,a1); emit(g,")"); return 1; }
-        if (!strcmp(proc,"Copy"))    { emit(g,"Strings_Copy(");    emit_as_string(g,a0); emit(g,","); emit_expr(g,a1); emit(g,")"); return 1; }
+        if (!strcmp(proc,"Copy"))    { emit(g,"Strings_Copy(");    emit_as_string(g,a0); emit(g,","); emit_expr(g,a1); emit(g,","); emit_string_capacity(g,a1); emit(g,")"); return 1; }
         if (!strcmp(proc,"Compare")) { emit(g,"Strings_Compare("); emit_as_string(g,a0); emit(g,","); emit_as_string(g,a1); emit(g,")"); return 1; }
         if (!strcmp(proc,"Pos"))      { emit(g,"Strings_PosFrom(");   emit_as_string(g,a0); emit(g,","); emit_as_string(g,a1); emit(g,","); if (a2) emit_expr(g,a2); else emit(g,"0"); emit(g,")"); return 1; }
         if (!strcmp(proc,"Extract"))  { emit(g,"Strings_Extract(");   emit_as_string(g,a0); emit(g,","); emit_expr(g,a1); emit(g,","); emit_expr(g,a2); emit(g,","); emit_expr(g,a2->next); emit(g,")"); return 1; }
@@ -2588,8 +2604,8 @@ void codegen(Node *module, FILE *out, int is_main) {
         emit(g,"    return dst;\n");
         emit(g,"}\n");
         /* Copy(src, VAR dst) — full string copy */
-        emit(g,"static void Strings_Copy(const char *src, char *dst) {\n");
-        emit(g,"    strncpy(dst, src, 255); dst[255]=0;\n");
+        emit(g,"static void Strings_Copy(const char *src, char *dst, int dst_len) {\n");
+        emit(g,"    strncpy(dst, src, dst_len-1); dst[dst_len-1]=0;\n");
         emit(g,"}\n");
         /* Compare(s1, s2): INTEGER — returns -1, 0, or 1 */
         emit(g,"static int Strings_Compare(const char *a, const char *b) {\n");
