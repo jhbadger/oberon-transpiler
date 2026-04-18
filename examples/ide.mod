@@ -843,12 +843,12 @@ BEGIN
   END;
   Strings.Copy("obc ", cmd);
   Strings.Append(ew.title, cmd);
-  Strings.Append(" > /tmp/obcout.txt 2>&1", cmd);
+  Strings.Append(" > .obc_errors 2>&1", cmd);
   rc := OS.Exec(cmd);
   IF rc = 0 THEN
     Strings.Copy("Compiled OK.", statusMsg)
   ELSE
-    f := Files.Old("/tmp/obcout.txt");
+    f := Files.Old(".obc_errors");
     IF f # NIL THEN
       Files.Set(r, f, 0);
       i := 0;
