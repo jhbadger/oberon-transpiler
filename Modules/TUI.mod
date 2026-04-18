@@ -145,11 +145,12 @@ TYPE
 
   ViewRec* = RECORD
     x*, y*, w*, h*: INTEGER;
-    draw*:    DrawProc;    (* called to repaint the view into the back buffer *)
-    handle*:  HandleProc;  (* called with key/mouse events; returns TRUE = consumed *)
-    next*:    View;        (* next sibling (desktop list or child list) *)
-    child*:   View;        (* first child view                         *)
-    focused*: BOOLEAN
+    draw*:       DrawProc;    (* called to repaint the view into the back buffer *)
+    handle*:     HandleProc;  (* called with key/mouse events; returns TRUE = consumed *)
+    next*:       View;        (* next sibling (desktop list or child list) *)
+    child*:      View;        (* first child view                         *)
+    focused*:    BOOLEAN;
+    alwaysOnTop*: BOOLEAN     (* if TRUE, drawn after all normal views    *)
   END;
 
   (* Window — a View with a title bar and automatic border *)
@@ -400,7 +401,9 @@ BEGIN
       ev.my   := Terminal.MouseY();
       ev.mb   := Terminal.MouseBtn()
     ELSE
-      ev.kind := EvKey
+      ev.kind := EvKey;
+      (* Normalize DEL (0x7F) → KBackspace: macOS sends DEL for the Backspace key *)
+      IF ORD(ev.key) = 127 THEN  ev.key := KBackspace  END
     END;
     RETURN TRUE
   END;
@@ -456,29 +459,44 @@ BEGIN
   IF w.draw # NIL THEN  w.draw(w)  END
 END DrawWindow;
 
+(* DrawOne — dispatch to DrawWindow or DrawView depending on the runtime type. *)
+PROCEDURE DrawOne(v: View);
+BEGIN
+  IF v IS WindowRec THEN
+    WITH v: WindowRec DO  DrawWindow(v)  END
+  ELSE
+    DrawView(v)
+  END
+END DrawOne;
+
 (** DrawAll — redraw all views on the desktop from back to front.
-    Collects up to MaxViews views into a local array and draws in reverse
-    order so the front-most window paints last (on top). **)
+    Two passes: first normal views, then alwaysOnTop views (e.g. MenuBar
+    dropdowns), so overlays always paint over all regular content. **)
 PROCEDURE DrawAll*;
 VAR stack: ARRAY MaxViews OF View;
-    n: INTEGER;
+    n, i: INTEGER;
     v: View;
 BEGIN
-  (* Collect desktop views into stack (head = front) *)
+  (* Collect desktop views into stack (head = front-most) *)
   n := 0;  v := Desktop;
   WHILE (v # NIL) & (n < MaxViews) DO
     stack[n] := v;  INC(n);  v := v.next
   END;
 
-  (* Draw from back (n-1) to front (0) *)
-  WHILE n > 0 DO
-    DEC(n);
-    v := stack[n];
-    IF v IS WindowRec THEN
-      WITH v: WindowRec DO  DrawWindow(v)  END
-    ELSE
-      DrawView(v)
-    END
+  (* Pass 1: normal views, back to front *)
+  i := n - 1;
+  WHILE i >= 0 DO
+    v := stack[i];
+    IF ~v.alwaysOnTop THEN  DrawOne(v)  END;
+    DEC(i)
+  END;
+
+  (* Pass 2: always-on-top views, back to front *)
+  i := n - 1;
+  WHILE i >= 0 DO
+    v := stack[i];
+    IF v.alwaysOnTop THEN  DrawOne(v)  END;
+    DEC(i)
   END
 END DrawAll;
 

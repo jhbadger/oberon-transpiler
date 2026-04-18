@@ -42,17 +42,18 @@ Oberon TUI IDE (rewrite oberon_ide.cpp in Oberon)
     - _TAG_Mod.Type → _TAG_Mod_Type in IS/WITH emission
     - Prefixed _TAG_Mod_TypeName exported in module headers
 
-  Phase 3 — Standard widgets in Oberon (Modules/Widgets.mod)
+  Phase 3 — Standard widgets in Oberon (Modules/Widgets.mod) ✓
 
-  - [ ] Label: static text
-  - [ ] Button: focusable, fires command on Enter/Space
-  - [ ] InputLine: single-line text entry with cursor, insert/delete
-  - [ ] ListBox: scrollable list, keyboard + mouse navigation
-  - [ ] ScrollBar: vertical and horizontal, connected to a scroller
-  - [ ] CheckBox / RadioButton group
-  - [ ] StaticText: multi-line read-only text area (for output dialogs)
-  - [ ] MenuBar + MenuItem + SubMenu
-  - [ ] StatusLine: bottom bar with hotkey hints
+  - [x] Label: static text
+  - [x] Button: focusable, fires command on Enter/Space (onClick callback or TUI.ModalResult)
+  - [x] InputLine: single-line text entry with cursor, insert/delete, horizontal scroll
+  - [x] ListBox: scrollable list, keyboard + mouse navigation, onClick callback
+  - [x] CheckBox: toggle with keyboard and mouse
+  - [x] StaticText: multi-line read-only text area (newline-delimited)
+  - [x] MenuBar + dropdown menus, separators, keyboard + mouse, onCmd callback
+  - [x] StatusLine: bottom bar with hint text
+  Smoke test: tests/widgettest.mod
+  Note: ScrollBar and RadioButton group deferred (not needed for Phase 4/5).
 
   Phase 4 — File dialog in Oberon
 

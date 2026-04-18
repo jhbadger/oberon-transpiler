@@ -815,7 +815,7 @@ static void emit_builtin(CG *g, const char *name, Node *args) {
         if (a1) { emit_expr(g,a0); emit(g," -= "); emit_expr(g,a1); }
         else    { emit_expr(g,a0); emit(g,"--"); }
     } else if (!strcasecmp(name,"NEW")) {
-        emit_expr(g,a0); emit(g," = malloc(sizeof(*"); emit_expr(g,a0); emit(g,"))");
+        emit_expr(g,a0); emit(g," = calloc(1, sizeof(*"); emit_expr(g,a0); emit(g,"))");
         /* Set _tag if we can determine the pointed-to record type */
         if (a0 && a0->kind==ND_IDENT) {
             const char *recname = NULL;
