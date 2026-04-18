@@ -199,6 +199,9 @@ static Node *find_type_decl(const char *name) {
                 if (!strcmp(g_xmod_typedecls[i]->str, ckey)) return g_xmod_typedecls[i];
         }
     }
+    /* Direct xmod lookup: already-mangled names like "TUI_View" */
+    for (int i = 0; i < g_n_xmod_typedecls; i++)
+        if (!strcmp(g_xmod_typedecls[i]->str, name)) return g_xmod_typedecls[i];
     return NULL;
 }
 
@@ -403,6 +406,55 @@ static void collect_xmod_type_decls(Node *decls, const char *modname) {
         snprintf(td->str, MAX_IDENT, "%s_%s", modname, d->str);
         td->c0 = xmod_copy_typetree(d->c0);
         g_xmod_typedecls[g_n_xmod_typedecls++] = td;
+    }
+}
+
+/* -----------------------------------------------------------------------
+ * Cross-module exported VAR declarations
+ * Keyed "RealModName_VarName" → type node.  Local TNAME references in the
+ * type are qualified with the module name so that is_ptr_type() can resolve
+ * them via g_xmod_typedecls (e.g. "View" → "TUI_View").
+ * ----------------------------------------------------------------------- */
+static int is_builtin_type_name(const char *n) {
+    return !strcmp(n,"INTEGER")||!strcmp(n,"CHAR")||!strcmp(n,"BOOLEAN")||
+           !strcmp(n,"REAL")||!strcmp(n,"LONGREAL")||!strcmp(n,"LONGINT")||
+           !strcmp(n,"STRING")||!strcmp(n,"BYTE")||!strcmp(n,"SET");
+}
+
+#define MAX_XMOD_VARDECLS 512
+typedef struct { char name[MAX_IDENT*2]; Node *type; } XModVarDecl;
+static XModVarDecl g_xmod_vardecls[MAX_XMOD_VARDECLS];
+static int g_n_xmod_vardecls = 0;
+
+static Node *lookup_xmod_var_type(const char *modname, const char *varname) {
+    char key[MAX_IDENT*2];
+    snprintf(key, sizeof(key), "%s_%s", modname, varname);
+    for (int i = 0; i < g_n_xmod_vardecls; i++)
+        if (!strcmp(g_xmod_vardecls[i].name, key)) return g_xmod_vardecls[i].type;
+    return NULL;
+}
+
+static void collect_xmod_var_decls(Node *decls, const char *modname) {
+    for (Node *d = decls; d; d = d->next) {
+        if (d->kind != ND_VAR_DECL || !d->c1) continue;
+        for (Node *id = d->c0; id; id = id->next) {
+            if (!(id->flags & FLAG_EXPORTED)) continue;
+            if (g_n_xmod_vardecls >= MAX_XMOD_VARDECLS) break;
+            XModVarDecl *vd = &g_xmod_vardecls[g_n_xmod_vardecls++];
+            snprintf(vd->name, sizeof(vd->name), "%s_%s", modname, id->str);
+            /* Qualify local TNAME so the caller can resolve it via find_type_decl.
+             * Direct TPOINTER nodes already satisfy bt->kind==ND_TPOINTER, so only
+             * TNAME aliases (like View = POINTER TO …) need this treatment. */
+            Node *t = d->c1;
+            if (t && t->kind == ND_TNAME && !is_builtin_type_name(t->str)
+                                         && !strchr(t->str, '_')) {
+                Node *n = xmod_node_alloc(ND_TNAME);
+                if (n) { snprintf(n->str, MAX_IDENT, "%s_%s", modname, t->str); }
+                vd->type = n ? n : xmod_copy_typetree(t);
+            } else {
+                vd->type = xmod_copy_typetree(t);
+            }
+        }
     }
 }
 
@@ -629,6 +681,12 @@ static Node *expr_type(Node *e) {
         return NULL;
     }
     if (e->kind == ND_FIELD_ACCESS) {
+        /* Cross-module exported variable: Mod.VarName → look up its type. */
+        if (e->c0 && e->c0->kind == ND_IDENT && is_import(e->c0->str)) {
+            const char *real = import_realname(e->c0->str);
+            Node *t = lookup_xmod_var_type(real, e->str);
+            if (t) return t;
+        }
         Node *bt = expr_type(e->c0);
         if (!bt) return NULL;
         /* Unwrap pointer: POINTER TO Foo → look up Foo */
@@ -1192,10 +1250,14 @@ static int try_emit_import(CG *g, Node *fa, Node *args) {
     /* OS module — basic OS calls */
     if (!strcmp(mod,"OS")) {
         Node *a2 = a1 ? a1->next : NULL; (void)a2;
-        if (!strcmp(proc,"Exec"))   { emit(g,"OS_Exec(");   emit_as_string(g,a0); emit(g,")"); return 1; }
-        if (!strcmp(proc,"Exit"))   { emit(g,"exit(");      emit_expr(g,a0);      emit(g,")"); return 1; }
-        if (!strcmp(proc,"GetCwd")) { emit(g,"OS_GetCwd("); emit_expr(g,a0); emit(g,","); emit_open_array_len(g,a0); emit(g,")"); return 1; }
-        if (!strcmp(proc,"ChDir"))  { emit(g,"OS_ChDir(");  emit_as_string(g,a0); emit(g,")"); return 1; }
+        if (!strcmp(proc,"Exec"))    { emit(g,"OS_Exec(");    emit_as_string(g,a0); emit(g,")"); return 1; }
+        if (!strcmp(proc,"Exit"))    { emit(g,"exit(");       emit_expr(g,a0);      emit(g,")"); return 1; }
+        if (!strcmp(proc,"GetCwd"))  { emit(g,"OS_GetCwd(");  emit_expr(g,a0); emit(g,","); emit_open_array_len(g,a0); emit(g,")"); return 1; }
+        if (!strcmp(proc,"ChDir"))   { emit(g,"OS_ChDir(");   emit_as_string(g,a0); emit(g,")"); return 1; }
+        if (!strcmp(proc,"DirOpen")) { emit(g,"OS_DirOpen("); emit_as_string(g,a0); emit(g,","); emit_as_string(g,a1); emit(g,")"); return 1; }
+        if (!strcmp(proc,"DirCount")){ emit(g,"OS_DirCount()"); return 1; }
+        if (!strcmp(proc,"DirName")) { emit(g,"OS_DirName("); emit_expr(g,a0); emit(g,","); emit_expr(g,a1); emit(g,","); emit_open_array_len(g,a1); emit(g,")"); return 1; }
+        if (!strcmp(proc,"DirIsDir")){ emit(g,"OS_DirIsDir("); emit_expr(g,a0); emit(g,")"); return 1; }
     }
     /* Time module — time, formatting, sleep */
     if (!strcmp(mod,"Time")) {
@@ -2064,6 +2126,7 @@ void codegen(Node *module, FILE *out, int is_main) {
     if (!is_main) {
         collect_xmod_proc_sigs(module->c1, module->str);
         collect_xmod_type_decls(module->c1, module->str);
+        collect_xmod_var_decls(module->c1, module->str);
     }
 
     /* ── Collect import module names (alias + real name) ─────────── */
@@ -2564,6 +2627,47 @@ void codegen(Node *module, FILE *out, int is_main) {
         emit(g,"}\n");
         /* OS_ChDir(path): BOOLEAN */
         emit(g,"static int OS_ChDir(const char *path) { return chdir(path)==0; }\n");
+        /* Directory listing — stateful, sorted (dirs first then alpha) */
+        emit(g,"#include <dirent.h>\n");
+        emit(g,"#define _OS_MAX_DIR 4096\n");
+        emit(g,"typedef struct { char name[256]; int isdir; } _OSDirEntry;\n");
+        emit(g,"static _OSDirEntry _os_dir[_OS_MAX_DIR];\n");
+        emit(g,"static int _os_dir_n = 0;\n");
+        emit(g,"static int _os_dir_cmp(const void *a, const void *b) {\n");
+        emit(g,"    const _OSDirEntry *ea=(const _OSDirEntry*)a;\n");
+        emit(g,"    const _OSDirEntry *eb=(const _OSDirEntry*)b;\n");
+        emit(g,"    if (ea->isdir != eb->isdir) return eb->isdir - ea->isdir;\n");
+        emit(g,"    return strcmp(ea->name, eb->name);\n");
+        emit(g,"}\n");
+        emit(g,"static void OS_DirOpen(const char *path, const char *filter) {\n");
+        emit(g,"    DIR *d = opendir(path[0] ? path : \".\");\n");
+        emit(g,"    _os_dir_n = 0;\n");
+        emit(g,"    if (!d) return;\n");
+        emit(g,"    int flen = filter ? (int)strlen(filter) : 0;\n");
+        emit(g,"    struct dirent *e;\n");
+        emit(g,"    while ((e = readdir(d)) != NULL && _os_dir_n < _OS_MAX_DIR) {\n");
+        emit(g,"        if (strcmp(e->d_name,\".\") == 0) continue;\n");
+        emit(g,"        int isdir = (e->d_type == DT_DIR);\n");
+        emit(g,"        if (!isdir && flen > 0) {\n");
+        emit(g,"            int nlen = (int)strlen(e->d_name);\n");
+        emit(g,"            if (nlen < flen || strcmp(e->d_name+nlen-flen,filter) != 0) continue;\n");
+        emit(g,"        }\n");
+        emit(g,"        strncpy(_os_dir[_os_dir_n].name, e->d_name, 255);\n");
+        emit(g,"        _os_dir[_os_dir_n].name[255] = 0;\n");
+        emit(g,"        _os_dir[_os_dir_n].isdir = isdir;\n");
+        emit(g,"        _os_dir_n++;\n");
+        emit(g,"    }\n");
+        emit(g,"    closedir(d);\n");
+        emit(g,"    qsort(_os_dir, _os_dir_n, sizeof(_os_dir[0]), _os_dir_cmp);\n");
+        emit(g,"}\n");
+        emit(g,"static int  OS_DirCount(void) { return _os_dir_n; }\n");
+        emit(g,"static void OS_DirName(int i, char *name, int nlen) {\n");
+        emit(g,"    if (i<0||i>=_os_dir_n){name[0]=0;return;}\n");
+        emit(g,"    strncpy(name,_os_dir[i].name,nlen-1); name[nlen-1]=0;\n");
+        emit(g,"}\n");
+        emit(g,"static int  OS_DirIsDir(int i) {\n");
+        emit(g,"    return (i>=0 && i<_os_dir_n) ? _os_dir[i].isdir : 0;\n");
+        emit(g,"}\n");
         emit(g,"\n");
     }
 

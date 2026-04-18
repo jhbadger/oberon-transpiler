@@ -55,10 +55,19 @@ Oberon TUI IDE (rewrite oberon_ide.cpp in Oberon)
   Smoke test: tests/widgettest.mod
   Note: ScrollBar and RadioButton group deferred (not needed for Phase 4/5).
 
-  Phase 4 — File dialog in Oberon
+  Phase 4 — File dialog in Oberon ✓
 
-  - [ ] Read directory entries (needs OS.ReadDir or a small C helper)
-  - [ ] FileDialog: path input, scrollable file list, filter (*.mod)
+  - [x] OS.DirOpen/DirCount/DirName/DirIsDir added to OS module in codegen
+          sorts entries: directories first (with ".." at top), then alpha
+          filter is a suffix string (e.g. ".mod"); empty = show all files
+  - [x] FileDialog.Show(title, startPath, filter, VAR result): BOOLEAN
+          self-contained modal event loop (saves/restores TUI.Desktop)
+          Tab cycles focus among list / filename input / OK / Cancel
+          Enter on directory = navigate in; Enter on file = accept
+          Esc or Cancel button = cancel
+  Smoke test: tests/fdtest.mod
+  Fix: cross-module VAR field access bug fully fixed in codegen.c — TUI.Focused.handle
+       now correctly emits ->. g_xmod_vardecls table + find_type_decl xmod fallback.
 
   Phase 5 — IDE application in Oberon (ide.mod)
 
