@@ -290,6 +290,8 @@ BEGIN
     IF v.open & (v.active >= 0) & (v.active < v.nMenus) THEN
       dw := MenuDropWidth(v, v.active);
       dh := v.nItems[v.active] + 2;
+      (* Expand h so HitTest covers the dropdown area *)
+      v.h := 1 + dh;
       x  := v.titleX[v.active];
       TUI.DrawBox(x, v.y + 1, dw, dh, TUI.White, TUI.Black);
       TUI.FillRect(x + 1, v.y + 2, dw - 2, dh - 2, ' ', TUI.White, TUI.Black);
@@ -307,6 +309,8 @@ BEGIN
           TUI.PutStr(x + 2, itemY, v.items[v.active][di].text, TUI.White, TUI.Black)
         END
       END
+    ELSE
+      v.h := 1  (* no dropdown — restore normal height *)
     END
   END
 END DrawMenuBar;
@@ -464,7 +468,7 @@ BEGIN
 END HandleCheckBox;
 
 PROCEDURE HandleMenuBar(v: TUI.View; ev: TUI.Event): BOOLEAN;
-VAR i, tl, cmd: INTEGER;
+VAR i, tl, cmd, dw, dropX: INTEGER;
 BEGIN
   WITH v: MenuBarRec DO
     IF ev.kind = TUI.EvKey THEN
@@ -512,6 +516,7 @@ BEGIN
         RETURN TRUE
       END
     ELSIF ev.kind = TUI.EvMouse THEN
+      IF ev.mb = 3 THEN  RETURN FALSE  END;  (* ignore button-release events *)
       IF ev.my = v.y THEN
         (* Click on bar row — open / close menu *)
         FOR i := 0 TO v.nMenus - 1 DO
@@ -526,9 +531,13 @@ BEGIN
           END
         END
       ELSIF v.open & (v.active >= 0) THEN
-        (* Click inside dropdown *)
-        i := ev.my - (v.y + 2);
-        IF (i >= 0) & (i < v.nItems[v.active]) THEN
+        (* Click while dropdown is open *)
+        dw    := MenuDropWidth(v, v.active);
+        dropX := v.titleX[v.active];
+        i     := ev.my - (v.y + 2);
+        IF (i >= 0) & (i < v.nItems[v.active]) &
+           (ev.mx >= dropX + 1) & (ev.mx < dropX + dw - 1) THEN
+          (* Click on a dropdown item *)
           IF ~v.items[v.active][i].sep THEN
             v.hotSel := i;
             cmd := v.items[v.active][i].cmd;
@@ -536,9 +545,12 @@ BEGIN
             IF v.onCmd # NIL THEN  v.onCmd(cmd)
             ELSE  TUI.ModalResult := cmd
             END
-          END;
-          RETURN TRUE
-        END
+          END
+        ELSE
+          (* Click outside the dropdown area — close it *)
+          v.open := FALSE;  v.active := -1
+        END;
+        RETURN TRUE
       END
     END
   END;

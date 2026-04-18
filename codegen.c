@@ -372,8 +372,13 @@ static Node *xmod_copy_typetree(Node *t) {
     n->ival  = t->ival;
     switch (t->kind) {
     case ND_TARRAY:
-        /* Preserve open vs. fixed (c0 present/absent) with a dummy bound node */
-        if (t->c0) { Node *dummy = xmod_node_alloc(ND_INTEGER); n->c0 = dummy; }
+        /* Preserve open vs. fixed (c0 present/absent) with a dummy bound node.
+         * Copy the bound's ival so ARRAY 64 OF CHAR stays char[64], not char[0]. */
+        if (t->c0) {
+            Node *dummy = xmod_node_alloc(ND_INTEGER);
+            if (dummy) dummy->ival = t->c0->ival;
+            n->c0 = dummy;
+        }
         n->c1 = xmod_copy_typetree(t->c1);
         break;
     case ND_TPOINTER:
@@ -405,6 +410,15 @@ static void collect_xmod_type_decls(Node *decls, const char *modname) {
         if (!td) break;
         snprintf(td->str, MAX_IDENT, "%s_%s", modname, d->str);
         td->c0 = xmod_copy_typetree(d->c0);
+        /* Qualify unqualified base type names in TRECORD nodes.
+         * e.g. WindowRec = RECORD (ViewRec) stores "ViewRec" in str, but
+         * cross-module lookup needs "TUI_ViewRec". */
+        if (td->c0 && td->c0->kind == ND_TRECORD && td->c0->str[0]
+                && !strchr(td->c0->str, '.') && !strchr(td->c0->str, '_')) {
+            char qualified[MAX_IDENT];
+            snprintf(qualified, sizeof(qualified), "%s_%s", modname, td->c0->str);
+            strncpy(td->c0->str, qualified, MAX_IDENT-1);
+        }
         g_xmod_typedecls[g_n_xmod_typedecls++] = td;
     }
 }

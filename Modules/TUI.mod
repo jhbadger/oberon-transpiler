@@ -306,17 +306,22 @@ END DrawBox;
 (** Flush — push changed back-buffer cells to the terminal.
     Only emits ANSI sequences for cells that differ from the front buffer. **)
 PROCEDURE Flush*;
-VAR r, c, curFg, curBg: INTEGER;
+VAR r, c, curFg, curBg, prevC: INTEGER;
     isBox: BOOLEAN;
 BEGIN
   curFg := -1;  curBg := -1;
   FOR r := 0 TO Rows - 1 DO
+    prevC := -2;
     FOR c := 0 TO Cols - 1 DO
       IF (back[r][c].ch # front[r][c].ch) OR
          (back[r][c].fg # front[r][c].fg) OR
          (back[r][c].bg # front[r][c].bg) THEN
 
-        Terminal.Goto(c + 1, r + 1);
+        (* Only emit a Goto when there's a gap — consecutive dirty cells
+           in the same row are output without repositioning, so multi-byte
+           UTF-8 sequences stored across adjacent cells render correctly. *)
+        IF c # prevC + 1 THEN  Terminal.Goto(c + 1, r + 1)  END;
+        prevC := c;
 
         IF (back[r][c].fg # curFg) OR (back[r][c].bg # curBg) THEN
           SetColor(back[r][c].fg, back[r][c].bg);
@@ -351,6 +356,28 @@ BEGIN
     END
   END
 END InvalidateFront;
+
+(** InvalidateLine — mark a single screen row dirty so the next Flush
+    re-emits every cell in that row without skipping unchanged ones.
+    Use before writing UTF-8 content so multi-byte sequences are always
+    output as one uninterrupted byte run. y is 1-based. **)
+PROCEDURE InvalidateLine*(y: INTEGER);
+VAR c: INTEGER;
+BEGIN
+  IF (y >= 1) & (y <= Rows) THEN
+    FOR c := 0 TO Cols - 1 DO
+      front[y - 1][c].fg := -1
+    END
+  END
+END InvalidateLine;
+
+(** SetCursor — show the terminal cursor at (x, y) (1-based).
+    Call after Flush to position the blinking cursor in an editor view. **)
+PROCEDURE SetCursor*(x, y: INTEGER);
+BEGIN
+  Terminal.ShowCursor();
+  Terminal.Goto(x, y)
+END SetCursor;
 
 (* ════════════════════════════════════════════════════════════════════════
    Terminal size
@@ -536,13 +563,27 @@ BEGIN
   AddView(v)
 END BringToFront;
 
-(** HitTest — return the front-most view whose bounds contain (x, y). **)
+(** HitTest — return the front-most view whose bounds contain (x, y).
+    alwaysOnTop views take priority so dropdowns/overlays get clicks
+    even when drawn on top of a larger underlying view. **)
 PROCEDURE HitTest*(x, y: INTEGER): View;
 VAR v: View;
 BEGIN
+  (* Pass 1: alwaysOnTop views — they render over everything *)
   v := Desktop;
   WHILE v # NIL DO
-    IF (x >= v.x) & (x < v.x + v.w) &
+    IF v.alwaysOnTop &
+       (x >= v.x) & (x < v.x + v.w) &
+       (y >= v.y) & (y < v.y + v.h) THEN
+      RETURN v
+    END;
+    v := v.next
+  END;
+  (* Pass 2: normal views *)
+  v := Desktop;
+  WHILE v # NIL DO
+    IF ~v.alwaysOnTop &
+       (x >= v.x) & (x < v.x + v.w) &
        (y >= v.y) & (y < v.y + v.h) THEN
       RETURN v
     END;
