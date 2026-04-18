@@ -437,7 +437,17 @@ BEGIN
         RETURN TRUE
       END
     ELSIF ev.kind = TUI.EvMouse THEN
-      IF (ev.my >= v.y) & (ev.my < v.y + v.h) &
+      IF ev.mb = 64 THEN  (* wheel up *)
+        IF v.scroll > 0 THEN  DEC(v.scroll, 3) END;
+        IF v.scroll < 0 THEN  v.scroll := 0 END;
+        RETURN TRUE
+      ELSIF ev.mb = 65 THEN  (* wheel down *)
+        INC(v.scroll, 3);
+        IF v.scroll > v.count - 1 THEN  v.scroll := v.count - 1 END;
+        IF v.scroll < 0 THEN  v.scroll := 0 END;
+        RETURN TRUE
+      ELSIF (ev.mb # 32) & (ev.mb # 3) &  (* real click only, not motion/release *)
+         (ev.my >= v.y) & (ev.my < v.y + v.h) &
          (ev.mx >= v.x) & (ev.mx < v.x + v.w) THEN
         row := v.scroll + (ev.my - v.y);
         IF row >= v.count THEN  row := v.count - 1  END;
@@ -517,6 +527,20 @@ BEGIN
       END
     ELSIF ev.kind = TUI.EvMouse THEN
       IF ev.mb = 3 THEN  RETURN FALSE  END;  (* ignore button-release events *)
+      IF ev.mb = 32 THEN
+        (* Mouse motion — update hover highlight only, no click actions *)
+        IF v.open & (v.active >= 0) THEN
+          dw    := MenuDropWidth(v, v.active);
+          dropX := v.titleX[v.active];
+          i     := ev.my - (v.y + 2);
+          IF (i >= 0) & (i < v.nItems[v.active]) &
+             (ev.mx >= dropX + 1) & (ev.mx < dropX + dw - 1) THEN
+            v.hotSel := i
+          END;
+          RETURN TRUE
+        END;
+        RETURN FALSE
+      END;
       IF ev.my = v.y THEN
         (* Click on bar row — open / close menu *)
         FOR i := 0 TO v.nMenus - 1 DO

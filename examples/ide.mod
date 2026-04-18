@@ -70,6 +70,7 @@ VAR
   statusMsg: ARRAY 128 OF CHAR;
   wins:      ARRAY MaxWins OF EditorWin;
   winCount:  INTEGER;
+  lastEditor: EditorWin;   (* last editor that held focus — used when menu is active *)
   (* inline find/goto prompt state *)
   promptMode: INTEGER;   (* 0=none 1=find 2=goto *)
   promptBuf:  ARRAY 128 OF CHAR;
@@ -480,7 +481,7 @@ END RenderEdLine;
 (* Draw an editor window — called by TUI.DrawAll via the view's draw proc. *)
 PROCEDURE DrawEditor(v: TUI.View);
 VAR innerX, innerY, innerW, innerH, row, li: INTEGER;
-    titleBuf: ARRAY 80 OF CHAR;
+    titleBuf: ARRAY 260 OF CHAR;
     tlen, tx, borderFg, borderBg, titleFg: INTEGER;
 BEGIN
   WITH v: EditorWinRec DO
@@ -578,9 +579,16 @@ BEGIN
       RETURN TRUE
 
     ELSIF ev.kind = TUI.EvMouse THEN
-      (* Click inside inner area → move cursor *)
-      IF (ev.mx >= v.x + 1) & (ev.mx <= v.x + v.w - 2) &
+      IF ev.mb = 64 THEN       (* wheel up *)
+        IF v.topLine > 0 THEN  DEC(v.topLine, 3) END;
+        IF v.topLine < 0 THEN  v.topLine := 0 END
+      ELSIF ev.mb = 65 THEN    (* wheel down *)
+        INC(v.topLine, 3);
+        IF v.topLine > v.nlines - 1 THEN  v.topLine := v.nlines - 1 END
+      ELSIF (ev.mb # 32) & (ev.mb # 3) &
+         (ev.mx >= v.x + 1) & (ev.mx <= v.x + v.w - 2) &
          (ev.my >= v.y + 1) & (ev.my <= v.y + v.h - 2) THEN
+        (* Click inside inner area → move cursor *)
         v.cy := v.topLine + (ev.my - v.y - 1);
         v.cx := v.leftCol + (ev.mx - v.x - 1);
         ClampCursor(v);
@@ -604,9 +612,10 @@ VAR i, n, row, col, cellW, cellH, x, y: INTEGER;
     ew: EditorWin;
     v: TUI.View;
 BEGIN
-  (* Collect living EditorWins *)
+  (* Collect living EditorWins — scan the full array, not just 0..winCount-1,
+     because closing a window can leave NIL gaps below live entries. *)
   n := 0;
-  FOR i := 0 TO winCount - 1 DO
+  FOR i := 0 TO MaxWins - 1 DO
     IF wins[i] # NIL THEN
       ewArr[n] := wins[i];  INC(n)
     END
@@ -698,6 +707,7 @@ VAR i, cur, next: INTEGER;
     ew: EditorWin;
 BEGIN
   ew := FocusedEditor();
+  IF ew = NIL THEN  ew := lastEditor  END;
   cur := -1;
   FOR i := 0 TO MaxWins - 1 DO
     IF wins[i] = ew THEN  cur := i  END
@@ -789,6 +799,34 @@ END SaveFile;
    Build integration
    ════════════════════════════════════════════════════════════════ *)
 
+(* BinName — derive executable path from a .mod title.
+   "examples/foo.mod" → "examples/foo" *)
+PROCEDURE BinName(title: ARRAY OF CHAR; VAR bin: ARRAY OF CHAR);
+VAR i: INTEGER;
+    hasSlash: BOOLEAN;
+    tmp: ARRAY 516 OF CHAR;
+BEGIN
+  Strings.Copy(title, bin);
+  i := Strings.Length(bin);
+  (* strip ".mod" suffix *)
+  IF (i >= 4) & (bin[i-4] = '.') &
+     (bin[i-3] = 'm') & (bin[i-2] = 'o') & (bin[i-1] = 'd') THEN
+    bin[i-4] := 0X
+  END;
+  (* If path has no '/' it won't execute without a prefix; prepend "./" *)
+  hasSlash := FALSE;
+  i := 0;
+  WHILE bin[i] # 0X DO
+    IF bin[i] = '/' THEN  hasSlash := TRUE  END;
+    INC(i)
+  END;
+  IF ~hasSlash THEN
+    Strings.Copy("./", tmp);
+    Strings.Append(bin, tmp);
+    Strings.Copy(tmp, bin)
+  END
+END BinName;
+
 PROCEDURE Compile(ew: EditorWin);
 VAR cmd: ARRAY 512 OF CHAR;
     f: Files.File;
@@ -828,26 +866,30 @@ BEGIN
   END
 END Compile;
 
+(* RunInTerminal — suspend TUI, run cmd with full terminal access,
+   then wait for Enter before returning to the IDE. *)
+PROCEDURE RunInTerminal(cmd: ARRAY OF CHAR);
+VAR fullCmd: ARRAY 640 OF CHAR;
+BEGIN
+  TUI.Suspend();
+  Out.Ln();
+  Strings.Copy(cmd, fullCmd);
+  (* Read from /dev/tty so stale mouse-event bytes in stdin don't fool read *)
+  Strings.Append("; echo; printf 'Press Enter to return to IDE...'; read x < /dev/tty", fullCmd);
+  OS.Exec(fullCmd);
+  TUI.Resume()
+END RunInTerminal;
+
 PROCEDURE CompileAndRun(ew: EditorWin);
-VAR cmd: ARRAY 512 OF CHAR;
-    base: ARRAY 256 OF CHAR;
-    i, rc: INTEGER;
+VAR bin: ARRAY 512 OF CHAR;
 BEGIN
   Compile(ew);
-  IF ew = NIL THEN  RETURN  END;
-  (* Strip .mod suffix to get binary name *)
-  Strings.Copy(ew.title, base);
-  i := Strings.Length(base) - 4;
-  IF (i > 0) & (base[i] = '.') THEN  base[i] := 0X  END;
-  Strings.Copy("./", cmd);
-  Strings.Append(base, cmd);
-  Strings.Append(" > /tmp/obcout.txt 2>&1", cmd);
-  rc := OS.Exec(cmd);
-  IF rc = 0 THEN
-    Strings.Copy("Run OK.", statusMsg)
-  ELSE
-    Strings.Copy("Run failed. See /tmp/obcout.txt", statusMsg)
-  END
+  (* Only run if compile succeeded ("Compiled OK." starts with 'C') *)
+  IF (ew = NIL) OR (statusMsg[0] # 'C') THEN
+    RETURN
+  END;
+  BinName(ew.title, bin);
+  RunInTerminal(bin)
 END CompileAndRun;
 
 (* ════════════════════════════════════════════════════════════════
@@ -858,17 +900,17 @@ PROCEDURE HandlePrompt(ev: TUI.Event);
 VAR ch: CHAR;
     n, i: INTEGER;
     ew: EditorWin;
-    found: BOOLEAN;
-    numBuf: ARRAY 16 OF CHAR;
 BEGIN
   IF ev.kind # TUI.EvKey THEN  RETURN  END;
   ch := ev.key;
+  ew := FocusedEditor();
+  IF ew = NIL THEN  ew := lastEditor  END;
   IF ch = TUI.KEsc THEN
-    promptMode := 0;  promptBuf[0] := 0X;
-    Strings.Copy("", statusMsg);  RETURN
+    promptMode := 0;  promptBuf[0] := 0X;  statusMsg[0] := 0X;
+    IF lastEditor # NIL THEN  TUI.SetFocus(lastEditor)  END;
+    RETURN
   END;
   IF ch = TUI.KEnter THEN
-    ew := FocusedEditor();
     IF promptMode = 1 THEN       (* find *)
       IF ew # NIL THEN
         Strings.Copy(promptBuf, ew.srchBuf);
@@ -890,9 +932,10 @@ BEGIN
         ew.cy := n;  ew.cx := 0;
         ScrollToCursor(ew)
       END;
-      Strings.Copy("", statusMsg)
+      statusMsg[0] := 0X
     END;
     promptMode := 0;  promptBuf[0] := 0X;
+    IF lastEditor # NIL THEN  TUI.SetFocus(lastEditor)  END;
     RETURN
   END;
   IF (ch = TUI.KBackspace) OR (ORD(ch) = 127) THEN
@@ -903,7 +946,6 @@ BEGIN
     promptBuf[promptPos] := ch;  INC(promptPos);
     promptBuf[promptPos] := 0X
   END;
-  (* Update status line text *)
   IF promptMode = 1 THEN
     Strings.Copy("Find: ", statusMsg);  Strings.Append(promptBuf, statusMsg)
   ELSIF promptMode = 2 THEN
@@ -922,6 +964,7 @@ VAR ew: EditorWin;
     cwd: ARRAY 512 OF CHAR;
 BEGIN
   ew := FocusedEditor();
+  IF ew = NIL THEN  ew := lastEditor  END;
 
   IF cmd = CmdNew THEN
     IF NewEditorWin() = NIL THEN
@@ -932,11 +975,14 @@ BEGIN
     OS.GetCwd(cwd);
     ok := FileDialog.Show("Open File", cwd, ".mod", path);
     IF ok THEN
-      IF ew = NIL THEN  ew := NewEditorWin()  END;
+      (* Always open in a new window so multiple files can be open at once *)
+      ew := NewEditorWin();
       IF ew # NIL THEN
         IF ~LoadFile(ew, path) THEN
           Strings.Copy("Could not open file.", statusMsg)
         END
+      ELSE
+        Strings.Copy("Too many windows.", statusMsg)
       END
     END
 
@@ -1005,19 +1051,13 @@ BEGIN
     Compile(ew)
 
   ELSIF cmd = CmdRun THEN
-    IF ew # NIL THEN
-      IF ew.title[0] # 0X THEN
-        path[0] := '.';  path[1] := '/';  path[2] := 0X;
-        Strings.Append(ew.title, path);
-        (* Strip .mod *)
-        path[Strings.Length(path) - 4] := 0X;
-        Strings.Append(" > /tmp/obcout.txt 2>&1", path);
-        IF OS.Exec(path) = 0 THEN
-          Strings.Copy("Run OK.", statusMsg)
-        ELSE
-          Strings.Copy("Run failed.", statusMsg)
-        END
-      END
+    IF ew = NIL THEN
+      Strings.Copy("No file open.", statusMsg)
+    ELSIF ew.title[0] = 0X THEN
+      Strings.Copy("Save file first.", statusMsg)
+    ELSE
+      BinName(ew.title, path);
+      RunInTerminal(path)
     END
 
   ELSIF cmd = CmdCompRun THEN
@@ -1028,6 +1068,10 @@ BEGIN
 
   ELSIF cmd = CmdTile THEN
     TileEditorWins
+  END;
+  (* Return focus to the editor (menus steal it; prompts restore it themselves) *)
+  IF (promptMode = 0) & (FocusedEditor() = NIL) & (lastEditor # NIL) THEN
+    TUI.SetFocus(lastEditor)
   END
 END OnMenuCmd;
 
@@ -1130,6 +1174,7 @@ BEGIN
   TUI.Init();
 
   winCount  := 0;
+  lastEditor := NIL;
   running   := TRUE;
   promptMode := 0;
   statusMsg[0] := 0X;
@@ -1140,6 +1185,7 @@ BEGIN
 
   (* Open file from command line, or start with empty window *)
   ew := NewEditorWin();
+  lastEditor := ew;   (* prime lastEditor so menu commands work before any mouse motion *)
   IF Args.Count() > 0 THEN
     Args.Get(1, fn);
     IF ~LoadFile(ew, fn) THEN
@@ -1161,9 +1207,17 @@ BEGIN
       TUI.SetCursor(sx, sy)
     END;
 
-    statusMsg[0] := 0X;
-
     TUI.WaitEvent(ev);
+
+    (* Clear status message only on significant input (key or real click, not motion) *)
+    IF (ev.kind = TUI.EvKey) OR
+       ((ev.kind = TUI.EvMouse) & (ev.mb # 32) & (ev.mb # 3)) THEN
+      statusMsg[0] := 0X
+    END;
+
+    (* Track the last editor that had focus so menu commands can use it *)
+    ew := FocusedEditor();
+    IF ew # NIL THEN  lastEditor := ew  END;
 
     IF promptMode # 0 THEN
       HandlePrompt(ev)

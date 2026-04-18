@@ -2277,13 +2277,13 @@ void codegen(Node *module, FILE *out, int is_main) {
         /* Mouse on/off */
         emit(g,"static void Terminal_MouseOn(void) {\n");
         emit(g,"    if (!_term_mouse_on) {\n");
-        emit(g,"        printf(\"\\033[?1000h\\033[?1006h\"); fflush(stdout);\n");
+        emit(g,"        printf(\"\\033[?1000h\\033[?1003h\\033[?1006h\"); fflush(stdout);\n");
         emit(g,"        _term_mouse_on = 1;\n");
         emit(g,"    }\n");
         emit(g,"}\n");
         emit(g,"static void Terminal_MouseOff(void) {\n");
         emit(g,"    if (_term_mouse_on) {\n");
-        emit(g,"        printf(\"\\033[?1000l\\033[?1006l\"); fflush(stdout);\n");
+        emit(g,"        printf(\"\\033[?1000l\\033[?1003l\\033[?1006l\"); fflush(stdout);\n");
         emit(g,"        _term_mouse_on = 0;\n");
         emit(g,"    }\n");
         emit(g,"}\n");
@@ -2376,10 +2376,13 @@ void codegen(Node *module, FILE *out, int is_main) {
         emit(g,"                sscanf(buf,\"%%d;%%d;%%d\",&btn,&mx,&my);\n");
         emit(g,"                _term_mouse_x = mx;\n");
         emit(g,"                _term_mouse_y = my;\n");
-        /* btn: bits 0-1 = button (0=left,1=mid,2=right), bit 6 set = wheel.
-         * Release is signalled by the final 'm' rather than a button-3 code. */
-        emit(g,"                if (last=='m') _term_mouse_btn=3;\n");
-        emit(g,"                else           _term_mouse_btn=(btn&67);\n");
+        /* btn: bits 0-1 = button (0=left,1=mid,2=right), bit 5 = motion, bit 6 = wheel.
+         * Release is signalled by the final 'm'.
+         * We expose: 0=L-press 1=M-press 2=R-press 3=release 32=motion 64=whl↑ 65=whl↓ */
+        emit(g,"                if (last=='m')            _term_mouse_btn=3;\n");
+        emit(g,"                else if (btn & 64)        _term_mouse_btn=(btn&67);\n");
+        emit(g,"                else if (btn & 32)        _term_mouse_btn=32;\n");
+        emit(g,"                else                      _term_mouse_btn=(btn&3);\n");
         emit(g,"                tcsetattr(STDIN_FILENO,TCSANOW,&t2);\n");
         emit(g,"                return '\\x05';\n");
         emit(g,"            }\n");

@@ -15,8 +15,8 @@ all: obc oberon lextest parsetest
 obc: $(OBC_SRCS) $(OBC_HDRS)
 	$(CC) $(CFLAGS) -o $@ $(OBC_SRCS)
 
-oberon: oberon_ide.cpp $(TVISION)/libtvision.a
-	$(CXX) $(CXXFLAGS) -o $@ $< -I$(TVISION)/include -L$(TVISION) -ltvision -lncurses
+oberon: examples/ide.mod
+	./obc examples/ide.mod -o oberon
 
 lextest: lextest.c lexer.c lexer.h
 	$(CC) $(CFLAGS) -o $@ lextest.c lexer.c

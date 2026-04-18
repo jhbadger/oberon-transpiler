@@ -310,12 +310,14 @@ BEGIN
         END
       END
     ELSIF ev.kind = TUI.EvMouse THEN
-      (* Click: focus the hit view, then route the event *)
-      hit := TUI.HitTest(ev.mx, ev.my);
-      IF hit # NIL THEN
-        IF hit # TUI.Focused THEN  TUI.SetFocus(hit)  END;
-        IF hit.handle # NIL THEN
-          consumed := hit.handle(hit, ev)
+      (* Ignore motion and release; only act on real clicks *)
+      IF (ev.mb # 32) & (ev.mb # 3) THEN
+        hit := TUI.HitTest(ev.mx, ev.my);
+        IF hit # NIL THEN
+          IF hit # TUI.Focused THEN  TUI.SetFocus(hit)  END;
+          IF hit.handle # NIL THEN
+            consumed := hit.handle(hit, ev)
+          END
         END
       END
     ELSIF ev.kind = TUI.EvResize THEN

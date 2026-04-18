@@ -131,7 +131,7 @@ TYPE
     key*:  CHAR;       (* EvKey: character / special code     *)
     mx*:   INTEGER;    (* EvMouse: column (1-based)           *)
     my*:   INTEGER;    (* EvMouse: row    (1-based)           *)
-    mb*:   INTEGER;    (* EvMouse: button 0=L 1=M 2=R 3=up 64=whl↑ 65=whl↓ *)
+    mb*:   INTEGER;    (* EvMouse: button 0=L 1=M 2=R 3=release 32=motion 64=whl↑ 65=whl↓ *)
     cols*: INTEGER;    (* EvResize: new width                 *)
     rows*: INTEGER;    (* EvResize: new height                *)
   END;
@@ -156,7 +156,7 @@ TYPE
   (* Window — a View with a title bar and automatic border *)
   Window* = POINTER TO WindowRec;
   WindowRec* = RECORD (ViewRec)
-    title*:    ARRAY 64 OF CHAR;
+    title*:    ARRAY 256 OF CHAR;
     moveable*: BOOLEAN
   END;
 
@@ -666,7 +666,8 @@ BEGIN
   ELSIF ev.kind = EvMouse THEN
     v := HitTest(ev.mx, ev.my);
     IF v # NIL THEN
-      IF v # Focused THEN  SetFocus(v)  END;
+      (* Only real clicks (not motion) transfer focus *)
+      IF (v # Focused) & (ev.mb # 32) THEN  SetFocus(v)  END;
       IF v.handle # NIL THEN  consumed := v.handle(v, ev)  END
     END
   ELSIF ev.kind = EvResize THEN
@@ -737,5 +738,24 @@ BEGIN
   Terminal.Restore();
   Terminal.Clear
 END Done;
+
+(** Suspend — temporarily hand the terminal back to a child process.
+    Call Resume to re-enter TUI mode afterwards. **)
+PROCEDURE Suspend*;
+BEGIN
+  Terminal.MouseOff();
+  Terminal.ShowCursor();
+  Terminal.Restore()
+END Suspend;
+
+(** Resume — re-enter TUI mode after Suspend. **)
+PROCEDURE Resume*;
+BEGIN
+  Terminal.Init();
+  Terminal.HideCursor();
+  Terminal.MouseOn();
+  Terminal.Clear();
+  InvalidateFront()
+END Resume;
 
 END TUI.
