@@ -23,12 +23,13 @@ MODULE IDE;
  *   Ctrl+Tab / F6   Next window
  *   F5              Compile current file
  *   F9              Compile & run
+ *   F1              Help on word under cursor
  *   Ctrl+F / F3     Find / find next
  *   Ctrl+G          Go to line
  *   Ctrl+K / Ctrl+Y Kill line / yank
  *   Ctrl+Left/Right Word left / right
  *)
-IMPORT TUI, Widgets, FileDialog, Strings, Files, OS, Out, Args;
+IMPORT TUI, Widgets, FileDialog, Help, Strings, Files, OS, Out, Args;
 
 CONST
   MaxLines = 2000;
@@ -48,6 +49,7 @@ CONST
   CmdFind    = 20;   CmdFindNext= 21;   CmdGoto    = 22;
   CmdCompile = 30;   CmdRun     = 31;   CmdCompRun = 32;
   CmdNextWin = 40;   CmdTile    = 41;
+  CmdHelp    = 50;
 
 TYPE
   UndoEntry = RECORD
@@ -403,6 +405,43 @@ END DoFind;
 (* ════════════════════════════════════════════════════════════════
    Cursor management
    ════════════════════════════════════════════════════════════════ *)
+
+PROCEDURE WordAtCursor(ew: EditorWin; VAR word: ARRAY OF CHAR);
+VAR i, wStart, wEnd, len: INTEGER;
+    ch: CHAR;
+    more: BOOLEAN;
+BEGIN
+  word[0] := 0X;
+  IF ew = NIL THEN  RETURN  END;
+  len := LineLen(ew, ew.cy);
+  (* Walk left while identifier chars (include '.' for Mod.Proc forms) *)
+  i := ew.cx;  more := TRUE;
+  WHILE more & (i > 0) DO
+    ch := ew.lines[ew.cy][i - 1];
+    IF ((ch >= 'A') & (ch <= 'Z')) OR ((ch >= 'a') & (ch <= 'z')) OR
+       ((ch >= '0') & (ch <= '9')) OR (ch = '_') OR (ch = '.') THEN
+      DEC(i)
+    ELSE
+      more := FALSE
+    END
+  END;
+  wStart := i;
+  (* Walk right while identifier chars (no '.' — right side is always ident-only) *)
+  i := ew.cx;  more := TRUE;
+  WHILE more & (i < len) DO
+    ch := ew.lines[ew.cy][i];
+    IF ((ch >= 'A') & (ch <= 'Z')) OR ((ch >= 'a') & (ch <= 'z')) OR
+       ((ch >= '0') & (ch <= '9')) OR (ch = '_') THEN
+      INC(i)
+    ELSE
+      more := FALSE
+    END
+  END;
+  wEnd := i;
+  IF wEnd > wStart THEN
+    Strings.Extract(ew.lines[ew.cy], wStart, wEnd - wStart, word)
+  END
+END WordAtCursor;
 
 PROCEDURE ClampCursor(ew: EditorWin);
 VAR len: INTEGER;
@@ -1297,6 +1336,13 @@ BEGIN
 
   ELSIF cmd = CmdTile THEN
     TileEditorWins
+
+  ELSIF cmd = CmdHelp THEN
+    (* F1: help on word under cursor; open dialog with empty query if no editor *)
+    IF ew # NIL THEN  WordAtCursor(ew, path)
+    ELSE  path[0] := 0X
+    END;
+    Help.Show(path)
   END;
   (* Return focus to the editor (menus steal it; prompts restore it themselves) *)
   IF (promptMode = 0) & (FocusedEditor() = NIL) & (lastEditor # NIL) THEN
@@ -1374,6 +1420,10 @@ BEGIN
   Widgets.MenuBarAddMenu(mbar, "Window");
   Widgets.MenuBarAddItem(mbar, 3, "Next Window   Ctrl+Tab", CmdNextWin);
   Widgets.MenuBarAddItem(mbar, 3, "Tile Windows",           CmdTile);
+
+  (* Help menu *)
+  Widgets.MenuBarAddMenu(mbar, "Help");
+  Widgets.MenuBarAddItem(mbar, 4, "Help (word)   F1", CmdHelp);
 
   mbar.onCmd := OnMenuCmd;
   TUI.AddView(mbar);
@@ -1470,6 +1520,7 @@ BEGIN
         (* actually Tab goes to editor; Ctrl+Tab would be different... *)
         (* Route Tab to the focused view via dispatch *)
         IF ~TUI.Dispatch(ev) THEN  END
+      ELSIF ch = TUI.KF1  THEN   OnMenuCmd(CmdHelp)
       ELSIF ch = TUI.KF5  THEN   OnMenuCmd(CmdCompile)
       ELSIF ch = TUI.KF6  THEN   OnMenuCmd(CmdRun)
       ELSIF ch = TUI.KF9  THEN   OnMenuCmd(CmdCompRun)
