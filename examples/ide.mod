@@ -735,7 +735,7 @@ PROCEDURE ScrollToCursor(ew: EditorWin);
 VAR innerH, innerW: INTEGER;
 BEGIN
   innerH := ew.h - 2;
-  innerW := ew.w - 2;
+  innerW := ew.w - 2 - GutterW(ew);
   IF ew.cy < ew.topLine THEN  ew.topLine := ew.cy  END;
   IF ew.cy >= ew.topLine + innerH THEN  ew.topLine := ew.cy - innerH + 1  END;
   IF ew.cx < ew.leftCol THEN  ew.leftCol := ew.cx  END;
@@ -1057,6 +1057,36 @@ END CheckAutoDeindent;
    Rendering
    ════════════════════════════════════════════════════════════════ *)
 
+(* Width of the line-number gutter: digits needed for nlines + 1 separator. *)
+PROCEDURE GutterW(ew: EditorWin): INTEGER;
+VAR n, w: INTEGER;
+BEGIN
+  n := ew.nlines;  w := 1;
+  WHILE n >= 10 DO  n := n DIV 10;  INC(w)  END;
+  RETURN w + 1
+END GutterW;
+
+(* Draw the gutter cell for one editor row.
+   gx = leftmost gutter column, gw = total gutter width,
+   li = line index (0-based), currentLine = cursor line. *)
+PROCEDURE DrawGutter(gx, y, gw, li, currentLine: INTEGER);
+VAR numBuf: ARRAY 8 OF CHAR;
+    nlen, pad, i: INTEGER;
+    fg: INTEGER;
+BEGIN
+  Strings.IntToStr(li + 1, numBuf);
+  nlen := Strings.Length(numBuf);
+  pad  := gw - 1 - nlen;
+  IF li = currentLine THEN  fg := TUI.Yellow  ELSE  fg := TUI.White  END;
+  FOR i := 0 TO pad - 1 DO
+    TUI.PutCell(gx + i, y, ' ', fg, TUI.Black)
+  END;
+  FOR i := 0 TO nlen - 1 DO
+    TUI.PutCell(gx + pad + i, y, numBuf[i], fg, TUI.Black)
+  END;
+  TUI.PutCell(gx + gw - 1, y, TUI.BoxV, TUI.White, TUI.Black)
+END DrawGutter;
+
 (* Render one editor line into the TUI back buffer.
    innerX, sy  : left column and row of the output cell.
    leftByte    : byte offset of the first visible column.
@@ -1144,14 +1174,15 @@ END RenderEdLine;
 
 (* Draw an editor window — called by TUI.DrawAll via the view's draw proc. *)
 PROCEDURE DrawEditor(v: TUI.View);
-VAR innerX, innerY, innerW, innerH, row, li: INTEGER;
+VAR innerX, innerY, innerW, innerH, row, li, gw: INTEGER;
     titleBuf: ARRAY 260 OF CHAR;
     tlen, tx, borderFg, borderBg, titleFg: INTEGER;
 BEGIN
   WITH v: EditorWinRec DO
-    innerX := v.x + 1;
+    gw     := GutterW(v);
+    innerX := v.x + 1 + gw;
     innerY := v.y + 1;
-    innerW := v.w - 2;
+    innerW := v.w - 2 - gw;
     innerH := v.h - 2;
 
     (* ── Border colour depends on focus ── *)
@@ -1161,8 +1192,8 @@ BEGIN
       borderFg := TUI.White;  borderBg := TUI.Black;  titleFg := TUI.White
     END;
 
-    (* ── Clear interior ── *)
-    TUI.FillRect(innerX, innerY, innerW, innerH, ' ', TUI.White, TUI.Black);
+    (* ── Clear interior (gutter + text area) ── *)
+    TUI.FillRect(v.x + 1, innerY, v.w - 2, innerH, ' ', TUI.White, TUI.Black);
 
     (* ── Border ── *)
     TUI.DrawBox(v.x, v.y, v.w, v.h, borderFg, borderBg);
@@ -1178,11 +1209,12 @@ BEGIN
     tx := v.x + (v.w - tlen) DIV 2;
     TUI.PutStr(tx, v.y, titleBuf, titleFg, borderBg);
 
-    (* ── Editor content ── *)
+    (* ── Gutter + editor content ── *)
     ComputeDepths(v);
     FOR row := 0 TO innerH - 1 DO
       li := v.topLine + row;
       IF li < v.nlines THEN
+        DrawGutter(v.x + 1, innerY + row, gw, li, v.cy);
         RenderEdLine(v, li, innerX, innerY + row, v.leftCol, innerW, v.cmtDepth[li])
       END
     END
@@ -1308,7 +1340,11 @@ BEGIN
          (ev.my >= v.y + 1) & (ev.my <= v.y + v.h - 2) THEN
         ClearSel(v);
         v.cy := v.topLine + (ev.my - v.y - 1);
-        v.cx := v.leftCol + (ev.mx - v.x - 1);
+        IF ev.mx < v.x + 1 + GutterW(v) THEN
+          v.cx := 0
+        ELSE
+          v.cx := v.leftCol + (ev.mx - v.x - 1 - GutterW(v))
+        END;
         ClampCursor(v);  ScrollToCursor(v);
         (* Remember anchor for drag; selActive stays FALSE until drag moves *)
         v.selAnchorLine := v.cy;  v.selAnchorCol := v.cx;
@@ -1318,7 +1354,11 @@ BEGIN
          (ev.my >= v.y + 1) & (ev.my <= v.y + v.h - 2) THEN
         IF ~v.selActive THEN  v.selActive := TRUE  END;
         v.cy := v.topLine + (ev.my - v.y - 1);
-        v.cx := v.leftCol + (ev.mx - v.x - 1);
+        IF ev.mx < v.x + 1 + GutterW(v) THEN
+          v.cx := 0
+        ELSE
+          v.cx := v.leftCol + (ev.mx - v.x - 1 - GutterW(v))
+        END;
         ClampCursor(v)
       ELSIF ev.mb = 3 THEN     (* any release *)
         v.mouseSelDrag := FALSE
@@ -2229,7 +2269,7 @@ END BuildMenus;
 
 PROCEDURE CursorScreenPos(ew: EditorWin; VAR sx, sy: INTEGER);
 BEGIN
-  sx := ew.x + 1 + ByteToCol(ew.lines[ew.cy], ew.cx) - ByteToCol(ew.lines[ew.cy], ew.leftCol);
+  sx := ew.x + 1 + GutterW(ew) + ByteToCol(ew.lines[ew.cy], ew.cx) - ByteToCol(ew.lines[ew.cy], ew.leftCol);
   sy := ew.y + 1 + ew.cy - ew.topLine
 END CursorScreenPos;
 
