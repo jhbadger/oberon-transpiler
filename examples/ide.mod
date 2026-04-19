@@ -30,7 +30,7 @@ MODULE IDE;
  *   Ctrl+K / Ctrl+Y Kill line / yank
  *   Ctrl+Left/Right Word left / right
  *)
-IMPORT TUI, Widgets, FileDialog, Help, Strings, Files, OS, Out, Args;
+IMPORT TUI, Widgets, FileDialog, Help, Strings, Terminal, Files, OS, Out, Args;
 
 CONST
   MaxLines = 2000;
@@ -1821,8 +1821,9 @@ END Compile;
 PROCEDURE RunInTerminal(cmd: ARRAY OF CHAR);
 VAR fullCmd: ARRAY 640 OF CHAR;
 BEGIN
-  TUI.Suspend();
-  Out.Ln();
+		 TUI.Suspend();
+		 Terminal.Restore();
+  Terminal.Clear();
   Strings.Copy(cmd, fullCmd);
   (* Read from /dev/tty so stale mouse-event bytes in stdin don't fool read *)
   Strings.Append("; echo; printf 'Press Enter to return to IDE...'; read x < /dev/tty", fullCmd);

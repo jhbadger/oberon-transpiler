@@ -8,12 +8,12 @@ CONST
   MaxName = 256;
   RetChar = 1FX;   (* hard paragraph break, displayed as < *)
 
-  (* Integer key codes returned by GetKey() *)
-  KEY_UP    = 1;   KEY_DOWN  = 2;
-  KEY_LEFT  = 3;   KEY_RIGHT = 4;
-  KEY_MOUSE = 5;
-  KEY_BS    = 8;   KEY_TAB   = 9;
-  KEY_ENTER = 13;  KEY_ESC   = 27;
+  (* Integer key codes *)
+  KEY_UP    = 0A0X;   KEY_DOWN  = 0A1X;
+  KEY_LEFT  = 0A2X;   KEY_RIGHT = 0A3X;
+  KEY_MOUSE = 0A4X;
+  KEY_BS    = 8;   KEY_TAB   = 09X;
+  KEY_ENTER = 0DX;  KEY_ESC   = 1BX;
   KEY_CTRL_F = 6;   (* Find *)
   KEY_CTRL_G = 7;   (* Find-and-replace *)
   KEY_CTRL_K = 11;  (* Kill to end of line *)
@@ -24,9 +24,9 @@ CONST
   KEY_CTRL_T = 20;  (* Transpose *)
   KEY_CTRL_W = 23;  (* Delete word backward *)
   KEY_CTRL_X = 24;  (* Toggle case *)
-  KEY_PGUP   = 256; KEY_PGDN   = 257;
-  KEY_HOME   = 258; KEY_END    = 259;
-  KEY_DEL    = 260;
+  KEY_PGUP   = 80X; KEY_PGDN   = 81X;
+  KEY_HOME   = 82X; KEY_END    = 83X;
+  KEY_DEL    = 84X;
   KEY_WLEFT  = 261; KEY_WRIGHT = 262;
   KEY_FHOME  = 263; KEY_FEND   = 264;
   KEY_F1     = 265; KEY_F2     = 266;
@@ -48,43 +48,6 @@ VAR
   curr, lastLine, topLin: INTEGER;
   cx, cy: INTEGER;            (* visual pos of cursor, set by Refresh *)
   insMode, modified, running: BOOLEAN;
-
-(* ── Key input ──────────────────────────────────────────────────────── *)
-
-PROCEDURE GetKey(): INTEGER;
-VAR c: CHAR;
-BEGIN
-  c := Terminal.ReadKey();
-  IF    ORD(c) =   1 THEN RETURN KEY_UP
-  ELSIF ORD(c) =   2 THEN RETURN KEY_DOWN
-  ELSIF ORD(c) =   3 THEN RETURN KEY_LEFT
-  ELSIF ORD(c) =   4 THEN RETURN KEY_RIGHT
-  ELSIF ORD(c) =   5 THEN RETURN KEY_MOUSE
-  ELSIF ORD(c) = 128 THEN RETURN KEY_PGUP
-  ELSIF ORD(c) = 129 THEN RETURN KEY_PGDN
-  ELSIF ORD(c) = 130 THEN RETURN KEY_HOME
-  ELSIF ORD(c) = 131 THEN RETURN KEY_END
-  ELSIF ORD(c) = 132 THEN RETURN KEY_DEL
-  ELSIF ORD(c) = 133 THEN RETURN KEY_WLEFT
-  ELSIF ORD(c) = 134 THEN RETURN KEY_WRIGHT
-  ELSIF ORD(c) = 135 THEN RETURN KEY_FHOME
-  ELSIF ORD(c) = 136 THEN RETURN KEY_FEND
-  ELSIF ORD(c) = 137 THEN RETURN KEY_F1
-  ELSIF ORD(c) = 138 THEN RETURN KEY_F2
-  ELSIF ORD(c) = 139 THEN RETURN KEY_F3
-  ELSIF ORD(c) = 140 THEN RETURN KEY_F4
-  ELSIF ORD(c) = 141 THEN RETURN KEY_F5
-  ELSIF ORD(c) = 142 THEN RETURN KEY_F6
-  ELSIF ORD(c) = 143 THEN RETURN KEY_F7
-  ELSIF ORD(c) = 144 THEN RETURN KEY_F8
-  ELSIF ORD(c) = 145 THEN RETURN KEY_F9
-  ELSIF ORD(c) = 146 THEN RETURN KEY_F10
-  ELSIF ORD(c) = 147 THEN RETURN KEY_F11
-  ELSIF ORD(c) = 148 THEN RETURN KEY_F12
-  ELSIF ORD(c) = 127 THEN RETURN KEY_BS
-  ELSE RETURN ORD(c)
-  END
-END GetKey;
 
 (* ── Buffer helpers ─────────────────────────────────────────────────── *)
 
@@ -312,7 +275,7 @@ BEGIN
   Terminal.Goto(plen + 1, 1);
   Terminal.ShowCursor;
   LOOP
-    k := GetKey();
+    k := Terminal.ReadKey();
     IF k = KEY_ESC THEN
       Terminal.HideCursor; RETURN FALSE
     ELSIF k = KEY_ENTER THEN
@@ -664,7 +627,7 @@ BEGIN
   Terminal.Goto(c2, row); Graphics.Color(14, 0); Out.String("Text symbols");   Graphics.Reset; INC(row);
   Terminal.Goto(c2, row); Graphics.Color(11, 0); Out.String("<       ");        Graphics.Color(7, 0); Out.String("Hard paragraph break");   Graphics.Reset;
 
-  i := GetKey();
+  i := Terminal.ReadKey();
   Terminal.ShowCursor
 END ShowHelp;
 
@@ -672,7 +635,7 @@ PROCEDURE NewDoc;
 VAR k: INTEGER;
 BEGIN
   Prompt("New document - lose changes? (y/n)");
-  k := GetKey();
+  k := Terminal.ReadKey();
   IF (k = ORD("y")) OR (k = ORD("Y")) THEN
     curr := 0; lastLine := 0; topLin := 0;
     fname[0] := 0X; modified := FALSE;
@@ -713,7 +676,7 @@ BEGIN
   WHILE running DO
     AdjustScroll;
     Refresh;
-    k := GetKey();
+    k := Terminal.ReadKey();
 
     CASE k OF
       KEY_ESC:
@@ -771,3 +734,4 @@ BEGIN
   Run;
   Terminal.MouseOff;
 END SpeedScript.
+

@@ -306,7 +306,41 @@ on exit.  `Random` is also seeded automatically.
 | `Terminal.ShowCursor()` | Make the cursor visible. |
 | `Terminal.HideCursor()` | Hide the cursor. |
 | `Terminal.KeyPressed(): BOOLEAN` | Returns TRUE (non-zero) if a key is waiting in the input buffer. Non-blocking. |
-| `Terminal.ReadKey(): CHAR` | Read and return the next key.  Blocks if no key is ready. Special keys are mapped to values above 127: Up=`01X`, Down=`02X`, Left=`03X`, Right=`04X`, Mouse=`05X`, PgUp=`ORD 128`, PgDn=`ORD 129`, Home=`ORD 130`, End=`ORD 131`, Del=`ORD 132`, Ctrl+Left=`ORD 133`, Ctrl+Right=`ORD 134`, Ctrl+Home=`ORD 135`, Ctrl+End=`ORD 136`, F1=`ORD 137`, F2=`ORD 138`, F3=`ORD 139`, F4=`ORD 140`, F5=`ORD 141`, F6=`ORD 142`, F7=`ORD 143`, F8=`ORD 144`, F9=`ORD 145`, F10=`ORD 146`, F11=`ORD 147`, F12=`ORD 148`. Call `MouseX/Y/Btn` immediately after a mouse event to get the details. |
+| `Terminal.ReadKey(): CHAR` | Read and return the next key.  Blocks if no key is ready. Special keys are mapped to values above 127: |
+| KUp*        = 0A0X;  (* Up arrow    *)|
+| KDown*      = 0A1X;  (* Down arrow  *)|
+| KLeft*      = 0A2X;  (* Left arrow  *)|
+| KRight*     = 0A3X;  (* Right arrow *)|
+| KMouse*     = 0A4X;  (* Mouse event *)|
+| KShiftUp*   = 0A5X;  (* Shift+Up    *)|
+| KShiftDown* = 0A6X;  (* Shift+Down  *)|
+| KShiftLeft* = 0A7X;  (* Shift+Left  *)|
+| KShiftRight*= 0A8X;  (* Shift+Right *)|
+| KBackspace* = 08X;|
+| KTab*       = 09X;|
+| KEnter*     = 0DX;|
+| KEsc*       = 1BX;|
+| KPgUp*      = 80X;   (* Page Up         *)|
+| KPgDn*      = 81X;   (* Page Down       *)|
+| KHome*      = 82X;   (* Home            *)|
+| KEnd*       = 83X;   (* End             *)|
+| KDel*       = 84X;   (* Delete          *)|
+| KCtrlLeft*  = 85X;   (* Ctrl+Left       *)|
+| KCtrlRight* = 86X;   (* Ctrl+Right      *)|
+| KCtrlHome*  = 87X;   (* Ctrl+Home       *)|
+| KCtrlEnd*   = 88X;   (* Ctrl+End        *)|
+| KF1*        = 89X;   (* F1              *)|
+| KF2*        = 8AX;   (* F2              *)|
+| KF3*        = 8BX;   (* F3              *)|
+| KF4*        = 8CX;   (* F4              *)|
+| KF5*        = 8DX;   (* F5              *)|
+| KF6*        = 8EX;   (* F6              *)|
+| KF7*        = 8FX;   (* F7              *)|
+| KF8*        = 90X;   (* F8              *)|
+| KF9*        = 91X;   (* F9              *)|
+| KF10*       = 92X;   (* F10             *)|
+| KF11*       = 93X;   (* F11             *)|
+| KF12*       = 94X;   (* F12             *)|
 | `Terminal.GetTickCount(): INTEGER` | Milliseconds since the Unix epoch (useful for timing). |
 | `Terminal.Cols(): INTEGER` | Returns the terminal width in columns (falls back to 80 if unavailable). |
 | `Terminal.Rows(): INTEGER` | Returns the terminal height in rows (falls back to 24 if unavailable). |

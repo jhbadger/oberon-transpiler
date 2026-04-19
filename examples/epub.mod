@@ -46,13 +46,13 @@ CONST
   WRAPSZ    = 131072;  (* 128 KB wrapped    *)
   OPFSZ     = 65536;   (* 64 KB OPF         *)
 
-  KEY_UP    = 1;  KEY_DOWN  = 2;
-  KEY_LEFT  = 3;  KEY_RIGHT = 4;
-  KEY_PGUP  = 128; KEY_PGDN = 129;
-  KEY_ESC   = 27;
+  KEY_UP    = 0A0X;  KEY_DOWN  = 0A1X;
+  KEY_LEFT  = 0A2X;  KEY_RIGHT = 0A3X;
+  KEY_PGUP  = 80X; KEY_PGDN = 81X;
+  KEY_ESC   = 1BX;
   KEY_CTRL_Q = 17;
   KEY_CTRL_F = 6;
-  KEY_MOUSE  = 5;   (* Terminal.ReadKey returns CHR(5) for mouse events *)
+  KEY_MOUSE  = 0A4X;
 
   MOUSE_WHEEL_UP   = 64;
   MOUSE_WHEEL_DOWN = 65;
@@ -655,7 +655,7 @@ BEGIN
   Graphics.Reset;
 
   (* wait for dismiss *)
-  c := ORD(Terminal.ReadKey())
+  c := Terminal.ReadKey()
 END ShowPopup;
 
 (* ── run trans on selected lines, show result in popup ──────────── *)
@@ -1007,13 +1007,13 @@ BEGIN
       Graphics.Reset
     END;
 
-    c := ORD(Terminal.ReadKey());
-    IF (c = KEY_DOWN) OR (c = ORD('j')) THEN
+    c := Terminal.ReadKey();
+    IF (c = KEY_DOWN) OR (c = 'j') THEN
       (* down in display = older entry = lower posPaths index *)
       IF sel > 0 THEN DEC(sel) END;
       (* scroll: display row for sel = n-1-top-sel; if >= visH, inc top *)
       IF n - 1 - top - sel >= visH THEN INC(top) END
-    ELSIF (c = KEY_UP) OR (c = ORD('k')) THEN
+    ELSIF (c = KEY_UP) OR (c = 'k') THEN
       (* up in display = more recent = higher posPaths index *)
       IF sel < n - 1 THEN INC(sel) END;
       (* scroll: display row for sel = n-1-top-sel; if < 0, dec top *)
@@ -1022,7 +1022,7 @@ BEGIN
       Terminal.Clear();
       COPY(posPaths[sel], chosen);
       RETURN TRUE
-    ELSIF (c = KEY_ESC) OR (c = ORD('q')) THEN
+    ELSIF (c = KEY_ESC) OR (c = 'q') THEN
       Terminal.Clear(); RETURN FALSE
     END
   END
@@ -1070,7 +1070,7 @@ BEGIN
     Out.String(prompt); Out.String(result);
     Graphics.Reset;
     Terminal.Goto(plen + i + 1, tRows);
-    k := ORD(Terminal.ReadKey());
+    k := Terminal.ReadKey();
     IF k = 13 THEN RETURN i > 0
     ELSIF k = KEY_ESC THEN result[0] := 0X; RETURN FALSE
     ELSIF k = 127 THEN
@@ -1173,16 +1173,16 @@ BEGIN
       Graphics.Reset
     END;
 
-    k := ORD(Terminal.ReadKey());
-    IF (k = KEY_DOWN) OR (k = ORD('j')) THEN
+    k := Terminal.ReadKey();
+    IF (k = KEY_DOWN) OR (k = 'j') THEN
       IF sel < nToc - 1 THEN INC(sel) END;
       IF sel >= top + visH THEN INC(top) END
-    ELSIF (k = KEY_UP) OR (k = ORD('k')) THEN
+    ELSIF (k = KEY_UP) OR (k = 'k') THEN
       IF sel > 0 THEN DEC(sel) END;
       IF sel < top THEN DEC(top) END
     ELSIF k = 13 THEN  (* Enter *)
       Terminal.Clear(); RETURN HrefToSpine(tocHref[sel])
-    ELSIF (k = KEY_ESC) OR (k = ORD('q')) THEN
+    ELSIF (k = KEY_ESC) OR (k = 'q') THEN
       Terminal.Clear(); RETURN -1
     END
   END
@@ -1295,23 +1295,23 @@ BEGIN
 
   IF selMode THEN
     (* ── visual selection mode ── *)
-    IF (k = KEY_UP) OR (k = ORD('k')) THEN
+    IF (k = KEY_UP) OR (k = 'k') THEN
       IF selCursor > 0 THEN DEC(selCursor) END;
       IF selCursor < topLine THEN DEC(topLine); ClampTop() END
-    ELSIF (k = KEY_DOWN) OR (k = ORD('j')) THEN
+    ELSIF (k = KEY_DOWN) OR (k = 'j') THEN
       IF selCursor < nLines - 1 THEN INC(selCursor) END;
       IF selCursor >= topLine + visRows THEN INC(topLine); ClampTop() END
     ELSIF k = 13 THEN  (* Enter/Return *)
       TranslateSelection()
-    ELSIF (k = KEY_ESC) OR (k = ORD('v')) THEN
+    ELSIF (k = KEY_ESC) OR (k = 'v') THEN
       selMode := FALSE
     END
 
   ELSE
     (* ── normal mode ── *)
-    IF (k = KEY_UP) OR (k = ORD('k')) THEN
+    IF (k = KEY_UP) OR (k = 'k') THEN
       DEC(topLine); ClampTop()
-    ELSIF (k = KEY_DOWN) OR (k = ORD('j')) THEN
+    ELSIF (k = KEY_DOWN) OR (k = 'j') THEN
       INC(topLine); ClampTop()
     ELSIF k = KEY_PGUP THEN
       DEC(topLine, visRows);
@@ -1330,11 +1330,11 @@ BEGIN
         ClampTop()
       END;
       SavePos()
-    ELSIF (k = KEY_LEFT) OR (k = ORD('h')) THEN
+    ELSIF (k = KEY_LEFT) OR (k = 'h') THEN
       IF curChap > 0 THEN
         DEC(curChap); topLine := 0; LoadChapter(); SavePos()
       END
-    ELSIF (k = KEY_RIGHT) OR (k = ORD('l')) THEN
+    ELSIF (k = KEY_RIGHT) OR (k = 'l') THEN
       IF curChap < nSpine - 1 THEN
         INC(curChap); topLine := 0; LoadChapter(); SavePos()
       END
@@ -1344,18 +1344,18 @@ BEGIN
       ELSIF Terminal.MouseBtn() = MOUSE_WHEEL_DOWN THEN
         INC(topLine, MOUSE_SCROLL_LINES); ClampTop()
       END
-    ELSIF k = ORD('v') THEN
+    ELSIF k = 'v' THEN
       selMode := TRUE; selAnchor := topLine; selCursor := topLine
-    ELSIF k = ORD('t') THEN
+    ELSIF k = 't' THEN
       chapIdx := ShowTOC();
       IF chapIdx >= 0 THEN
         curChap := chapIdx; topLine := 0; LoadChapter(); SavePos()
       END
-    ELSIF k = ORD('f') THEN
+    ELSIF k = 'f' THEN
       ShowFootnote()
-    ELSIF k = ORD('r') THEN
+    ELSIF k = 'r' THEN
       SwitchBook()
-    ELSIF k = ORD('i') THEN
+    ELSIF k = 'i' THEN
       ShowMeta()
     ELSIF k = KEY_CTRL_F THEN
       IF Prompt("Find: ", findStr) THEN
@@ -1364,7 +1364,7 @@ BEGIN
         ELSE COPY("Not found.", statusMsg)
         END
       END
-    ELSIF k = ORD('n') THEN
+    ELSIF k = 'n' THEN
       IF findStr[0] = 0X THEN
         COPY("No search active.", statusMsg)
       ELSE
@@ -1373,7 +1373,7 @@ BEGIN
         ELSE COPY("Not found.", statusMsg)
         END
       END
-    ELSIF k = ORD('N') THEN
+    ELSIF k = 'N' THEN
       IF findStr[0] = 0X THEN
         COPY("No search active.", statusMsg)
       ELSE
@@ -1382,7 +1382,7 @@ BEGIN
         ELSE COPY("Not found.", statusMsg)
         END
       END
-    ELSIF (k = ORD('q')) OR (k = KEY_CTRL_Q) OR (k = KEY_ESC) THEN
+    ELSIF (k = 'q') OR (k = KEY_CTRL_Q) OR (k = KEY_ESC) THEN
       SavePos(); running := FALSE
     END
   END
@@ -1449,7 +1449,7 @@ BEGIN
   DrawAll();
 
   WHILE running DO
-    k := ORD(Terminal.ReadKey());
+    k := Terminal.ReadKey();
     tCols := Terminal.Cols(); tRows := Terminal.Rows();
     visRows := tRows - 1;
     HandleKey(k);
@@ -1459,3 +1459,4 @@ BEGIN
   Terminal.MouseOff();
   Terminal.Clear()
 END epub.
+

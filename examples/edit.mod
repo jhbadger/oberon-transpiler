@@ -6,11 +6,15 @@ CONST
   MAXLINES = 2000;
   LLEN     = 256;
 
-  KEY_UP     = 1;    KEY_DOWN   = 2;
-  KEY_LEFT   = 3;    KEY_RIGHT  = 4;
-  KEY_MOUSE  = 5;
-  KEY_BS     = 8;    KEY_TAB    = 9;
-  KEY_ENTER  = 13;   KEY_ESC    = 27;
+  KEY_UP     = 0A0X;
+  KEY_DOWN   = 0A1X;
+  KEY_LEFT   = 0A2X;
+  KEY_RIGHT  = 0A3X;
+  KEY_MOUSE  = 0A4X;
+  KEY_BS     = 08X;
+  KEY_TAB    = 09X;   
+  KEY_ESC    = 1BX;
+  KEY_ENTER  = 0DX;
   KEY_CTRL_G = 7;
   KEY_CTRL_K = 11;
   KEY_CTRL_F = 6;
@@ -19,11 +23,15 @@ CONST
   KEY_CTRL_S = 19;
   KEY_CTRL_R = 18;
   KEY_CTRL_Y = 25;
-  KEY_HOME   = 256;  KEY_END    = 257;
-  KEY_PGUP   = 258;  KEY_PGDN   = 259;
-  KEY_DEL    = 260;
-  KEY_WLEFT  = 261;  KEY_WRIGHT = 262;
-  KEY_FHOME  = 263;  KEY_FEND   = 264;
+  KEY_HOME   = 82X;  
+  KEY_END    = 83X;
+  KEY_PGUP   = 80X;
+  KEY_PGDN   = 81X;
+  KEY_DEL    = 84X;
+  KEY_WLEFT  = 261;  
+  KEY_WRIGHT = 262;  
+  KEY_FHOME  = 263;  
+  KEY_FEND   = 264;
 
   CLR_NORMAL   = 255;  BG_NORMAL  = 0;
   CLR_H1       = 214;
@@ -59,29 +67,6 @@ VAR
   lineState : ARRAY MAXLINES OF INTEGER;
   killBuf   : ARRAY LLEN OF CHAR;
   shellCmd  : ARRAY 256 OF CHAR;
-
-PROCEDURE GetKey() : INTEGER;
-VAR c : CHAR;
-BEGIN
-  c := Terminal.ReadKey();
-  IF    ORD(c) =   1 THEN  RETURN KEY_UP
-  ELSIF ORD(c) =   2 THEN  RETURN KEY_DOWN
-  ELSIF ORD(c) =   3 THEN  RETURN KEY_LEFT
-  ELSIF ORD(c) =   4 THEN  RETURN KEY_RIGHT
-  ELSIF ORD(c) =   5 THEN  RETURN KEY_MOUSE
-  ELSIF ORD(c) = 128 THEN  RETURN KEY_PGUP
-  ELSIF ORD(c) = 129 THEN  RETURN KEY_PGDN
-  ELSIF ORD(c) = 130 THEN  RETURN KEY_HOME
-  ELSIF ORD(c) = 131 THEN  RETURN KEY_END
-  ELSIF ORD(c) = 132 THEN  RETURN KEY_DEL
-  ELSIF ORD(c) = 133 THEN  RETURN KEY_WLEFT
-  ELSIF ORD(c) = 134 THEN  RETURN KEY_WRIGHT
-  ELSIF ORD(c) = 135 THEN  RETURN KEY_FHOME
-  ELSIF ORD(c) = 136 THEN  RETURN KEY_FEND
-  ELSIF ORD(c) = 127 THEN  RETURN KEY_BS
-  ELSE  RETURN ORD(c)
-  END
-END GetKey;
 
 PROCEDURE LineLen(li : INTEGER) : INTEGER;
 VAR i : INTEGER;
@@ -493,7 +478,7 @@ BEGIN
     Out.String(prompt);  Out.String(result);
     Graphics.Reset;
     Terminal.Goto(plen + i + 1, 1);
-    j := GetKey();
+    j := Terminal.ReadKey();
     IF j = KEY_ENTER THEN  RETURN i > 0
     ELSIF j = KEY_ESC THEN  result[0] := 0X;  RETURN FALSE
     ELSIF j = KEY_BS  THEN  IF i > 0 THEN  DEC(i);  result[i] := 0X  END
@@ -861,7 +846,7 @@ BEGIN
     ScrollToCursor;
     Render;
     statusMsg[0] := 0X;
-    k := GetKey();
+    k := Terminal.ReadKey();
 
     IF    k = KEY_UP    THEN  DEC(cy);  ClampCursor
     ELSIF k = KEY_DOWN  THEN  INC(cy);  ClampCursor
@@ -918,3 +903,5 @@ BEGIN
   Terminal.Clear;
   Terminal.Goto(1, 1)
 END Edit.
+
+

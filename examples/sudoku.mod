@@ -13,10 +13,10 @@ MODULE Sudoku;
 IMPORT Terminal, Out;
 
 CONST
-  KUp    = 01X;
-  KDown  = 02X;
-  KLeft  = 03X;
-  KRight = 04X;
+  KUp    = 0A0X;
+  KDown  = 0A1X;
+  KLeft  = 0A2X;
+  KRight = 0A3X;
   KEnter = 0DX;
 
 VAR
@@ -329,3 +329,5 @@ BEGIN
   Terminal.Goto(20, 16);  Out.String("Thanks for playing! Press ENTER...");
   REPEAT  yesno := Terminal.ReadKey()  UNTIL yesno = KEnter
 END Sudoku.
+
+

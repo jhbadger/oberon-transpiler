@@ -8,10 +8,10 @@ MODULE smiley;
 IMPORT Graphics, Terminal, Out;
 
 CONST
-  KeyUp    = 01X;
-  KeyDown  = 02X;
-  KeyLeft  = 03X;
-  KeyRight = 04X;
+  KeyUp    = 0A0X;
+  KeyDown  = 0A1X;
+  KeyLeft  = 0A2X;
+  KeyRight = 0A3X;
   KeyEsc   = 1BX;
 
   (* Play-area bounds (inside the box border) *)
@@ -78,3 +78,4 @@ BEGIN
 
   Graphics.Goto(1, 25)
 END smiley.
+

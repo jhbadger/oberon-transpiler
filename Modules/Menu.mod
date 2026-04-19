@@ -85,9 +85,9 @@ BEGIN
       done := TRUE;
     
     (* Navigation Keys *)
-    ELSIF ch = 01X THEN (* Up Arrow *)
+    ELSIF ch = 0A0X THEN (* Up Arrow *)
       IF current > 0 THEN DEC(current) ELSE current := m.count - 1 END;
-    ELSIF ch = 02X THEN (* Down Arrow *)
+    ELSIF ch = 0A1X THEN (* Down Arrow *)
       IF current < m.count - 1 THEN INC(current) ELSE current := 0 END;
     ELSIF ch = 0DX THEN (* Enter Key *)
       done := TRUE;
@@ -95,8 +95,9 @@ BEGIN
   UNTIL done;
   
   Terminal.ShowCursor();
-	Terminal.Restore();
+ Terminal.Restore();
   RETURN current;
 END Run;
 
 END Menu.
+

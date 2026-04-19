@@ -50,7 +50,7 @@ CONST
 
   FOV_R = 7;
 
-  KUp = 01X;  KDown = 02X;  KLeft = 03X;  KRight = 04X;
+  KUp = 0A0X;  KDown = 0A1X;  KLeft = 0A2X;  KRight = 0A3X;
 
 TYPE
   Room = RECORD  x, y, w, h : INTEGER  END;
@@ -832,3 +832,4 @@ BEGIN
   Terminal.Clear;
   Terminal.Goto(1, 1)
 END BRErogue.
+

@@ -320,13 +320,13 @@ BEGIN
     key := Terminal.ReadKey();
     IF (key = "q") OR (key = "Q") THEN
       won := TRUE;
-    ELSIF key = 01X THEN               (* Up:    move forward  *)
+    ELSIF key = 0A0X THEN               (* Up:    move forward  *)
       MoveForward();
-    ELSIF key = 02X THEN               (* Down:  move backward *)
+    ELSIF key = 0A1X THEN               (* Down:  move backward *)
       MoveBackward();
-    ELSIF key = 03X THEN               (* Left:  turn left     *)
+    ELSIF key = 0A2X THEN               (* Left:  turn left     *)
       pdir := (pdir + 3) MOD 4;
-    ELSIF key = 04X THEN               (* Right: turn right    *)
+    ELSIF key = 0A3X THEN               (* Right: turn right    *)
       pdir := (pdir + 1) MOD 4;
     END;
 
@@ -345,3 +345,4 @@ BEGIN
 
   Graphics.Reset();
 END Maze.
+

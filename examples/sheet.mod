@@ -39,15 +39,15 @@ CONST
   CLR_HELP  = 250;  BG_HELP = 238;  (* light grey on dark *)
   CLR_FRZ   = 15;   BG_FRZ  = 22;   (* white on dark green — frozen row *)
 
-  KEY_UP    = 1;   KEY_DOWN  = 2;
-  KEY_LEFT  = 3;   KEY_RIGHT = 4;
-  KEY_MOUSE = 5;
-  KEY_BS    = 8;   KEY_TAB   = 9;
-  KEY_ENTER = 13;  KEY_ESC   = 27;
-  KEY_PGUP  = 258; KEY_PGDN  = 259;
-  KEY_HOME  = 256; KEY_END   = 257;
-  KEY_DEL   = 260;
-  KEY_F2    = 265;
+  KEY_UP    = 0A0X;   KEY_DOWN  = 0A1X;
+  KEY_LEFT  = 0A2X;   KEY_RIGHT = 0A3X;
+  KEY_MOUSE = 0A4X;
+  KEY_BS    = 8;   KEY_TAB   = 09X;
+  KEY_ENTER = 0DX; KEY_ESC  = 1BX;
+  KEY_PGUP  = 80X; KEY_PGDN  = 81X;
+  KEY_HOME  = 82X; KEY_END   = 83X;
+  KEY_DEL   = 84X;
+  KEY_F2    = 8AX;
   KEY_CTRL_O = 15;
   KEY_CTRL_S = 19;
   KEY_CTRL_L = 12;
@@ -772,7 +772,7 @@ BEGIN
     Out.String(prompt); Out.String(result);
     Graphics.Reset;
     Graphics.Goto(plen + i + 1, 1);
-    j := GetKey();
+    j := Terminal.ReadKey();
     IF j = KEY_ENTER THEN RETURN i > 0
     ELSIF j = KEY_ESC THEN result[0] := 0X; RETURN FALSE
     ELSIF j = KEY_BS THEN IF i > 0 THEN DEC(i); result[i] := 0X END
@@ -931,26 +931,6 @@ BEGIN
   END
 END HandleMouse;
 
-(* ── GetKey: maps raw terminal bytes to logical keys ──────────────── *)
-PROCEDURE GetKey(): INTEGER;
-VAR c: CHAR;
-BEGIN
-  c := Terminal.ReadKey();
-  IF    ORD(c) = 1   THEN RETURN KEY_UP
-  ELSIF ORD(c) = 2   THEN RETURN KEY_DOWN
-  ELSIF ORD(c) = 3   THEN RETURN KEY_LEFT
-  ELSIF ORD(c) = 4   THEN RETURN KEY_RIGHT
-  ELSIF ORD(c) = 5   THEN RETURN KEY_MOUSE
-  ELSIF ORD(c) = 127 THEN RETURN KEY_BS
-  ELSIF ORD(c) = 128 THEN RETURN KEY_PGUP
-  ELSIF ORD(c) = 129 THEN RETURN KEY_PGDN
-  ELSIF ORD(c) = 130 THEN RETURN KEY_HOME
-  ELSIF ORD(c) = 131 THEN RETURN KEY_END
-  ELSIF ORD(c) = 132 THEN RETURN KEY_DEL
-  ELSE RETURN ORD(c)
-  END
-END GetKey;
-
 (* ── main ────────────────────────────────────────────────────────── *)
 VAR
   k, err: INTEGER;
@@ -987,7 +967,7 @@ BEGIN
   WHILE running DO
     prevRow := curRow; prevCol := curCol;
     prevScrRow := scrRow; prevScrCol := scrCol;
-    k := GetKey();
+    k := Terminal.ReadKey();
     statusMsg[0] := 0X;
 
     IF k = KEY_MOUSE THEN

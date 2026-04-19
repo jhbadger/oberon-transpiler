@@ -24,10 +24,10 @@ CONST
   OY      = 2;    (* top  pixel offset                     *)
   MaxIter = 128;
 
-  KUp    = 01X;
-  KDown  = 02X;
-  KLeft  = 03X;
-  KRight = 04X;
+  KUp    = 0A0X;
+  KDown  = 0A1X;
+  KLeft  = 0A2X;
+  KRight = 0A3X;
   KEsc   = 1BX;
 
 VAR
@@ -151,3 +151,4 @@ BEGIN
   Graphics.Clear;
   Graphics.Reset
 END Mandelbrot.
+

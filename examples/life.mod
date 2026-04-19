@@ -84,7 +84,7 @@ BEGIN
   Out.String("SEED MODE  Click to place cells   Enter or ESC to run");
   WHILE running_seeding DO
     key := Terminal.ReadKey();
-    IF key = 05X THEN
+    IF key = 04X THEN
       x := Terminal.MouseX() - 1;
       y := (Terminal.MouseY() - 1) * 2;
       IF (x >= 0) & (x < GRID_WIDTH) & (y >= 0) & (y < GRID_HEIGHT) THEN
@@ -138,3 +138,4 @@ BEGIN
   Terminal.MouseOff();
   Graphics.Reset();
 END GameOfLife.
+

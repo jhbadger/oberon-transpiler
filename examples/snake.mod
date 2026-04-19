@@ -19,8 +19,8 @@ CONST
 
   Right = 0;  Down = 1;  Left = 2;  Up = 3;
 
-  KUp    = 01X;  KDown  = 02X;
-  KLeft  = 03X;  KRight = 04X;
+  KUp    = 0A0X;  KDown  = 0A1X;
+  KLeft  = 0A2X;  KRight = 0A3X;
   KEsc   = 1BX;
 
   OX = 3;  OY = 3;   (* grid origin in terminal coords *)
@@ -277,3 +277,4 @@ BEGIN
   Terminal.Clear;
   Terminal.Goto(1, 1)
 END Snake.
+

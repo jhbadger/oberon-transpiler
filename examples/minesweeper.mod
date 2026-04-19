@@ -20,9 +20,9 @@ CONST
   MinesCount = 15;
 
   (* Arrow keys *)
-  KeyUp    = 01X;  KeyDown  = 02X;
-  KeyLeft  = 03X;  KeyRight = 04X;
-  KeyMouse = 05X;
+  KeyUp    = 0A0X;  KeyDown  = 0A1X;
+  KeyLeft  = 0A2X;  KeyRight = 0A3X;
+  KeyMouse = 04X;
 
   (* Grid origin in terminal coordinates *)
   OX = 2;   (* cells occupy cols OX .. OX + Width*2 - 1, 2 chars each *)
@@ -290,3 +290,4 @@ END Play;
 BEGIN
   Play;
 END Minesweeper.
+
