@@ -58,23 +58,17 @@ BEGIN
 END ContainsIC;
 
 (* Try to locate stdlib.md and return its path.
-   Tries: directory of the running binary, then ./, then ../  *)
+   Tries: directory of the running binary (resolved via PATH if needed),
+   then current working directory, then one level up as a last resort. *)
 PROCEDURE FindStdlib(VAR path: ARRAY OF CHAR): BOOLEAN;
-VAR exe: ARRAY 512 OF CHAR;
-    i, last: INTEGER;
+VAR dir:       ARRAY 512 OF CHAR;
     candidate: ARRAY 600 OF CHAR;
 BEGIN
-  (* 1. Look next to the binary: extract directory from argv[0] *)
-  Args.Get(0, exe);
-  last := -1;
-  i := 0;
-  WHILE exe[i] # 0X DO
-    IF exe[i] = '/' THEN  last := i  END;
-    INC(i)
-  END;
-  IF last >= 0 THEN
-    Strings.Extract(exe, 0, last + 1, candidate);  (* includes trailing '/' *)
-    Strings.Append("stdlib.md", candidate);
+  (* 1. Directory containing the binary (handles PATH-based invocation) *)
+  Args.ExeDir(dir);
+  IF dir[0] # 0X THEN
+    Strings.Copy(dir, candidate);
+    Strings.Append("/stdlib.md", candidate);
     IF Files.Exists(candidate) THEN
       Strings.Copy(candidate, path);  RETURN TRUE
     END

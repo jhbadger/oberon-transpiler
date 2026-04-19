@@ -41,6 +41,11 @@ CONST
   UOpEdit  = 1;   (* one line modified in place *)
   UOpSplit = 2;   (* line split into two by Enter *)
   UOpJoin  = 3;   (* two lines joined into one by Backspace/Delete at boundary *)
+  UOpBlock = 4;   (* block cut/paste — saves/restores a region of lines *)
+
+  (* ── Block undo snapshot limit ── *)
+  MaxBlockLines = 20;   (* lines per UOpBlock snapshot *)
+  MaxClipLines  = 200;  (* clipboard capacity *)
 
   (* ── Menu command codes ── *)
   CmdNew     = 10;   CmdOpen    = 11;   CmdSave    = 12;
@@ -50,6 +55,7 @@ CONST
   CmdCompile = 30;   CmdRun     = 31;   CmdCompRun = 32;
   CmdNextWin = 40;   CmdTile    = 41;
   CmdHelp    = 50;
+  CmdCopy    = 60;   CmdCut     = 61;   CmdPaste   = 62;   CmdSelAll  = 63;
 
   (* ── Autocomplete ── *)
   MaxAcItems   = 200;
@@ -57,11 +63,15 @@ CONST
 
 TYPE
   UndoEntry = RECORD
-    op:       INTEGER;          (* UOpEdit / UOpSplit / UOpJoin *)
+    op:       INTEGER;          (* UOpEdit / UOpSplit / UOpJoin / UOpBlock *)
     cy, cx:   INTEGER;          (* cursor position before the edit *)
     fromLine: INTEGER;          (* first affected line index *)
     line0:    ARRAY LLEN OF CHAR;  (* saved content of fromLine *)
-    line1:    ARRAY LLEN OF CHAR   (* saved content of fromLine+1 (UOpJoin only) *)
+    line1:    ARRAY LLEN OF CHAR;  (* saved content of fromLine+1 (UOpJoin only) *)
+    (* UOpBlock fields *)
+    blockNLines:    INTEGER;    (* lines in pre-op snapshot (<=MaxBlockLines) *)
+    blockPostNLines: INTEGER;   (* lines in region after the op *)
+    blockLines: ARRAY MaxBlockLines, LLEN OF CHAR
   END;
 
   EditorWin  = POINTER TO EditorWinRec;
@@ -81,7 +91,13 @@ TYPE
     (* undo stack (circular buffer) *)
     undo:      ARRAY MaxUndo OF UndoEntry;
     undoTop:   INTEGER;   (* next write slot *)
-    undoCount: INTEGER    (* number of valid entries *)
+    undoCount: INTEGER;   (* number of valid entries *)
+    (* selection *)
+    selActive:      BOOLEAN;
+    selAnchorLine:  INTEGER;
+    selAnchorCol:   INTEGER;
+    (* mouse drag tracking *)
+    mouseSelDrag:   BOOLEAN
   END;
 
 (* ════════════════════════════════════════════════════════════════
@@ -101,6 +117,9 @@ VAR
   promptMode: INTEGER;   (* 0=none 1=find 2=goto 3=confirmClose 4=confirmQuit *)
   promptBuf:  ARRAY 128 OF CHAR;
   promptPos:  INTEGER;
+  (* clipboard (module-level, shared across windows) *)
+  clipLines:  ARRAY MaxClipLines, LLEN OF CHAR;
+  clipNLines: INTEGER;
   (* autocomplete popup *)
   acActive:  BOOLEAN;
   acItems:   ARRAY MaxAcItems, 64 OF CHAR;
@@ -237,8 +256,33 @@ BEGIN
   IF ew.undoCount < MaxUndo THEN  INC(ew.undoCount)  END
 END PushUndo;
 
+(* Save a block region r1..r2 before a cut or paste operation.
+   postNLines = how many lines that region will span after the op
+   (1 for cut, clipNLines for multi-line paste). *)
+PROCEDURE PushBlockUndo(ew: EditorWin; r1, r2, postNLines: INTEGER);
+VAR e, b, i: INTEGER;
+BEGIN
+  e := ew.undoTop;
+  ew.undo[e].op             := UOpBlock;
+  ew.undo[e].cy             := ew.cy;
+  ew.undo[e].cx             := ew.cx;
+  ew.undo[e].fromLine       := r1;
+  ew.undo[e].blockPostNLines := postNLines;
+  ew.undo[e].blockNLines    := r2 - r1 + 1;
+  IF ew.undo[e].blockNLines > MaxBlockLines THEN
+    ew.undo[e].blockNLines := MaxBlockLines
+  END;
+  FOR b := 0 TO ew.undo[e].blockNLines - 1 DO
+    FOR i := 0 TO LLEN - 1 DO
+      ew.undo[e].blockLines[b][i] := ew.lines[r1 + b][i]
+    END
+  END;
+  ew.undoTop := (e + 1) MOD MaxUndo;
+  IF ew.undoCount < MaxUndo THEN  INC(ew.undoCount)  END
+END PushBlockUndo;
+
 PROCEDURE DoUndo(ew: EditorWin);
-VAR e, i, fromLine: INTEGER;
+VAR e, b, i, fromLine, n, postN: INTEGER;
 BEGIN
   IF ew.undoCount = 0 THEN  RETURN  END;
   DEC(ew.undoCount);
@@ -256,7 +300,7 @@ BEGIN
     FOR i := 0 TO LLEN - 1 DO
       ew.lines[fromLine][i] := ew.undo[e].line0[i]
     END
-  ELSE  (* UOpJoin *)
+  ELSIF ew.undo[e].op = UOpJoin THEN
     (* Reverse a line join: restore original line, re-insert the removed one *)
     FOR i := 0 TO LLEN - 1 DO
       ew.lines[fromLine][i] := ew.undo[e].line0[i]
@@ -265,6 +309,24 @@ BEGIN
     FOR i := 0 TO LLEN - 1 DO
       ew.lines[fromLine + 1][i] := ew.undo[e].line1[i]
     END
+  ELSE  (* UOpBlock: restore the saved region *)
+    n     := ew.undo[e].blockNLines;
+    postN := ew.undo[e].blockPostNLines;
+    (* Adjust line count: post had postN lines in region, pre had n *)
+    IF postN > n THEN
+      (* Post added lines (paste): remove the extra ones *)
+      FOR b := 1 TO postN - n DO  RemoveLine(ew, fromLine + n)  END
+    ELSIF postN < n THEN
+      (* Post removed lines (cut): re-insert the missing ones *)
+      FOR b := postN TO n - 1 DO  InsertLineAt(ew, fromLine + b)  END
+    END;
+    (* Restore all saved lines *)
+    FOR b := 0 TO n - 1 DO
+      FOR i := 0 TO LLEN - 1 DO
+        ew.lines[fromLine + b][i] := ew.undo[e].blockLines[b][i]
+      END
+    END;
+    ew.modified := TRUE
   END;
   ew.cy := ew.undo[e].cy;
   ew.cx := ew.undo[e].cx;
@@ -687,6 +749,170 @@ BEGIN
 END WordRight;
 
 (* ════════════════════════════════════════════════════════════════
+   Selection and clipboard
+   ════════════════════════════════════════════════════════════════ *)
+
+PROCEDURE ClearSel(ew: EditorWin);
+BEGIN  ew.selActive := FALSE  END ClearSel;
+
+PROCEDURE StartSel(ew: EditorWin);
+BEGIN
+  ew.selAnchorLine := ew.cy;
+  ew.selAnchorCol  := ew.cx;
+  ew.selActive     := TRUE
+END StartSel;
+
+(* Return selection start (r1,c1) and end (r2,c2) in document order. *)
+PROCEDURE SelNorm(ew: EditorWin; VAR r1, c1, r2, c2: INTEGER);
+BEGIN
+  IF (ew.selAnchorLine < ew.cy) OR
+     ((ew.selAnchorLine = ew.cy) & (ew.selAnchorCol <= ew.cx)) THEN
+    r1 := ew.selAnchorLine;  c1 := ew.selAnchorCol;
+    r2 := ew.cy;             c2 := ew.cx
+  ELSE
+    r1 := ew.cy;             c1 := ew.cx;
+    r2 := ew.selAnchorLine;  c2 := ew.selAnchorCol
+  END
+END SelNorm;
+
+(* Is byte byteI on line li inside the current selection? *)
+PROCEDURE InSel(ew: EditorWin; li, byteI: INTEGER): BOOLEAN;
+VAR r1, c1, r2, c2: INTEGER;
+BEGIN
+  IF ~ew.selActive THEN  RETURN FALSE  END;
+  SelNorm(ew, r1, c1, r2, c2);
+  IF (li < r1) OR (li > r2) THEN  RETURN FALSE  END;
+  IF r1 = r2 THEN  RETURN (byteI >= c1) & (byteI < c2)  END;
+  IF li = r1 THEN  RETURN byteI >= c1  END;
+  IF li = r2 THEN  RETURN byteI < c2   END;
+  RETURN TRUE   (* middle lines: fully selected *)
+END InSel;
+
+(* Delete the current selection; push undo; cursor moves to selection start. *)
+PROCEDURE DeleteSel(ew: EditorWin);
+VAR r1, c1, r2, c2, i, slen: INTEGER;
+    suffix: ARRAY LLEN OF CHAR;
+BEGIN
+  IF ~ew.selActive THEN  RETURN  END;
+  SelNorm(ew, r1, c1, r2, c2);
+  ew.cy := r1;  ew.cx := c1;
+  IF r1 = r2 THEN
+    PushUndo(ew, UOpEdit, r1);
+    DeleteBytesAt(ew, r1, c1, c2 - c1)
+  ELSE
+    PushBlockUndo(ew, r1, r2, 1);
+    slen := LineLen(ew, r2) - c2;
+    FOR i := 0 TO slen - 1 DO  suffix[i] := ew.lines[r2][c2 + i]  END;
+    suffix[slen] := 0X;
+    ew.lines[r1][c1] := 0X;
+    FOR i := 0 TO slen - 1 DO  ew.lines[r1][c1 + i] := suffix[i]  END;
+    ew.lines[r1][c1 + slen] := 0X;
+    FOR i := 1 TO r2 - r1 DO  RemoveLine(ew, r1 + 1)  END
+  END;
+  ClearSel(ew);
+  ClampCursor(ew)
+END DeleteSel;
+
+(* Copy selection into the module clipboard. *)
+PROCEDURE DoCopy(ew: EditorWin);
+VAR r1, c1, r2, c2, li, j, n: INTEGER;
+BEGIN
+  IF ~ew.selActive THEN  RETURN  END;
+  SelNorm(ew, r1, c1, r2, c2);
+  IF r1 = r2 THEN
+    n := c2 - c1;
+    FOR j := 0 TO n - 1 DO  clipLines[0][j] := ew.lines[r1][c1 + j]  END;
+    clipLines[0][n] := 0X;
+    clipNLines := 1
+  ELSE
+    clipNLines := r2 - r1 + 1;
+    IF clipNLines > MaxClipLines THEN  clipNLines := MaxClipLines  END;
+    (* First partial line *)
+    n := LineLen(ew, r1) - c1;
+    FOR j := 0 TO n - 1 DO  clipLines[0][j] := ew.lines[r1][c1 + j]  END;
+    clipLines[0][n] := 0X;
+    (* Middle lines: full copy *)
+    FOR li := 1 TO clipNLines - 2 DO
+      FOR j := 0 TO LLEN - 1 DO  clipLines[li][j] := ew.lines[r1 + li][j]  END
+    END;
+    (* Last partial line: bytes 0..c2-1 *)
+    FOR j := 0 TO c2 - 1 DO  clipLines[clipNLines - 1][j] := ew.lines[r2][j]  END;
+    clipLines[clipNLines - 1][c2] := 0X
+  END
+END DoCopy;
+
+(* Cut: copy selection to clipboard then delete it. *)
+PROCEDURE DoCut(ew: EditorWin);
+BEGIN
+  IF ~ew.selActive THEN  RETURN  END;
+  DoCopy(ew);
+  DeleteSel(ew)
+END DoCut;
+
+(* Paste clipboard at cursor; replaces selection if any. *)
+PROCEDURE DoPaste(ew: EditorWin);
+VAR clen, slen, j, b, lastLen: INTEGER;
+    suffix: ARRAY LLEN OF CHAR;
+BEGIN
+  IF clipNLines = 0 THEN  RETURN  END;
+  IF ew.selActive THEN  DeleteSel(ew)  END;
+  IF clipNLines = 1 THEN
+    clen := Strings.Length(clipLines[0]);
+    IF clen > 0 THEN
+      PushUndo(ew, UOpEdit, ew.cy);
+      InsertBytesAt(ew, ew.cy, ew.cx, clipLines[0], clen);
+      INC(ew.cx, clen)
+    END
+  ELSE
+    (* Save the part of the current line after the cursor *)
+    slen := LineLen(ew, ew.cy) - ew.cx;
+    FOR j := 0 TO slen - 1 DO  suffix[j] := ew.lines[ew.cy][ew.cx + j]  END;
+    suffix[slen] := 0X;
+    PushBlockUndo(ew, ew.cy, ew.cy, clipNLines);
+    (* First line: existing[0..cx-1] + clipLines[0] *)
+    ew.lines[ew.cy][ew.cx] := 0X;
+    clen := Strings.Length(clipLines[0]);
+    FOR j := 0 TO clen - 1 DO
+      IF ew.cx + j < LLEN - 1 THEN
+        ew.lines[ew.cy][ew.cx + j] := clipLines[0][j]
+      END
+    END;
+    ew.lines[ew.cy][ew.cx + clen] := 0X;
+    (* Insert clipNLines-1 new lines after the current one *)
+    FOR b := 1 TO clipNLines - 1 DO
+      InsertLineAt(ew, ew.cy + b)
+    END;
+    (* Fill middle lines *)
+    FOR b := 1 TO clipNLines - 2 DO
+      FOR j := 0 TO LLEN - 1 DO  ew.lines[ew.cy + b][j] := clipLines[b][j]  END
+    END;
+    (* Last line: clipLines[clipNLines-1] + suffix *)
+    b       := clipNLines - 1;
+    lastLen := Strings.Length(clipLines[b]);
+    FOR j := 0 TO lastLen - 1 DO  ew.lines[ew.cy + b][j] := clipLines[b][j]  END;
+    FOR j := 0 TO slen - 1 DO
+      IF lastLen + j < LLEN - 1 THEN
+        ew.lines[ew.cy + b][lastLen + j] := suffix[j]
+      END
+    END;
+    ew.lines[ew.cy + b][lastLen + slen] := 0X;
+    INC(ew.cy, b);
+    ew.cx := lastLen
+  END;
+  ew.modified := TRUE
+END DoPaste;
+
+(* Select the entire buffer. *)
+PROCEDURE DoSelAll(ew: EditorWin);
+BEGIN
+  ew.selAnchorLine := 0;
+  ew.selAnchorCol  := 0;
+  ew.selActive     := TRUE;
+  ew.cy := ew.nlines - 1;
+  ew.cx := LineLen(ew, ew.cy)
+END DoSelAll;
+
+(* ════════════════════════════════════════════════════════════════
    Syntax highlighting helpers
    ════════════════════════════════════════════════════════════════ *)
 
@@ -894,7 +1120,11 @@ BEGIN
     (* ── Output if in the visible range ── *)
     sc := i - leftByte;
     IF (sc >= 0) & (sc < innerW) THEN
-      TUI.PutCell(innerX + sc, sy, ch, fg, TUI.Black)
+      IF InSel(ew, li, i) THEN
+        TUI.PutCell(innerX + sc, sy, ch, fg, TUI.Blue)
+      ELSE
+        TUI.PutCell(innerX + sc, sy, ch, fg, TUI.Black)
+      END
     END;
     INC(i)
   END
@@ -957,45 +1187,95 @@ BEGIN
     IF ev.kind = TUI.EvKey THEN
       ch := ev.key;
 
-      IF    ch = TUI.KUp    THEN  DEC(v.cy);  ClampCursor(v)
-      ELSIF ch = TUI.KDown  THEN  INC(v.cy);  ClampCursor(v)
-      ELSIF ch = TUI.KLeft  THEN
+      (* ── Plain movement: clear selection ── *)
+      IF ch = TUI.KUp THEN
+        ClearSel(v);  DEC(v.cy);  ClampCursor(v)
+      ELSIF ch = TUI.KDown THEN
+        ClearSel(v);  INC(v.cy);  ClampCursor(v)
+      ELSIF ch = TUI.KLeft THEN
+        ClearSel(v);
         IF v.cx > 0 THEN  Utf8Back(v.lines[v.cy], v.cx)
         ELSIF v.cy > 0 THEN  DEC(v.cy);  v.cx := LineLen(v, v.cy)
         END
       ELSIF ch = TUI.KRight THEN
+        ClearSel(v);
         IF v.cx < LineLen(v, v.cy) THEN  Utf8Fwd(v.lines[v.cy], v.cx)
         ELSIF v.cy < v.nlines - 1 THEN  INC(v.cy);  v.cx := 0
         END
-      ELSIF ch = TUI.KHome   THEN  v.cy := 0;  v.cx := 0
-      ELSIF ch = TUI.KEnd    THEN  v.cy := v.nlines - 1;  v.cx := LineLen(v, v.cy)
-      ELSIF ch = TUI.KCtrlHome THEN  v.cx := 0
-      ELSIF ch = TUI.KCtrlEnd  THEN  v.cx := LineLen(v, v.cy)
-      ELSIF ch = TUI.KCtrlLeft  THEN  WordLeft(v)
-      ELSIF ch = TUI.KCtrlRight THEN  WordRight(v)
-      ELSIF ch = TUI.KPgUp   THEN  DEC(v.cy, v.h - 2);  ClampCursor(v)
-      ELSIF ch = TUI.KPgDn   THEN  INC(v.cy, v.h - 2);  ClampCursor(v)
-      ELSIF ch = TUI.KEnter  THEN  DoEnter(v)
-      ELSIF ch = TUI.KBackspace THEN  DoBackspace(v)
-      ELSIF ch = TUI.KDel    THEN  DoDelete(v)
-      ELSIF ch = TUI.KTab    THEN
-        (* Insert 4 spaces *)
+      ELSIF ch = TUI.KHome THEN
+        ClearSel(v);  v.cy := 0;  v.cx := 0
+      ELSIF ch = TUI.KEnd THEN
+        ClearSel(v);  v.cy := v.nlines - 1;  v.cx := LineLen(v, v.cy)
+      ELSIF ch = TUI.KCtrlHome THEN
+        ClearSel(v);  v.cx := 0
+      ELSIF ch = TUI.KCtrlEnd THEN
+        ClearSel(v);  v.cx := LineLen(v, v.cy)
+      ELSIF ch = TUI.KCtrlLeft THEN
+        ClearSel(v);  WordLeft(v)
+      ELSIF ch = TUI.KCtrlRight THEN
+        ClearSel(v);  WordRight(v)
+      ELSIF ch = TUI.KPgUp THEN
+        ClearSel(v);  DEC(v.cy, v.h - 2);  ClampCursor(v)
+      ELSIF ch = TUI.KPgDn THEN
+        ClearSel(v);  INC(v.cy, v.h - 2);  ClampCursor(v)
+
+      (* ── Shift+Arrow: extend selection ── *)
+      ELSIF ch = TUI.KShiftLeft THEN
+        IF ~v.selActive THEN  StartSel(v)  END;
+        IF v.cx > 0 THEN  Utf8Back(v.lines[v.cy], v.cx)
+        ELSIF v.cy > 0 THEN  DEC(v.cy);  v.cx := LineLen(v, v.cy)
+        END
+      ELSIF ch = TUI.KShiftRight THEN
+        IF ~v.selActive THEN  StartSel(v)  END;
+        IF v.cx < LineLen(v, v.cy) THEN  Utf8Fwd(v.lines[v.cy], v.cx)
+        ELSIF v.cy < v.nlines - 1 THEN  INC(v.cy);  v.cx := 0
+        END
+      ELSIF ch = TUI.KShiftUp THEN
+        IF ~v.selActive THEN  StartSel(v)  END;
+        DEC(v.cy);  ClampCursor(v)
+      ELSIF ch = TUI.KShiftDown THEN
+        IF ~v.selActive THEN  StartSel(v)  END;
+        INC(v.cy);  ClampCursor(v)
+
+      (* ── Editing: delete selection first where applicable ── *)
+      ELSIF ch = TUI.KEnter THEN
+        IF v.selActive THEN  DeleteSel(v)  END;
+        DoEnter(v)
+      ELSIF ch = TUI.KBackspace THEN
+        IF v.selActive THEN  DeleteSel(v)
+        ELSE  DoBackspace(v)
+        END
+      ELSIF ch = TUI.KDel THEN
+        IF v.selActive THEN  DeleteSel(v)
+        ELSE  DoDelete(v)
+        END
+      ELSIF ch = TUI.KTab THEN
+        IF v.selActive THEN  DeleteSel(v)  END;
         PushUndo(v, UOpEdit, v.cy);
         bytes[0] := ' ';  bytes[1] := ' ';  bytes[2] := ' ';  bytes[3] := ' ';
         InsertBytesAt(v, v.cy, v.cx, bytes, 4);
         INC(v.cx, 4)
-      ELSIF ORD(ch) = 11 THEN  DoKillLine(v)   (* Ctrl+K *)
-      ELSIF ORD(ch) = 25 THEN  DoYank(v)       (* Ctrl+Y *)
-      ELSIF ORD(ch) = 26 THEN  DoUndo(v)       (* Ctrl+Z *)
-      ELSIF ORD(ch) = 6  THEN                  (* Ctrl+F *)
+
+      (* ── Control commands ── *)
+      ELSIF ORD(ch) = 1  THEN  DoSelAll(v)       (* Ctrl+A: select all  *)
+      ELSIF ORD(ch) = 3  THEN  DoCopy(v)         (* Ctrl+C: copy        *)
+      ELSIF ORD(ch) = 22 THEN  DoPaste(v)        (* Ctrl+V: paste       *)
+      ELSIF ORD(ch) = 24 THEN  DoCut(v)          (* Ctrl+X: cut         *)
+      ELSIF ORD(ch) = 11 THEN  ClearSel(v);  DoKillLine(v)  (* Ctrl+K  *)
+      ELSIF ORD(ch) = 25 THEN  ClearSel(v);  DoYank(v)      (* Ctrl+Y  *)
+      ELSIF ORD(ch) = 26 THEN  ClearSel(v);  DoUndo(v)      (* Ctrl+Z  *)
+      ELSIF ORD(ch) = 6  THEN                    (* Ctrl+F: find        *)
         promptMode := 1;
         promptBuf[0] := 0X;  promptPos := 0;
         Strings.Copy("Find: ", statusMsg)
-      ELSIF ORD(ch) = 7  THEN                  (* Ctrl+G *)
+      ELSIF ORD(ch) = 7  THEN                    (* Ctrl+G: goto line   *)
         promptMode := 2;
         promptBuf[0] := 0X;  promptPos := 0;
         Strings.Copy("Go to line: ", statusMsg)
+
+      (* ── Printable characters ── *)
       ELSIF (ORD(ch) >= 32) & (ORD(ch) < 127) THEN
+        IF v.selActive THEN  DeleteSel(v)  END;
         PushUndo(v, UOpEdit, v.cy);
         bytes[0] := ch;
         InsertBytesAt(v, v.cy, v.cx, bytes, 1);
@@ -1012,14 +1292,25 @@ BEGIN
       ELSIF ev.mb = 65 THEN    (* wheel down *)
         INC(v.topLine, 3);
         IF v.topLine > v.nlines - 1 THEN  v.topLine := v.nlines - 1 END
-      ELSIF (ev.mb # 32) & (ev.mb # 3) &
+      ELSIF (ev.mb = 0) &      (* left press inside content area *)
          (ev.mx >= v.x + 1) & (ev.mx <= v.x + v.w - 2) &
          (ev.my >= v.y + 1) & (ev.my <= v.y + v.h - 2) THEN
-        (* Click inside inner area → move cursor *)
+        ClearSel(v);
         v.cy := v.topLine + (ev.my - v.y - 1);
         v.cx := v.leftCol + (ev.mx - v.x - 1);
-        ClampCursor(v);
-        ScrollToCursor(v)
+        ClampCursor(v);  ScrollToCursor(v);
+        (* Remember anchor for drag; selActive stays FALSE until drag moves *)
+        v.selAnchorLine := v.cy;  v.selAnchorCol := v.cx;
+        v.mouseSelDrag  := TRUE
+      ELSIF (ev.mb = 32) & v.mouseSelDrag &   (* drag with left button *)
+         (ev.mx >= v.x + 1) & (ev.mx <= v.x + v.w - 2) &
+         (ev.my >= v.y + 1) & (ev.my <= v.y + v.h - 2) THEN
+        IF ~v.selActive THEN  v.selActive := TRUE  END;
+        v.cy := v.topLine + (ev.my - v.y - 1);
+        v.cx := v.leftCol + (ev.mx - v.x - 1);
+        ClampCursor(v)
+      ELSIF ev.mb = 3 THEN     (* any release *)
+        v.mouseSelDrag := FALSE
       END;
       RETURN TRUE
     END
@@ -1091,6 +1382,8 @@ BEGIN
   ew.killBuf[0] := 0X;
   ew.srchBuf[0] := 0X;
   ew.undoTop := 0;  ew.undoCount := 0;
+  ew.selActive    := FALSE;
+  ew.mouseSelDrag := FALSE;
   (* Find a free slot *)
   i := 0;
   WHILE (i < MaxWins) & (wins[i] # NIL) DO  INC(i)  END;
@@ -1197,6 +1490,7 @@ BEGIN
   ew.topLine := 0;  ew.leftCol := 0;
   ew.modified := FALSE;
   ew.undoTop := 0;  ew.undoCount := 0;
+  ew.selActive := FALSE;
   RETURN TRUE
 END LoadFile;
 
@@ -1539,6 +1833,11 @@ BEGIN
   ELSIF cmd = CmdTile THEN
     TileEditorWins
 
+  ELSIF cmd = CmdCopy   THEN  IF ew # NIL THEN  DoCopy(ew)   END
+  ELSIF cmd = CmdCut    THEN  IF ew # NIL THEN  DoCut(ew)    END
+  ELSIF cmd = CmdPaste  THEN  IF ew # NIL THEN  DoPaste(ew)  END
+  ELSIF cmd = CmdSelAll THEN  IF ew # NIL THEN  DoSelAll(ew) END
+
   ELSIF cmd = CmdHelp THEN
     (* F1: help on word under cursor; open dialog with empty query if no editor *)
     IF ew # NIL THEN  WordAtCursor(ew, path)
@@ -1608,6 +1907,11 @@ BEGIN
   Widgets.MenuBarAddMenu(mbar, "Edit");
   Widgets.MenuBarAddItem(mbar, 1, "Undo          Ctrl+Z", CmdUndo);
   Widgets.MenuBarAddSep (mbar, 1);
+  Widgets.MenuBarAddItem(mbar, 1, "Cut           Ctrl+X", CmdCut);
+  Widgets.MenuBarAddItem(mbar, 1, "Copy          Ctrl+C", CmdCopy);
+  Widgets.MenuBarAddItem(mbar, 1, "Paste         Ctrl+V", CmdPaste);
+  Widgets.MenuBarAddItem(mbar, 1, "Select All    Ctrl+A", CmdSelAll);
+  Widgets.MenuBarAddSep (mbar, 1);
   Widgets.MenuBarAddItem(mbar, 1, "Find...       Ctrl+F", CmdFind);
   Widgets.MenuBarAddItem(mbar, 1, "Find Next     F3",     CmdFindNext);
   Widgets.MenuBarAddItem(mbar, 1, "Go to Line... Ctrl+G", CmdGoto);
@@ -1664,8 +1968,9 @@ BEGIN
   statusMsg[0] := 0X;
   promptBuf[0] := 0X;
   promptPos := 0;
-  acActive  := FALSE;
-  acCount   := 0;
+  acActive   := FALSE;
+  acCount    := 0;
+  clipNLines := 0;
 
   BuildMenus();
 

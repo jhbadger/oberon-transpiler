@@ -59,11 +59,15 @@ CONST
 (* ── Special key codes (matching Terminal.ReadKey return values) ────────── *)
 
 CONST
-  KUp*        = 01X;   (* Up arrow    *)
-  KDown*      = 02X;   (* Down arrow  *)
-  KLeft*      = 03X;   (* Left arrow  *)
-  KRight*     = 04X;   (* Right arrow *)
-  KMouse*     = 05X;   (* Mouse event — read ev.mx/my/mb for details *)
+  KUp*        = 0A0X;  (* Up arrow    *)
+  KDown*      = 0A1X;  (* Down arrow  *)
+  KLeft*      = 0A2X;  (* Left arrow  *)
+  KRight*     = 0A3X;  (* Right arrow *)
+  KMouse*     = 0A4X;  (* Mouse event — read ev.mx/my/mb for details *)
+  KShiftUp*   = 0A5X;  (* Shift+Up    *)
+  KShiftDown* = 0A6X;  (* Shift+Down  *)
+  KShiftLeft* = 0A7X;  (* Shift+Left  *)
+  KShiftRight*= 0A8X;  (* Shift+Right *)
   KBackspace* = 08X;
   KTab*       = 09X;
   KEnter*     = 0DX;

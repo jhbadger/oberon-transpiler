@@ -1230,6 +1230,10 @@ static int try_emit_import(CG *g, Node *fa, Node *args) {
             emit(g,","); emit_open_array_len(g,a1); emit(g,")");
             return 1;
         }
+        if (!strcmp(proc,"ExeDir")) {
+            emit(g,"Args_ExeDir("); emit_expr(g,a0); emit(g,")");
+            return 1;
+        }
     }
     /* Dict module — string-keyed hash table */
     if (!strcmp(mod,"Dict")) {
@@ -2331,9 +2335,11 @@ void codegen(Node *module, FILE *out, int is_main) {
         emit(g,"}\n");
         /* ReadKey — handles keyboard sequences AND SGR mouse events.
          * Returns:
-         *   01X  Up arrow      02X  Down arrow
-         *   03X  Left arrow    04X  Right arrow
-         *   05X  Mouse event   (call MouseX/Y/Btn for details)
+         *   A0X  Up arrow      A1X  Down arrow
+         *   A2X  Left arrow    A3X  Right arrow
+         *   A4X  Mouse event   (call MouseX/Y/Btn for details)
+         *   A5X  Shift+Up      A6X  Shift+Down
+         *   A7X  Shift+Left    A8X  Shift+Right
          *   1BX  Bare ESC
          *   otherwise: the character itself
          *
@@ -2358,10 +2364,10 @@ void codegen(Node *module, FILE *out, int is_main) {
         emit(g,"        if (read(STDIN_FILENO,&c2,1)==1 && c2=='[') {\n");
         emit(g,"            if (read(STDIN_FILENO,&c3,1)!=1) c3=0;\n");
         /* Arrow keys */
-        emit(g,"            if (c3=='A') { tcsetattr(STDIN_FILENO,TCSANOW,&t2); return '\\x01'; }\n");
-        emit(g,"            if (c3=='B') { tcsetattr(STDIN_FILENO,TCSANOW,&t2); return '\\x02'; }\n");
-        emit(g,"            if (c3=='D') { tcsetattr(STDIN_FILENO,TCSANOW,&t2); return '\\x03'; }\n");
-        emit(g,"            if (c3=='C') { tcsetattr(STDIN_FILENO,TCSANOW,&t2); return '\\x04'; }\n");
+        emit(g,"            if (c3=='A') { tcsetattr(STDIN_FILENO,TCSANOW,&t2); return (char)0xa0; }\n");
+        emit(g,"            if (c3=='B') { tcsetattr(STDIN_FILENO,TCSANOW,&t2); return (char)0xa1; }\n");
+        emit(g,"            if (c3=='D') { tcsetattr(STDIN_FILENO,TCSANOW,&t2); return (char)0xa2; }\n");
+        emit(g,"            if (c3=='C') { tcsetattr(STDIN_FILENO,TCSANOW,&t2); return (char)0xa3; }\n");
         /* SGR mouse: \033[<btn;x;yM or \033[<btn;x;ym */
         emit(g,"            if (c3=='<') {\n");
         emit(g,"                char buf[32]; int bi=0; char last=0;\n");
@@ -2384,7 +2390,7 @@ void codegen(Node *module, FILE *out, int is_main) {
         emit(g,"                else if (btn & 32)        _term_mouse_btn=32;\n");
         emit(g,"                else                      _term_mouse_btn=(btn&3);\n");
         emit(g,"                tcsetattr(STDIN_FILENO,TCSANOW,&t2);\n");
-        emit(g,"                return '\\x05';\n");
+        emit(g,"                return (char)0xa4;\n");
         emit(g,"            }\n");
         /* Home / End (ESC [ H / ESC [ F) */
         emit(g,"            if (c3=='H') { tcsetattr(STDIN_FILENO,TCSANOW,&t2); return (char)130; }\n");
@@ -2403,6 +2409,12 @@ void codegen(Node *module, FILE *out, int is_main) {
         emit(g,"                        if (c6=='C') return (char)134;\n");
         emit(g,"                        if (c6=='H') return (char)135;\n");
         emit(g,"                        if (c6=='F') return (char)136;\n");
+        emit(g,"                    }\n");
+        emit(g,"                    if (c5=='2') {\n");
+        emit(g,"                        if (c6=='A') return (char)0xa5;\n");
+        emit(g,"                        if (c6=='B') return (char)0xa6;\n");
+        emit(g,"                        if (c6=='D') return (char)0xa7;\n");
+        emit(g,"                        if (c6=='C') return (char)0xa8;\n");
         emit(g,"                    }\n");
         emit(g,"                    return '\\x1B';\n");
         emit(g,"                }\n");
@@ -2949,9 +2961,15 @@ void codegen(Node *module, FILE *out, int is_main) {
 
     /* ── Args module runtime ─────────────────────────────────────── */
     if (has_args) {
+        if (!has_terminal) emit(g,"#include <unistd.h>\n");
         emit(g,"/* Args module — command-line argument access */\n");
-        emit(g,"static int   _args_argc = 0;\n");
-        emit(g,"static char **_args_argv = NULL;\n");
+        if (g->is_main) {
+            emit(g,"int   _args_argc = 0;\n");
+            emit(g,"char **_args_argv = NULL;\n");
+        } else {
+            emit(g,"extern int   _args_argc;\n");
+            emit(g,"extern char **_args_argv;\n");
+        }
         emit(g,"static int Args_Count(void) { return _args_argc > 0 ? _args_argc - 1 : 0; }\n");
         emit(g,"static void Args_Get(int n, char *s) {\n");
         emit(g,"    if (n >= 0 && n < _args_argc && _args_argv) {\n");
@@ -2962,6 +2980,41 @@ void codegen(Node *module, FILE *out, int is_main) {
         emit(g,"static void Args_GetEnv(const char *name, char *val, int val_len) {\n");
         emit(g,"    const char *v=getenv(name);\n");
         emit(g,"    if(v){strncpy(val,v,(size_t)(val_len-1));val[val_len-1]=0;} else val[0]=0;\n");
+        emit(g,"}\n");
+        /* Args_ExeDir: returns directory containing the running binary.
+         * If argv[0] contains '/', extract dir from it (handles ./foo and /abs/path).
+         * Otherwise search PATH for argv[0]. */
+        emit(g,"static void Args_ExeDir(char *s) {\n");
+        emit(g,"    char resolved[512]={0};\n");
+        emit(g,"    if (_args_argv && _args_argc > 0) {\n");
+        emit(g,"        const char *a0=_args_argv[0]; int hasslash=0;\n");
+        emit(g,"        for(int i=0;a0[i];i++){if(a0[i]=='/'){hasslash=1;break;}}\n");
+        emit(g,"        if (hasslash) {\n");
+        emit(g,"            int i=0; while(a0[i]&&i<511){resolved[i]=a0[i];i++;} resolved[i]=0;\n");
+        emit(g,"        } else {\n");
+        emit(g,"            const char *pe=getenv(\"PATH\");\n");
+        emit(g,"            if (pe) {\n");
+        emit(g,"                char dir[256]; int di;\n");
+        emit(g,"                while (*pe) {\n");
+        emit(g,"                    di=0;\n");
+        emit(g,"                    while(*pe && *pe!=':'){if(di<255)dir[di++]=*pe; pe++;}\n");
+        emit(g,"                    dir[di]=0; if(*pe==':')pe++;\n");
+        emit(g,"                    if(di==0) continue;\n");
+        emit(g,"                    char cand[512];\n");
+        emit(g,"                    snprintf(cand,sizeof(cand),\"%%s/%%s\",dir,a0);\n");
+        emit(g,"                    if(access(cand,X_OK)==0){\n");
+        emit(g,"                        int i=0; while(cand[i]&&i<511){resolved[i]=cand[i];i++;}\n");
+        emit(g,"                        resolved[i]=0; break;\n");
+        emit(g,"                    }\n");
+        emit(g,"                }\n");
+        emit(g,"            }\n");
+        emit(g,"        }\n");
+        emit(g,"    }\n");
+        emit(g,"    /* strip trailing filename, keep directory */\n");
+        emit(g,"    int last=-1,i=0; while(resolved[i]){if(resolved[i]=='/')last=i; i++;}\n");
+        emit(g,"    if(last>0){for(i=0;i<last;i++)s[i]=resolved[i]; s[last]=0;}\n");
+        emit(g,"    else if(last==0){s[0]='/';s[1]=0;}\n");
+        emit(g,"    else{s[0]=0;}\n");
         emit(g,"}\n\n");
     }
 
