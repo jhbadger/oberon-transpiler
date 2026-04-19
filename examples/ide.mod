@@ -25,6 +25,7 @@ MODULE IDE;
  *   F9              Compile & run
  *   F1              Help on word under cursor
  *   Ctrl+F / F3     Find / find next
+ *   Ctrl+R          Find & replace
  *   Ctrl+G          Go to line
  *   Ctrl+K / Ctrl+Y Kill line / yank
  *   Ctrl+Left/Right Word left / right
@@ -51,7 +52,7 @@ CONST
   CmdNew     = 10;   CmdOpen    = 11;   CmdSave    = 12;
   CmdSaveAs  = 13;   CmdClose   = 14;   CmdQuit    = 15;
   CmdUndo    = 19;
-  CmdFind    = 20;   CmdFindNext= 21;   CmdGoto    = 22;
+  CmdFind    = 20;   CmdFindNext= 21;   CmdGoto    = 22;   CmdReplace = 23;
   CmdCompile = 30;   CmdRun     = 31;   CmdCompRun = 32;
   CmdNextWin = 40;   CmdTile    = 41;
   CmdHelp    = 50;
@@ -119,9 +120,12 @@ VAR
   lastEditor: EditorWin;       (* last editor that held focus — used when menu is active *)
   pendingCloseWin: EditorWin; (* editor awaiting close confirmation *)
   (* inline prompt state *)
-  promptMode: INTEGER;   (* 0=none 1=find 2=goto 3=confirmClose 4=confirmQuit *)
+  promptMode: INTEGER;   (* 0=none 1=find 2=goto 3=confirmClose 4=confirmQuit
+                            5=replaceSearch 6=replaceWith 7=replaceStep *)
   promptBuf:  ARRAY 128 OF CHAR;
   promptPos:  INTEGER;
+  replaceBuf: ARRAY 128 OF CHAR;
+  replacePos: INTEGER;
   (* clipboard (module-level, shared across windows) *)
   clipLines:  ARRAY MaxClipLines, LLEN OF CHAR;
   clipNLines: INTEGER;
@@ -487,6 +491,45 @@ BEGIN
   END;
   RETURN found
 END DoFind;
+
+(* Replace the match at (ew.cy, ew.cx) with replaceBuf, then find next.
+   Assumes srchBuf is non-empty and the cursor is sitting on a match.
+   Returns TRUE if another match was found after the replacement. *)
+PROCEDURE DoReplaceOne(ew: EditorWin): BOOLEAN;
+VAR qlen, rlen: INTEGER;
+BEGIN
+  qlen := Strings.Length(ew.srchBuf);
+  rlen := Strings.Length(replaceBuf);
+  PushUndo(ew, UOpEdit, ew.cy);
+  DeleteBytesAt(ew, ew.cy, ew.cx, qlen);
+  IF rlen > 0 THEN
+    InsertBytesAt(ew, ew.cy, ew.cx, replaceBuf, rlen)
+  END;
+  INC(ew.cx, rlen);
+  RETURN DoFind(ew)
+END DoReplaceOne;
+
+(* Replace every occurrence from the beginning of the file. *)
+PROCEDURE DoReplaceAll(ew: EditorWin): INTEGER;
+VAR count, qlen, rlen: INTEGER;
+BEGIN
+  qlen := Strings.Length(ew.srchBuf);
+  rlen := Strings.Length(replaceBuf);
+  IF qlen = 0 THEN  RETURN 0  END;
+  count := 0;
+  ew.cy := 0;  ew.cx := 0;
+  WHILE DoFind(ew) DO
+    PushUndo(ew, UOpEdit, ew.cy);
+    DeleteBytesAt(ew, ew.cy, ew.cx, qlen);
+    IF rlen > 0 THEN
+      InsertBytesAt(ew, ew.cy, ew.cx, replaceBuf, rlen)
+    END;
+    INC(ew.cx, rlen);
+    INC(count);
+    IF count > 10000 THEN  EXIT  END  (* safety *)
+  END;
+  RETURN count
+END DoReplaceAll;
 
 (* ════════════════════════════════════════════════════════════════
    Cursor management
@@ -1315,6 +1358,11 @@ BEGIN
         promptMode := 2;
         promptBuf[0] := 0X;  promptPos := 0;
         Strings.Copy("Go to line: ", statusMsg)
+      ELSIF ORD(ch) = 18 THEN                    (* Ctrl+R: replace     *)
+        promptMode := 5;
+        promptBuf[0] := 0X;  promptPos := 0;
+        replaceBuf[0] := 0X;  replacePos := 0;
+        Strings.Copy("Find: ", statusMsg)
 
       (* ── Printable characters ── *)
       ELSIF (ORD(ch) >= 32) & (ORD(ch) < 127) THEN
@@ -1772,16 +1820,62 @@ BEGIN
     IF lastEditor # NIL THEN  TUI.SetFocus(lastEditor)  END;
     RETURN
   END;
+
+  (* Replace step mode: Y=replace this, N=skip, A=all, Esc already handled *)
+  IF promptMode = 7 THEN
+    IF (ch = 'Y') OR (ch = 'y') THEN
+      IF ew # NIL THEN
+        IF DoReplaceOne(ew) THEN
+          ScrollToCursor(ew);
+          Strings.Copy("Replace (Y/N/A/Esc): ", statusMsg);
+          Strings.Append(ew.srchBuf, statusMsg)
+        ELSE
+          Strings.Copy("Done.", statusMsg);
+          promptMode := 0
+        END
+      END
+    ELSIF (ch = 'N') OR (ch = 'n') THEN
+      IF ew # NIL THEN
+        IF DoFind(ew) THEN
+          ScrollToCursor(ew);
+          Strings.Copy("Replace (Y/N/A/Esc): ", statusMsg);
+          Strings.Append(ew.srchBuf, statusMsg)
+        ELSE
+          Strings.Copy("No more matches.", statusMsg);
+          promptMode := 0
+        END
+      END
+    ELSIF (ch = 'A') OR (ch = 'a') THEN
+      IF ew # NIL THEN
+        n := DoReplaceAll(ew);
+        ScrollToCursor(ew);
+        Strings.Copy("Replaced ", statusMsg);
+        Strings.IntToStr(n, promptBuf);
+        Strings.Append(promptBuf, statusMsg);
+        Strings.Append(" occurrence(s).", statusMsg)
+      END;
+      promptMode := 0
+    END;
+    IF promptMode = 0 THEN
+      promptBuf[0] := 0X;
+      IF lastEditor # NIL THEN  TUI.SetFocus(lastEditor)  END
+    END;
+    RETURN
+  END;
+
   IF ch = TUI.KEnter THEN
     IF promptMode = 1 THEN       (* find *)
       IF ew # NIL THEN
         Strings.Copy(promptBuf, ew.srchBuf);
         IF DoFind(ew) THEN
+          ScrollToCursor(ew);
           Strings.Copy("Found.", statusMsg)
         ELSE
           Strings.Copy("Not found.", statusMsg)
         END
-      END
+      END;
+      promptMode := 0;  promptBuf[0] := 0X;
+      IF lastEditor # NIL THEN  TUI.SetFocus(lastEditor)  END
     ELSIF promptMode = 2 THEN    (* goto line *)
       n := 0;  i := 0;
       WHILE (promptBuf[i] >= '0') & (promptBuf[i] <= '9') DO
@@ -1794,24 +1888,72 @@ BEGIN
         ew.cy := n;  ew.cx := 0;
         ScrollToCursor(ew)
       END;
-      statusMsg[0] := 0X
+      statusMsg[0] := 0X;
+      promptMode := 0;  promptBuf[0] := 0X;
+      IF lastEditor # NIL THEN  TUI.SetFocus(lastEditor)  END
+    ELSIF promptMode = 5 THEN    (* replace: Enter moves to With field *)
+      Strings.Copy(promptBuf, promptBuf);  (* keep search term in promptBuf *)
+      promptMode := 6;
+      replacePos := 0;  replaceBuf[0] := 0X;
+      Strings.Copy("Find: ", statusMsg);  Strings.Append(promptBuf, statusMsg);
+      Strings.Append("  With: ", statusMsg)
+    ELSIF promptMode = 6 THEN    (* replace: Enter starts replace *)
+      IF ew # NIL THEN
+        Strings.Copy(promptBuf, ew.srchBuf);
+        ew.cy := 0;  ew.cx := 0;
+        IF DoFind(ew) THEN
+          ScrollToCursor(ew);
+          promptMode := 7;
+          Strings.Copy("Replace (Y/N/A/Esc): ", statusMsg);
+          Strings.Append(ew.srchBuf, statusMsg)
+        ELSE
+          Strings.Copy("Not found.", statusMsg);
+          promptMode := 0;  promptBuf[0] := 0X;
+          IF lastEditor # NIL THEN  TUI.SetFocus(lastEditor)  END
+        END
+      END
     END;
-    promptMode := 0;  promptBuf[0] := 0X;
-    IF lastEditor # NIL THEN  TUI.SetFocus(lastEditor)  END;
     RETURN
   END;
-  IF (ch = TUI.KBackspace) OR (ORD(ch) = 127) THEN
-    IF promptPos > 0 THEN
-      DEC(promptPos);  promptBuf[promptPos] := 0X
-    END
-  ELSIF (ORD(ch) >= 32) & (ORD(ch) < 127) & (promptPos < 127) THEN
-    promptBuf[promptPos] := ch;  INC(promptPos);
-    promptBuf[promptPos] := 0X
+
+  (* Tab in search field moves to With field *)
+  IF (ch = 9X) & (promptMode = 5) THEN
+    promptMode := 6;
+    replacePos := 0;  replaceBuf[0] := 0X;
+    Strings.Copy("Find: ", statusMsg);  Strings.Append(promptBuf, statusMsg);
+    Strings.Append("  With: ", statusMsg);
+    RETURN
   END;
-  IF promptMode = 1 THEN
-    Strings.Copy("Find: ", statusMsg);  Strings.Append(promptBuf, statusMsg)
-  ELSIF promptMode = 2 THEN
-    Strings.Copy("Go to line: ", statusMsg);  Strings.Append(promptBuf, statusMsg)
+  (* Tab in With field moves back to search field *)
+  IF (ch = 9X) & (promptMode = 6) THEN
+    promptMode := 5;
+    promptPos := Strings.Length(promptBuf);
+    Strings.Copy("Find: ", statusMsg);  Strings.Append(promptBuf, statusMsg);
+    RETURN
+  END;
+
+  (* Edit the active field *)
+  IF promptMode = 6 THEN
+    IF (ch = TUI.KBackspace) OR (ORD(ch) = 127) THEN
+      IF replacePos > 0 THEN  DEC(replacePos);  replaceBuf[replacePos] := 0X  END
+    ELSIF (ORD(ch) >= 32) & (ORD(ch) < 127) & (replacePos < 127) THEN
+      replaceBuf[replacePos] := ch;  INC(replacePos);  replaceBuf[replacePos] := 0X
+    END;
+    Strings.Copy("Find: ", statusMsg);  Strings.Append(promptBuf, statusMsg);
+    Strings.Append("  With: ", statusMsg);  Strings.Append(replaceBuf, statusMsg)
+  ELSE
+    IF (ch = TUI.KBackspace) OR (ORD(ch) = 127) THEN
+      IF promptPos > 0 THEN  DEC(promptPos);  promptBuf[promptPos] := 0X  END
+    ELSIF (ORD(ch) >= 32) & (ORD(ch) < 127) & (promptPos < 127) THEN
+      promptBuf[promptPos] := ch;  INC(promptPos);  promptBuf[promptPos] := 0X
+    END;
+    IF promptMode = 1 THEN
+      Strings.Copy("Find: ", statusMsg);  Strings.Append(promptBuf, statusMsg)
+    ELSIF promptMode = 2 THEN
+      Strings.Copy("Go to line: ", statusMsg);  Strings.Append(promptBuf, statusMsg)
+    ELSIF promptMode = 5 THEN
+      Strings.Copy("Find: ", statusMsg);  Strings.Append(promptBuf, statusMsg)
+    END
   END
 END HandlePrompt;
 
@@ -1925,6 +2067,12 @@ BEGIN
   ELSIF cmd = CmdFind THEN
     promptMode := 1;
     promptBuf[0] := 0X;  promptPos := 0;
+    Strings.Copy("Find: ", statusMsg)
+
+  ELSIF cmd = CmdReplace THEN
+    promptMode := 5;
+    promptBuf[0] := 0X;  promptPos := 0;
+    replaceBuf[0] := 0X;  replacePos := 0;
     Strings.Copy("Find: ", statusMsg)
 
   ELSIF cmd = CmdFindNext THEN
@@ -2187,6 +2335,7 @@ BEGIN
   Widgets.MenuBarAddSep (mbar, 1);
   Widgets.MenuBarAddItem(mbar, 1, "Find...       Ctrl+F", CmdFind);
   Widgets.MenuBarAddItem(mbar, 1, "Find Next     F3",     CmdFindNext);
+  Widgets.MenuBarAddItem(mbar, 1, "Replace...    Ctrl+R", CmdReplace);
   Widgets.MenuBarAddItem(mbar, 1, "Go to Line... Ctrl+G", CmdGoto);
 
   (* Build menu *)
@@ -2236,6 +2385,7 @@ BEGIN
   Widgets.MenuBarAddSep (mbar, 1);
   Widgets.MenuBarAddItem(mbar, 1, "Find...       Ctrl+F", CmdFind);
   Widgets.MenuBarAddItem(mbar, 1, "Find Next     F3",     CmdFindNext);
+  Widgets.MenuBarAddItem(mbar, 1, "Replace...    Ctrl+R", CmdReplace);
   Widgets.MenuBarAddItem(mbar, 1, "Go to Line... Ctrl+G", CmdGoto);
 
   (* Build menu *)
@@ -2291,6 +2441,8 @@ BEGIN
   statusMsg[0] := 0X;
   promptBuf[0] := 0X;
   promptPos := 0;
+  replaceBuf[0] := 0X;
+  replacePos := 0;
   acActive   := FALSE;
   acCount    := 0;
   clipNLines := 0;
