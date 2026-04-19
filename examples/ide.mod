@@ -51,6 +51,10 @@ CONST
   CmdNextWin = 40;   CmdTile    = 41;
   CmdHelp    = 50;
 
+  (* ── Autocomplete ── *)
+  MaxAcItems   = 200;
+  MaxAcVisible = 8;
+
 TYPE
   UndoEntry = RECORD
     op:       INTEGER;          (* UOpEdit / UOpSplit / UOpJoin *)
@@ -97,6 +101,15 @@ VAR
   promptMode: INTEGER;   (* 0=none 1=find 2=goto 3=confirmClose 4=confirmQuit *)
   promptBuf:  ARRAY 128 OF CHAR;
   promptPos:  INTEGER;
+  (* autocomplete popup *)
+  acActive:  BOOLEAN;
+  acItems:   ARRAY MaxAcItems, 64 OF CHAR;
+  acCount:   INTEGER;
+  acSel:     INTEGER;
+  acScroll:  INTEGER;
+  acX, acY:  INTEGER;
+  acPrefix:  ARRAY 64 OF CHAR;
+  acPrefLen: INTEGER;
 
 (* ════════════════════════════════════════════════════════════════
    UTF-8 helpers
@@ -442,6 +455,195 @@ BEGIN
     Strings.Extract(ew.lines[ew.cy], wStart, wEnd - wStart, word)
   END
 END WordAtCursor;
+
+(* ════════════════════════════════════════════════════════════════
+   Autocomplete
+   ════════════════════════════════════════════════════════════════ *)
+
+(* Case-insensitive: does item start with prefix? *)
+PROCEDURE AcMatch(item, prefix: ARRAY OF CHAR): BOOLEAN;
+VAR i, plen: INTEGER;
+    ic, pc: CHAR;
+BEGIN
+  plen := Strings.Length(prefix);
+  IF plen = 0 THEN  RETURN TRUE  END;
+  IF Strings.Length(item) < plen THEN  RETURN FALSE  END;
+  i := 0;
+  WHILE i < plen DO
+    ic := item[i];  pc := prefix[i];
+    IF (ic >= 'A') & (ic <= 'Z') THEN  ic := CHR(ORD(ic) + 32)  END;
+    IF (pc >= 'A') & (pc <= 'Z') THEN  pc := CHR(ORD(pc) + 32)  END;
+    IF ic # pc THEN  RETURN FALSE  END;
+    INC(i)
+  END;
+  RETURN TRUE
+END AcMatch;
+
+PROCEDURE AcHas(s: ARRAY OF CHAR): BOOLEAN;
+VAR i: INTEGER;
+BEGIN
+  FOR i := 0 TO acCount - 1 DO
+    IF Strings.Compare(acItems[i], s) = 0 THEN  RETURN TRUE  END
+  END;
+  RETURN FALSE
+END AcHas;
+
+PROCEDURE TryKw(kw: ARRAY OF CHAR);
+BEGIN
+  IF AcMatch(kw, acPrefix) & ~AcHas(kw) & (acCount < MaxAcItems) THEN
+    Strings.Copy(kw, acItems[acCount]);  INC(acCount)
+  END
+END TryKw;
+
+PROCEDURE CollectAC(ew: EditorWin);
+VAR li, i, wStart, llen, wLen: INTEGER;
+    ch: CHAR;
+    word: ARRAY 64 OF CHAR;
+    more: BOOLEAN;
+BEGIN
+  acCount := 0;
+  IF Strings.Length(acPrefix) = 0 THEN  RETURN  END;
+
+  (* Oberon keywords *)
+  TryKw("ABS");     TryKw("ARRAY");   TryKw("ASR");     TryKw("ASSERT");
+  TryKw("BEGIN");   TryKw("BOOLEAN"); TryKw("BY");      TryKw("BYTE");
+  TryKw("CASE");    TryKw("CHAR");    TryKw("CHR");     TryKw("CONST");
+  TryKw("COPY");    TryKw("DEC");     TryKw("DIV");     TryKw("DO");
+  TryKw("ELSE");    TryKw("ELSIF");   TryKw("END");     TryKw("EXCL");
+  TryKw("EXIT");    TryKw("FALSE");   TryKw("FLT");     TryKw("FOR");
+  TryKw("HALT");    TryKw("IF");      TryKw("IMPORT");  TryKw("IN");
+  TryKw("INC");     TryKw("INCL");    TryKw("INTEGER"); TryKw("IS");
+  TryKw("LEN");     TryKw("LONGINT"); TryKw("LOOP");    TryKw("LSL");
+  TryKw("MAX");     TryKw("MIN");     TryKw("MOD");     TryKw("MODULE");
+  TryKw("NEW");     TryKw("NIL");     TryKw("ODD");     TryKw("OF");
+  TryKw("OR");      TryKw("ORD");     TryKw("PACK");    TryKw("POINTER");
+  TryKw("PROCEDURE"); TryKw("REAL");  TryKw("RECORD");  TryKw("REPEAT");
+  TryKw("RETURN");  TryKw("ROR");     TryKw("SET");     TryKw("STRING");
+  TryKw("TRUE");    TryKw("TYPE");    TryKw("UNPK");    TryKw("UNTIL");
+  TryKw("VAR");     TryKw("WITH");    TryKw("WHILE");
+
+  (* Identifiers from the current file *)
+  FOR li := 0 TO ew.nlines - 1 DO
+    llen := LineLen(ew, li);
+    i    := 0;
+    WHILE i < llen DO
+      ch := ew.lines[li][i];
+      IF ((ch >= 'A') & (ch <= 'Z')) OR ((ch >= 'a') & (ch <= 'z')) OR (ch = '_') THEN
+        wStart := i;
+        more   := TRUE;
+        WHILE more DO
+          INC(i);
+          IF i >= llen THEN  more := FALSE
+          ELSE
+            ch := ew.lines[li][i];
+            IF ~(((ch >= 'A') & (ch <= 'Z')) OR ((ch >= 'a') & (ch <= 'z')) OR
+                 ((ch >= '0') & (ch <= '9')) OR (ch = '_')) THEN
+              more := FALSE
+            END
+          END
+        END;
+        wLen := i - wStart;
+        IF (wLen >= 2) & (wLen <= 62) THEN
+          Strings.Extract(ew.lines[li], wStart, wLen, word);
+          IF AcMatch(word, acPrefix) & ~AcHas(word) & (acCount < MaxAcItems) THEN
+            Strings.Copy(word, acItems[acCount]);  INC(acCount)
+          END
+        END
+      ELSE
+        INC(i)
+      END
+    END
+  END
+END CollectAC;
+
+PROCEDURE TriggerAC(ew: EditorWin);
+VAR i: INTEGER;
+    ch: CHAR;
+    more: BOOLEAN;
+    sx, sy, vis, popH: INTEGER;
+BEGIN
+  (* Extract partial word to the LEFT of cursor *)
+  i := ew.cx;  more := TRUE;
+  WHILE more & (i > 0) DO
+    ch := ew.lines[ew.cy][i - 1];
+    IF ((ch >= 'A') & (ch <= 'Z')) OR ((ch >= 'a') & (ch <= 'z')) OR
+       ((ch >= '0') & (ch <= '9')) OR (ch = '_') THEN
+      DEC(i)
+    ELSE
+      more := FALSE
+    END
+  END;
+  acPrefLen := ew.cx - i;
+  Strings.Extract(ew.lines[ew.cy], i, acPrefLen, acPrefix);
+
+  CollectAC(ew);
+
+  IF acCount = 0 THEN  acActive := FALSE;  RETURN  END;
+
+  acSel    := 0;
+  acScroll := 0;
+  acActive := TRUE;
+
+  (* Position popup just below the cursor *)
+  CursorScreenPos(ew, sx, sy);
+  acX := sx;
+  acY := sy + 1;
+
+  vis  := acCount;  IF vis > MaxAcVisible THEN  vis := MaxAcVisible  END;
+  popH := vis + 2;
+  IF acY + popH - 1 > TUI.Rows THEN  acY := sy - popH  END;
+  IF acY < 1 THEN  acY := 1  END;
+  IF acX + 18 > TUI.Cols THEN  acX := TUI.Cols - 18  END;
+  IF acX < 1 THEN  acX := 1  END
+END TriggerAC;
+
+PROCEDURE AcceptAC(ew: EditorWin);
+VAR suffix: ARRAY 64 OF CHAR;
+    suffLen: INTEGER;
+BEGIN
+  IF (acSel < 0) OR (acSel >= acCount) THEN  RETURN  END;
+  suffLen := Strings.Length(acItems[acSel]) - acPrefLen;
+  IF suffLen <= 0 THEN  RETURN  END;
+  Strings.Extract(acItems[acSel], acPrefLen, suffLen, suffix);
+  PushUndo(ew, UOpEdit, ew.cy);
+  InsertBytesAt(ew, ew.cy, ew.cx, suffix, suffLen);
+  INC(ew.cx, suffLen)
+END AcceptAC;
+
+PROCEDURE DrawAC;
+VAR popW, popH, vis, i, row: INTEGER;
+    fg, bg: INTEGER;
+    item: ARRAY 64 OF CHAR;
+BEGIN
+  vis := acCount;
+  IF vis > MaxAcVisible THEN  vis := MaxAcVisible  END;
+  popH := vis + 2;
+
+  (* Width: longest visible item + 2-char border, capped at 64 *)
+  popW := 16;
+  FOR i := acScroll TO acScroll + vis - 1 DO
+    IF (i < acCount) & (Strings.Length(acItems[i]) + 2 > popW) THEN
+      popW := Strings.Length(acItems[i]) + 2
+    END
+  END;
+  IF popW > 64 THEN  popW := 64  END;
+  IF acX + popW - 1 > TUI.Cols THEN  popW := TUI.Cols - acX + 1  END;
+  IF popW < 4 THEN  popW := 4  END;
+
+  TUI.DrawBox(acX, acY, popW, popH, TUI.Cyan, TUI.Black);
+
+  FOR i := 0 TO vis - 1 DO
+    row := acScroll + i;
+    IF row < acCount THEN
+      IF row = acSel THEN  fg := TUI.Black;  bg := TUI.White
+      ELSE                 fg := TUI.White;  bg := TUI.Black
+      END;
+      TUI.FillRect(acX + 1, acY + 1 + i, popW - 2, 1, ' ', fg, bg);
+      Strings.Extract(acItems[row], 0, popW - 2, item);
+      TUI.PutStr(acX + 1, acY + 1 + i, item, fg, bg)
+    END
+  END
+END DrawAC;
 
 PROCEDURE ClampCursor(ew: EditorWin);
 VAR len: INTEGER;
@@ -1445,11 +1647,12 @@ BEGIN
 END CursorScreenPos;
 
 VAR
-  ev:    TUI.Event;
-  ew:    EditorWin;
-  sx, sy: INTEGER;
-  fn:    ARRAY 512 OF CHAR;
-  ch:    CHAR;
+  ev:        TUI.Event;
+  ew:        EditorWin;
+  sx, sy:    INTEGER;
+  fn:        ARRAY 512 OF CHAR;
+  ch:        CHAR;
+  acHandled: BOOLEAN;
 
 BEGIN
   TUI.Init();
@@ -1461,6 +1664,8 @@ BEGIN
   statusMsg[0] := 0X;
   promptBuf[0] := 0X;
   promptPos := 0;
+  acActive  := FALSE;
+  acCount   := 0;
 
   BuildMenus();
 
@@ -1479,6 +1684,7 @@ BEGIN
     UpdateStatus();
     TUI.ClearBack(TUI.White, TUI.Black);
     TUI.DrawAll();
+    IF acActive & (promptMode = 0) THEN  DrawAC()  END;
     TUI.Flush();
 
     (* Position blinking cursor in the focused editor *)
@@ -1504,32 +1710,73 @@ BEGIN
       HandlePrompt(ev)
     ELSIF ev.kind = TUI.EvKey THEN
       ch := ev.key;
+      acHandled := FALSE;
 
-      (* Global hotkeys *)
-      IF ORD(ch) = 14 THEN       (* Ctrl+N *)
-        IF NewEditorWin() = NIL THEN  Strings.Copy("Too many windows.", statusMsg)  END
-      ELSIF ORD(ch) = 15 THEN    (* Ctrl+O *)
-        OnMenuCmd(CmdOpen)
-      ELSIF ORD(ch) = 19 THEN    (* Ctrl+S *)
-        OnMenuCmd(CmdSave)
-      ELSIF ORD(ch) = 23 THEN    (* Ctrl+W *)
-        OnMenuCmd(CmdClose)
-      ELSIF ORD(ch) = 17 THEN    (* Ctrl+Q *)
-        OnMenuCmd(CmdQuit)
-      ELSIF ORD(ch) = 9  THEN    (* Ctrl+Tab — ORD(TUI.KTab)=9, handled below *)
-        (* actually Tab goes to editor; Ctrl+Tab would be different... *)
-        (* Route Tab to the focused view via dispatch *)
-        IF ~TUI.Dispatch(ev) THEN  END
-      ELSIF ch = TUI.KF1  THEN   OnMenuCmd(CmdHelp)
-      ELSIF ch = TUI.KF5  THEN   OnMenuCmd(CmdCompile)
-      ELSIF ch = TUI.KF6  THEN   OnMenuCmd(CmdRun)
-      ELSIF ch = TUI.KF9  THEN   OnMenuCmd(CmdCompRun)
-      ELSIF ch = TUI.KF3  THEN   OnMenuCmd(CmdFindNext)
-      ELSE
-        IF ~TUI.Dispatch(ev) THEN  END
+      (* Autocomplete popup navigation *)
+      IF acActive THEN
+        IF ch = TUI.KEsc THEN
+          acActive  := FALSE;
+          acHandled := TRUE
+        ELSIF ch = TUI.KUp THEN
+          IF acSel > 0 THEN  DEC(acSel) END;
+          IF acSel < acScroll THEN  acScroll := acSel  END;
+          acHandled := TRUE
+        ELSIF ch = TUI.KDown THEN
+          IF acSel < acCount - 1 THEN  INC(acSel)  END;
+          IF acSel >= acScroll + MaxAcVisible THEN  acScroll := acSel - MaxAcVisible + 1  END;
+          acHandled := TRUE
+        ELSIF (ch = TUI.KEnter) OR (ORD(ch) = 9) THEN  (* Enter or Tab *)
+          ew := FocusedEditor();
+          IF ew # NIL THEN  AcceptAC(ew)  END;
+          acActive  := FALSE;
+          acHandled := TRUE
+        ELSIF (ORD(ch) >= 32) & (ORD(ch) < 127) THEN
+          (* Printable: let it fall through to normal handling, then re-trigger *)
+          acHandled := FALSE
+        ELSIF ORD(ch) = 8 THEN  (* Backspace: let through, then re-trigger *)
+          acHandled := FALSE
+        ELSE
+          acActive  := FALSE;
+          acHandled := FALSE
+        END
+      END;
+
+      IF ~acHandled THEN
+        (* Global hotkeys *)
+        IF ORD(ch) = 14 THEN       (* Ctrl+N *)
+          acActive := FALSE;
+          IF NewEditorWin() = NIL THEN  Strings.Copy("Too many windows.", statusMsg)  END
+        ELSIF ORD(ch) = 15 THEN    (* Ctrl+O *)
+          acActive := FALSE;  OnMenuCmd(CmdOpen)
+        ELSIF ORD(ch) = 19 THEN    (* Ctrl+S *)
+          acActive := FALSE;  OnMenuCmd(CmdSave)
+        ELSIF ORD(ch) = 23 THEN    (* Ctrl+W *)
+          acActive := FALSE;  OnMenuCmd(CmdClose)
+        ELSIF ORD(ch) = 17 THEN    (* Ctrl+Q *)
+          acActive := FALSE;  OnMenuCmd(CmdQuit)
+        ELSIF ORD(ch) = 9  THEN    (* Tab — route to focused view *)
+          IF ~TUI.Dispatch(ev) THEN  END
+        ELSIF ORD(ch) = 0  THEN    (* Ctrl+Space — trigger autocomplete *)
+          ew := FocusedEditor();
+          IF ew # NIL THEN  TriggerAC(ew)  END
+        ELSIF ch = TUI.KF1  THEN   acActive := FALSE;  OnMenuCmd(CmdHelp)
+        ELSIF ch = TUI.KF5  THEN   acActive := FALSE;  OnMenuCmd(CmdCompile)
+        ELSIF ch = TUI.KF6  THEN   acActive := FALSE;  OnMenuCmd(CmdRun)
+        ELSIF ch = TUI.KF9  THEN   acActive := FALSE;  OnMenuCmd(CmdCompRun)
+        ELSIF ch = TUI.KF3  THEN   acActive := FALSE;  OnMenuCmd(CmdFindNext)
+        ELSE
+          IF ~TUI.Dispatch(ev) THEN  END;
+          (* After a printable char or backspace, re-filter if AC is active *)
+          IF acActive & ((ORD(ch) >= 32) & (ORD(ch) < 127) OR (ORD(ch) = 8)) THEN
+            ew := FocusedEditor();
+            IF ew # NIL THEN  TriggerAC(ew)  END
+          END
+        END
       END
 
     ELSIF ev.kind = TUI.EvMouse THEN
+      (* Dismiss autocomplete on any real click *)
+      IF (ev.mb # 32) & (ev.mb # 3) THEN  acActive := FALSE  END;
       IF ~TUI.Dispatch(ev) THEN  END
 
     ELSIF ev.kind = TUI.EvResize THEN

@@ -79,34 +79,37 @@ Oberon TUI IDE (rewrite oberon_ide.cpp in Oberon)
           error line highlight with inline annotation
   - [x] EditorWindow: Window containing an EditorView + scrollbars + indicator
   - [x] Multi-window desktop: window registry, Alt-1..9 switching, tile/cascade
-  - [ ] Menu bar: File / Edit / Run / Search / Window / Help
+  - [x] Menu bar: File / Edit / Build / Window / Help
   - [x] Run/Compile: fork obc, capture stderr, parse error line, jump to it
-  - [ ] Help system: load stdlib.md, searchable topic list + description panel
-  - [ ] Autocomplete: keyword + identifier prefix match, picker dialog
+  - [x] Help system: Modules/Help.mod — F1 looks up word under cursor in stdlib.md;
+          modal dialog with InputLine search, scrollable results, section headings
+  - [x] Autocomplete: keyword + identifier prefix match, picker dialog
+          Ctrl+Space triggers popup; Up/Down navigate; Enter/Tab accept; Esc dismiss
+          Re-filters live on each printable char/backspace
   - [ ] Recent files: persist to ~/.oberon_ide_recent
-  - [x] Goto line, Find, Replace dialogs
+  - [x] Goto line, Find dialogs
 
 High impact / frequently needed
-  1. Undo  the most glaring absence; any accidental edit or paste is permanent
-  2. Auto-indent  Enter should carry forward the leading whitespace of the
-  current line; essential for Oberon's block structure
-  3. Save prompt on close/quit  currently silently discards unsaved changes
-  (modified = TRUE is tracked but never checked on close)
-  4. Jump to error line  when compile fails, parse the error message (e.g.
-  file.mod:42:) and move the cursor there
+  1. [x] Undo  circular buffer, UOpEdit/UOpSplit/UOpJoin, Ctrl+Z
+  2. [x] Auto-indent  Enter copies leading whitespace; smart indent adds 4 spaces
+          after BEGIN/THEN/ELSE/DO/REPEAT/RECORD/OF/WITH/LOOP; auto-dedent
+          when END/UNTIL/ELSE/ELSIF typed alone on a line
+  3. [x] Save prompt on close/quit  "Modified. Close without saving? (Y/N)"
+  4. [ ] Jump to error line  when compile fails, parse the error message (e.g.
+          file.mod:42:) and move the cursor there
 
   Useful quality-of-life
-  5. Line numbers  gutter showing line numbers alongside the text
-  6. Find & Replace  currently only Find
-  7. Copy to system clipboard / paste from it  kill/yank works within one
-  window but not across windows or with external programs
-  8. Bracket/BEGINEND matching  highlight the matching delimiter
+  5. [ ] Line numbers  gutter showing line numbers alongside the text
+  6. [ ] Find & Replace  currently only Find
+  7. [ ] Copy to system clipboard / paste from it  kill/yank works within one
+          window but not across windows or with external programs
+  8. [ ] Bracket/BEGIN–END matching  highlight the matching delimiter
 
   Nice to have eventually
-  9. Recent files menu
-  10. Word wrap toggle
-  11. Configurable tab width
-  12. Help/keybindings viewer
+  9. [ ] Recent files menu
+  10. [ ] Word wrap toggle
+  11. [ ] Configurable tab width
+  12. [x] Help/keybindings viewer  (Help.mod, F1)
 
 ----
 
