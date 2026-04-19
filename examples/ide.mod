@@ -867,6 +867,60 @@ BEGIN
   ClampCursor(ew)
 END DeleteSel;
 
+(* Write internal clipboard to system clipboard via OSC 52 + command fallback. *)
+PROCEDURE SysClipCopy;
+VAR f: Files.File;  r: Files.Rider;
+    li, j: INTEGER;  ch: CHAR;
+BEGIN
+  f := Files.New(".obc_clipboard");
+  IF f = NIL THEN  RETURN  END;
+  Files.Set(r, f, 0);
+  FOR li := 0 TO clipNLines - 1 DO
+    j := 0;
+    WHILE clipLines[li][j] # 0X DO
+      Files.Write(r, clipLines[li][j]);
+      INC(j)
+    END;
+    IF li < clipNLines - 1 THEN
+      Files.Write(r, 0AX)   (* newline between lines *)
+    END
+  END;
+  Files.Register(f);
+  (* OSC 52 write — works in most terminals including over SSH *)
+  OS.ClipWriteFile(".obc_clipboard");
+  (* also try native clipboard commands as secondary path *)
+  OS.Exec("pbcopy < .obc_clipboard 2>/dev/null; wl-copy < .obc_clipboard 2>/dev/null; xclip -selection clipboard < .obc_clipboard 2>/dev/null; true");
+END SysClipCopy;
+
+(* Try to load system clipboard into internal clipboard. *)
+PROCEDURE SysClipPaste;
+VAR f: Files.File;  r: Files.Rider;
+    ch: CHAR;  li, j: INTEGER;  done: BOOLEAN;
+BEGIN
+  OS.ClipPasteCmd(".obc_clipboard");
+  f := Files.Old(".obc_clipboard");
+  IF f = NIL THEN  RETURN  END;
+  Files.Set(r, f, 0);
+  li := 0;  j := 0;  clipNLines := 0;  done := FALSE;
+  WHILE ~done & (li < MaxClipLines) DO
+    Files.Read(r, ch);
+    IF r.eof THEN
+      clipLines[li][j] := 0X;
+      IF j > 0 THEN
+        INC(li)
+      END;
+      done := TRUE
+    ELSIF ch = 0AX THEN  (* newline — advance to next line *)
+      clipLines[li][j] := 0X;
+      INC(li);  j := 0
+    ELSIF j < LLEN - 1 THEN
+      clipLines[li][j] := ch;
+      INC(j)
+    END
+  END;
+  IF li > 0 THEN  clipNLines := li  END
+END SysClipPaste;
+
 (* Copy selection into the module clipboard. *)
 PROCEDURE DoCopy(ew: EditorWin);
 VAR r1, c1, r2, c2, li, j, n: INTEGER;
@@ -892,7 +946,8 @@ BEGIN
     (* Last partial line: bytes 0..c2-1 *)
     FOR j := 0 TO c2 - 1 DO  clipLines[clipNLines - 1][j] := ew.lines[r2][j]  END;
     clipLines[clipNLines - 1][c2] := 0X
-  END
+  END;
+  SysClipCopy
 END DoCopy;
 
 (* Cut: copy selection to clipboard then delete it. *)
@@ -908,6 +963,7 @@ PROCEDURE DoPaste(ew: EditorWin);
 VAR clen, slen, j, b, lastLen: INTEGER;
     suffix: ARRAY LLEN OF CHAR;
 BEGIN
+  SysClipPaste;  (* try to load from system clipboard first *)
   IF clipNLines = 0 THEN  RETURN  END;
   IF ew.selActive THEN  DeleteSel(ew)  END;
   IF clipNLines = 1 THEN

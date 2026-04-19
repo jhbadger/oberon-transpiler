@@ -86,8 +86,8 @@ Oberon TUI IDE (rewrite oberon_ide.cpp in Oberon)
   - [x] Autocomplete: keyword + identifier prefix match, picker dialog
           Ctrl+Space triggers popup; Up/Down navigate; Enter/Tab accept; Esc dismiss
           Re-filters live on each printable char/backspace
-  - [ ] Recent files: persist to ~/.oberon_ide_recent
-  - [x] Goto line, Find dialogs
+  - [x] Recent files: persist to ~/.oberon_recent; shown in File menu
+  - [x] Goto line, Find, Find & Replace dialogs
 
 High impact / frequently needed
   1. [x] Undo  circular buffer, UOpEdit/UOpSplit/UOpJoin, Ctrl+Z
@@ -95,18 +95,18 @@ High impact / frequently needed
           after BEGIN/THEN/ELSE/DO/REPEAT/RECORD/OF/WITH/LOOP; auto-dedent
           when END/UNTIL/ELSE/ELSIF typed alone on a line
   3. [x] Save prompt on close/quit  "Modified. Close without saving? (Y/N)"
-  4. [ ] Jump to error line  when compile fails, parse the error message (e.g.
-          file.mod:42:) and move the cursor there
+  4. [x] Jump to error line  F2 / Build→Jump to Error; #line directives in
+          codegen so all errors (not just parser errors) reference .mod:line
 
   Useful quality-of-life
-  5. [ ] Line numbers  gutter showing line numbers alongside the text
-  6. [ ] Find & Replace  currently only Find
-  7. [ ] Copy to system clipboard / paste from it  kill/yank works within one
-          window but not across windows or with external programs
+  5. [x] Line numbers  gutter showing line numbers alongside the text
+  6. [x] Find & Replace  Ctrl+R; Y/N/A/Esc step mode or replace-all
+  7. [x] Copy to system clipboard / paste from it  OSC 52 for write (terminal-
+          native, works over SSH); pbpaste/wl-paste/xclip fallback for read
   8. [ ] Bracket/BEGIN–END matching  highlight the matching delimiter
 
   Nice to have eventually
-  9. [ ] Recent files menu
+  9. [x] Recent files menu
   10. [ ] Word wrap toggle
   11. [ ] Configurable tab width
   12. [x] Help/keybindings viewer  (Help.mod, F1)

@@ -1277,7 +1277,9 @@ static int try_emit_import(CG *g, Node *fa, Node *args) {
         if (!strcmp(proc,"DirOpen")) { emit(g,"OS_DirOpen("); emit_as_string(g,a0); emit(g,","); emit_as_string(g,a1); emit(g,")"); return 1; }
         if (!strcmp(proc,"DirCount")){ emit(g,"OS_DirCount()"); return 1; }
         if (!strcmp(proc,"DirName")) { emit(g,"OS_DirName("); emit_expr(g,a0); emit(g,","); emit_expr(g,a1); emit(g,","); emit_open_array_len(g,a1); emit(g,")"); return 1; }
-        if (!strcmp(proc,"DirIsDir")){ emit(g,"OS_DirIsDir("); emit_expr(g,a0); emit(g,")"); return 1; }
+        if (!strcmp(proc,"DirIsDir"))     { emit(g,"OS_DirIsDir("); emit_expr(g,a0); emit(g,")"); return 1; }
+        if (!strcmp(proc,"ClipWriteFile")){ emit(g,"OS_ClipWriteFile("); emit_as_string(g,a0); emit(g,")"); return 1; }
+        if (!strcmp(proc,"ClipPasteCmd")) { emit(g,"OS_ClipPasteCmd("); emit_as_string(g,a0); emit(g,")"); return 1; }
     }
     /* Time module — time, formatting, sleep */
     if (!strcmp(mod,"Time")) {
@@ -2707,6 +2709,51 @@ void codegen(Node *module, FILE *out, int is_main, const char *srcfile) {
         emit(g,"}\n");
         emit(g,"static int  OS_DirIsDir(int i) {\n");
         emit(g,"    return (i>=0 && i<_os_dir_n) ? _os_dir[i].isdir : 0;\n");
+        emit(g,"}\n");
+        /* OS_ClipWriteFile: read file, base64-encode, write OSC 52 to /dev/tty */
+        emit(g,"static void OS_ClipWriteFile(const char *path) {\n");
+        emit(g,"    FILE *f = fopen(path, \"rb\"); if (!f) return;\n");
+        emit(g,"    fseek(f,0,SEEK_END); long sz=ftell(f); fseek(f,0,SEEK_SET);\n");
+        emit(g,"    if (sz<=0){fclose(f);return;}\n");
+        emit(g,"    unsigned char *buf=(unsigned char*)malloc(sz);\n");
+        emit(g,"    if(!buf){fclose(f);return;}\n");
+        emit(g,"    fread(buf,1,sz,f); fclose(f);\n");
+        emit(g,"    /* base64 encode */\n");
+        emit(g,"    static const char b64[]=\"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/\";\n");
+        emit(g,"    long enclen = ((sz+2)/3)*4;\n");
+        emit(g,"    char *enc=(char*)malloc(enclen+1);\n");
+        emit(g,"    if(!enc){free(buf);return;}\n");
+        emit(g,"    long si=0,di=0;\n");
+        emit(g,"    while(si<sz){\n");
+        emit(g,"        unsigned int v=(unsigned int)buf[si++]<<16;\n");
+        emit(g,"        if(si<sz) v|=(unsigned int)buf[si++]<<8;\n");
+        emit(g,"        if(si<sz) v|=(unsigned int)buf[si++];\n");
+        emit(g,"        enc[di++]=b64[(v>>18)&63]; enc[di++]=b64[(v>>12)&63];\n");
+        emit(g,"        enc[di++]=b64[(v>>6)&63];  enc[di++]=b64[v&63];\n");
+        emit(g,"    }\n");
+        emit(g,"    /* fix padding */\n");
+        emit(g,"    long rem=sz%%3;\n");
+        emit(g,"    if(rem==1){enc[enclen-2]='=';enc[enclen-1]='=';}\n");
+        emit(g,"    else if(rem==2){enc[enclen-1]='=';}\n");
+        emit(g,"    enc[enclen]=0;\n");
+        emit(g,"    free(buf);\n");
+        emit(g,"    FILE *tty=fopen(\"/dev/tty\",\"wb\");\n");
+        emit(g,"    if(tty){ fprintf(tty,\"\\033]52;c;%%s\\a\",enc); fclose(tty); }\n");
+        emit(g,"    free(enc);\n");
+        emit(g,"}\n");
+        /* OS_ClipPasteCmd: run paste command, write stdout to file */
+        emit(g,"static void OS_ClipPasteCmd(const char *outpath) {\n");
+        emit(g,"    const char *cmds[]={\n");
+        emit(g,"        \"pbpaste\",\n");
+        emit(g,"        \"wl-paste --no-newline\",\n");
+        emit(g,"        \"xclip -selection clipboard -o\",\n");
+        emit(g,"        \"xsel --clipboard --output\",\n");
+        emit(g,"        NULL};\n");
+        emit(g,"    char cmd[512];\n");
+        emit(g,"    for(int i=0;cmds[i];i++){\n");
+        emit(g,"        snprintf(cmd,sizeof(cmd),\"%%s > %%s 2>/dev/null\",cmds[i],outpath);\n");
+        emit(g,"        if(system(cmd)==0) return;\n");
+        emit(g,"    }\n");
         emit(g,"}\n");
         emit(g,"\n");
     }
