@@ -27,6 +27,6 @@ parsetest: parsetest.c parser.c lexer.c parser.h lexer.h
 install: all
 	cp obc    $(PREFIX)/bin/
 	cp oberon $(PREFIX)/bin/
-
+	cp stdlib.md $(PREFIX)/bin/
 clean:
 	rm -f obc oberon lextest parsetest

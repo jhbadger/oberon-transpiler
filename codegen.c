@@ -2954,7 +2954,7 @@ void codegen(Node *module, FILE *out, int is_main) {
         emit(g,"static char **_args_argv = NULL;\n");
         emit(g,"static int Args_Count(void) { return _args_argc > 0 ? _args_argc - 1 : 0; }\n");
         emit(g,"static void Args_Get(int n, char *s) {\n");
-        emit(g,"    if (n >= 1 && n < _args_argc && _args_argv) {\n");
+        emit(g,"    if (n >= 0 && n < _args_argc && _args_argv) {\n");
         emit(g,"        int i=0; const char *src=_args_argv[n];\n");
         emit(g,"        while(src[i] && i<255){s[i]=src[i];i++;} s[i]=0;\n");
         emit(g,"    } else { s[0]=0; }\n");
