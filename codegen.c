@@ -13,6 +13,8 @@ typedef struct {
     FILE *out;
     int   indent;
     char  modname[MAX_IDENT]; /* current module name (library mode) */
+    char  srcfile[512];       /* source .mod path for #line directives */
+    int   last_line;          /* last #line directive emitted          */
     int   is_main;            /* 1 = top-level program, 0 = library  */
     int   in_proc;            /* 1 when inside a procedure body      */
     /* Nested procedure closure support */
@@ -1530,8 +1532,16 @@ static void emit_expr(CG *g, Node *e) {
  * Statement emission
  * ----------------------------------------------------------------------- */
 
+static void emit_line(CG *g, int line) {
+    if (line > 0 && line != g->last_line && g->srcfile[0]) {
+        emit(g, "#line %d \"%s\"\n", line, g->srcfile);
+        g->last_line = line;
+    }
+}
+
 static void emit_stmt(CG *g, Node *s) {
     if (!s) return;
+    emit_line(g, s->line);
     switch (s->kind) {
 
     case ND_ASSIGN: {
@@ -2130,12 +2140,13 @@ static void emit_proc_def(CG *g, Node *proc, int nested) {
  * Main entry point
  * ----------------------------------------------------------------------- */
 
-void codegen(Node *module, FILE *out, int is_main) {
+void codegen(Node *module, FILE *out, int is_main, const char *srcfile) {
     CG cg;
     memset(&cg, 0, sizeof(cg));
     cg.out     = out;
     cg.is_main = is_main;
     strncpy(cg.modname, module->str, MAX_IDENT-1);
+    if (srcfile) strncpy(cg.srcfile, srcfile, sizeof(cg.srcfile)-1);
     CG *g = &cg;
     g_nsyms=0; g_sdepth=0; g_nimports=0; g_nprocsigs=0;
     type_tags_reset(); ptr_types_reset();

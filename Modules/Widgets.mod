@@ -28,7 +28,7 @@ CONST
   MaxItemText*  = 64;
   MaxItems*     = 256;
   MaxMenus*     = 8;
-  MaxMenuItems* = 16;
+  MaxMenuItems* = 32;
 
   (* Standard dialog command codes *)
   CmdOK*     = 1;

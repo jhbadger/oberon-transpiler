@@ -507,7 +507,7 @@ static int compile_module(const char *modfile, int is_main)
                 ast_free_all();
                 return 1;
             }
-            codegen(ast, out, is_main);
+            codegen(ast, out, is_main, modfile);
             fclose(out);
         }
 

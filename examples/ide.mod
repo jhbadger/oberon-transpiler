@@ -55,7 +55,12 @@ CONST
   CmdCompile = 30;   CmdRun     = 31;   CmdCompRun = 32;
   CmdNextWin = 40;   CmdTile    = 41;
   CmdHelp    = 50;
+  CmdJumpError = 51;
   CmdCopy    = 60;   CmdCut     = 61;   CmdPaste   = 62;   CmdSelAll  = 63;
+
+  (* ── Recent files ── *)
+  MaxRecent      = 8;
+  CmdRecentBase  = 70;   (* CmdRecentBase+0 .. CmdRecentBase+MaxRecent-1 *)
 
   (* ── Autocomplete ── *)
   MaxAcItems   = 200;
@@ -120,6 +125,12 @@ VAR
   (* clipboard (module-level, shared across windows) *)
   clipLines:  ARRAY MaxClipLines, LLEN OF CHAR;
   clipNLines: INTEGER;
+  (* recent files *)
+  recentFiles: ARRAY MaxRecent, 512 OF CHAR;
+  recentCount: INTEGER;
+  (* last compiler error location *)
+  errorFile: ARRAY 512 OF CHAR;
+  errorLine: INTEGER;
   (* autocomplete popup *)
   acActive:  BOOLEAN;
   acItems:   ARRAY MaxAcItems, 64 OF CHAR;
@@ -1550,6 +1561,76 @@ BEGIN
   END
 END BinName;
 
+(* Parse "file:line:col: ..." and extract file and line number. *)
+PROCEDURE ParseErrorLoc(msg: ARRAY OF CHAR; VAR fname: ARRAY OF CHAR; VAR lno: INTEGER);
+VAR i, j, n, len: INTEGER;
+BEGIN
+  lno := 0;  fname[0] := 0X;
+  len := Strings.Length(msg);
+  i := 0;
+  WHILE i < len DO
+    IF msg[i] = ':' THEN
+      j := i + 1;  n := 0;
+      WHILE (j < len) & (msg[j] >= '0') & (msg[j] <= '9') DO
+        n := n * 10 + ORD(msg[j]) - ORD('0');
+        INC(j)
+      END;
+      IF (j > i + 1) & (j < len) & (msg[j] = ':') & (n > 0) THEN
+        Strings.Extract(msg, 0, i, fname);
+        lno := n;
+        RETURN
+      END
+    END;
+    INC(i)
+  END
+END ParseErrorLoc;
+
+PROCEDURE JumpToError;
+VAR ew: EditorWin;
+    i:  INTEGER;
+    base: ARRAY 512 OF CHAR;
+    elen: INTEGER;
+BEGIN
+  IF errorLine <= 0 THEN
+    Strings.Copy("No error location.", statusMsg);  RETURN
+  END;
+  (* Find an editor whose title matches errorFile (exact or by basename) *)
+  ew := NIL;
+  elen := Strings.Length(errorFile);
+  FOR i := 0 TO MaxWins - 1 DO
+    IF (wins[i] # NIL) & (ew = NIL) THEN
+      IF Strings.Compare(wins[i].title, errorFile) = 0 THEN
+        ew := wins[i]
+      ELSE
+        (* match on basename: errorFile ends with title or title ends with errorFile *)
+        IF Strings.Length(wins[i].title) <= elen THEN
+          Strings.Extract(errorFile, elen - Strings.Length(wins[i].title),
+                          Strings.Length(wins[i].title), base);
+          IF Strings.Compare(base, wins[i].title) = 0 THEN  ew := wins[i]  END
+        END
+      END
+    END
+  END;
+  IF ew = NIL THEN  ew := FocusedEditor()  END;
+  IF ew = NIL THEN  ew := lastEditor  END;
+  IF ew = NIL THEN
+    Strings.Copy("No editor open.", statusMsg);  RETURN
+  END;
+  i := errorLine - 1;
+  IF i < 0 THEN  i := 0  END;
+  IF i >= ew.nlines THEN  i := ew.nlines - 1  END;
+  ew.cy := i;  ew.cx := 0;
+  (* Scroll so the error line is visible *)
+  IF ew.cy < ew.topLine THEN  ew.topLine := ew.cy
+  ELSIF ew.cy >= ew.topLine + (ew.h - 2) THEN
+    ew.topLine := ew.cy - (ew.h - 2) DIV 2
+  END;
+  TUI.SetFocus(ew);
+  Strings.Copy("Error at line ", statusMsg);
+  Strings.IntToStr(errorLine, base);
+  Strings.Append(base, statusMsg)
+END JumpToError;
+
 PROCEDURE Compile(ew: EditorWin);
 VAR cmd: ARRAY 512 OF CHAR;
     f: Files.File;
@@ -1582,9 +1663,11 @@ BEGIN
       END;
       outBuf[i] := 0X;
       Files.Close(f);
-      Strings.Copy(outBuf, statusMsg)
+      Strings.Copy(outBuf, statusMsg);
+      ParseErrorLoc(outBuf, errorFile, errorLine)
     ELSE
-      Strings.Copy("Compile failed.", statusMsg)
+      Strings.Copy("Compile failed.", statusMsg);
+      errorLine := 0
     END
   END
 END Compile;
@@ -1710,6 +1793,7 @@ VAR ew: EditorWin;
     path: ARRAY 512 OF CHAR;
     ok: BOOLEAN;
     cwd: ARRAY 512 OF CHAR;
+    i: INTEGER;
 BEGIN
   ew := FocusedEditor();
   IF ew = NIL THEN  ew := lastEditor  END;
@@ -1728,6 +1812,9 @@ BEGIN
       IF ew # NIL THEN
         IF ~LoadFile(ew, path) THEN
           Strings.Copy("Could not open file.", statusMsg)
+        ELSE
+          AddRecentFile(path);
+          RebuildMenuBar
         END
       ELSE
         Strings.Copy("Too many windows.", statusMsg)
@@ -1744,14 +1831,16 @@ BEGIN
           IF ~SaveFile(ew) THEN
             Strings.Copy("Save failed.", statusMsg)
           ELSE
-            Strings.Copy("Saved.", statusMsg)
+            Strings.Copy("Saved.", statusMsg);
+            AddRecentFile(path);  RebuildMenuBar
           END
         END
       ELSE
         IF ~SaveFile(ew) THEN
           Strings.Copy("Save failed.", statusMsg)
         ELSE
-          Strings.Copy("Saved.", statusMsg)
+          Strings.Copy("Saved.", statusMsg);
+          AddRecentFile(ew.title);  RebuildMenuBar
         END
       END
     END
@@ -1765,7 +1854,8 @@ BEGIN
         IF ~SaveFile(ew) THEN
           Strings.Copy("Save failed.", statusMsg)
         ELSE
-          Strings.Copy("Saved.", statusMsg)
+          Strings.Copy("Saved.", statusMsg);
+          AddRecentFile(path);  RebuildMenuBar
         END
       END
     END
@@ -1827,6 +1917,9 @@ BEGIN
   ELSIF cmd = CmdCompRun THEN
     CompileAndRun(ew)
 
+  ELSIF cmd = CmdJumpError THEN
+    JumpToError
+
   ELSIF cmd = CmdNextWin THEN
     NextEditorWin
 
@@ -1844,6 +1937,22 @@ BEGIN
     ELSE  path[0] := 0X
     END;
     Help.Show(path)
+
+  ELSIF (cmd >= CmdRecentBase) & (cmd < CmdRecentBase + MaxRecent) THEN
+    i := cmd - CmdRecentBase;
+    IF i < recentCount THEN
+      ew := NewEditorWin();
+      IF ew # NIL THEN
+        IF ~LoadFile(ew, recentFiles[i]) THEN
+          Strings.Copy("Could not open file.", statusMsg)
+        ELSE
+          AddRecentFile(recentFiles[i]);
+          RebuildMenuBar
+        END
+      ELSE
+        Strings.Copy("Too many windows.", statusMsg)
+      END
+    END
   END;
   (* Return focus to the editor (menus steal it; prompts restore it themselves) *)
   IF (promptMode = 0) & (FocusedEditor() = NIL) & (lastEditor # NIL) THEN
@@ -1888,6 +1997,179 @@ END UpdateStatus;
    Setup
    ════════════════════════════════════════════════════════════════ *)
 
+(* ════════════════════════════════════════════════════════════════
+   Recent files
+   ════════════════════════════════════════════════════════════════ *)
+
+(* Path to the recent-files list: ~/.oberon_recent *)
+PROCEDURE RecentPath(VAR path: ARRAY OF CHAR);
+VAR home: ARRAY 512 OF CHAR;
+BEGIN
+  Args.GetEnv("HOME", home);
+  IF home[0] # 0X THEN
+    Strings.Copy(home, path);
+    Strings.Append("/.oberon_recent", path)
+  ELSE
+    Strings.Copy(".oberon_recent", path)
+  END
+END RecentPath;
+
+PROCEDURE LoadRecentFiles;
+VAR path: ARRAY 512 OF CHAR;
+    f:    Files.File;
+    r:    Files.Rider;
+    b:    BYTE;
+    buf:  ARRAY 512 OF CHAR;
+    col:  INTEGER;
+BEGIN
+  recentCount := 0;
+  RecentPath(path);
+  f := Files.Old(path);
+  IF f = NIL THEN  RETURN  END;
+  Files.Set(r, f, 0);
+  col := 0;
+  Files.Read(r, b);
+  WHILE ~r.eof & (recentCount < MaxRecent) DO
+    IF b = 10 THEN
+      IF col > 0 THEN
+        buf[col] := 0X;
+        Strings.Copy(buf, recentFiles[recentCount]);
+        INC(recentCount)
+      END;
+      col := 0
+    ELSE
+      IF col < 511 THEN  buf[col] := CHR(b);  INC(col)  END
+    END;
+    Files.Read(r, b)
+  END;
+  IF (col > 0) & (recentCount < MaxRecent) THEN
+    buf[col] := 0X;
+    Strings.Copy(buf, recentFiles[recentCount]);
+    INC(recentCount)
+  END;
+  Files.Close(f)
+END LoadRecentFiles;
+
+PROCEDURE SaveRecentFiles;
+VAR path: ARRAY 512 OF CHAR;
+    f:    Files.File;
+    r:    Files.Rider;
+    i, j: INTEGER;
+    b:    BYTE;
+BEGIN
+  RecentPath(path);
+  f := Files.New(path);
+  IF f = NIL THEN  RETURN  END;
+  Files.Set(r, f, 0);
+  FOR i := 0 TO recentCount - 1 DO
+    j := 0;
+    WHILE recentFiles[i][j] # 0X DO
+      b := ORD(recentFiles[i][j]);  Files.Write(r, b);  INC(j)
+    END;
+    b := 10;  Files.Write(r, b)
+  END;
+  Files.Register(f);
+  Files.Close(f)
+END SaveRecentFiles;
+
+(* Add path to front of recent list; deduplicate; rebuild menu. *)
+PROCEDURE AddRecentFile(path: ARRAY OF CHAR);
+VAR i, j: INTEGER;
+    tmp: ARRAY 512 OF CHAR;
+BEGIN
+  IF path[0] = 0X THEN  RETURN  END;
+  (* Remove existing entry for this path *)
+  i := 0;
+  WHILE i < recentCount DO
+    IF Strings.Compare(recentFiles[i], path) = 0 THEN
+      FOR j := i TO recentCount - 2 DO
+        Strings.Copy(recentFiles[j + 1], recentFiles[j])
+      END;
+      DEC(recentCount)
+    ELSE
+      INC(i)
+    END
+  END;
+  (* Shift everything down and insert at front *)
+  IF recentCount >= MaxRecent THEN  recentCount := MaxRecent - 1  END;
+  FOR i := recentCount - 1 TO 0 BY -1 DO
+    Strings.Copy(recentFiles[i], recentFiles[i + 1])
+  END;
+  Strings.Copy(path, recentFiles[0]);
+  INC(recentCount);
+  SaveRecentFiles
+END AddRecentFile;
+
+PROCEDURE RebuildMenuBar;
+VAR i: INTEGER;
+    label: ARRAY 64 OF CHAR;
+    name:  ARRAY 512 OF CHAR;
+    slen, j: INTEGER;
+BEGIN
+  TUI.RemoveView(mbar);
+  TUI.RemoveView(sline);
+
+  mbar := Widgets.NewMenuBar(1, 1, TUI.Cols);
+
+  (* File menu *)
+  Widgets.MenuBarAddMenu(mbar, "File");
+  Widgets.MenuBarAddItem(mbar, 0, "New           Ctrl+N", CmdNew);
+  Widgets.MenuBarAddItem(mbar, 0, "Open...       Ctrl+O", CmdOpen);
+  Widgets.MenuBarAddItem(mbar, 0, "Save          Ctrl+S", CmdSave);
+  Widgets.MenuBarAddItem(mbar, 0, "Save As...", CmdSaveAs);
+  Widgets.MenuBarAddSep (mbar, 0);
+  Widgets.MenuBarAddItem(mbar, 0, "Close         Ctrl+W", CmdClose);
+  Widgets.MenuBarAddSep (mbar, 0);
+  Widgets.MenuBarAddItem(mbar, 0, "Quit          Ctrl+Q", CmdQuit);
+  IF recentCount > 0 THEN
+    Widgets.MenuBarAddSep(mbar, 0);
+    FOR i := 0 TO recentCount - 1 DO
+      (* Show just the filename (last path component) as the label *)
+      slen := Strings.Length(recentFiles[i]);
+      j := slen - 1;
+      WHILE (j > 0) & (recentFiles[i][j - 1] # '/') DO  DEC(j)  END;
+      Strings.Extract(recentFiles[i], j, slen - j, name);
+      Strings.IntToStr(i + 1, label);
+      Strings.Append("  ", label);
+      Strings.Append(name, label);
+      Widgets.MenuBarAddItem(mbar, 0, label, CmdRecentBase + i)
+    END
+  END;
+
+  (* Edit menu *)
+  Widgets.MenuBarAddMenu(mbar, "Edit");
+  Widgets.MenuBarAddItem(mbar, 1, "Undo          Ctrl+Z", CmdUndo);
+  Widgets.MenuBarAddSep (mbar, 1);
+  Widgets.MenuBarAddItem(mbar, 1, "Cut           Ctrl+X", CmdCut);
+  Widgets.MenuBarAddItem(mbar, 1, "Copy          Ctrl+C", CmdCopy);
+  Widgets.MenuBarAddItem(mbar, 1, "Paste         Ctrl+V", CmdPaste);
+  Widgets.MenuBarAddItem(mbar, 1, "Select All    Ctrl+A", CmdSelAll);
+  Widgets.MenuBarAddSep (mbar, 1);
+  Widgets.MenuBarAddItem(mbar, 1, "Find...       Ctrl+F", CmdFind);
+  Widgets.MenuBarAddItem(mbar, 1, "Find Next     F3",     CmdFindNext);
+  Widgets.MenuBarAddItem(mbar, 1, "Go to Line... Ctrl+G", CmdGoto);
+
+  (* Build menu *)
+  Widgets.MenuBarAddMenu(mbar, "Build");
+  Widgets.MenuBarAddItem(mbar, 2, "Compile       F5",  CmdCompile);
+  Widgets.MenuBarAddItem(mbar, 2, "Run           F6",  CmdRun);
+  Widgets.MenuBarAddItem(mbar, 2, "Compile & Run F9",  CmdCompRun);
+  Widgets.MenuBarAddItem(mbar, 2, "Jump to Error F2",  CmdJumpError);
+
+  (* Window menu *)
+  Widgets.MenuBarAddMenu(mbar, "Window");
+  Widgets.MenuBarAddItem(mbar, 3, "Next Window   Ctrl+Tab", CmdNextWin);
+  Widgets.MenuBarAddItem(mbar, 3, "Tile Windows",           CmdTile);
+
+  (* Help menu *)
+  Widgets.MenuBarAddMenu(mbar, "Help");
+  Widgets.MenuBarAddItem(mbar, 4, "Help (word)   F1", CmdHelp);
+
+  mbar.onCmd := OnMenuCmd;
+  TUI.AddView(mbar);
+  TUI.AddView(sline)
+END RebuildMenuBar;
+
 PROCEDURE BuildMenus;
 BEGIN
   mbar := Widgets.NewMenuBar(1, 1, TUI.Cols);
@@ -1921,6 +2203,7 @@ BEGIN
   Widgets.MenuBarAddItem(mbar, 2, "Compile       F5",  CmdCompile);
   Widgets.MenuBarAddItem(mbar, 2, "Run           F6",  CmdRun);
   Widgets.MenuBarAddItem(mbar, 2, "Compile & Run F9",  CmdCompRun);
+  Widgets.MenuBarAddItem(mbar, 2, "Jump to Error F2",  CmdJumpError);
 
   (* Window menu *)
   Widgets.MenuBarAddMenu(mbar, "Window");
@@ -1971,8 +2254,12 @@ BEGIN
   acActive   := FALSE;
   acCount    := 0;
   clipNLines := 0;
+  recentCount := 0;
+  errorLine := 0;  errorFile[0] := 0X;
 
+  LoadRecentFiles();
   BuildMenus();
+  RebuildMenuBar();   (* re-adds mbar and sline with recent files populated *)
 
   (* Open file from command line, or start with empty window *)
   ew := NewEditorWin();
@@ -1982,6 +2269,8 @@ BEGIN
     IF ~LoadFile(ew, fn) THEN
       Strings.Copy("New file: ", statusMsg);  Strings.Append(fn, statusMsg);
       Strings.Copy(fn, ew.title)
+    ELSE
+      AddRecentFile(fn);  RebuildMenuBar()
     END
   END;
 
@@ -2065,6 +2354,7 @@ BEGIN
           ew := FocusedEditor();
           IF ew # NIL THEN  TriggerAC(ew)  END
         ELSIF ch = TUI.KF1  THEN   acActive := FALSE;  OnMenuCmd(CmdHelp)
+        ELSIF ch = TUI.KF2  THEN   acActive := FALSE;  OnMenuCmd(CmdJumpError)
         ELSIF ch = TUI.KF5  THEN   acActive := FALSE;  OnMenuCmd(CmdCompile)
         ELSIF ch = TUI.KF6  THEN   acActive := FALSE;  OnMenuCmd(CmdRun)
         ELSIF ch = TUI.KF9  THEN   acActive := FALSE;  OnMenuCmd(CmdCompRun)

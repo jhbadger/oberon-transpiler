@@ -5,8 +5,10 @@
 #include <stdio.h>
 
 /* Translate an Oberon AST to C.
- * is_main=1 → emit int main(); is_main=0 → emit ModName_init(). */
-void codegen(Node *module, FILE *out, int is_main);
+ * is_main=1 → emit int main(); is_main=0 → emit ModName_init().
+ * srcfile is the .mod source path, used for #line directives so C compiler
+ * errors refer back to Oberon source lines. */
+void codegen(Node *module, FILE *out, int is_main, const char *srcfile);
 
 /* Generate a C header (.h) with extern declarations of all exported
  * symbols.  Call this for every library (non-main) module.           */
