@@ -621,7 +621,7 @@ int main(int argc, char *argv[]) {
     {
         char cmd[8192];
         int pos = snprintf(cmd, sizeof(cmd),
-            "gcc -std=c11 %s-O -o %s",
+            "gcc -fno-diagnostics-show-line-numbers -std=c11 %s-O -o %s",
             g_warnings
                 ? "-Wall -Wno-unused-function -Wno-unused-variable "
                 : "-w ",
