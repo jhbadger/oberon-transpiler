@@ -621,7 +621,7 @@ int main(int argc, char *argv[]) {
     {
         char cmd[8192];
         int pos = snprintf(cmd, sizeof(cmd),
-            "set -o pipefail;gcc --std=c11 %s-O -o %s",
+            "bash -c 'set -o pipefail;gcc --std=c11 %s-O -o %s",
             g_warnings
                 ? "-Wall -Wno-unused-function -Wno-unused-variable "
                 : "-w ",
@@ -649,7 +649,7 @@ int main(int argc, char *argv[]) {
 
         if (pos < (int)sizeof(cmd)) {
             snprintf(cmd + pos, sizeof(cmd) - (size_t)pos,
-										 " -lm -lz 2>&1 | sed '/: In function/d'");
+										 " -lm -lz 2>&1 | sed \"/: In function/d\"'");
         }
 
         {
