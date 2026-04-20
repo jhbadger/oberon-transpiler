@@ -724,7 +724,7 @@ BEGIN
     MoveTo(curRow + 1, curCol)
   ELSIF k = KEY_ESC THEN
     mode := NORMAL
-  ELSIF k = KEY_BS THEN
+  ELSIF k = KEY_BS OR ORD(k) = 127 THEN
     IF editPos > 0 THEN
       DEC(editPos); len := Strings.Length(editBuf);
       i := editPos;
@@ -882,7 +882,8 @@ BEGIN
   my  := Terminal.MouseY();
   btn := Terminal.MouseBtn();
 
-  IF btn = 3 THEN RETURN END;
+  IF (btn # 0 & btn # 3 & btn # 64 & btn # 65) THEN RETURN END;
+  DrawAll();
 
   IF my = 1 THEN
     IF mode = NORMAL THEN StartEdit(FALSE) END;
@@ -971,8 +972,7 @@ BEGIN
     statusMsg[0] := 0X;
 
     IF k = KEY_MOUSE THEN
-      HandleMouse();
-      DrawAll()
+      HandleMouse()
     ELSIF mode = EDIT THEN
       HandleEdit(k);
       IF (curRow # prevRow) OR (curCol # prevCol) THEN
@@ -996,3 +996,6 @@ BEGIN
 
   Terminal.MouseOff()
 END sheet.
+
+
+

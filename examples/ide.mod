@@ -33,7 +33,7 @@ MODULE IDE;
 IMPORT TUI, Widgets, FileDialog, Help, Strings, Terminal, Files, OS, Out, Args;
 
 CONST
-  MaxLines = 2000;
+  MaxLines = 5000;
   LLEN     = 512;    (* bytes per line — wide enough for UTF-8 *)
   MaxWins  = 8;
   MaxUndo  = 100;    (* undo history depth per editor window *)

@@ -62,7 +62,7 @@ VAR
   statusMsg: ARRAY 60  OF CHAR;
   modified    : BOOLEAN;
   running     : BOOLEAN;
-  k, mx, my  : INTEGER;
+  btn, k, mx, my  : INTEGER;
   searchQuery : ARRAY 128 OF CHAR;
   lineState : ARRAY MAXLINES OF INTEGER;
   killBuf   : ARRAY LLEN OF CHAR;
@@ -481,7 +481,7 @@ BEGIN
     j := Terminal.ReadKey();
     IF j = KEY_ENTER THEN  RETURN i > 0
     ELSIF j = KEY_ESC THEN  result[0] := 0X;  RETURN FALSE
-    ELSIF j = KEY_BS  THEN  IF i > 0 THEN  DEC(i);  result[i] := 0X  END
+    ELSIF j = KEY_BS  OR ORD(j) = 127 THEN  IF i > 0 THEN  DEC(i);  result[i] := 0X  END
     ELSIF (j >= 32) & (j < 127) & (i < LEN(result) - 1) THEN
       result[i] := CHR(j);  INC(i);  result[i] := 0X
     END
@@ -867,12 +867,15 @@ BEGIN
     ELSIF k = KEY_PGUP  THEN  DEC(cy, EROWS);  ClampCursor
     ELSIF k = KEY_PGDN  THEN  INC(cy, EROWS);  ClampCursor
     ELSIF k = KEY_MOUSE THEN
-      mx := Terminal.MouseX();  my := Terminal.MouseY();
-      IF (my >= 2) & (my <= EROWS + 1) THEN
-        cy := topLine + my - 2;  cx := leftCol + mx - 1;  ClampCursor
+      btn := Terminal.MouseBtn();
+      IF btn = 0 OR btn = 3 THEN
+        mx := Terminal.MouseX();  my := Terminal.MouseY();
+        IF (my >= 2) & (my <= EROWS + 1) THEN
+          cy := topLine + my - 2;  cx := leftCol + mx - 1;  ClampCursor
+        END;
       END
     ELSIF k = KEY_ENTER THEN  DoEnter
-    ELSIF k = KEY_BS    THEN  DoBackspace
+    ELSIF k = KEY_BS OR ORD(k) = 127 THEN  DoBackspace
     ELSIF k = KEY_DEL   THEN  DoDelete
     ELSIF k = KEY_TAB   THEN
       FOR mx := 1 TO 4 DO  InsertCharAt(cy, cx, ' ');  INC(cx)  END
@@ -903,5 +906,6 @@ BEGIN
   Terminal.Clear;
   Terminal.Goto(1, 1)
 END Edit.
+
 
 

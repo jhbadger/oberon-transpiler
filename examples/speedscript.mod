@@ -169,7 +169,7 @@ BEGIN
   mx := Terminal.MouseX();
   my := Terminal.MouseY();
   mb := Terminal.MouseBtn();
-  IF mb # 0 THEN (* Button is pressed *)
+  IF mb # 0 & mb # 3 THEN RETURN;
     w := Terminal.Cols(); 
     rows := Terminal.Rows() - 1;
     tx := 1; ty := 2; (* Starting position of text area in Refresh *)
@@ -691,7 +691,7 @@ BEGIN
           running := FALSE
         END
     | KEY_MOUSE:  HandleMouse
-    | KEY_BS:     Backspace
+    | KEY_BS, 127:     Backspace
     | KEY_DEL:    DeleteFwd
     | KEY_ENTER:  Insert(RetChar)
     | KEY_TAB:    insMode := ~insMode
@@ -734,4 +734,5 @@ BEGIN
   Run;
   Terminal.MouseOff;
 END SpeedScript.
+
 
