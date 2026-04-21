@@ -7,7 +7,7 @@ VAR
   s:       FastaParser.Scanner;
   chunk:   ARRAY 32768 OF CHAR;
   id:      ARRAY 64 OF CHAR;
-  read:    LONGINT;
+  seq:     LONGINT;
   count:   LONGINT;
   slen:    LONGINT;
   total:   LONGINT;
@@ -39,10 +39,9 @@ BEGIN
     INC(count);
     slen := 0; 
     REPEAT
-      WRITELN(LEN(chunk));
-      read := FastaParser.ReadChunk(s, chunk);
-      INC(slen, Strings.Length(chunk));
-    UNTIL read = 0;
+      seq := FastaParser.ReadChunk(s, chunk);
+      INC(slen, seq);
+    UNTIL seq = 0;
     INC(total, slen);
     IF minLen < 0 OR slen < minLen THEN minLen := slen END;
     IF slen > maxLen THEN maxLen := slen END
@@ -60,3 +59,4 @@ BEGIN
     Out.String("Avg length: "); Out.Int(total DIV count, 0); Out.Ln
   END
 END fastaStats.
+
