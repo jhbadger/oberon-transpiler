@@ -12,7 +12,7 @@ CONST
   KEY_UP    = 0A0X;   KEY_DOWN  = 0A1X;
   KEY_LEFT  = 0A2X;   KEY_RIGHT = 0A3X;
   KEY_MOUSE = 0A4X;
-  KEY_BS    = 8;   KEY_TAB   = 09X;
+  KEY_BS    = 07FX;   KEY_TAB   = 09X;
   KEY_ENTER = 0DX;  KEY_ESC   = 1BX;
   KEY_CTRL_F = 6;   (* Find *)
   KEY_CTRL_G = 7;   (* Find-and-replace *)
@@ -29,7 +29,7 @@ CONST
   KEY_DEL    = 84X;
   KEY_WLEFT  = 261; KEY_WRIGHT = 262;
   KEY_FHOME  = 263; KEY_FEND   = 264;
-  KEY_F1     = 265; KEY_F2     = 266;
+  KEY_F1     = 089X; KEY_F2     = 266;
   KEY_F3     = 267; KEY_F4     = 268;
   KEY_F5     = 269; KEY_F6     = 270;
   KEY_F7     = 271; KEY_F8     = 272;
@@ -280,7 +280,7 @@ BEGIN
       Terminal.HideCursor; RETURN FALSE
     ELSIF k = KEY_ENTER THEN
       result[len] := 0X; Terminal.HideCursor; RETURN TRUE
-    ELSIF (k = KEY_BS) OR (k = 127) THEN
+    ELSIF k = KEY_BS THEN
       IF len > 0 THEN
         DEC(len); result[len] := 0X;
         Terminal.Goto(plen + len + 1, 1); Out.Char(" ");
@@ -734,5 +734,6 @@ BEGIN
   Run;
   Terminal.MouseOff;
 END SpeedScript.
+
 
 

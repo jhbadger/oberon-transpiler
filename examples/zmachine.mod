@@ -19,7 +19,7 @@ CONST
   MAXFRAMES = 128;
 
   (* Keys *)
-  KEY_BS    =  8;
+  KEY_BS    = 07FX;
   KEY_ENTER = 13;
   KEY_CTRLC =  3;
   KEY_CTRLD =  4;
@@ -918,7 +918,7 @@ BEGIN
     k := ORD(c);
     IF (k = KEY_ENTER) OR (k = 0AX) THEN
       EXIT
-    ELSIF (k = KEY_BS) OR (k = 127) THEN
+    ELSIF k = KEY_BS THEN
       IF n > 0 THEN
         DEC(n);
         Out.Char(8X);  Out.Char(' ');  Out.Char(8X)
@@ -1816,3 +1816,4 @@ BEGIN
   Out.String("[Game over]");
   EmitNewline
 END ZMachine.
+

@@ -1821,8 +1821,8 @@ END Compile;
 PROCEDURE RunInTerminal(cmd: ARRAY OF CHAR);
 VAR fullCmd: ARRAY 640 OF CHAR;
 BEGIN
-		 TUI.Suspend();
-		 Terminal.Restore();
+      TUI.Suspend();
+      Terminal.Restore();
   Terminal.Clear();
   Strings.Copy(cmd, fullCmd);
   (* Read from /dev/tty so stale mouse-event bytes in stdin don't fool read *)
@@ -1991,7 +1991,7 @@ BEGIN
 
   (* Edit the active field *)
   IF promptMode = 6 THEN
-    IF (ch = TUI.KBackspace) OR (ORD(ch) = 127) THEN
+    IF ch = TUI.KBackspace THEN
       IF replacePos > 0 THEN  DEC(replacePos);  replaceBuf[replacePos] := 0X  END
     ELSIF (ORD(ch) >= 32) & (ORD(ch) < 127) & (replacePos < 127) THEN
       replaceBuf[replacePos] := ch;  INC(replacePos);  replaceBuf[replacePos] := 0X
@@ -1999,7 +1999,7 @@ BEGIN
     Strings.Copy("Find: ", statusMsg);  Strings.Append(promptBuf, statusMsg);
     Strings.Append("  With: ", statusMsg);  Strings.Append(replaceBuf, statusMsg)
   ELSE
-    IF (ch = TUI.KBackspace) OR (ORD(ch) = 127) THEN
+    IF ch = TUI.KBackspace THEN
       IF promptPos > 0 THEN  DEC(promptPos);  promptBuf[promptPos] := 0X  END
     ELSIF (ORD(ch) >= 32) & (ORD(ch) < 127) & (promptPos < 127) THEN
       promptBuf[promptPos] := ch;  INC(promptPos);  promptBuf[promptPos] := 0X
@@ -2634,3 +2634,4 @@ BEGIN
 
   TUI.Done()
 END IDE.
+

@@ -11,7 +11,7 @@ CONST
   KEY_LEFT   = 0A2X;
   KEY_RIGHT  = 0A3X;
   KEY_MOUSE  = 0A4X;
-  KEY_BS     = 08X;
+  KEY_BS     = 07FX;
   KEY_TAB    = 09X;   
   KEY_ESC    = 1BX;
   KEY_ENTER  = 0DX;
@@ -481,7 +481,7 @@ BEGIN
     j := Terminal.ReadKey();
     IF j = KEY_ENTER THEN  RETURN i > 0
     ELSIF j = KEY_ESC THEN  result[0] := 0X;  RETURN FALSE
-    ELSIF j = KEY_BS  OR ORD(j) = 127 THEN  IF i > 0 THEN  DEC(i);  result[i] := 0X  END
+    ELSIF j = KEY_BS  THEN  IF i > 0 THEN  DEC(i);  result[i] := 0X  END
     ELSIF (j >= 32) & (j < 127) & (i < LEN(result) - 1) THEN
       result[i] := CHR(j);  INC(i);  result[i] := 0X
     END
@@ -875,7 +875,7 @@ BEGIN
         END;
       END
     ELSIF k = KEY_ENTER THEN  DoEnter
-    ELSIF k = KEY_BS OR ORD(k) = 127 THEN  DoBackspace
+    ELSIF k = KEY_BS THEN  DoBackspace
     ELSIF k = KEY_DEL   THEN  DoDelete
     ELSIF k = KEY_TAB   THEN
       FOR mx := 1 TO 4 DO  InsertCharAt(cy, cx, ' ');  INC(cx)  END
@@ -906,6 +906,7 @@ BEGIN
   Terminal.Clear;
   Terminal.Goto(1, 1)
 END Edit.
+
 
 
 

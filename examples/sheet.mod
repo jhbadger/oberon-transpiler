@@ -42,7 +42,7 @@ CONST
   KEY_UP    = 0A0X;   KEY_DOWN  = 0A1X;
   KEY_LEFT  = 0A2X;   KEY_RIGHT = 0A3X;
   KEY_MOUSE = 0A4X;
-  KEY_BS    = 8;   KEY_TAB   = 09X;
+  KEY_BS    = 07FX;   KEY_TAB   = 09X;
   KEY_ENTER = 0DX; KEY_ESC  = 1BX;
   KEY_PGUP  = 80X; KEY_PGDN  = 81X;
   KEY_HOME  = 82X; KEY_END   = 83X;
@@ -724,7 +724,7 @@ BEGIN
     MoveTo(curRow + 1, curCol)
   ELSIF k = KEY_ESC THEN
     mode := NORMAL
-  ELSIF k = KEY_BS OR ORD(k) = 127 THEN
+  ELSIF k = KEY_BS THEN
     IF editPos > 0 THEN
       DEC(editPos); len := Strings.Length(editBuf);
       i := editPos;
@@ -996,6 +996,7 @@ BEGIN
 
   Terminal.MouseOff()
 END sheet.
+
 
 
 
