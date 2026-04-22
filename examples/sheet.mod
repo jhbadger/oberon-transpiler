@@ -619,51 +619,101 @@ END RedrawCur;
 
 (* ── save to CSV ─────────────────────────────────────────────────── *)
 PROCEDURE SaveCSV(fn: ARRAY OF CHAR): BOOLEAN;
-VAR f: Files.File; r2: Files.Rider;
-    r, c, nr, nc: INTEGER;
-    cell: ARRAY DataFrame.CELLLEN OF CHAR;
+VAR 
+  f: Files.File; 
+  r: Files.Rider;
+  row, col, nr, nc, i: INTEGER;
+  cell: ARRAY DataFrame.CELLLEN OF CHAR;
+  needsQuotes: BOOLEAN;
 BEGIN
   f := Files.New(fn);
   IF f = NIL THEN RETURN FALSE END;
-  Files.Set(r2, f, 0);
-  nc := DataFrame.NCols(df); nr := DataFrame.NRows(df);
-  FOR r := 0 TO nr - 1 DO
-    FOR c := 0 TO nc - 1 DO
-      IF c > 0 THEN Files.Write(r2, ',') END;
-      DataFrame.GetStr(df, r, c, cell);
-      IF Strings.Pos(",", cell, 0) >= 0 THEN
-        Files.Write(r2, 022X);
-        Files.WriteString(r2, cell);
-        Files.Write(r2, 022X)
+  Files.Set(r, f, 0);
+
+  nc := DataFrame.NCols(df); 
+  nr := DataFrame.NRows(df);
+
+  FOR row := 0 TO nr - 1 DO
+    FOR col := 0 TO nc - 1 DO
+      IF col > 0 THEN Files.Write(r, ',') END; (* Separator *)
+
+      DataFrame.GetStr(df, row, col, cell);
+      
+      (* Check if quoting is required for this specific cell *)
+      needsQuotes := FALSE;
+      i := 0;
+      WHILE cell[i] # 0X DO
+        (* Quote if cell contains comma, double-quote, or newline *)
+        IF (cell[i] = ',') OR (cell[i] = 022X) OR (cell[i] = 0AX) OR (cell[i] = 0DX) THEN
+          needsQuotes := TRUE
+        END;
+        INC(i)
+      END;
+
+      IF needsQuotes THEN
+        Files.Write(r, 022X); (* Opening Quote [cite: 165] *)
+        i := 0;
+        WHILE cell[i] # 0X DO
+          IF cell[i] = 022X THEN 
+            Files.Write(r, 022X) (* Escape internal quote by doubling it *)
+          END;
+          Files.Write(r, cell[i]);
+          INC(i)
+        END;
+        Files.Write(r, 022X) (* Closing Quote [cite: 166] *)
       ELSE
-        Files.WriteString(r2, cell)
+        Files.WriteString(r, cell) (* Raw write for simple cells [cite: 166] *)
       END
     END;
-    Files.Write(r2, 0AX)
+    Files.Write(r, 0AX) (* End of row [cite: 167] *)
   END;
-  Files.Register(f); Files.Close(f);
+
+  Files.Register(f); 
+  Files.Close(f);
   RETURN TRUE
 END SaveCSV;
 
 (* ── save to TSV ─────────────────────────────────────────────────── *)
 PROCEDURE SaveTSV(fn: ARRAY OF CHAR): BOOLEAN;
-VAR f: Files.File; r2: Files.Rider;
-    r, c, nr, nc: INTEGER;
-    cell: ARRAY DataFrame.CELLLEN OF CHAR;
+VAR 
+  f: Files.File; 
+  r: Files.Rider;
+  row, col, nr, nc, i: INTEGER;
+  cell: ARRAY DataFrame.CELLLEN OF CHAR;
 BEGIN
   f := Files.New(fn);
   IF f = NIL THEN RETURN FALSE END;
-  Files.Set(r2, f, 0);
-  nc := DataFrame.NCols(df); nr := DataFrame.NRows(df);
-  FOR r := 0 TO nr - 1 DO
-    FOR c := 0 TO nc - 1 DO
-      IF c > 0 THEN Files.Write(r2, 09X) END;
-      DataFrame.GetStr(df, r, c, cell);
-      Files.WriteString(r2, cell)
+  Files.Set(r, f, 0);
+
+  (* Ensure we get the full count of rows and columns *)
+  nc := DataFrame.NCols(df); 
+  nr := DataFrame.NRows(df);
+
+  FOR row := 0 TO nr - 1 DO
+    FOR col := 0 TO nc - 1 DO
+      IF col > 0 THEN Files.Write(r, 09X) END; (* Write Tab separator *)
+
+      DataFrame.GetStr(df, row, col, cell);
+      
+      (* Sanitize: If the data contains a tab or newline, 
+         we must handle it to prevent corrupting the TSV structure. *)
+      i := 0;
+      WHILE cell[i] # 0X DO
+        IF cell[i] = 09X THEN 
+          Files.Write(r, ' ') (* Replace internal tabs with space *)
+        ELSIF (cell[i] = 0AX) OR (cell[i] = 0DX) THEN
+          Files.Write(r, ' ') (* Replace newlines with space *)
+        ELSE
+          Files.Write(r, cell[i])
+        END;
+        INC(i)
+      END
     END;
-    Files.Write(r2, 0AX)
+    Files.Write(r, 0AX) (* End of row *)
   END;
-  Files.Register(f); Files.Close(f);
+
+  Files.Register(f); 
+  Files.Close(f);
   RETURN TRUE
 END SaveTSV;
 
@@ -932,6 +982,54 @@ BEGIN
   END
 END HandleMouse;
 
+PROCEDURE SortCurrentColumn;
+VAR
+  i, j, maxRow, c: INTEGER;
+  valI, valJ: REAL;
+  strI, strJ, temp: ARRAY DataFrame.CELLLEN OF CHAR;
+  res: INTEGER;
+
+  (* Helper to swap two full rows *)
+  PROCEDURE SwapRows(r1, r2: INTEGER);
+  VAR col: INTEGER;
+      t: ARRAY DataFrame.CELLLEN OF CHAR;
+  BEGIN
+    FOR col := 0 TO DataFrame.NCols(df) - 1 DO
+      DataFrame.GetStr(df, r1, col, t);
+      DataFrame.GetStr(df, r2, col, strI); (* Reuse strI as buffer *)
+      DataFrame.SetStr(df, r1, col, strI);
+      DataFrame.SetStr(df, r2, col, t)
+    END
+  END SwapRows;
+
+BEGIN
+  maxRow := DataFrame.NRows(df);
+  IF maxRow < 2 THEN RETURN END;
+
+  statusMsg := "Sorting...";
+  DrawAll(); (* Show status *)
+
+  (* Simple Selection Sort *)
+  FOR i := 1 TO maxRow - 2 DO
+    FOR j := i + 1 TO maxRow - 1 DO
+      DataFrame.GetStr(df, i, curCol, strI);
+      DataFrame.GetStr(df, j, curCol, strJ);
+
+      (* Try to compare as numbers first *)
+      IF Strings.StrToReal(strI, valI) & Strings.StrToReal(strJ, valJ) THEN
+        IF valI > valJ THEN SwapRows(i, j) END
+      ELSE
+        (* Fallback to alphabetical comparison *)
+        IF strI > strJ THEN SwapRows(i, j) END
+      END
+    END
+  END;
+
+  dirty := TRUE;
+  statusMsg := "Sort complete.";
+  DrawAll()
+END SortCurrentColumn;
+
 (* ── main ────────────────────────────────────────────────────────── *)
 VAR
   k, err: INTEGER;
@@ -973,6 +1071,8 @@ BEGIN
 
     IF k = KEY_MOUSE THEN
       HandleMouse()
+    ELSIF k = 14X THEN (* Ctrl+N for Sort *)
+      SortCurrentColumn()
     ELSIF mode = EDIT THEN
       HandleEdit(k);
       IF (curRow # prevRow) OR (curCol # prevCol) THEN
@@ -996,6 +1096,9 @@ BEGIN
 
   Terminal.MouseOff()
 END sheet.
+
+
+
 
 
 
