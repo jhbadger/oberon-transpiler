@@ -352,48 +352,71 @@ END DoUndo;
 (* ════════════════════════════════════════════════════════════════
    Editing operations (take EditorWin, modify in place)
    ════════════════════════════════════════════════════════════════ *)
-
 PROCEDURE DoEnter(ew: EditorWin);
 VAR len, rest, baseIndent, extra, totalIndent, i: INTEGER;
 BEGIN
   PushUndo(ew, UOpSplit, ew.cy);
   len  := LineLen(ew, ew.cy);
   rest := len - ew.cx;
-  (* Measure leading whitespace on the current line for auto-indent.
-     baseIndent = number of leading space/tab bytes in the current line,
-     capped at the cursor position. *)
+
+  (* Measure leading whitespace on the current line for auto-indent. *)
   baseIndent := 0;
   WHILE (baseIndent < ew.cx) &
         ((ew.lines[ew.cy][baseIndent] = ' ') OR (ew.lines[ew.cy][baseIndent] = 09X)) DO
     INC(baseIndent)
   END;
+
   (* Smart indent: opener keywords add one extra level *)
   extra := 0;
-  IF LineEndsWithOpener(ew, ew.cy, ew.cx) THEN  extra := 4  END;
+  IF LineEndsWithOpener(ew, ew.cy, ew.cx) THEN extra := 4 END;
   totalIndent := baseIndent + extra;
+
   InsertLineAt(ew, ew.cy + 1);
-  (* Copy the rest of the current line after the split point *)
-  FOR i := 0 TO rest - 1 DO  ew.lines[ew.cy + 1][i] := ew.lines[ew.cy][ew.cx + i]  END;
-  ew.lines[ew.cy + 1][rest] := 0X;
-  ew.lines[ew.cy][ew.cx]   := 0X;
-  INC(ew.cy);  ew.cx := 0;
+
+  (* Copy the rest of the current line (suffix) after the split point *)
+  FOR i := 0 TO rest - 1 DO 
+    ew.lines[ew.cy + 1][i] := ew.lines[ew.cy][ew.cx + i] 
+  END;
+  ew.lines[ew.cy + 1][rest] := 0X; (* Terminate the new line suffix [cite: 853] *)
+
+  (* Truncate the original line at the cursor *)
+  ew.lines[ew.cy][ew.cx] := 0X; 
+
+  (* Move cursor to the new line *)
+  INC(ew.cy); 
+  ew.cx := 0;
+
   (* Prepend indentation onto the new line *)
   IF (totalIndent > 0) & (totalIndent + rest < LLEN) THEN
-    FOR i := rest - 1 TO 0 BY -1 DO  (* shift existing content rightward *)
+    (* Shift the suffix (rest) to the right to make room for indentation *)
+    FOR i := rest - 1 TO 0 BY -1 DO
       ew.lines[ew.cy][totalIndent + i] := ew.lines[ew.cy][i]
     END;
-    (* Copy base indent chars from the previous line (they may be tabs or spaces) *)
+
+    (* Copy base indent characters (tabs/spaces) from the previous line *)
     FOR i := 0 TO baseIndent - 1 DO
       ew.lines[ew.cy][i] := ew.lines[ew.cy - 1][i]
     END;
-    (* Fill the extra indent level with spaces *)
+
+    (* Fill the extra indent level (4 spaces) *)
     FOR i := baseIndent TO totalIndent - 1 DO
       ew.lines[ew.cy][i] := ' '
     END;
+
+    (* CRITICAL FIX: Explicitly terminate the line after indent + rest *)
+    (* This prevents "ghost" text from the copied line from appearing  *)
+    ew.lines[ew.cy][totalIndent + rest] := 0X;
+
     ew.cx := totalIndent
+  ELSE
+    (* If no indent, ensure the line is just the rest of the text *)
+    ew.lines[ew.cy][rest] := 0X;
+    ew.cx := 0
   END;
+
   ew.modified := TRUE
 END DoEnter;
+
 
 PROCEDURE DoBackspace(ew: EditorWin);
 VAR len1, len2, prev, i: INTEGER;
@@ -2135,6 +2158,7 @@ BEGIN
   ELSIF cmd = CmdFindNext THEN
     IF ew # NIL THEN
       IF DoFind(ew) THEN
+        ScrollToCursor(ew);
         Strings.Copy("Found.", statusMsg)
       ELSE
         Strings.Copy("Not found.", statusMsg)
@@ -2634,4 +2658,7 @@ BEGIN
 
   TUI.Done()
 END IDE.
+
+
+
 
