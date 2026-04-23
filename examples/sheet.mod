@@ -984,20 +984,19 @@ END HandleMouse;
 
 PROCEDURE SortCurrentColumn;
 VAR
-  i, j, maxRow, c: INTEGER;
+  i, j, maxRow: INTEGER;
   valI, valJ: REAL;
-  strI, strJ, temp: ARRAY DataFrame.CELLLEN OF CHAR;
-  res: INTEGER;
+  strI, strJ: ARRAY DataFrame.CELLLEN OF CHAR;
 
   (* Helper to swap two full rows *)
   PROCEDURE SwapRows(r1, r2: INTEGER);
   VAR col: INTEGER;
-      t: ARRAY DataFrame.CELLLEN OF CHAR;
+      t, u: ARRAY DataFrame.CELLLEN OF CHAR;
   BEGIN
     FOR col := 0 TO DataFrame.NCols(df) - 1 DO
       DataFrame.GetStr(df, r1, col, t);
-      DataFrame.GetStr(df, r2, col, strI); (* Reuse strI as buffer *)
-      DataFrame.SetStr(df, r1, col, strI);
+      DataFrame.GetStr(df, r2, col, u);
+      DataFrame.SetStr(df, r1, col, u);
       DataFrame.SetStr(df, r2, col, t)
     END
   END SwapRows;
@@ -1020,7 +1019,7 @@ BEGIN
         IF valI > valJ THEN SwapRows(i, j) END
       ELSE
         (* Fallback to alphabetical comparison *)
-        IF strI > strJ THEN SwapRows(i, j) END
+        IF Strings.Compare(strI, strJ) > 0 THEN SwapRows(i, j) END
       END
     END
   END;
@@ -1071,7 +1070,7 @@ BEGIN
 
     IF k = KEY_MOUSE THEN
       HandleMouse()
-    ELSIF k = 14X THEN (* Ctrl+N for Sort *)
+    ELSIF k = 14X THEN (* Ctrl+T: sort current column *)
       SortCurrentColumn()
     ELSIF mode = EDIT THEN
       HandleEdit(k);
