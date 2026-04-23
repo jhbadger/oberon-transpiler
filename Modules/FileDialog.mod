@@ -218,7 +218,7 @@ BEGIN
   fDY := (TUI.Rows - fDH) DIV 2 + 1;
 
   lx := fDX + 1;              (* interior left edge  *)
-  lh := fDH - 7;              (* list box height     *)
+  lh := fDH - 9;              (* list box height — leaves room for File: input below *)
   ly := fDY + 4;              (* list box top row    *)
 
   (* ── Initial directory ───────────────────────────────────────────── *)
@@ -262,9 +262,14 @@ BEGIN
   TUI.AddView(fInput);
   TUI.AddView(fList);
 
-  (* Populate list and focus it *)
+  (* Populate list; focus the filename input if it is empty (Save As),
+     otherwise focus the list (Open, where browsing is the primary action) *)
   RefreshList;
-  TUI.SetFocus(fList);
+  IF fInput.len = 0 THEN
+    TUI.SetFocus(fInput)
+  ELSE
+    TUI.SetFocus(fList)
+  END;
 
   (* ── Modal event loop ────────────────────────────────────────────── *)
   fRunning := TRUE;  fOK := FALSE;

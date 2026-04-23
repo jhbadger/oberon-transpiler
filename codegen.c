@@ -2268,6 +2268,9 @@ void codegen(Node *module, FILE *out, int is_main, const char *srcfile) {
         emit(g,"#ifdef VDISCARD\n");
         emit(g,"    raw.c_cc[VDISCARD] = _POSIX_VDISABLE;\n");
         emit(g,"#endif\n");
+        emit(g,"#ifdef VLNEXT\n");
+        emit(g,"    raw.c_cc[VLNEXT] = _POSIX_VDISABLE;\n");
+        emit(g,"#endif\n");
         emit(g,"    tcsetattr(STDIN_FILENO, TCSANOW, &raw);\n");
         emit(g,"    setvbuf(stdout, NULL, _IONBF, 0);\n");
         emit(g,"    printf(\"\\033[?25l\"); fflush(stdout);\n");
@@ -2286,6 +2289,9 @@ void codegen(Node *module, FILE *out, int is_main, const char *srcfile) {
 				emit(g,"    raw.c_cc[VMIN] = 0; raw.c_cc[VTIME] = 0;\n");
 				emit(g,"#ifdef VDISCARD\n");
 				emit(g,"    raw.c_cc[VDISCARD] = _POSIX_VDISABLE;\n");
+				emit(g,"#endif\n");
+				emit(g,"#ifdef VLNEXT\n");
+				emit(g,"    raw.c_cc[VLNEXT] = _POSIX_VDISABLE;\n");
 				emit(g,"#endif\n");
 				emit(g,"    tcsetattr(STDIN_FILENO, TCSANOW, &raw);\n");
 				emit(g,"    setvbuf(stdout, NULL, _IONBF, 0);\n");

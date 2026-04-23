@@ -20,7 +20,8 @@ MODULE IDE;
  *   Ctrl+S          Save
  *   Ctrl+W          Close window
  *   Ctrl+Q          Quit
- *   Ctrl+Tab / F6   Next window
+ *   F7              Next window
+ *   F8              Toggle full screen for current window
  *   F5              Compile current file
  *   F9              Compile & run
  *   F1              Help on word under cursor
@@ -54,7 +55,7 @@ CONST
   CmdUndo    = 19;
   CmdFind    = 20;   CmdFindNext= 21;   CmdGoto    = 22;   CmdReplace = 23;
   CmdCompile = 30;   CmdRun     = 31;   CmdCompRun = 32;
-  CmdNextWin = 40;   CmdTile    = 41;
+  CmdNextWin = 40;   CmdTile    = 41;   CmdFullScreen = 42;
   CmdHelp    = 50;
   CmdJumpError = 51;
   CmdCopy    = 60;   CmdCut     = 61;   CmdPaste   = 62;   CmdSelAll  = 63;
@@ -118,6 +119,7 @@ VAR
   wins:      ARRAY MaxWins OF EditorWin;
   winCount:  INTEGER;
   lastEditor: EditorWin;       (* last editor that held focus — used when menu is active *)
+  zoomedWin: EditorWin;        (* window currently zoomed full-screen, NIL = tiled mode *)
   pendingCloseWin: EditorWin; (* editor awaiting close confirmation *)
   (* inline prompt state *)
   promptMode: INTEGER;   (* 0=none 1=find 2=goto 3=confirmClose 4=confirmQuit
@@ -1534,7 +1536,9 @@ BEGIN
     ewArr[i].y := y;
     ewArr[i].w := cellW;
     ewArr[i].h := cellH
-  END
+  END;
+  zoomedWin := NIL;
+  TUI.InvalidateFront()
 END TileEditorWins;
 
 PROCEDURE NewEditorWin(): EditorWin;
@@ -1577,6 +1581,7 @@ PROCEDURE CloseEditorWin(ew: EditorWin);
 VAR i: INTEGER;
 BEGIN
   IF ew = NIL THEN  RETURN  END;
+  IF zoomedWin = ew THEN  zoomedWin := NIL  END;
   TUI.RemoveView(ew);
   FOR i := 0 TO MaxWins - 1 DO
     IF wins[i] = ew THEN  wins[i] := NIL  END
@@ -1601,6 +1606,40 @@ BEGIN
   RETURN NIL
 END FocusedEditor;
 
+(* Zoom the focused window to full desktop area, hiding others.
+   Calling again (or Tile Windows) restores the tiled layout. *)
+PROCEDURE ZoomCurrentWin;
+VAR ew: EditorWin;
+    i: INTEGER;
+BEGIN
+  ew := FocusedEditor();
+  IF ew = NIL THEN  ew := lastEditor  END;
+  IF ew = NIL THEN  RETURN  END;
+
+  IF zoomedWin # NIL THEN
+    (* Un-zoom: restore tiled layout *)
+    TileEditorWins;
+    TUI.BringToFront(ew);
+    TUI.SetFocus(ew);
+    COPY("Tiled.", statusMsg)
+  ELSE
+    (* Zoom: expand ew to full desktop, push all others off-screen *)
+    zoomedWin := ew;
+    FOR i := 0 TO MaxWins - 1 DO
+      IF (wins[i] # NIL) & (wins[i] # ew) THEN
+        wins[i].x := TUI.Cols + 1;  (* off-screen — invisible but still in Desktop list *)
+        wins[i].y := 2
+      END
+    END;
+    ew.x := 1;  ew.y := 2;
+    ew.w := TUI.Cols;  ew.h := TUI.Rows - 2;
+    TUI.BringToFront(ew);
+    TUI.SetFocus(ew);
+    TUI.InvalidateFront();
+    COPY("Full screen.", statusMsg)
+  END
+END ZoomCurrentWin;
+
 PROCEDURE NextEditorWin;
 VAR i, cur, next: INTEGER;
     ew: EditorWin;
@@ -1616,7 +1655,21 @@ BEGIN
     next := (next + 1) MOD MaxWins
   END;
   IF (wins[next] # NIL) & (wins[next] # ew) THEN
-    TUI.SetFocus(wins[next])
+    IF zoomedWin # NIL THEN
+      (* Stay in zoomed mode: expand the new window, push all others off-screen *)
+      zoomedWin := wins[next];
+      FOR i := 0 TO MaxWins - 1 DO
+        IF (wins[i] # NIL) & (wins[i] # wins[next]) THEN
+          wins[i].x := TUI.Cols + 1;
+          wins[i].y := 2
+        END
+      END;
+      wins[next].x := 1;  wins[next].y := 2;
+      wins[next].w := TUI.Cols;  wins[next].h := TUI.Rows - 2
+    END;
+    TUI.BringToFront(wins[next]);
+    TUI.SetFocus(wins[next]);
+    TUI.InvalidateFront()
   END
 END NextEditorWin;
 
@@ -2195,6 +2248,9 @@ BEGIN
   ELSIF cmd = CmdTile THEN
     TileEditorWins
 
+  ELSIF cmd = CmdFullScreen THEN
+    ZoomCurrentWin
+
   ELSIF cmd = CmdCopy   THEN  IF ew # NIL THEN  DoCopy(ew)   END
   ELSIF cmd = CmdCut    THEN  IF ew # NIL THEN  DoCut(ew)    END
   ELSIF cmd = CmdPaste  THEN  IF ew # NIL THEN  DoPaste(ew)  END
@@ -2428,7 +2484,8 @@ BEGIN
 
   (* Window menu *)
   Widgets.MenuBarAddMenu(mbar, "Window");
-  Widgets.MenuBarAddItem(mbar, 3, "Next Window   Ctrl+Tab", CmdNextWin);
+  Widgets.MenuBarAddItem(mbar, 3, "Next Window   F7",       CmdNextWin);
+  Widgets.MenuBarAddItem(mbar, 3, "Full Screen   F8",       CmdFullScreen);
   Widgets.MenuBarAddItem(mbar, 3, "Tile Windows",           CmdTile);
 
   (* Help menu *)
@@ -2478,7 +2535,8 @@ BEGIN
 
   (* Window menu *)
   Widgets.MenuBarAddMenu(mbar, "Window");
-  Widgets.MenuBarAddItem(mbar, 3, "Next Window   Ctrl+Tab", CmdNextWin);
+  Widgets.MenuBarAddItem(mbar, 3, "Next Window   F7",       CmdNextWin);
+  Widgets.MenuBarAddItem(mbar, 3, "Full Screen   F8",       CmdFullScreen);
   Widgets.MenuBarAddItem(mbar, 3, "Tile Windows",           CmdTile);
 
   (* Help menu *)
@@ -2517,6 +2575,7 @@ BEGIN
 
   winCount  := 0;
   lastEditor := NIL;
+  zoomedWin  := NIL;
   running   := TRUE;
   promptMode := 0;
   statusMsg[0] := 0X;
@@ -2632,6 +2691,8 @@ BEGIN
         ELSIF ch = TUI.KF6  THEN   acActive := FALSE;  OnMenuCmd(CmdRun)
         ELSIF ch = TUI.KF9  THEN   acActive := FALSE;  OnMenuCmd(CmdCompRun)
         ELSIF ch = TUI.KF3  THEN   acActive := FALSE;  OnMenuCmd(CmdFindNext)
+        ELSIF ch = TUI.KF7  THEN   acActive := FALSE;  OnMenuCmd(CmdNextWin)
+        ELSIF ch = TUI.KF8  THEN   acActive := FALSE;  OnMenuCmd(CmdFullScreen)
         ELSE
           IF ~TUI.Dispatch(ev) THEN  END;
           (* After a printable char or backspace, re-filter if AC is active *)
@@ -2651,7 +2712,13 @@ BEGIN
       sline.y := TUI.Rows;
       sline.w := TUI.Cols;
       mbar.w  := TUI.Cols;
-      TileEditorWins();
+      IF zoomedWin # NIL THEN
+        (* Re-apply full-screen geometry to the zoomed window *)
+        zoomedWin.x := 1;  zoomedWin.y := 2;
+        zoomedWin.w := TUI.Cols;  zoomedWin.h := TUI.Rows - 2
+      ELSE
+        TileEditorWins()
+      END;
       TUI.InvalidateFront()
     END
   END;
