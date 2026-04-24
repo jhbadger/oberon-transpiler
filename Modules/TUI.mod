@@ -258,18 +258,23 @@ END PutStr;
 (** PutInt — write an integer as decimal text at (x, y). **)
 PROCEDURE PutInt*(x, y, n, fg, bg: INTEGER);
 VAR buf: ARRAY 16 OF CHAR;
+    tmp: ARRAY 16 OF CHAR;
     neg: BOOLEAN;
-    i, m: INTEGER;
+    i, j, m: INTEGER;
 BEGIN
   IF n < 0 THEN  neg := TRUE;  m := -n  ELSE  neg := FALSE;  m := n  END;
-  i := 14;  buf[15] := 0X;
-  IF m = 0 THEN  buf[i] := '0';  DEC(i)
+  i := 14;  tmp[15] := 0X;
+  IF m = 0 THEN  tmp[i] := '0';  DEC(i)
   ELSE
     WHILE m > 0 DO
-      buf[i] := CHR(ORD('0') + m MOD 10);  DEC(i);  m := m DIV 10
+      tmp[i] := CHR(ORD('0') + m MOD 10);  DEC(i);  m := m DIV 10
     END
   END;
-  IF neg THEN  buf[i] := '-';  DEC(i)  END;
+  IF neg THEN  tmp[i] := '-';  DEC(i)  END;
+  (* Copy number to buf starting at index 0 *)
+  INC(i);  j := 0;
+  WHILE tmp[i] # 0X DO  buf[j] := tmp[i];  INC(i);  INC(j)  END;
+  buf[j] := 0X;
   PutStr(x, y, buf, fg, bg)
 END PutInt;
 
