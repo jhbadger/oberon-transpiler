@@ -84,15 +84,17 @@ BEGIN
   Out.String("SEED MODE  Click to place cells   Enter or ESC to run");
   WHILE running_seeding DO
     key := Terminal.ReadKey();
-    IF key = 04X THEN
-      x := Terminal.MouseX() - 1;
-      y := (Terminal.MouseY() - 1) * 2;
-      IF (x >= 0) & (x < GRID_WIDTH) & (y >= 0) & (y < GRID_HEIGHT) THEN
-        GridState[y, x] := TRUE;
-        IF y + 1 < GRID_HEIGHT THEN GridState[y + 1, x] := TRUE; END;
-        DrawGrid();
-        Terminal.Goto(1, 47);
-        Out.String("SEED MODE  Click to place cells   Enter or ESC to run");
+    IF key = 0A4X THEN
+      IF Terminal.MouseBtn() = 0 THEN
+        x := Terminal.MouseX() - 1;
+        y := (Terminal.MouseY() - 1) * 2;
+        IF (x >= 0) & (x < GRID_WIDTH) & (y >= 0) & (y < GRID_HEIGHT) THEN
+          GridState[y, x] := TRUE;
+          IF y + 1 < GRID_HEIGHT THEN GridState[y + 1, x] := TRUE; END;
+          DrawGrid();
+          Terminal.Goto(1, 47);
+          Out.String("SEED MODE  Click to place cells   Enter or ESC to run");
+        END;
       END;
     ELSIF (key = 0DX) OR (key = 1BX) THEN
       running_seeding := FALSE;

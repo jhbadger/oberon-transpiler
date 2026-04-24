@@ -22,7 +22,7 @@ CONST
   (* Arrow keys *)
   KeyUp    = 0A0X;  KeyDown  = 0A1X;
   KeyLeft  = 0A2X;  KeyRight = 0A3X;
-  KeyMouse = 04X;
+  KeyMouse = 0A4X;
 
   (* Grid origin in terminal coordinates *)
   OX = 2;   (* cells occupy cols OX .. OX + Width*2 - 1, 2 chars each *)
