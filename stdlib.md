@@ -599,3 +599,786 @@ links with `-lz` automatically.
 | `Zip.Extract(z: Archive; i: INTEGER; VAR buf: ARRAY OF CHAR): INTEGER` | Decompress entry `i` into `buf`.  Returns the number of bytes written, or -1 on error.  The buffer size limits how much is read. |
 | `Zip.ExtractFile(z: Archive; i: INTEGER; dest: ARRAY OF CHAR): BOOLEAN` | Decompress entry `i` and write it to the file path `dest`.  Returns TRUE on success. |
 | `Zip.Close(z: Archive)` | Close the archive and free all resources. |
+
+---
+
+## TUI - Terminal User Interface
+
+```
+IMPORT TUI;
+```
+
+Double-buffered character-cell UI framework.  The screen is a grid of cells, each
+holding one character plus foreground/background color.  Views are linked-list nodes
+attached to `TUI.Desktop`; `DrawAll` paints them back-to-front.
+
+### Colors
+
+| Constant | Value | Description |
+|----------|-------|-------------|
+| `TUI.Black` | 0 | |
+| `TUI.Red` | 1 | |
+| `TUI.Green` | 2 | |
+| `TUI.Yellow` | 3 | |
+| `TUI.Blue` | 4 | |
+| `TUI.Magenta` | 5 | |
+| `TUI.Cyan` | 6 | |
+| `TUI.White` | 7 | |
+
+### Key Codes
+
+Same values as Terminal module.  Use `TUI.KEsc`, `TUI.KUp`, `TUI.KDown`, etc.  Mouse
+events arrive as `ev.kind = TUI.EvMouse` with `ev.mb`: 0=left press, 3=release,
+32=motion, 64=wheel-up, 65=wheel-down.
+
+### Box-Drawing Characters
+
+| Constant | Description |
+|----------|-------------|
+| `TUI.BoxH` | Horizontal line `─` |
+| `TUI.BoxV` | Vertical line `│` |
+| `TUI.BoxTL` | Top-left corner `┌` |
+| `TUI.BoxTR` | Top-right corner `┐` |
+| `TUI.BoxBL` | Bottom-left corner `└` |
+| `TUI.BoxBR` | Bottom-right corner `┘` |
+
+These are stored as single-byte codes (0xC0–0xC5) in the back-buffer and converted
+to UTF-8 at flush time.  Pass them to `TUI.PutCell`.
+
+### Event Kinds
+
+| Constant | Description |
+|----------|-------------|
+| `TUI.EvNone` | No event |
+| `TUI.EvKey` | Keyboard event; `ev.key` holds the key code |
+| `TUI.EvMouse` | Mouse event; `ev.mx`, `ev.my`, `ev.mb` set |
+| `TUI.EvResize` | Terminal was resized; `ev.cols`, `ev.rows` set |
+
+### Types
+
+| Type | Description |
+|------|-------------|
+| `TUI.Event` | Event record: `kind: INTEGER; key: CHAR; mx, my, mb, cols, rows: INTEGER` |
+| `TUI.View` | `POINTER TO TUI.ViewRec` — base view type |
+| `TUI.ViewRec` | Base record: `x, y, w, h: INTEGER; draw: DrawProc; handle: HandleProc; next, child: View; focused, alwaysOnTop: INTEGER` |
+| `TUI.Window` | `POINTER TO TUI.WindowRec` — view with a titled border |
+| `TUI.WindowRec` | Extends `ViewRec` with `title: ARRAY 256 OF CHAR; moveable: INTEGER` |
+| `TUI.DrawProc` | `PROCEDURE(v: TUI.View)` — callback to paint a view |
+| `TUI.HandleProc` | `PROCEDURE(v: TUI.View; ev: TUI.Event): BOOLEAN` — callback to handle an event |
+
+### Global Variables
+
+| Variable | Description |
+|----------|-------------|
+| `TUI.Cols` | Current terminal width in columns |
+| `TUI.Rows` | Current terminal height in rows |
+| `TUI.Desktop` | Head of the view linked list (back of drawing order) |
+| `TUI.Focused` | Currently focused view (receives keyboard events) |
+| `TUI.ModalResult` | Set non-zero to break out of a `REPEAT ... UNTIL TUI.ModalResult # 0` main loop |
+
+### Procedures
+
+| Procedure / Function | Description |
+|----------------------|-------------|
+| `TUI.Init` | Initialize the TUI (enter raw mode, enable mouse, query terminal size). |
+| `TUI.Done` | Restore the terminal to normal state. |
+| `TUI.Suspend` | Temporarily restore the terminal (e.g. before shelling out). |
+| `TUI.Resume` | Re-enter TUI mode after `Suspend`. |
+| `TUI.ClearBack(fg, bg: INTEGER)` | Fill the entire back-buffer with character `' '` in the given colors. Call at the top of each frame. |
+| `TUI.PutCell(x, y: INTEGER; ch: CHAR; fg, bg: INTEGER)` | Write one character to the back-buffer at column `x`, row `y` (1-based). |
+| `TUI.PutStr(x, y: INTEGER; s: ARRAY OF CHAR; fg, bg: INTEGER)` | Write a string starting at `(x, y)`. One cell per byte; stops at the null terminator. |
+| `TUI.PutInt(x, y, n, fg, bg: INTEGER)` | Write integer `n` as a decimal string at `(x, y)`. |
+| `TUI.FillRect(x, y, w, h: INTEGER; ch: CHAR; fg, bg: INTEGER)` | Fill a rectangle of `w` x `h` cells with `ch`. |
+| `TUI.DrawBox(x, y, w, h, fg, bg: INTEGER)` | Draw a box outline using box-drawing characters. |
+| `TUI.Flush` | Compare back-buffer to front-buffer and emit only the changed cells to the terminal, then swap. |
+| `TUI.InvalidateFront` | Mark the entire front-buffer as dirty so `Flush` redraws everything. Use after a terminal resize. |
+| `TUI.InvalidateLine(y: INTEGER)` | Mark row `y` dirty. |
+| `TUI.SetCursor(x, y: INTEGER)` | Position the hardware cursor. |
+| `TUI.UpdateSize` | Re-query the terminal dimensions; updates `TUI.Cols` and `TUI.Rows`. Returns 1 if size changed. |
+| `TUI.WaitEvent(VAR ev: TUI.Event)` | Block until the next event and fill `ev`. |
+| `TUI.PollEvent(VAR ev: TUI.Event): INTEGER` | Non-blocking event check. Returns 1 if an event was available, 0 otherwise. |
+| `TUI.AddView(v: TUI.View)` | Append `v` to the desktop list (drawn last = on top). |
+| `TUI.RemoveView(v: TUI.View)` | Unlink `v` from the desktop list. |
+| `TUI.BringToFront(v: TUI.View)` | Move `v` to the front of the desktop list. |
+| `TUI.HitTest(x, y: INTEGER): TUI.View` | Return the topmost view whose bounding box contains `(x, y)`, or NIL. |
+| `TUI.TileWindows` | Arrange all `TUI.Window` views in a non-overlapping tile layout. |
+| `TUI.SetFocus(v: TUI.View)` | Set `TUI.Focused` to `v`. |
+| `TUI.FocusNext` | Cycle focus to the next focusable view in the desktop list. |
+| `TUI.Dispatch(ev: TUI.Event): INTEGER` | Route `ev` to the focused view's `handle` proc. Returns the result. |
+| `TUI.RunModal(w: TUI.Window): INTEGER` | Run a modal event loop for window `w` until `TUI.ModalResult` is set; returns `ModalResult`. |
+| `TUI.DrawView(v: TUI.View)` | Call `v.draw(v)` if `v.draw # NIL`. |
+| `TUI.DrawWindow(w: TUI.Window)` | Draw the window border and title, then call `w.draw`. |
+| `TUI.DrawAll` | Repaint all views on the desktop in back-to-front order. |
+
+---
+
+## Widgets - TUI Widget Library
+
+```
+IMPORT Widgets;
+```
+
+Ready-made interactive controls built on `TUI`.  Each widget is a `TUI.View`
+subtype with its own `draw` and `handle` procs; call `TUI.AddView` after creation
+and `TUI.RemoveView` when done.
+
+### Constants
+
+| Constant | Value | Description |
+|----------|-------|-------------|
+| `Widgets.CmdOK` | 1 | Command code sent by OK buttons |
+| `Widgets.CmdCancel` | 2 | Command code sent by Cancel buttons |
+| `Widgets.CmdYes` | 3 | Command code sent by Yes buttons |
+| `Widgets.CmdNo` | 4 | Command code sent by No buttons |
+| `Widgets.MaxItemText` | 64 | Maximum characters per list item |
+| `Widgets.MaxItems` | 256 | Maximum items in a ListBox |
+| `Widgets.MaxMenus` | 8 | Maximum menus in a MenuBar |
+| `Widgets.MaxMenuItems` | 32 | Maximum items per menu |
+
+### Types
+
+| Type | Description |
+|------|-------------|
+| `Widgets.Label` | Read-only text label. Fields: `text: ARRAY 128 OF CHAR; fg, bg: INTEGER` |
+| `Widgets.Button` | Clickable button. Fields: `text: ARRAY 64 OF CHAR; cmd: INTEGER; onClick: CmdProc` |
+| `Widgets.InputLine` | Single-line text input. Fields: `buf: ARRAY 256 OF CHAR; len, pos, scroll: INTEGER` |
+| `Widgets.ListBox` | Scrollable item list. Fields: `items: ARRAY[MaxItems][MaxItemText]; count, sel, scroll: INTEGER; onClick: CmdProc` |
+| `Widgets.CheckBox` | Toggle checkbox. Fields: `text: ARRAY 64 OF CHAR; checked: INTEGER` |
+| `Widgets.StaticText` | Multi-line read-only text. Fields: `text: ARRAY 1024 OF CHAR; fg, bg: INTEGER` |
+| `Widgets.StatusLine` | Single-line status bar. Fields: `text: ARRAY 256 OF CHAR` |
+| `Widgets.MenuBar` | Pulldown menu bar. Has `onCmd: CmdProc` callback fired when a menu item is selected. |
+| `Widgets.CmdProc` | `PROCEDURE(cmd: INTEGER)` — callback type used by Button and ListBox |
+
+### Constructors
+
+| Function | Description |
+|----------|-------------|
+| `Widgets.NewLabel(x, y, w: INTEGER; text: ARRAY OF CHAR): Label` | Create a label at `(x, y)` with width `w`. |
+| `Widgets.NewButton(x, y, w: INTEGER; text: ARRAY OF CHAR; cmd: INTEGER): Button` | Create a button. |
+| `Widgets.NewInputLine(x, y, w: INTEGER): InputLine` | Create an empty single-line input field. |
+| `Widgets.NewListBox(x, y, w, h: INTEGER): ListBox` | Create an empty list box. |
+| `Widgets.NewCheckBox(x, y: INTEGER; text: ARRAY OF CHAR; checked: INTEGER): CheckBox` | Create a checkbox. |
+| `Widgets.NewStaticText(x, y, w, h: INTEGER; text: ARRAY OF CHAR): StaticText` | Create a multi-line static text area. |
+| `Widgets.NewStatusLine(x, y, w: INTEGER; text: ARRAY OF CHAR): StatusLine` | Create a status bar. Typically placed at `y = TUI.Rows`. |
+| `Widgets.NewMenuBar(x, y, w: INTEGER): MenuBar` | Create a menu bar. Typically placed at `y = 1`. |
+
+### Helper Procedures
+
+| Procedure | Description |
+|-----------|-------------|
+| `Widgets.ListBoxAdd(lb: ListBox; item: ARRAY OF CHAR)` | Append an item to the list. |
+| `Widgets.ListBoxClear(lb: ListBox)` | Remove all items and reset selection. |
+| `Widgets.MenuBarAddMenu(mb: MenuBar; title: ARRAY OF CHAR)` | Add a top-level menu with the given title. |
+| `Widgets.MenuBarAddItem(mb: MenuBar; menu: INTEGER; text: ARRAY OF CHAR; cmd: INTEGER)` | Add an item to menu `menu` (0-based) that fires `cmd` when selected. |
+| `Widgets.MenuBarAddSep(mb: MenuBar; menu: INTEGER)` | Add a separator line to menu `menu`. |
+
+---
+
+## FileDialog - Modal File-Open Dialog
+
+```
+IMPORT FileDialog;
+```
+
+Presents a full-screen modal file browser built on `TUI` and `Widgets`.  Saves and
+restores the desktop automatically; the caller's views are unaffected.
+
+| Function | Description |
+|----------|-------------|
+| `FileDialog.Show(title, startPath, filter: ARRAY OF CHAR; VAR result: ARRAY OF CHAR): BOOLEAN` | Display the dialog.  `title` is the window title.  `startPath` is the initial directory (`""` = current working directory).  `filter` is a filename suffix to show (`""` = all files, e.g. `".mod"`).  On confirmation, copies the full absolute path into `result` and returns TRUE.  Returns FALSE if the user cancelled. |
+
+**Navigation:** Arrow keys / PgUp / PgDn move through the file list.  Enter on a
+directory navigates into it; Enter on a file accepts it.  Tab cycles focus between
+list, filename input, OK, and Cancel.  Esc cancels.
+
+---
+
+## Help - Context-sensitive Help Dialog
+
+```
+IMPORT Help;
+```
+
+Searches `stdlib.md` for a query string and shows matching lines in a scrollable
+modal window.  The IDE calls this from the F1 key.
+
+| Procedure | Description |
+|-----------|-------------|
+| `Help.Show(query: ARRAY OF CHAR)` | Open a modal help window pre-searched for `query`.  The user can retype the term and press Enter to re-search.  Up/Down/PgUp/PgDn scroll results; Home/End jump to top/bottom; Esc closes. |
+
+`stdlib.md` is located by searching the binary's directory, then `./stdlib.md`,
+then `../stdlib.md`.
+
+---
+
+## Editor - Gap-buffer Text Editor
+
+```
+IMPORT Editor;
+```
+
+Gap-buffer text editor with undo support.  Implemented in C via FFI.
+Line and column numbers in the API are **1-based**.
+
+### Types
+
+| Type | Description |
+|------|-------------|
+| `Editor.Handle` | Opaque pointer to an editor buffer. NIL = no buffer. |
+
+### Lifecycle
+
+| Function / Procedure | Description |
+|----------------------|-------------|
+| `Editor.New(): Handle` | Allocate a new empty editor buffer. |
+| `Editor.Free(h: Handle)` | Free all resources associated with `h`. |
+| `Editor.Load(h: Handle; path: ARRAY OF CHAR): INTEGER` | Load the file at `path` into `h`. Returns 0 on success, non-zero on error. |
+| `Editor.Save(h: Handle; path: ARRAY OF CHAR): INTEGER` | Write the buffer to `path`. Returns 0 on success, non-zero on error. |
+
+### Buffer State
+
+| Function | Description |
+|----------|-------------|
+| `Editor.Len(h): INTEGER` | Total character count in the buffer. |
+| `Editor.LineCount(h): INTEGER` | Number of lines in the buffer. |
+| `Editor.IsModified(h): INTEGER` | Non-zero if the buffer has unsaved changes. |
+| `Editor.CursorPos(h): INTEGER` | Absolute character offset of the cursor. |
+| `Editor.CursorLine(h): INTEGER` | Line number of the cursor (1-based). |
+| `Editor.CursorCol(h): INTEGER` | Column of the cursor (1-based). |
+
+### Cursor Movement
+
+| Procedure | Description |
+|-----------|-------------|
+| `Editor.MoveLeft(h)` | Move cursor one character left. |
+| `Editor.MoveRight(h)` | Move cursor one character right. |
+| `Editor.MoveUp(h)` | Move cursor one line up. |
+| `Editor.MoveDown(h)` | Move cursor one line down. |
+| `Editor.MoveLineStart(h)` | Move cursor to start of current line. |
+| `Editor.MoveLineEnd(h)` | Move cursor to end of current line. |
+| `Editor.GotoLine(h: Handle; line: INTEGER)` | Move cursor to line `line` (1-based). |
+| `Editor.GotoPos(h: Handle; pos: INTEGER)` | Move cursor to absolute character offset `pos`. |
+
+### Editing
+
+| Procedure | Description |
+|-----------|-------------|
+| `Editor.InsertChar(h: Handle; ch: CHAR)` | Insert character `ch` at the cursor. |
+| `Editor.InsertStr(h: Handle; s: ARRAY OF CHAR)` | Insert string `s` at the cursor. |
+| `Editor.Backspace(h: Handle)` | Delete the character before the cursor. |
+| `Editor.DeleteChar(h: Handle)` | Delete the character at the cursor. |
+| `Editor.Undo(h: Handle)` | Undo the last edit. |
+
+### Rendering and Search
+
+| Function / Procedure | Description |
+|----------------------|-------------|
+| `Editor.GetLine(h: Handle; lineNo, bufsize: INTEGER; VAR buf: ARRAY OF CHAR): INTEGER` | Copy line `lineNo` (1-based) into `buf`, limited to `bufsize` bytes.  Pass `LEN(buf)` as `bufsize`.  Returns the character count. |
+| `Editor.Find(h: Handle; pat: ARRAY OF CHAR; caseSensitive, wholeWord: INTEGER): INTEGER` | Search for `pat`. Returns 1 if found (cursor moves to match), 0 otherwise. |
+| `Editor.FindAgain(h: Handle): INTEGER` | Repeat the last search. Returns 1 if found. |
+| `Editor.Replace(h: Handle; repl: ARRAY OF CHAR): INTEGER` | Replace the current match with `repl`. Returns 1 on success. |
+
+---
+
+## FastaParser - FASTA Sequence File Parser
+
+```
+IMPORT FastaParser;
+```
+
+Streaming parser for FASTA-format files.  Iterates records without loading the
+entire file into memory.
+
+### Constants
+
+| Constant | Value | Description |
+|----------|-------|-------------|
+| `FastaParser.MaxIdLen` | 128 | Maximum bytes in a sequence identifier |
+
+### Types
+
+| Type | Description |
+|------|-------------|
+| `FastaParser.Scanner` | Parser state record.  Declare `VAR s: FastaParser.Scanner`.  Public field: `eof: BOOLEAN`. |
+
+### Procedures
+
+| Procedure / Function | Description |
+|----------------------|-------------|
+| `FastaParser.InitScanner(VAR s: Scanner; f: Files.File)` | Initialize `s` to read from file `f` (already opened with `Files.Old`). |
+| `FastaParser.NextRecord(VAR s: Scanner; VAR id: ARRAY OF CHAR): BOOLEAN` | Advance to the next `>` header.  Copies the identifier into `id` (up to `LEN(id)-1` bytes) and returns TRUE.  Returns FALSE at end of file. |
+| `FastaParser.ReadChunk(VAR s: Scanner; VAR buffer: ARRAY OF CHAR): INTEGER` | Read sequence data for the current record into `buffer`.  Returns the number of characters written.  Whitespace is stripped.  Must call `NextRecord` first.  Returns 0 and sets `buffer[0] := 0X` if called out of sequence. |
+
+**Typical pattern:**
+```oberon
+VAR s: FastaParser.Scanner; id: ARRAY 128 OF CHAR; seq: ARRAY 4096 OF CHAR;
+f := Files.Old("sequences.fasta");
+FastaParser.InitScanner(s, f);
+WHILE FastaParser.NextRecord(s, id) DO
+  n := FastaParser.ReadChunk(s, seq);
+  (* process id and seq *)
+END
+```
+
+---
+
+## DataFrame - Tabular Data
+
+```
+IMPORT DataFrame;
+```
+
+In-memory table with up to `MAXCOLS` columns and `MAXROWS` rows.  All cell values
+are stored internally as strings; numeric accessors convert on the fly.
+
+### Constants
+
+| Constant | Value | Description |
+|----------|-------|-------------|
+| `DataFrame.MAXCOLS` | 32 | Maximum columns |
+| `DataFrame.MAXROWS` | 32768 | Maximum rows |
+| `DataFrame.CNAMELEN` | 64 | Maximum column-name length |
+| `DataFrame.CELLLEN` | 64 | Maximum cell string length |
+| `DataFrame.OK` | 0 | Success |
+| `DataFrame.ERR_COL` | 1 | Column index out of range |
+| `DataFrame.ERR_ROW` | 2 | Row index out of range |
+| `DataFrame.ERR_FULL` | 3 | Table is full |
+| `DataFrame.ERR_FILE` | 4 | File not found or I/O error |
+
+### Types
+
+| Type | Description |
+|------|-------------|
+| `DataFrame.DataFrame` | `POINTER TO DataFrameRec` — opaque table handle.  NIL = error / not created. |
+
+### Construction and Dimensions
+
+| Function / Procedure | Description |
+|----------------------|-------------|
+| `DataFrame.Create(): DataFrame` | Allocate and return an empty DataFrame. |
+| `DataFrame.AddCol(df: DataFrame; name: ARRAY OF CHAR): INTEGER` | Add a column named `name`. Returns the new column index, or -1 if at capacity. |
+| `DataFrame.AddRow(df: DataFrame): INTEGER` | Append a blank row. Returns the new row index, or -1 if at capacity. |
+| `DataFrame.NCols(df): INTEGER` | Number of columns. |
+| `DataFrame.NRows(df): INTEGER` | Number of rows. |
+| `DataFrame.ColName(df: DataFrame; c: INTEGER; VAR name: ARRAY OF CHAR)` | Copy the name of column `c` into `name`. Sets `name` to `""` if `c` is out of range. |
+| `DataFrame.FindCol(df: DataFrame; name: ARRAY OF CHAR): INTEGER` | Return the index of the column named `name`, or -1 if not found. |
+
+### Cell Setters
+
+| Procedure | Description |
+|-----------|-------------|
+| `DataFrame.SetStr(df: DataFrame; r, c: INTEGER; val: ARRAY OF CHAR)` | Set cell `(r, c)` to a string value. |
+| `DataFrame.SetInt(df: DataFrame; r, c, val: INTEGER)` | Set cell `(r, c)` to an integer (stored as a string). |
+| `DataFrame.SetReal(df: DataFrame; r, c: INTEGER; val: REAL)` | Set cell `(r, c)` to a real (stored as a string). |
+
+### Cell Getters
+
+| Function / Procedure | Description |
+|----------------------|-------------|
+| `DataFrame.GetStr(df: DataFrame; r, c: INTEGER; VAR val: ARRAY OF CHAR)` | Copy cell `(r, c)` into `val`. Sets `val` to `""` for bad indices. |
+| `DataFrame.GetInt(df: DataFrame; r, c: INTEGER; VAR val: INTEGER): BOOLEAN` | Parse cell `(r, c)` as integer into `val`. Returns FALSE if not a valid integer. |
+| `DataFrame.GetReal(df: DataFrame; r, c: INTEGER; VAR val: REAL): BOOLEAN` | Parse cell `(r, c)` as real into `val`. Returns FALSE if not a valid number. |
+
+### File Loading
+
+| Function | Description |
+|----------|-------------|
+| `DataFrame.LoadCSV(fname: ARRAY OF CHAR; hasHeader: BOOLEAN; VAR err: INTEGER): DataFrame` | Load a CSV file. `hasHeader = TRUE` treats the first row as column names. Sets `err` to `OK` or an `ERR_*` constant. Returns NIL on file error. |
+| `DataFrame.LoadTSV(fname: ARRAY OF CHAR; hasHeader: BOOLEAN; VAR err: INTEGER): DataFrame` | Load a tab-separated file. Same semantics as `LoadCSV`. |
+| `DataFrame.LoadSep(fname: ARRAY OF CHAR; sep: CHAR; hasHeader: BOOLEAN; VAR err: INTEGER): DataFrame` | Load a file with an arbitrary separator character `sep`. |
+
+### Display
+
+| Procedure | Description |
+|-----------|-------------|
+| `DataFrame.Info(df: DataFrame)` | Print column count, row count, and column names to stdout. |
+| `DataFrame.Head(df: DataFrame; n: INTEGER)` | Print the first `n` rows with column headers. |
+| `DataFrame.Tail(df: DataFrame; n: INTEGER)` | Print the last `n` rows with column headers. |
+| `DataFrame.Print(df: DataFrame)` | Print all rows with column headers. |
+
+---
+
+## DBF - dBASE/FoxPro Database Files
+
+```
+IMPORT DBF;
+```
+
+Read and write dBASE III / FoxPro `.dbf` files.  Supports Character (`C`), Numeric
+(`N`), Logical (`L`), and Memo (`M`) field types.
+
+### Constants
+
+| Constant | Description |
+|----------|-------------|
+| `DBF.MaxFields` | Maximum number of fields per database (32) |
+| `DBF.TypeChar` | Field type character `'C'` |
+| `DBF.TypeNumeric` | Field type character `'N'` |
+| `DBF.TypeLogical` | Field type character `'L'` |
+| `DBF.TypeMemo` | Field type character `'M'` |
+
+### Types
+
+| Type | Description |
+|------|-------------|
+| `DBF.Field` | Field descriptor: `name: ARRAY 11 OF CHAR; type: CHAR; len, dec: BYTE` |
+| `DBF.Database` | Open database state: `f: Files.File; numFields, recordLen, numRecs, headerLen: INTEGER; fields: ARRAY MaxFields OF Field` |
+| `DBF.Index` | In-memory sorted index: `count, fieldIdx: INTEGER` |
+| `DBF.ValidationResult` | Result of `Validate`: `ok: BOOLEAN; recNum, fieldIdx: INTEGER; msg: ARRAY 64 OF CHAR` |
+
+### Field Construction
+
+| Procedure | Description |
+|-----------|-------------|
+| `DBF.MakeField(VAR f: Field; name: ARRAY OF CHAR; ftype: CHAR; len, dec: BYTE)` | Fill a `Field` record with the given name, type, total length, and decimal places. |
+
+### File Lifecycle
+
+| Procedure | Description |
+|-----------|-------------|
+| `DBF.Create(VAR db: Database; filename: ARRAY OF CHAR; VAR flds: ARRAY OF Field; n: INTEGER)` | Create a new `.dbf` file with `n` fields from `flds`. |
+| `DBF.Open(VAR db: Database; filename: ARRAY OF CHAR)` | Open an existing `.dbf` file. |
+| `DBF.Close(VAR db: Database)` | Write the EOF marker, flush, and close. |
+
+### Navigation
+
+| Function / Procedure | Description |
+|----------------------|-------------|
+| `DBF.RecordCount(VAR db): INTEGER` | Number of records (including deleted). |
+| `DBF.SeekRecord(VAR db: Database; recNum: INTEGER)` | Position the rider at record `recNum` (0-based). |
+| `DBF.IsDeleted(VAR db: Database; recNum: INTEGER): BOOLEAN` | TRUE if record `recNum` is marked deleted. |
+
+### Reading Fields
+
+| Procedure / Function | Description |
+|----------------------|-------------|
+| `DBF.GetField(VAR db: Database; recNum, fieldIdx: INTEGER; VAR dst: ARRAY OF CHAR)` | Read a field as a trimmed string. |
+| `DBF.GetFieldInt(VAR db: Database; recNum, fieldIdx: INTEGER; VAR n: INTEGER): BOOLEAN` | Read a numeric field as integer. Returns FALSE if not parseable. |
+| `DBF.GetFieldReal(VAR db: Database; recNum, fieldIdx: INTEGER; VAR x: REAL): BOOLEAN` | Read a numeric field as real. Returns FALSE if not parseable. |
+| `DBF.GetFieldBool(VAR db: Database; recNum, fieldIdx: INTEGER): BOOLEAN` | Read a logical field (T/t/Y/y = TRUE). |
+| `DBF.GetRecord(VAR db: Database; recNum: INTEGER; VAR packed: ARRAY OF CHAR)` | Read all fields as a pipe-delimited packed string. |
+
+### Writing Records
+
+| Procedure | Description |
+|-----------|-------------|
+| `DBF.AppendFields(VAR db: Database; packed: ARRAY OF CHAR)` | Append a new record from a pipe-delimited packed string. |
+| `DBF.UpdateField(VAR db: Database; recNum, fieldIdx: INTEGER; value: ARRAY OF CHAR)` | Overwrite one field in an existing record. |
+| `DBF.UpdateFieldInt(VAR db: Database; recNum, fieldIdx, n: INTEGER)` | Overwrite a numeric field with integer `n`. |
+| `DBF.UpdateFieldReal(VAR db: Database; recNum, fieldIdx: INTEGER; x: REAL)` | Overwrite a numeric field with real `x`. |
+| `DBF.UpdateFieldBool(VAR db: Database; recNum, fieldIdx: INTEGER; v: BOOLEAN)` | Overwrite a logical field. |
+| `DBF.UpdateRecord(VAR db: Database; recNum: INTEGER; packed: ARRAY OF CHAR)` | Overwrite all fields of record `recNum` from a pipe-delimited string. |
+
+### Delete / Undelete / Pack
+
+| Procedure | Description |
+|-----------|-------------|
+| `DBF.Delete(VAR db: Database; recNum: INTEGER)` | Mark record `recNum` as deleted. |
+| `DBF.Undelete(VAR db: Database; recNum: INTEGER)` | Clear the deleted marker on record `recNum`. |
+| `DBF.Pack(VAR db: Database; filename: ARRAY OF CHAR)` | Physically remove all deleted records by rewriting the file. |
+
+### Search and Index
+
+| Function | Description |
+|----------|-------------|
+| `DBF.Find(VAR db: Database; fieldIdx: INTEGER; value: ARRAY OF CHAR): INTEGER` | Linear search; returns first matching record index, or -1. |
+| `DBF.FindNext(VAR db: Database; fieldIdx, fromRec: INTEGER; value: ARRAY OF CHAR): INTEGER` | Linear search starting at `fromRec`. Returns matching index or -1. |
+| `DBF.BuildIndex(VAR db: Database; fieldIdx: INTEGER; VAR idx: Index)` | Build an in-memory sorted index on field `fieldIdx`. |
+| `DBF.IndexFind(VAR idx: Index; value: ARRAY OF CHAR): INTEGER` | Binary search in an index. Returns matching record number or -1. |
+
+### Export and Validate
+
+| Procedure | Description |
+|-----------|-------------|
+| `DBF.ExportCSV(VAR db: Database; csvfile: ARRAY OF CHAR)` | Write all non-deleted records to a CSV file with a header row. |
+| `DBF.Validate(VAR db: Database; VAR result: ValidationResult)` | Check all non-deleted records for type validity. Sets `result.ok` to FALSE and fills `result.msg` on the first error found. |
+
+---
+
+## PCA - Principal Component Analysis
+
+```
+IMPORT PCA;
+```
+
+Performs PCA on numeric columns of a `DataFrame` using power iteration with
+deflation.  Results are printed to stdout as CSV.
+
+### Limits
+
+| Constant | Value | Description |
+|----------|-------|-------------|
+| `PCA.MAXFEAT` | 64 | Maximum number of feature columns |
+| `PCA.MAXK` | 16 | Maximum number of principal components |
+| `PCA.PCA_MAXROWS` | 1024 | Maximum number of rows |
+
+### Procedures
+
+| Procedure | Description |
+|-----------|-------------|
+| `PCA.Execute(df: DataFrame.DataFrame; featureCols: SET; labelCol, k: INTEGER)` | Standardize the columns indicated by `featureCols` (a SET of column indices), compute the top `k` principal components via power iteration, project each row, and print a CSV with columns `PC1, PC2, ..., PCk, Label` where `Label` comes from column `labelCol`. |
+
+---
+
+## SummarizedExperiment - Bioinformatics Assay Container
+
+```
+IMPORT SummarizedExperiment;
+```
+
+An Oberon port of Bioconductor's `SummarizedExperiment`.  Stores one or more named
+numeric assay matrices (rows = features/genes, columns = samples) alongside
+per-row and per-column metadata DataFrames and a string key/value metadata dict.
+
+### Constants
+
+| Constant | Value | Description |
+|----------|-------|-------------|
+| `SummarizedExperiment.MAXROWS` | 4096 | Maximum feature (row) count |
+| `SummarizedExperiment.MAXCOLS` | 256 | Maximum sample (column) count |
+| `SummarizedExperiment.MAXASSAYS` | 8 | Maximum number of named assays |
+| `SummarizedExperiment.NAMELEN` | 64 | Maximum length of row/column/assay names |
+| `SummarizedExperiment.OK` | 0 | Success |
+| `SummarizedExperiment.ERR_NIL` | 1 | SE pointer is NIL |
+| `SummarizedExperiment.ERR_DIM` | 2 | Dimension out of range |
+| `SummarizedExperiment.ERR_ROW` | 3 | Row index out of range |
+| `SummarizedExperiment.ERR_COL` | 4 | Column index out of range |
+| `SummarizedExperiment.ERR_ASSAY` | 5 | Assay index or name invalid |
+| `SummarizedExperiment.ERR_FULL` | 6 | Capacity exceeded |
+| `SummarizedExperiment.ERR_NAME` | 7 | Name already exists or is empty |
+
+### Types
+
+| Type | Description |
+|------|-------------|
+| `SummarizedExperiment.SE` | `POINTER TO SERec` — the top-level container handle |
+
+### Construction and Dimensions
+
+| Function / Procedure | Description |
+|----------------------|-------------|
+| `SummarizedExperiment.Create(nrows, ncols: INTEGER; VAR err: INTEGER): SE` | Allocate an SE with `nrows` features and `ncols` samples. Sets `err`. |
+| `SummarizedExperiment.NRows(se: SE): INTEGER` | Number of feature rows. |
+| `SummarizedExperiment.NCols(se: SE): INTEGER` | Number of sample columns. |
+| `SummarizedExperiment.AssayCount(se: SE): INTEGER` | Number of assays added so far. |
+| `SummarizedExperiment.Info(se: SE)` | Print dimensions and assay names to stdout. |
+
+### Assays
+
+| Function / Procedure | Description |
+|----------------------|-------------|
+| `SummarizedExperiment.AddAssay(se: SE; name: ARRAY OF CHAR; VAR err: INTEGER): INTEGER` | Add a named zero-filled assay matrix.  Returns its index, or -1 on error. |
+| `SummarizedExperiment.FindAssay(se: SE; name: ARRAY OF CHAR): INTEGER` | Return the index of the assay named `name`, or -1 if not found. |
+| `SummarizedExperiment.AssayName(se: SE; a: INTEGER; VAR name: ARRAY OF CHAR)` | Copy the name of assay `a` into `name`. |
+| `SummarizedExperiment.SetAssay(se: SE; a, r, c: INTEGER; x: REAL; VAR err: INTEGER)` | Set cell `(r, c)` of assay `a` to `x`. |
+| `SummarizedExperiment.GetAssay(se: SE; a, r, c: INTEGER; VAR x: REAL; VAR err: INTEGER)` | Get cell `(r, c)` of assay `a` into `x`. |
+| `SummarizedExperiment.SetAssayByName(se: SE; assayName: ARRAY OF CHAR; r, c: INTEGER; x: REAL; VAR err: INTEGER)` | Set by assay name instead of index. |
+| `SummarizedExperiment.GetAssayByName(se: SE; assayName: ARRAY OF CHAR; r, c: INTEGER; VAR x: REAL; VAR err: INTEGER)` | Get by assay name instead of index. |
+
+### Row / Column Names
+
+| Procedure | Description |
+|-----------|-------------|
+| `SummarizedExperiment.SetRowName(se: SE; r: INTEGER; name: ARRAY OF CHAR; VAR err: INTEGER)` | Set the name of feature row `r`. |
+| `SummarizedExperiment.RowName(se: SE; r: INTEGER; VAR name: ARRAY OF CHAR)` | Copy the name of row `r` into `name`. |
+| `SummarizedExperiment.SetColName(se: SE; c: INTEGER; name: ARRAY OF CHAR; VAR err: INTEGER)` | Set the name of sample column `c`. |
+| `SummarizedExperiment.ColName(se: SE; c: INTEGER; VAR name: ARRAY OF CHAR)` | Copy the name of column `c` into `name`. |
+
+### Row Metadata (rowData)
+
+The rowData is a `DataFrame` with one row per feature.  Use the procedures below to
+add columns and set/get values by column name.
+
+| Function / Procedure | Description |
+|----------------------|-------------|
+| `SummarizedExperiment.AddRowDataCol(se: SE; name: ARRAY OF CHAR; VAR err: INTEGER): INTEGER` | Add a rowData column named `name`. Returns column index or -1. |
+| `SummarizedExperiment.FindRowDataCol(se: SE; name: ARRAY OF CHAR): INTEGER` | Find a rowData column by name. |
+| `SummarizedExperiment.SetRowDataStr(se: SE; r: INTEGER; colName, val: ARRAY OF CHAR; VAR err: INTEGER)` | Set a string cell in rowData. |
+| `SummarizedExperiment.GetRowDataStr(se: SE; r: INTEGER; colName: ARRAY OF CHAR; VAR val: ARRAY OF CHAR; VAR err: INTEGER)` | Get a string cell from rowData. |
+| `SummarizedExperiment.SetRowDataInt(se: SE; r: INTEGER; colName: ARRAY OF CHAR; val: INTEGER; VAR err: INTEGER)` | Set an integer cell in rowData. |
+| `SummarizedExperiment.GetRowDataInt(se: SE; r: INTEGER; colName: ARRAY OF CHAR; VAR val: INTEGER; VAR err: INTEGER)` | Get an integer cell from rowData. |
+| `SummarizedExperiment.SetRowDataReal(se: SE; r: INTEGER; colName: ARRAY OF CHAR; val: REAL; VAR err: INTEGER)` | Set a real cell in rowData. |
+| `SummarizedExperiment.GetRowDataReal(se: SE; r: INTEGER; colName: ARRAY OF CHAR; VAR val: REAL; VAR err: INTEGER)` | Get a real cell from rowData. |
+| `SummarizedExperiment.RowDataFrame(se: SE): DataFrame.DataFrame` | Return the underlying rowData DataFrame for direct access. |
+
+### Column Metadata (colData)
+
+Same API as rowData but indexed by sample column index `cix`.
+
+| Function / Procedure | Description |
+|----------------------|-------------|
+| `SummarizedExperiment.AddColDataCol(se: SE; name: ARRAY OF CHAR; VAR err: INTEGER): INTEGER` | Add a colData column. |
+| `SummarizedExperiment.FindColDataCol(se: SE; name: ARRAY OF CHAR): INTEGER` | Find a colData column by name. |
+| `SummarizedExperiment.SetColDataStr(se: SE; cix: INTEGER; colName, val: ARRAY OF CHAR; VAR err: INTEGER)` | Set a string cell. |
+| `SummarizedExperiment.GetColDataStr(se: SE; cix: INTEGER; colName: ARRAY OF CHAR; VAR val: ARRAY OF CHAR; VAR err: INTEGER)` | Get a string cell. |
+| `SummarizedExperiment.SetColDataInt(se: SE; cix: INTEGER; colName: ARRAY OF CHAR; val: INTEGER; VAR err: INTEGER)` | Set an integer cell. |
+| `SummarizedExperiment.GetColDataInt(se: SE; cix: INTEGER; colName: ARRAY OF CHAR; VAR val: INTEGER; VAR err: INTEGER)` | Get an integer cell. |
+| `SummarizedExperiment.SetColDataReal(se: SE; cix: INTEGER; colName: ARRAY OF CHAR; val: REAL; VAR err: INTEGER)` | Set a real cell. |
+| `SummarizedExperiment.GetColDataReal(se: SE; cix: INTEGER; colName: ARRAY OF CHAR; VAR val: REAL; VAR err: INTEGER)` | Get a real cell. |
+| `SummarizedExperiment.ColDataFrame(se: SE): DataFrame.DataFrame` | Return the underlying colData DataFrame. |
+
+### Metadata
+
+| Function / Procedure | Description |
+|----------------------|-------------|
+| `SummarizedExperiment.MetadataPut(se: SE; key, value: ARRAY OF CHAR; VAR err: INTEGER)` | Store a key/value string pair in the SE's metadata dictionary. |
+| `SummarizedExperiment.MetadataGet(se: SE; key: ARRAY OF CHAR; VAR value: ARRAY OF CHAR): BOOLEAN` | Retrieve a metadata value by key. Returns FALSE if not found. |
+
+---
+
+## Sixel - Sixel Graphics
+
+```
+IMPORT Sixel;
+```
+
+640 × 480 pixel buffer rendered as DEC Sixel graphics sequences on terminals that
+support them (e.g. xterm, iTerm2, mlterm).  Pixels are addressed as palette color
+indices (0–255).
+
+### Constants
+
+| Constant | Value | Description |
+|----------|-------|-------------|
+| `Sixel.Width` | 640 | Buffer width in pixels |
+| `Sixel.Height` | 480 | Buffer height in pixels |
+
+### Procedures
+
+| Procedure | Description |
+|-----------|-------------|
+| `Sixel.Init(w, h: INTEGER)` | Clear the pixel buffer and reset the palette to all-black. (`w` and `h` are accepted but the buffer is always 640 × 480.) |
+| `Sixel.SetPalette(idx, r, g, b: INTEGER)` | Define palette entry `idx` (0–255) with RGB values in the range 0–255. Internally converts to Sixel's 0–100 range. |
+| `Sixel.Plot(x, y, color: INTEGER)` | Set pixel at `(x, y)` to palette index `color`. |
+| `Sixel.ClearBuf` | Fill the entire pixel buffer with color index 0. |
+| `Sixel.Flush` | Encode the buffer as a Sixel stream and write it to stdout. |
+| `Sixel.Line(x0, y0, x1, y1, color: INTEGER)` | Draw a Bresenham line from `(x0, y0)` to `(x1, y1)` using `Plot`. |
+
+---
+
+## Turtle - Turtle Graphics
+
+```
+IMPORT Turtle;
+```
+
+Logo-style turtle graphics drawn into the `Graphics` pixel buffer.  The canvas is
+240 × 100 (matching `Graphics`).  The turtle starts at `(120, 50)` facing East
+(angle 0), pen down, color 7.
+
+### Types
+
+| Type | Description |
+|------|-------------|
+| `Turtle.State` | Record holding the turtle's position and heading: `x, y, angle: REAL` |
+
+### Procedures and Functions
+
+| Procedure / Function | Description |
+|----------------------|-------------|
+| `Turtle.Init` | Clear the pixel buffer and reset the turtle to the center, facing East, pen down, color 7. |
+| `Turtle.SetPos(x, y: REAL)` | Teleport the turtle to `(x, y)` without drawing. |
+| `Turtle.Rotate(degrees: REAL)` | Set the absolute heading in degrees (0 = East, increases clockwise). |
+| `Turtle.Right(degrees: REAL)` | Turn the turtle right (clockwise) by `degrees` relative to the current heading. |
+| `Turtle.Forward(dist: REAL)` | Move the turtle forward by `dist` pixels. If the pen is down, draws a line. Clamps position to the canvas bounds. |
+| `Turtle.GetX(): REAL` | Return the current X coordinate. |
+| `Turtle.GetY(): REAL` | Return the current Y coordinate. |
+| `Turtle.GetHeading(): REAL` | Return the current heading in degrees. |
+| `Turtle.GetState(VAR s: Turtle.State)` | Capture the current position and heading into `s`. |
+| `Turtle.RestoreState(s: Turtle.State)` | Restore position and heading from a previously saved state. |
+| `Turtle.SetColor(c: INTEGER)` | Set the pen color (ANSI color index 1–7). |
+| `Turtle.PenUp` | Lift the pen: `Forward` moves without drawing. |
+| `Turtle.PenDown` | Lower the pen: `Forward` draws. |
+| `Turtle.Update` | Flush the `Graphics` pixel buffer to the terminal. Call after each frame. |
+
+---
+
+## Menu - Text-based Popup Menu
+
+```
+IMPORT Menu;
+```
+
+Retro dBASE-style interactive menu.  Uses `Terminal` raw mode and `Graphics` for
+rendering.
+
+### Types
+
+| Type | Description |
+|------|-------------|
+| `Menu.Option` | `ARRAY 64 OF CHAR` — a single menu item string |
+| `Menu.MenuData` | Menu state record: `count: INTEGER; options: ARRAY 32 OF Option; fg, bg, highlightFg, highlightBg, width: INTEGER` |
+
+### Procedures
+
+| Procedure / Function | Description |
+|----------------------|-------------|
+| `Menu.Init(VAR m: MenuData)` | Initialize `m` with default colors (white text on blue, black-on-white highlight) and zero items. |
+| `Menu.Add(VAR m: MenuData; text: ARRAY OF CHAR)` | Append an item. Automatically widens the menu box to fit. Maximum 32 items. |
+| `Menu.Run(VAR m: MenuData; x, y: INTEGER): INTEGER` | Display the menu at `(x, y)` and run the selection loop.  Up/Down navigate; number keys jump directly; Enter confirms.  Returns the 0-based index of the selected item. |
+
+---
+
+## Base64 - Base64 Encoding
+
+```
+IMPORT Base64;
+```
+
+| Procedure | Description |
+|-----------|-------------|
+| `Base64.Encode(VAR src, dst: ARRAY OF CHAR)` | Encode the null-terminated string `src` to standard Base64 in `dst`.  Stops at the first null byte in `src`. |
+| `Base64.EncodeBin(VAR src: ARRAY OF CHAR; n: INTEGER; VAR dst: ARRAY OF CHAR)` | Binary-safe variant: encode exactly `n` bytes from `src` (null bytes included) into `dst`. |
+
+The output alphabet is `A–Z a–z 0–9 + /` with `=` padding.
+
+---
+
+## XHTML - HTML/XHTML Parsing Utilities
+
+```
+IMPORT XHTML;
+```
+
+| Procedure / Function | Description |
+|----------------------|-------------|
+| `XHTML.ToText(src: ARRAY OF CHAR; VAR dst: ARRAY OF CHAR)` | Strip all HTML tags from `src` and write plain text to `dst`.  Block-level elements (`<p>`, `<br>`, `<div>`, `<li>`, headings, etc.) become newlines.  `<script>` and `<style>` bodies are removed entirely.  HTML entities are decoded to their nearest ASCII equivalent.  Consecutive whitespace collapses to a single space. |
+| `XHTML.AttrValue(src: ARRAY OF CHAR; attr: ARRAY OF CHAR; VAR val: ARRAY OF CHAR): BOOLEAN` | Find the first occurrence of attribute `attr` (case-insensitive; supply in lowercase) anywhere in `src` and copy its quoted value into `val`.  Returns TRUE on success.  Useful for parsing OPF/container.xml fragments without a full XML parser. |
+
+---
+
+## NumberTheory - Number Theory Utilities
+
+```
+IMPORT NumberTheory;
+```
+
+| Function | Returns | Description |
+|----------|---------|-------------|
+| `NumberTheory.IsPrime(N: INTEGER): BOOLEAN` | BOOLEAN | TRUE if `N` is a prime number.  Uses trial division up to √N. |
+| `NumberTheory.GCD(a, b: LONGINT): LONGINT` | LONGINT | Greatest common divisor of `a` and `b` via recursive Euclidean algorithm. |
+
+---
+
+## MathUtils - Simple Math Utilities
+
+```
+IMPORT MathUtils;
+```
+
+A small demonstration module with a call counter.
+
+### Constants and Variables
+
+| Name | Type | Description |
+|------|------|-------------|
+| `MathUtils.MaxVal` | INTEGER constant | Compile-time constant with value 1000 |
+| `MathUtils.CallCount` | INTEGER variable | Running count of `Square` and `Cube` calls; starts at 0 |
+
+### Procedures
+
+| Function / Procedure | Description |
+|----------------------|-------------|
+| `MathUtils.Square(n: INTEGER): INTEGER` | Return `n * n`.  Increments `CallCount`. |
+| `MathUtils.Cube(n: INTEGER): INTEGER` | Return `n * n * n`.  Increments `CallCount`. |
+| `MathUtils.PrintInfo()` | Print `"MathUtils loaded. MaxVal = 1000"` to stdout. |
