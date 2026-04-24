@@ -568,7 +568,7 @@ static const char *import_realname(const char *alias) {
  * Built-in module list
  * ----------------------------------------------------------------------- */
 static const char *g_builtins[] = {
-    "Out","In","Random","Terminal","Graphics","Math","Strings","Files","Args","Dict","Zip",
+    "Out","In","Terminal","Graphics","Strings","Files","Args","Dict","Zip",
     "Env","OS","Time",NULL
 };
 static int is_builtin_module(const char *s) {
@@ -1114,50 +1114,6 @@ static int try_emit_import(CG *g, Node *fa, Node *args) {
 					return 1;
 				}
     }
-    /* Random module */
-    if (!strcmp(mod,"Random")) {
-        if (!strcmp(proc,"Int")) {
-            /* Random.Int(n) -> random integer in [0, n) */
-            emit(g,"(int)(rand()%%(unsigned)("); emit_expr(g,a0); emit(g,"))");
-            return 1;
-        }
-        if (!strcmp(proc,"Real")) {
-            /* Random.Real() -> random double in [0.0, 1.0) */
-            emit(g,"((double)rand()/(double)RAND_MAX)");
-            return 1;
-        }
-    }
-    /* Math module */
-    if (!strcmp(mod,"Math")) {
-        Node *a2 = a1 ? a1->next : NULL;
-        /* one-argument functions */
-        if (!strcmp(proc,"sqrt"))   { emit(g,"sqrt(");  emit_expr(g,a0); emit(g,")"); return 1; }
-        if (!strcmp(proc,"exp"))    { emit(g,"exp(");   emit_expr(g,a0); emit(g,")"); return 1; }
-        if (!strcmp(proc,"ln"))     { emit(g,"log(");   emit_expr(g,a0); emit(g,")"); return 1; }
-        if (!strcmp(proc,"log"))    { emit(g,"log10("); emit_expr(g,a0); emit(g,")"); return 1; }
-        if (!strcmp(proc,"sin"))    { emit(g,"sin(");   emit_expr(g,a0); emit(g,")"); return 1; }
-        if (!strcmp(proc,"cos"))    { emit(g,"cos(");   emit_expr(g,a0); emit(g,")"); return 1; }
-        if (!strcmp(proc,"tan"))    { emit(g,"tan(");   emit_expr(g,a0); emit(g,")"); return 1; }
-        if (!strcmp(proc,"arcsin")) { emit(g,"asin(");  emit_expr(g,a0); emit(g,")"); return 1; }
-        if (!strcmp(proc,"arccos")) { emit(g,"acos(");  emit_expr(g,a0); emit(g,")"); return 1; }
-        if (!strcmp(proc,"arctan")) { emit(g,"atan(");  emit_expr(g,a0); emit(g,")"); return 1; }
-        if (!strcmp(proc,"floor"))  { emit(g,"floor("); emit_expr(g,a0); emit(g,")"); return 1; }
-        if (!strcmp(proc,"ceil"))   { emit(g,"ceil(");  emit_expr(g,a0); emit(g,")"); return 1; }
-        if (!strcmp(proc,"round"))  { emit(g,"round("); emit_expr(g,a0); emit(g,")"); return 1; }
-        if (!strcmp(proc,"entier")) { emit(g,"(int)floor("); emit_expr(g,a0); emit(g,")"); return 1; }
-        if (!strcmp(proc,"abs"))    { emit(g,"fabs(");  emit_expr(g,a0); emit(g,")"); return 1; }
-        /* two-argument functions */
-        if (!strcmp(proc,"arctan2")) { emit(g,"atan2("); emit_expr(g,a0); emit(g,","); emit_expr(g,a1); emit(g,")"); return 1; }
-        if (!strcmp(proc,"power"))   { emit(g,"pow(");   emit_expr(g,a0); emit(g,","); emit_expr(g,a1); emit(g,")"); return 1; }
-        if (!strcmp(proc,"min"))     { emit(g,"fmin(");  emit_expr(g,a0); emit(g,","); emit_expr(g,a1); emit(g,")"); return 1; }
-        if (!strcmp(proc,"max"))     { emit(g,"fmax(");  emit_expr(g,a0); emit(g,","); emit_expr(g,a1); emit(g,")"); return 1; }
-        if (!strcmp(proc,"clamp"))   {
-            /* clamp(x,lo,hi) = fmin(fmax(x,lo),hi) */
-            emit(g,"fmin(fmax("); emit_expr(g,a0); emit(g,","); emit_expr(g,a1); emit(g,"),"); emit_expr(g,a2); emit(g,")");
-            return 1;
-        }
-        (void)a2;
-    }
     /* Strings module */
     if (!strcmp(mod,"Strings")) {
         Node *a2=a1?a1->next:NULL;
@@ -1434,13 +1390,9 @@ static void emit_expr(CG *g, Node *e) {
         emit_expr(g,e->c0); emit(g,"["); emit_expr(g,e->c1); emit(g,"]");
         break;
     case ND_FIELD_ACCESS:
-        /* Module constants / variables (e.g. Math.pi, Utils.count) */
+        /* Module constants / variables (e.g. Utils.count) */
         if (e->c0 && e->c0->kind==ND_IDENT && is_import(e->c0->str)) {
             const char *real = import_realname(e->c0->str);
-            if (!strcmp(real,"Math")) {
-                if (!strcmp(e->str,"pi")) { emit(g,"M_PI"); break; }
-                if (!strcmp(e->str,"e"))  { emit(g,"M_E");  break; }
-            }
             /* User module variable/constant: alias.Name → RealMod_Name */
             if (!is_builtin_module(real)) {
                 emit(g,"%s_%s", real, e->str);
@@ -2205,8 +2157,6 @@ void codegen(Node *module, FILE *out, int is_main, const char *srcfile) {
     for (int i=0;i<g_nimports;i++) if (!strcmp(g_imports[i],"Terminal")) { has_terminal=1; break; }
     int has_graphics = 0;
     for (int i=0;i<g_nimports;i++) if (!strcmp(g_imports[i],"Graphics")) { has_graphics=1; break; }
-    int has_random = 0;
-    for (int i=0;i<g_nimports;i++) if (!strcmp(g_imports[i],"Random"))   { has_random=1;   break; }
     int has_strings = 0;
     for (int i=0;i<g_nimports;i++) if (!strcmp(g_imports[i],"Strings"))  { has_strings=1;  break; }
     int has_files = 0;
@@ -2225,9 +2175,6 @@ void codegen(Node *module, FILE *out, int is_main, const char *srcfile) {
     for (int i=0;i<g_nimports;i++) if (!strcmp(g_imports[i],"OS"))       { has_os=1;       break; }
     int has_time = 0;
     for (int i=0;i<g_nimports;i++) if (!strcmp(g_imports[i],"Time"))     { has_time=1;     break; }
-
-    if (has_random && !has_terminal)
-        emit(g,"#include <time.h>\n");
 
     /* ── Terminal module runtime (emitted when Terminal is imported) ─ */
     if (has_terminal) {
@@ -3359,7 +3306,6 @@ void codegen(Node *module, FILE *out, int is_main, const char *srcfile) {
         }
         if (has_terminal) iemit(g,"_term_init();\n");
         if (has_graphics) iemit(g,"Graphics_Init();\n");
-        if (has_random && !has_terminal) iemit(g,"srand((unsigned)time(NULL));\n");
         for (int i=0;i<g_nimports;i++) {
             const char *real = g_import_real[i];
             if (!is_builtin_module(real) && !ffi_is_registered(real))
@@ -3383,7 +3329,6 @@ void codegen(Node *module, FILE *out, int is_main, const char *srcfile) {
         iemit(g,"if (_once) return; _once = 1;\n");
         if (has_terminal) iemit(g,"_term_init();\n");
         if (has_graphics) iemit(g,"Graphics_Init();\n");
-        if (has_random && !has_terminal) iemit(g,"srand((unsigned)time(NULL));\n");
         /* Call each user-module dependency's init */
         for (int i=0;i<g_nimports;i++) {
             const char *real = g_import_real[i];
