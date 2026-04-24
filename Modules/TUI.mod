@@ -1,6 +1,6 @@
 MODULE TUI;
 (*
- * TUI — text-user-interface framework built on Terminal and Graphics.
+ * TUI — text-user-interface framework built on Terminal.
  *
  * Screen model
  * ─────────────

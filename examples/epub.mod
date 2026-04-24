@@ -35,7 +35,7 @@ MODULE epub;
  * at the last-read line.
  *)
 
-IMPORT Zip, XHTML, Terminal, Graphics, Strings, Files, Args, Dict, Out, Base64, OS;
+IMPORT Zip, XHTML, Terminal,  Strings, Files, Args, Dict, Out, Base64, OS;
 
 CONST
   MAXSPINE  = 256;
@@ -577,7 +577,7 @@ BEGIN
   Out.String("1337;File=inline=1;width=auto;height=auto;preserveAspectRatio=1:");
   Out.String(b64Buf);
   Out.Char(7X);  (* BEL *)
-  Graphics.Reset  (* flushes stdout and resets any colour state *)
+  Terminal.Reset  (* flushes stdout and resets any colour state *)
 END EmitImage;
 
 (* ── translation popup ───────────────────────────────────────────
@@ -615,7 +615,7 @@ BEGIN
 
   (* ── top border ── *)
   Terminal.Goto(popX, popY);
-  Graphics.Color256(CLR_POPBDR, BG_POPBDR);
+  Terminal.Color256(CLR_POPBDR, BG_POPBDR);
   Out.Char('+');
   c := 0; WHILE c < popW + 2 DO Out.Char('-'); INC(c) END;
   Out.Char('+');
@@ -624,8 +624,8 @@ BEGIN
   i := 0;
   FOR r := 1 TO lc DO
     Terminal.Goto(popX, popY + r);
-    Graphics.Color256(CLR_POPBDR, BG_POPBDR); Out.Char('|');
-    Graphics.Color256(CLR_POP,    BG_POP);    Out.Char(' ');
+    Terminal.Color256(CLR_POPBDR, BG_POPBDR); Out.Char('|');
+    Terminal.Color256(CLR_POP,    BG_POP);    Out.Char(' ');
     c := 0;
     WHILE (text[i] # 0X) & (text[i] # 0AX) & (c < popW) DO
       Out.Char(text[i]); INC(i); INC(c)
@@ -633,26 +633,26 @@ BEGIN
     IF text[i] = 0AX THEN INC(i) END;  (* consume newline *)
     WHILE c < popW DO Out.Char(' '); INC(c) END;
     Out.Char(' ');
-    Graphics.Color256(CLR_POPBDR, BG_POPBDR); Out.Char('|')
+    Terminal.Color256(CLR_POPBDR, BG_POPBDR); Out.Char('|')
   END;
 
   (* ── footer ── *)
   Terminal.Goto(popX, popY + lc + 1);
-  Graphics.Color256(CLR_POPBDR, BG_POPBDR); Out.Char('|');
-  Graphics.Color256(CLR_POPFTR, BG_POPFTR); Out.Char(' ');
+  Terminal.Color256(CLR_POPBDR, BG_POPBDR); Out.Char('|');
+  Terminal.Color256(CLR_POPFTR, BG_POPFTR); Out.Char(' ');
   Out.String("Press any key to close");
   c := 22;
   WHILE c < popW DO Out.Char(' '); INC(c) END;
   Out.Char(' ');
-  Graphics.Color256(CLR_POPBDR, BG_POPBDR); Out.Char('|');
+  Terminal.Color256(CLR_POPBDR, BG_POPBDR); Out.Char('|');
 
   (* ── bottom border ── *)
   Terminal.Goto(popX, popY + popH - 1);
-  Graphics.Color256(CLR_POPBDR, BG_POPBDR);
+  Terminal.Color256(CLR_POPBDR, BG_POPBDR);
   Out.Char('+');
   c := 0; WHILE c < popW + 2 DO Out.Char('-'); INC(c) END;
   Out.Char('+');
-  Graphics.Reset;
+  Terminal.Reset;
 
   (* wait for dismiss *)
   c := Terminal.ReadKey()
@@ -758,18 +758,18 @@ BEGIN
       ImgFullPath(imgSrc, imgFull);
       EmitImage(imgFull)
     ELSE
-      IF isSel THEN Graphics.Color256(CLR_SEL, BG_SEL)
-      ELSE Graphics.Color256(CLR_TEXT, BG_TEXT) END;
+      IF isSel THEN Terminal.Color256(CLR_SEL, BG_SEL)
+      ELSE Terminal.Color256(CLR_TEXT, BG_TEXT) END;
       col := 0;
       WHILE col < tCols DO Out.Char(' '); INC(col) END;
-      Graphics.Reset
+      Terminal.Reset
     END
   ELSE
     IF isSel THEN
-      IF li = selCursor THEN Graphics.Color256(CLR_SELCUR, BG_SELCUR)
-      ELSE Graphics.Color256(CLR_SEL, BG_SEL) END
+      IF li = selCursor THEN Terminal.Color256(CLR_SELCUR, BG_SELCUR)
+      ELSE Terminal.Color256(CLR_SEL, BG_SEL) END
     ELSE
-      Graphics.Color256(CLR_TEXT, BG_TEXT)
+      Terminal.Color256(CLR_TEXT, BG_TEXT)
     END;
     col := 0;
     IF (li >= 0) & (li < nLines) THEN
@@ -777,7 +777,7 @@ BEGIN
       WHILE len > 0 DO Out.Char(wrapBuf[i]); INC(i); DEC(len); INC(col) END
     END;
     WHILE col < tCols DO Out.Char(' '); INC(col) END;
-    Graphics.Reset
+    Terminal.Reset
   END
 END DrawLine;
 
@@ -793,7 +793,7 @@ BEGIN
   END;
 
   Terminal.Goto(1, tRows);
-  Graphics.Color256(CLR_STATUS, BG_STATUS);
+  Terminal.Color256(CLR_STATUS, BG_STATUS);
   i := 0; WHILE i < tCols DO Out.Char(' '); INC(i) END;
   Terminal.Goto(1, tRows);
   Out.String(bookTitle);
@@ -807,7 +807,7 @@ BEGIN
   Out.String("  "); Out.Int(pct); Out.String("%");
   IF selMode THEN Out.String("  [VISUAL]") END;
   IF statusMsg[0] # 0X THEN Out.String("  "); Out.String(statusMsg) END;
-  Graphics.Reset
+  Terminal.Reset
 END DrawStatus;
 
 PROCEDURE DrawAll();
@@ -972,24 +972,24 @@ BEGIN
   LOOP
     Terminal.Clear();
     Terminal.Goto(1, 1);
-    Graphics.Color256(CLR_POPBDR, BG_POPBDR);
+    Terminal.Color256(CLR_POPBDR, BG_POPBDR);
     Out.String("Recent books  j/k:move  Enter:open  Esc/q:cancel");
-    Graphics.Reset;
+    Terminal.Reset;
 
     FOR r := 0 TO visH - 1 DO
       idx := n - 1 - top - r;   (* posPaths index for this display row *)
       Terminal.Goto(1, r + 2);
       IF idx < 0 THEN
         (* past end of list: blank line *)
-        Graphics.Color256(CLR_TEXT, BG_TEXT);
+        Terminal.Color256(CLR_TEXT, BG_TEXT);
         j := 0; WHILE j < tCols DO Out.Char(' '); INC(j) END
       ELSE
         IF idx = sel THEN
-          Graphics.Color256(CLR_SELCUR, BG_SELCUR)
+          Terminal.Color256(CLR_SELCUR, BG_SELCUR)
         ELSIF Strings.Compare(posPaths[idx], epubPath) = 0 THEN
-          Graphics.Color256(CLR_SEL, BG_SEL)
+          Terminal.Color256(CLR_SEL, BG_SEL)
         ELSE
-          Graphics.Color256(CLR_TEXT, BG_TEXT)
+          Terminal.Color256(CLR_TEXT, BG_TEXT)
         END;
         IF Strings.Compare(posPaths[idx], epubPath) = 0 THEN
           Out.Char('*')
@@ -1004,7 +1004,7 @@ BEGIN
         END;
         WHILE j < tCols DO Out.Char(' '); INC(j) END
       END;
-      Graphics.Reset
+      Terminal.Reset
     END;
 
     c := Terminal.ReadKey();
@@ -1064,11 +1064,11 @@ BEGIN
   plen := Strings.Length(prompt);
   LOOP
     Terminal.Goto(1, tRows);
-    Graphics.Color256(CLR_FIND, BG_FIND);
+    Terminal.Color256(CLR_FIND, BG_FIND);
     j := 1; WHILE j <= tCols DO Out.Char(' '); INC(j) END;
     Terminal.Goto(1, tRows);
     Out.String(prompt); Out.String(result);
-    Graphics.Reset;
+    Terminal.Reset;
     Terminal.Goto(plen + i + 1, tRows);
     k := Terminal.ReadKey();
     IF k = 13 THEN RETURN i > 0
@@ -1143,24 +1143,24 @@ BEGIN
   LOOP
     Terminal.Clear();
     Terminal.Goto(1, 1);
-    Graphics.Color256(CLR_POPBDR, BG_POPBDR);
+    Terminal.Color256(CLR_POPBDR, BG_POPBDR);
     Out.String("Contents  j/k:move  Enter:open  Esc/q:cancel");
-    Graphics.Reset;
+    Terminal.Reset;
 
     FOR i := 0 TO visH - 1 DO
       j := top + i;
       Terminal.Goto(1, i + 2);
       IF j >= nToc THEN
-        Graphics.Color256(CLR_TEXT, BG_TEXT);
+        Terminal.Color256(CLR_TEXT, BG_TEXT);
         k := 0; WHILE k < tCols DO Out.Char(' '); INC(k) END
       ELSE
         curMark := HrefToSpine(tocHref[j]);
         IF j = sel THEN
-          Graphics.Color256(CLR_SELCUR, BG_SELCUR)
+          Terminal.Color256(CLR_SELCUR, BG_SELCUR)
         ELSIF curMark = curChap THEN
-          Graphics.Color256(CLR_SEL, BG_SEL)
+          Terminal.Color256(CLR_SEL, BG_SEL)
         ELSE
-          Graphics.Color256(CLR_TEXT, BG_TEXT)
+          Terminal.Color256(CLR_TEXT, BG_TEXT)
         END;
         IF curMark = curChap THEN Out.Char('*') ELSE Out.Char(' ') END;
         Out.Char(' ');
@@ -1170,7 +1170,7 @@ BEGIN
         END;
         WHILE k < tCols DO Out.Char(' '); INC(k) END
       END;
-      Graphics.Reset
+      Terminal.Reset
     END;
 
     k := Terminal.ReadKey();

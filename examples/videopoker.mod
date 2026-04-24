@@ -14,7 +14,7 @@ MODULE VideoPoker;
  * Controls: 1-5 toggle HOLD  ENTER/SPACE deal or draw  R restart  Q quit
  *)
 
-IMPORT Graphics, Terminal, Out, Random;
+IMPORT Terminal, Out, Random;
 
 CONST
   Clubs = 0;  Diamonds = 1;  Hearts = 2;  Spades = 3;
@@ -206,28 +206,28 @@ BEGIN
   r := CardRank(hand[slot]);
   s := CardSuit(hand[slot]);
   fg := SuitFg(s);
-  Graphics.Color256(fg, 231);
-  Graphics.Goto(x, y);     Out.String("+---------+");
-  Graphics.Goto(x, y + 1); Out.Char('|'); PrintRank(r); Out.String("        |");
-  Graphics.Goto(x, y + 2); Out.String("|    "); PrintSuit(s); Out.String("    |");
-  Graphics.Goto(x, y + 3); Out.String("|        "); PrintRank(r); Out.Char('|');
-  Graphics.Goto(x, y + 4); Out.String("+---------+");
-  Graphics.Reset
+  Terminal.Color256(fg, 231);
+  Terminal.Goto(x, y);     Out.String("+---------+");
+  Terminal.Goto(x, y + 1); Out.Char('|'); PrintRank(r); Out.String("        |");
+  Terminal.Goto(x, y + 2); Out.String("|    "); PrintSuit(s); Out.String("    |");
+  Terminal.Goto(x, y + 3); Out.String("|        "); PrintRank(r); Out.Char('|');
+  Terminal.Goto(x, y + 4); Out.String("+---------+");
+  Terminal.Reset
 END DrawCard;
 
 PROCEDURE DrawHold(slot : INTEGER);
 VAR x : INTEGER;
 BEGIN
   x := CardX0 + slot * CardDX;
-  Graphics.Goto(x, CardY - 2);
+  Terminal.Goto(x, CardY - 2);
   IF hold[slot] THEN
-    Graphics.Color256(16, 226);
+    Terminal.Color256(16, 226);
     Out.String("   [HOLD]  ")
   ELSE
-    Graphics.Color256(8, 0);
+    Terminal.Color256(8, 0);
     Out.String("    ["); Out.Int(slot + 1, 0); Out.String("]    ")
   END;
-  Graphics.Reset
+  Terminal.Reset
 END DrawHold;
 
 PROCEDURE DrawAllCards;
@@ -241,30 +241,30 @@ VAR x, y : INTEGER;
 BEGIN
   x := CardX0 + slot * CardDX;
   y := CardY;
-  Graphics.Color256(15, 17);
-  Graphics.Goto(x, y);     Out.String("+---------+");
-  Graphics.Goto(x, y + 1); Out.String("| * * * * |");
-  Graphics.Goto(x, y + 2); Out.String("| * * * * |");
-  Graphics.Goto(x, y + 3); Out.String("| * * * * |");
-  Graphics.Goto(x, y + 4); Out.String("+---------+");
-  Graphics.Reset;
-  Graphics.Color256(8, 0);
-  Graphics.Goto(x, y - 2);
+  Terminal.Color256(15, 17);
+  Terminal.Goto(x, y);     Out.String("+---------+");
+  Terminal.Goto(x, y + 1); Out.String("| * * * * |");
+  Terminal.Goto(x, y + 2); Out.String("| * * * * |");
+  Terminal.Goto(x, y + 3); Out.String("| * * * * |");
+  Terminal.Goto(x, y + 4); Out.String("+---------+");
+  Terminal.Reset;
+  Terminal.Color256(8, 0);
+  Terminal.Goto(x, y - 2);
   Out.String("    ["); Out.Int(slot + 1, 0); Out.String("]    ");
-  Graphics.Reset
+  Terminal.Reset
 END DrawCardBack;
 
 (* ── UI panels ──────────────────────────────────────────── *)
 
 PROCEDURE DrawTitle;
 BEGIN
-  Graphics.Color256(226, 0);
-  Graphics.Goto(34, 1); Out.String("VIDEO POKER");
-  Graphics.Reset;
-  Graphics.Color256(7, 0);
-  Graphics.Goto(20, 1); Out.String("♠  ♥  ♦  ♣");
-  Graphics.Goto(48, 1); Out.String("♣  ♦  ♥  ♠");
-  Graphics.Reset
+  Terminal.Color256(226, 0);
+  Terminal.Goto(34, 1); Out.String("VIDEO POKER");
+  Terminal.Reset;
+  Terminal.Color256(7, 0);
+  Terminal.Goto(20, 1); Out.String("♠  ♥  ♦  ♣");
+  Terminal.Goto(48, 1); Out.String("♣  ♦  ♥  ♠");
+  Terminal.Reset
 END DrawTitle;
 
 (*
@@ -286,20 +286,20 @@ BEGIN
   ELSE
     fg := 8; bg := 0
   END;
-  Graphics.Color256(fg, bg);
-  Graphics.Goto(PayX, y);
+  Terminal.Color256(fg, bg);
+  Terminal.Goto(PayX, y);
   Out.String(name);   (* 11 chars *)
   Out.String(" $");
   Out.Int(amt, 4);
-  Graphics.Reset
+  Terminal.Reset
 END DrawPayRow;
 
 PROCEDURE DrawPayTable;
 BEGIN
-  Graphics.Color256(7, 0);
-  Graphics.Goto(PayX, PayY - 1);
+  Terminal.Color256(7, 0);
+  Terminal.Goto(PayX, PayY - 1);
   Out.String(" HAND        PAY");
-  Graphics.Reset;
+  Terminal.Reset;
   DrawPayRow(PayY,     RoyalFlush,    "Royal Flush", 4000, FALSE);
   DrawPayRow(PayY + 1, StraightFlush, "Str Flush  ",  250, FALSE);
   DrawPayRow(PayY + 2, FourOfAKind,   "4 of a Kind",  125, FALSE);
@@ -314,8 +314,8 @@ END DrawPayTable;
 
 PROCEDURE DrawControls;
 BEGIN
-  Graphics.Goto(1, 11);
-  Graphics.Color256(7, 0);
+  Terminal.Goto(1, 11);
+  Terminal.Color256(7, 0);
   IF phase = PhaseDraw THEN
     Out.String("  1-5: toggle HOLD    ENTER/SPACE: draw    Q: quit        ")
   ELSIF phase = PhaseShow THEN
@@ -325,15 +325,15 @@ BEGIN
   ELSE
     Out.String("  ENTER/SPACE: deal (-$5)                     Q: quit   ")
   END;
-  Graphics.Reset
+  Terminal.Reset
 END DrawControls;
 
 PROCEDURE ClearResult;
 BEGIN
-  Graphics.Color256(0, 0);
-  Graphics.Goto(1, 13);
+  Terminal.Color256(0, 0);
+  Terminal.Goto(1, 13);
   Out.String("                                                        ");
-  Graphics.Reset
+  Terminal.Reset
 END ClearResult;
 
 PROCEDURE ShowResult;
@@ -347,8 +347,8 @@ BEGIN
   ELSIF payout > 0                THEN fg := 15
   ELSE                                 fg := 196
   END;
-  Graphics.Color256(fg, 0);
-  Graphics.Goto(1, 13);
+  Terminal.Color256(fg, 0);
+  Terminal.Goto(1, 13);
   IF    handRank = RoyalFlush    THEN Out.String("  *** ROYAL FLUSH!  Incredible! ***")
   ELSIF handRank = StraightFlush THEN Out.String("  *** STRAIGHT FLUSH!  Amazing! ***")
   ELSIF handRank = FourOfAKind   THEN Out.String("  *** FOUR OF A KIND!  Excellent!***")
@@ -363,59 +363,59 @@ BEGIN
   ELSE                                Out.String("  High Card.                       ")
   END;
   IF net > 0 THEN
-    Graphics.Color256(46, 0);
+    Terminal.Color256(46, 0);
     Out.String("  +$"); Out.Int(net, 0); Out.String("       ")
   ELSIF net = 0 THEN
-    Graphics.Color256(11, 0);
+    Terminal.Color256(11, 0);
     Out.String("  push         ")
   ELSE
-    Graphics.Color256(196, 0);
+    Terminal.Color256(196, 0);
     Out.String("  -$"); Out.Int(Bet, 0); Out.String("       ")
   END;
-  Graphics.Reset
+  Terminal.Reset
 END ShowResult;
 
 PROCEDURE DrawMoney;
 BEGIN
-  Graphics.Goto(1, 15);
+  Terminal.Goto(1, 15);
   IF money > 30 THEN
-    Graphics.Color256(46, 0)    (* green – comfortable *)
+    Terminal.Color256(46, 0)    (* green – comfortable *)
   ELSIF money > Bet THEN
-    Graphics.Color256(226, 0)   (* yellow – getting low *)
+    Terminal.Color256(226, 0)   (* yellow – getting low *)
   ELSE
-    Graphics.Color256(196, 0)   (* red – last hand! *)
+    Terminal.Color256(196, 0)   (* red – last hand! *)
   END;
   Out.String("  Balance: $"); Out.Int(money, 0);
-  Graphics.Color256(7, 0);
+  Terminal.Color256(7, 0);
   Out.String("    Hands: "); Out.Int(games, 0);
   Out.String("    Won: ");   Out.Int(won, 0);
   Out.String("             ");
-  Graphics.Reset
+  Terminal.Reset
 END DrawMoney;
 
 PROCEDURE DrawGameOver;
 BEGIN
-  Graphics.Color256(15, 88);
-  Graphics.Goto(17, 12); Out.String("                            ");
-  Graphics.Goto(17, 13); Out.String("   *** GAME  OVER ***       ");
-  Graphics.Goto(17, 14); Out.String("   You ran out of money!    ");
-  Graphics.Goto(17, 15); Out.String("   R = restart  Q = quit    ");
-  Graphics.Goto(17, 16); Out.String("                            ");
-  Graphics.Reset
+  Terminal.Color256(15, 88);
+  Terminal.Goto(17, 12); Out.String("                            ");
+  Terminal.Goto(17, 13); Out.String("   *** GAME  OVER ***       ");
+  Terminal.Goto(17, 14); Out.String("   You ran out of money!    ");
+  Terminal.Goto(17, 15); Out.String("   R = restart  Q = quit    ");
+  Terminal.Goto(17, 16); Out.String("                            ");
+  Terminal.Reset
 END DrawGameOver;
 
 PROCEDURE InitScreen;
 BEGIN
-  Graphics.Clear;
+  Terminal.Clear;
   DrawTitle;
   FOR i := 0 TO 4 DO DrawCardBack(i) END;
   DrawPayTable;
   DrawControls;
   DrawMoney;
-  Graphics.Color256(242, 0);
-  Graphics.Goto(1, 13);
+  Terminal.Color256(242, 0);
+  Terminal.Goto(1, 13);
   Out.String("  Press ENTER or SPACE to deal your first hand.  ($5/hand)");
-  Graphics.Reset
+  Terminal.Reset
 END InitScreen;
 
 (* ── Main ───────────────────────────────────────────────── *)
@@ -507,8 +507,8 @@ BEGIN
     (* PhaseOver: R and Q handled above; all other keys ignored *)
   END;
 
-  Graphics.Clear;
-  Graphics.Goto(1, 1);
+  Terminal.Clear;
+  Terminal.Goto(1, 1);
   Out.String("Thanks for playing Video Poker!"); Out.Ln;
   Out.String("Final balance: $"); Out.Int(money, 0); Out.Ln;
   Out.String("Hands played:  "); Out.Int(games, 0); Out.Ln;
@@ -518,3 +518,4 @@ BEGIN
   END;
   Out.Ln
 END VideoPoker.
+

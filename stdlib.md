@@ -344,7 +344,6 @@ on exit.  `Random` is also seeded automatically.
 | `Terminal.GetTickCount(): INTEGER` | Milliseconds since the Unix epoch (useful for timing). |
 | `Terminal.Cols(): INTEGER` | Returns the terminal width in columns (falls back to 80 if unavailable). |
 | `Terminal.Rows(): INTEGER` | Returns the terminal height in rows (falls back to 24 if unavailable). |
-| `Terminal.Random(n: INTEGER): INTEGER` | Random integer in `[0, n)`. |
 | `Terminal.Shell(cmd: ARRAY OF CHAR)` | Suspend raw mode, run `cmd` via the system shell, print `-- Press Enter to return --`, wait for Enter, then reinitialise raw mode. Useful for invoking compilers, pagers, or any interactive command without leaving the editor. |
 | `Terminal.Restore()` | Restore the terminal to its original (cooked) mode and show the cursor. Called automatically on exit; call manually before handing control to code that expects a normal terminal. |
 | `Terminal.Init()` | Re-enter raw (non-canonical) mode and hide the cursor, matching the state established at program start. Use after `Terminal.Restore()` to return to raw mode without restarting the program. |
@@ -373,49 +372,34 @@ IF key = 05X THEN
 END
 ```
 
----
-
-## Graphics - ANSI Terminal Graphics
-
-```
-IMPORT Graphics;
-```
-
-Provides two layers:
-- **Text layer** -- direct cursor/color control for character-cell graphics.
-- **Pixel buffer** -- a 240 x 100 logical pixel grid rendered using half-block
-  characters (two vertical pixels per terminal cell).
-
-### Text Layer
+### Color and Drawing
 
 | Procedure | Description |
 |-----------|-------------|
-| `Graphics.Clear()` | Clear screen and home cursor. |
-| `Graphics.Goto(x, y: INTEGER)` | Move cursor to column `x`, row `y` (1-based). |
-| `Graphics.Color(fg, bg: INTEGER)` | Set foreground / background using standard ANSI color indices 0-7. |
-| `Graphics.Color256(fg, bg: INTEGER)` | Set foreground / background using 256-color indices 0-255. |
-| `Graphics.Reset()` | Reset all color/style attributes. |
-| `Graphics.Fill(x, y, w, h: INTEGER; ch: CHAR)` | Fill a rectangle of `w` x `h` cells at `(x, y)` with character `ch`. |
-| `Graphics.HLine(x, y, len: INTEGER; ch: CHAR)` | Draw a horizontal line of `len` copies of `ch` starting at `(x, y)`. |
-| `Graphics.VLine(x, y, len: INTEGER; ch: CHAR)` | Draw a vertical line of `len` copies of `ch` starting at `(x, y)`. |
-| `Graphics.Box(x, y, w, h: INTEGER)` | Draw a box using ASCII box-drawing characters (+-+|+-). |
-| `Graphics.Sprite(x, y: INTEGER; s: ARRAY OF CHAR; color: INTEGER)` | Draw multi-line string `s` at `(x, y)` with ANSI color `color`. Newlines in `s` advance to the next row at column `x`. |
+| `Terminal.Color(fg, bg: INTEGER)` | Set foreground / background using standard ANSI color indices 0-7. |
+| `Terminal.Color256(fg, bg: INTEGER)` | Set foreground / background using 256-color indices 0-255. |
+| `Terminal.Reset()` | Reset all color/style attributes. |
+| `Terminal.Fill(x, y, w, h: INTEGER; ch: CHAR)` | Fill a rectangle of `w` x `h` cells at `(x, y)` with character `ch`. |
+| `Terminal.HLine(x, y, len: INTEGER; ch: CHAR)` | Draw a horizontal line of `len` copies of `ch` starting at `(x, y)`. |
+| `Terminal.VLine(x, y, len: INTEGER; ch: CHAR)` | Draw a vertical line of `len` copies of `ch` starting at `(x, y)`. |
+| `Terminal.Box(x, y, w, h: INTEGER)` | Draw a box using Unicode box-drawing characters. |
+| `Terminal.Sprite(x, y: INTEGER; s: ARRAY OF CHAR; color: INTEGER)` | Draw multi-line string `s` at `(x, y)` with ANSI color `color`. Newlines advance to the next row at column `x`. |
 
 ### Pixel Buffer
 
-The pixel buffer is 240 columns x 100 rows.  Call `Graphics.Flush` to render it.
-Colors are ANSI indices 1-7 (0 = transparent/off).
+A 240 x 100 logical pixel grid rendered via half-block characters (two vertical pixels per terminal cell).
+Colors are xterm-256 indices 1-255 (0 = transparent/off).  Call `Terminal.Flush` to render.
 
 | Procedure | Description |
 |-----------|-------------|
-| `Graphics.ClearBuf()` | Clear the pixel buffer (all pixels off). |
-| `Graphics.Plot(x, y, color: INTEGER)` | Set pixel at `(x, y)` to `color` (1-255, same palette as `Color256`). |
-| `Graphics.Circle(cx, cy, r, color: INTEGER)` | Draw a circle outline using Bresenham's algorithm. |
-| `Graphics.FillCircle(cx, cy, r, color: INTEGER)` | Draw a filled circle using Bresenham scan-fill. |
-| `Graphics.Line(x0, y0, x1, y1, color: INTEGER)` | Draw a line between `(x0, y0)` and `(x1, y1)` using Bresenham's algorithm. |
-| `Graphics.FillBuf(color: INTEGER)` | Fill the entire pixel buffer with `color`. |
-| `Graphics.RGBColor(r, g, b: INTEGER): INTEGER` | Map an RGB triple (0–255 each) to the nearest xterm-256 color index. Useful for passing to `Graphics.Plot` or `Graphics.Color256`. |
-| `Graphics.Flush()` | Render the pixel buffer to the terminal using half-block characters. |
+| `Terminal.ClearBuf()` | Clear the pixel buffer (all pixels off). |
+| `Terminal.Plot(x, y, color: INTEGER)` | Set pixel at `(x, y)` to `color`. |
+| `Terminal.Circle(cx, cy, r, color: INTEGER)` | Draw a circle outline using Bresenham's algorithm. |
+| `Terminal.FillCircle(cx, cy, r, color: INTEGER)` | Draw a filled circle using Bresenham scan-fill. |
+| `Terminal.Line(x0, y0, x1, y1, color: INTEGER)` | Draw a line between `(x0, y0)` and `(x1, y1)` using Bresenham's algorithm. |
+| `Terminal.FillBuf(color: INTEGER)` | Fill the entire pixel buffer with `color`. |
+| `Terminal.RGBColor(r, g, b: INTEGER): INTEGER` | Map an RGB triple (0–255 each) to the nearest xterm-256 color index. |
+| `Terminal.Flush()` | Render the pixel buffer to the terminal using half-block characters. |
 
 ---
 
@@ -1262,7 +1246,7 @@ indices (0–255).
 IMPORT Turtle;
 ```
 
-Logo-style turtle graphics drawn into the `Graphics` pixel buffer.  The canvas is
+Logo-style turtle graphics drawn into the \`Terminal\` pixel buffer.  The canvas is
 240 × 100 (matching `Graphics`).  The turtle starts at `(120, 50)` facing East
 (angle 0), pen down, color 7.
 

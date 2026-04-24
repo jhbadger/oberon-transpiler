@@ -1,6 +1,6 @@
 MODULE Turtle;
 
-IMPORT Graphics, Math;
+IMPORT Terminal, Math;
 
 TYPE
   State* = RECORD
@@ -51,7 +51,7 @@ BEGIN
   nextY := Math.clamp(cur.y + (dist * Math.sin(cur.angle)), 0.0, 99.0);
   
   IF penDown THEN
-    Graphics.Line(Math.entier(cur.x), Math.entier(cur.y), 
+    Terminal.Line(Math.entier(cur.x), Math.entier(cur.y), 
                   Math.entier(nextX), Math.entier(nextY), penColor);
   END;
   
@@ -73,7 +73,7 @@ END RestoreState;
 
 PROCEDURE Init*;
 BEGIN
-  Graphics.ClearBuf();
+  Terminal.ClearBuf();
   cur.x := 120.0; cur.y := 50.0; cur.angle := 0.0;
   penDown := TRUE; penColor := 7;
 END Init;
@@ -81,7 +81,7 @@ END Init;
 PROCEDURE SetColor*(c: INTEGER); BEGIN penColor := c END SetColor;
 PROCEDURE PenUp*; BEGIN penDown := FALSE END PenUp;
 PROCEDURE PenDown*; BEGIN penDown := TRUE END PenDown;
-PROCEDURE Update*; BEGIN Graphics.Flush() END Update;
+PROCEDURE Update*; BEGIN Terminal.Flush() END Update;
 
 BEGIN
   Init;

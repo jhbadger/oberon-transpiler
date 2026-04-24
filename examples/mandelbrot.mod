@@ -15,7 +15,7 @@ MODULE Mandelbrot;
  *   status line: row 24
  *)
 
-IMPORT Graphics, Terminal, Out;
+IMPORT Terminal, Out;
 
 CONST
   PW      = 74;   (* pixel width                           *)
@@ -57,7 +57,7 @@ END Iterate;
 PROCEDURE Draw;
 VAR w, h : REAL;
 BEGIN
-  Graphics.ClearBuf;
+  Terminal.ClearBuf;
   w := xMax - xMin;
   h := yMax - yMin;
 
@@ -68,34 +68,34 @@ BEGIN
       n   := Iterate(cre, cim);
       IF n < MaxIter THEN
         color := (n MOD 215) + 17;
-        Graphics.Plot(OX + px, OY + py, color)
+        Terminal.Plot(OX + px, OY + py, color)
       END
     END
   END;
 
   (* Cursor crosshair in white (colour 7) *)
   IF curX > 0 THEN
-    Graphics.Plot(OX + curX - 1, OY + curY, 255)
+    Terminal.Plot(OX + curX - 1, OY + curY, 255)
   END;
   IF curX < PW - 1 THEN
-    Graphics.Plot(OX + curX + 1, OY + curY, 255)
+    Terminal.Plot(OX + curX + 1, OY + curY, 255)
   END;
   IF curY > 0 THEN
-    Graphics.Plot(OX + curX, OY + curY - 1, 255)
+    Terminal.Plot(OX + curX, OY + curY - 1, 255)
   END;
   IF curY < PH - 1 THEN
-    Graphics.Plot(OX + curX, OY + curY + 1, 255)
+    Terminal.Plot(OX + curX, OY + curY + 1, 255)
   END;
-  Graphics.Plot(OX + curX, OY + curY, 255);
+  Terminal.Plot(OX + curX, OY + curY, 255);
 
-  Graphics.Flush;
-  Graphics.Reset;
-  Graphics.Box(1, 1, 80, 23);
+  Terminal.Flush;
+  Terminal.Reset;
+  Terminal.Box(1, 1, 80, 23);
 
   (* Status bar *)
   cre := xMin + (xMax - xMin) * curX / PW;
   cim := yMax - (yMax - yMin) * curY / PH;
-  Graphics.Goto(2, 24);
+  Terminal.Goto(2, 24);
   Out.String(" Re:"); Out.Fixed(cre, 8, 5);
   Out.String(" Im:"); Out.Fixed(cim, 8, 5);
   Out.String("  +/-=zoom  arrows=move  r=reset  q=quit ")
@@ -132,7 +132,7 @@ END Reset;
 BEGIN
   Reset;
   running := TRUE;
-  Graphics.Clear;
+  Terminal.Clear;
 
   WHILE running DO
     Draw;
@@ -148,7 +148,8 @@ BEGIN
     END
   END;
 
-  Graphics.Clear;
-  Graphics.Reset
+  Terminal.Clear;
+  Terminal.Reset
 END Mandelbrot.
+
 

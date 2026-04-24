@@ -5,7 +5,7 @@ MODULE smiley;
  * Press Esc to quit.
  *)
 
-IMPORT Graphics, Terminal, Out;
+IMPORT Terminal, Out;
 
 CONST
   KeyUp    = 0A0X;
@@ -26,24 +26,24 @@ VAR
 (* ------------------------------------------------------------------ *)
 PROCEDURE DrawFace(px, py, c : INTEGER);
 BEGIN
-  Graphics.Sprite(px, py,   " .---. ", c);
-  Graphics.Sprite(px, py+1, "(o   o)", c);
-  Graphics.Sprite(px, py+2, " '---' ", c)
+  Terminal.Sprite(px, py,   " .---. ", c);
+  Terminal.Sprite(px, py+1, "(o   o)", c);
+  Terminal.Sprite(px, py+2, " '---' ", c)
 END DrawFace;
 
 PROCEDURE EraseFace(px, py : INTEGER);
 BEGIN
-  Graphics.Sprite(px, py,   "       ", 7);
-  Graphics.Sprite(px, py+1, "       ", 7);
-  Graphics.Sprite(px, py+2, "       ", 7)
+  Terminal.Sprite(px, py,   "       ", 7);
+  Terminal.Sprite(px, py+1, "       ", 7);
+  Terminal.Sprite(px, py+2, "       ", 7)
 END EraseFace;
 
 (* ------------------------------------------------------------------ *)
 BEGIN
-  Graphics.Clear;
-  Graphics.Box(1, 1, 80, 23);
+  Terminal.Clear;
+  Terminal.Box(1, 1, 80, 23);
 
-  Graphics.Goto(11, 24);
+  Terminal.Goto(11, 24);
   Out.String("Arrow keys: move   Esc: quit");
 
   x := 37;  y := 11;  color := 3;
@@ -76,6 +76,7 @@ BEGIN
     END
   END;
 
-  Graphics.Goto(1, 25)
+  Terminal.Goto(1, 25)
 END smiley.
+
 

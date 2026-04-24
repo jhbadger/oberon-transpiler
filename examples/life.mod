@@ -1,6 +1,6 @@
 MODULE GameOfLife;
 
-IMPORT Out, Terminal, Graphics;
+IMPORT Out, Terminal;
 
 CONST
   GRID_WIDTH  = 200;
@@ -64,15 +64,15 @@ END CalculateNextState;
 PROCEDURE DrawGrid;
 VAR x, y: INTEGER;
 BEGIN
-  Graphics.ClearBuf();
+  Terminal.ClearBuf();
   FOR y := 0 TO GRID_HEIGHT - 1 DO
     FOR x := 0 TO GRID_WIDTH - 1 DO
       IF GridState[y, x] THEN
-        Graphics.Plot(x, y, COLOR_ALIVE);
+        Terminal.Plot(x, y, COLOR_ALIVE);
       END;
     END;
   END;
-  Graphics.Flush();
+  Terminal.Flush();
 END DrawGrid;
 
 PROCEDURE SeedFromMouse;
@@ -80,7 +80,7 @@ VAR x, y: INTEGER; running_seeding: BOOLEAN;
 BEGIN
   running_seeding := TRUE;
   DrawGrid();
-  Graphics.Goto(1, 47);
+  Terminal.Goto(1, 47);
   Out.String("SEED MODE  Click to place cells   Enter or ESC to run");
   WHILE running_seeding DO
     key := Terminal.ReadKey();
@@ -91,7 +91,7 @@ BEGIN
         GridState[y, x] := TRUE;
         IF y + 1 < GRID_HEIGHT THEN GridState[y + 1, x] := TRUE; END;
         DrawGrid();
-        Graphics.Goto(1, 47);
+        Terminal.Goto(1, 47);
         Out.String("SEED MODE  Click to place cells   Enter or ESC to run");
       END;
     ELSIF (key = 0DX) OR (key = 1BX) THEN
@@ -110,7 +110,7 @@ BEGIN
   turn := 1;
   WHILE running DO
     DrawGrid();
-    Graphics.Goto(1, 47);
+    Terminal.Goto(1, 47);
     Out.String("RUN MODE  S=step  E=seed  Q=quit  Turn: ");
     Out.Int(turn);
     key := Terminal.ReadKey();
@@ -128,7 +128,7 @@ END RunSimulation;
 
 BEGIN
   Terminal.MouseOn();
-  Graphics.Clear();
+  Terminal.Clear();
   InitializeGrid();
   goSeed := TRUE;
   WHILE goSeed DO
@@ -136,6 +136,6 @@ BEGIN
     RunSimulation();
   END;
   Terminal.MouseOff();
-  Graphics.Reset();
+  Terminal.Reset();
 END GameOfLife.
 

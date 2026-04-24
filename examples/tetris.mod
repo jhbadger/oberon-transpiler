@@ -10,7 +10,7 @@ MODULE Tetris;
  * Controls: ← → rotate=↑  soft-drop=↓  hard-drop=Space  Esc=quit
  *)
 
-IMPORT Terminal, Graphics, Out;
+IMPORT Terminal, Out, Random;
 
 CONST
   BW  = 10;    (* board width  in cells *)
@@ -103,30 +103,30 @@ PROCEDURE DrawCell(bx, by, color : INTEGER);
 BEGIN
   Terminal.Goto(BX + 1 + bx * CW, BT + 1 + by);
   IF color = 0 THEN
-    Graphics.Reset;  Out.Char(' ');  Out.Char(' ')
+    Terminal.Reset;  Out.Char(' ');  Out.Char(' ')
   ELSE
-    Graphics.Color(color, 0);
+    Terminal.Color(color, 0);
     Out.Char('[');  Out.Char(']')
   END;
-  Graphics.Reset
+  Terminal.Reset
 END DrawCell;
 
 PROCEDURE DrawBorder;
 BEGIN
-  Graphics.Color(7, 0);
-  Graphics.Box(BX, BT, BW * CW + 2, BH + 2);
-  Graphics.Reset
+  Terminal.Color(7, 0);
+  Terminal.Box(BX, BT, BW * CW + 2, BH + 2);
+  Terminal.Reset
 END DrawBorder;
 
 PROCEDURE DrawStatus;
 BEGIN
-  Terminal.Goto(NX, NY);     Graphics.Color(7, 0);  Out.String("TETRIS");    Graphics.Reset;
+  Terminal.Goto(NX, NY);     Terminal.Color(7, 0);  Out.String("TETRIS");    Terminal.Reset;
   Terminal.Goto(NX, NY+2);   Out.String("Score:");
-  Terminal.Goto(NX, NY+3);   Graphics.Color(3, 0);  Out.Int(score, 7);  Graphics.Reset;
+  Terminal.Goto(NX, NY+3);   Terminal.Color(3, 0);  Out.Int(score, 7);  Terminal.Reset;
   Terminal.Goto(NX, NY+5);   Out.String("Level:");
-  Terminal.Goto(NX, NY+6);   Graphics.Color(3, 0);  Out.Int(level, 7);  Graphics.Reset;
+  Terminal.Goto(NX, NY+6);   Terminal.Color(3, 0);  Out.Int(level, 7);  Terminal.Reset;
   Terminal.Goto(NX, NY+8);   Out.String("Lines:");
-  Terminal.Goto(NX, NY+9);   Graphics.Color(3, 0);  Out.Int(lines, 7);  Graphics.Reset;
+  Terminal.Goto(NX, NY+9);   Terminal.Color(3, 0);  Out.Int(lines, 7);  Terminal.Reset;
   Terminal.Goto(NX, NY+11);  Out.String("Next:")
 END DrawStatus;
 
@@ -141,10 +141,10 @@ BEGIN
     tx := NX + pdx[nextType * 16 + cl] * CW;
     ty := NY + 12 + pdy[nextType * 16 + cl];
     Terminal.Goto(tx, ty);
-    Graphics.Color(nextType + 1, 0);
+    Terminal.Color(nextType + 1, 0);
     Out.Char('[');  Out.Char(']')
   END;
-  Graphics.Reset
+  Terminal.Reset
 END DrawNextPiece;
 
 
@@ -276,7 +276,7 @@ BEGIN
   ELSE
     LockAndClear;
     Spawn(nextType);
-    nextType := Terminal.Random(7);
+    nextType := Random.Int(7);
     DrawNextPiece;
     IF alive THEN  DrawPiece(TRUE)  END
   END
@@ -289,7 +289,7 @@ BEGIN
   DrawPiece(TRUE);
   LockAndClear;
   Spawn(nextType);
-  nextType := Terminal.Random(7);
+  nextType := Random.Int(7);
   DrawNextPiece;
   IF alive THEN  DrawPiece(TRUE)  END
 END HardDrop;
@@ -310,8 +310,8 @@ BEGIN
   DrawBorder;
   DrawStatus;
 
-  nextType := Terminal.Random(7);
-  Spawn(Terminal.Random(7));
+  nextType := Random.Int(7);
+  Spawn(Random.Int(7));
   DrawNextPiece;
   DrawPiece(TRUE);
 
@@ -324,14 +324,14 @@ BEGIN
   cx := BX + 2;
   cy := BT + BH DIV 2;
   Terminal.Goto(cx, cy);
-  Graphics.Color(1, 0);  Out.String("  ** GAME OVER **   ");
+  Terminal.Color(1, 0);  Out.String("  ** GAME OVER **   ");
   Terminal.Goto(cx, cy + 1);
-  Graphics.Color(3, 0);  Out.String("  Score: ");  Out.Int(score, 0);
+  Terminal.Color(3, 0);  Out.String("  Score: ");  Out.Int(score, 0);
   Terminal.Goto(cx, cy + 3);
-  Graphics.Color(7, 0);  Out.String("  [Y] play again    ");
+  Terminal.Color(7, 0);  Out.String("  [Y] play again    ");
   Terminal.Goto(cx, cy + 4);
   Out.String("  [N] quit          ");
-  Graphics.Reset;
+  Terminal.Reset;
   REPEAT  key := Terminal.ReadKey()
   UNTIL (key = 'y') OR (key = 'Y') OR (key = 'n') OR (key = 'N') OR (key = KEsc);
   quitting := (key = 'n') OR (key = 'N') OR (key = KEsc)

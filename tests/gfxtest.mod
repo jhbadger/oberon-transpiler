@@ -1,34 +1,34 @@
 MODULE gfxtest;
 
-IMPORT Graphics;
+IMPORT Terminal;
 
 VAR
     i : INTEGER;
 
 BEGIN
-    Graphics.Clear();
-    Graphics.ClearBuf();
+    Terminal.Clear();
+    Terminal.ClearBuf();
 
     (* Five concentric circles using 256-colour palette *)
-    Graphics.Circle(60, 48, 40, 196);  (* red        *)
-    Graphics.Circle(60, 48, 30,  46);  (* green      *)
-    Graphics.Circle(60, 48, 20,  27);  (* blue       *)
-    Graphics.Circle(60, 48, 12, 226);  (* yellow     *)
-    Graphics.Circle(60, 48,  5, 201);  (* magenta    *)
+    Terminal.Circle(60, 48, 40, 196);  (* red        *)
+    Terminal.Circle(60, 48, 30,  46);  (* green      *)
+    Terminal.Circle(60, 48, 20,  27);  (* blue       *)
+    Terminal.Circle(60, 48, 12, 226);  (* yellow     *)
+    Terminal.Circle(60, 48,  5, 201);  (* magenta    *)
 
     (* Gradient line across the full 256-colour cube *)
     i := 0;
     WHILE i < 120 DO
-        Graphics.Plot(i, 48, 17 + (i * 215) DIV 120);
+        Terminal.Plot(i, 48, 17 + (i * 215) DIV 120);
         i := i + 1;
     END;
 
-    Graphics.Flush();
+    Terminal.Flush();
 
     (* Sprite drawn in the lower-right corner *)
-    Graphics.Sprite(140, 8, " /\_/\ ", 3);
-    Graphics.Sprite(140, 9, "( o.o )", 3);
-    Graphics.Sprite(140, 10, " > ^ < ", 3);
+    Terminal.Sprite(140, 8, " /\_/\ ", 3);
+    Terminal.Sprite(140, 9, "( o.o )", 3);
+    Terminal.Sprite(140, 10, " > ^ < ", 3);
 
-    Graphics.Goto(1, 55);
+    Terminal.Goto(1, 55);
 END gfxtest.

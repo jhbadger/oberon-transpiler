@@ -3,7 +3,7 @@ MODULE Maze;
 (* First-person wireframe maze — fits in a standard 80x24 terminal.
    Layout: 3D view cols 1-56, rows 1-20 | minimap cols 58-78 | HUD rows 22-23 *)
 
-IMPORT Random, Terminal, Graphics, Out;
+IMPORT Random, Terminal,  Out;
 
 CONST
   MAZE_SIZE = 21;
@@ -186,10 +186,10 @@ VAR fdx, fdy, ldx, ldy    : INTEGER;
 BEGIN
   MarkVisible();
   DirVecs(pdir, fdx, fdy, ldx, ldy);
-  Graphics.Clear();
+  Terminal.Clear();
 
   (* Floor dots in lower half of view *)
-  Graphics.Color(3, 0);
+  Terminal.Color(3, 0);
   FillRect(2, VIEW_H DIV 2 + 1, VIEW_W-1, VIEW_H-1, '.');
 
   (* Find first front wall *)
@@ -216,11 +216,11 @@ BEGIN
 
     (* Fill front wall solid, then outline *)
     IF frontWall THEN
-      Graphics.Color(6, 0);
+      Terminal.Color(6, 0);
       FillRect(ax1+1, ay1+1, ax2-1, ay2-1, '#');
     END;
 
-    Graphics.Color(7, 0);
+    Terminal.Color(7, 0);
 
     IF frontWall THEN WireRect(ax1, ay1, ax2, ay2); END;
 
@@ -246,7 +246,7 @@ BEGIN
   END;
 
   (* Outer border *)
-  Graphics.Color(7, 0);
+  Terminal.Color(7, 0);
   WireRect(1, 1, VIEW_W, VIEW_H);
 
   (* Minimap *)
@@ -257,11 +257,11 @@ BEGIN
       IF ~seen[my, mx] THEN
         Out.Char(' ');
       ELSIF (mx = px) & (my = py) THEN
-        Graphics.Color(6, 0); Out.Char('@'); Graphics.Color(7, 0);
+        Terminal.Color(6, 0); Out.Char('@'); Terminal.Color(7, 0);
       ELSIF maze[my, mx] = WALL THEN
         Out.Char('#');
       ELSIF maze[my, mx] = STOPCH THEN
-        Graphics.Color(2, 0); Out.Char('E'); Graphics.Color(7, 0);
+        Terminal.Color(2, 0); Out.Char('E'); Terminal.Color(7, 0);
       ELSE
         Out.Char(' ');
       END;
@@ -304,7 +304,7 @@ END MoveBackward;
 BEGIN
   bslash := CHR(92);
 
-  Graphics.Clear();
+  Terminal.Clear();
   InitializeMaze();
   GenerateMaze(1, 1);
 
@@ -334,15 +334,15 @@ BEGIN
       won := TRUE;
       DrawScene();
       Terminal.Goto(1, VIEW_H+4);
-      Graphics.Color(2, 0);
+      Terminal.Color(2, 0);
       Out.String("*** YOU FOUND THE EXIT! Congratulations! ***");
-      Graphics.Reset();
+      Terminal.Reset();
       key := Terminal.ReadKey();
     ELSIF ~won THEN
       DrawScene();
     END;
   END;
 
-  Graphics.Reset();
+  Terminal.Reset();
 END Maze.
 

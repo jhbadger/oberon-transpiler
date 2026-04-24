@@ -1,6 +1,6 @@
 MODULE Edit;
 
-IMPORT Terminal, Graphics, Out, Files, Args, Strings;
+IMPORT Terminal, Out, Files, Args, Strings;
 
 CONST
   MAXLINES = 2000;
@@ -472,11 +472,11 @@ BEGIN
   plen := Strings.Length(prompt);
   LOOP
     Terminal.Goto(1, 1);
-    Graphics.Color256(226, 4);
+    Terminal.Color256(226, 4);
     FOR j := 1 TO COLS DO  Out.Char(' ')  END;
     Terminal.Goto(1, 1);
     Out.String(prompt);  Out.String(result);
-    Graphics.Reset;
+    Terminal.Reset;
     Terminal.Goto(plen + i + 1, 1);
     j := Terminal.ReadKey();
     IF j = KEY_ENTER THEN  RETURN i > 0
@@ -539,38 +539,38 @@ VAR
   PROCEDURE ApplyState;
   BEGIN
     IF inCode THEN
-      Graphics.Color256(CLR_CODE, BG_CODE)
+      Terminal.Color256(CLR_CODE, BG_CODE)
     ELSIF carryIn = 1 THEN
-      Graphics.Color256(CLR_FENCE, BG_FENCE)
+      Terminal.Color256(CLR_FENCE, BG_FENCE)
     ELSIF inBoldIta THEN
-      Graphics.Color256(CLR_BOLDITA, BG_NORMAL)
+      Terminal.Color256(CLR_BOLDITA, BG_NORMAL)
     ELSIF inBold THEN
-      Graphics.Color256(CLR_BOLD, BG_NORMAL)
+      Terminal.Color256(CLR_BOLD, BG_NORMAL)
     ELSIF inItalic THEN
-      Graphics.Color256(CLR_ITALIC, BG_NORMAL)
+      Terminal.Color256(CLR_ITALIC, BG_NORMAL)
     ELSIF inStrike THEN
-      Graphics.Color256(CLR_STRIKE, BG_NORMAL)
+      Terminal.Color256(CLR_STRIKE, BG_NORMAL)
     ELSIF isTaskChecked THEN
-      Graphics.Color256(CLR_TASKDONE, BG_NORMAL)
+      Terminal.Color256(CLR_TASKDONE, BG_NORMAL)
     ELSIF headLevel = 1 THEN
-      Graphics.Color256(CLR_H1, BG_NORMAL)
+      Terminal.Color256(CLR_H1, BG_NORMAL)
     ELSIF headLevel = 2 THEN
-      Graphics.Color256(CLR_H2, BG_NORMAL)
+      Terminal.Color256(CLR_H2, BG_NORMAL)
     ELSIF headLevel >= 3 THEN
-      Graphics.Color256(CLR_H3, BG_NORMAL)
+      Terminal.Color256(CLR_H3, BG_NORMAL)
     ELSIF isHR THEN
-      Graphics.Color256(CLR_HR, BG_NORMAL)
+      Terminal.Color256(CLR_HR, BG_NORMAL)
     ELSIF isQuote THEN
-      Graphics.Color256(CLR_QUOTE, BG_NORMAL)
+      Terminal.Color256(CLR_QUOTE, BG_NORMAL)
     ELSIF inLink OR inUrl THEN
-      Graphics.Color256(CLR_LINK, BG_NORMAL)
+      Terminal.Color256(CLR_LINK, BG_NORMAL)
     ELSE
-      Graphics.Color256(CLR_NORMAL, BG_NORMAL)
+      Terminal.Color256(CLR_NORMAL, BG_NORMAL)
     END
   END ApplyState;
 
   PROCEDURE Marker;
-  BEGIN  Graphics.Color256(CLR_MARKER, BG_NORMAL)  END Marker;
+  BEGIN  Terminal.Color256(CLR_MARKER, BG_NORMAL)  END Marker;
 
   PROCEDURE At(pos : INTEGER; ch : CHAR) : BOOLEAN;
   BEGIN  RETURN (pos < len) & (buf[li][pos] = ch)  END At;
@@ -686,7 +686,7 @@ BEGIN
         EmitChar(c);  INC(col);  INC(sc)
 
       ELSIF col < listPfxLen THEN
-        Graphics.Color256(CLR_LIST, BG_NORMAL);
+        Terminal.Color256(CLR_LIST, BG_NORMAL);
         Out.Char(c);
         IF col = listPfxLen - 1 THEN  ApplyState  END;
         INC(col);  INC(sc)
@@ -750,7 +750,7 @@ BEGIN
       ELSIF c = '[' THEN
         Marker;  Out.Char(c);
         inLink := TRUE;
-        Graphics.Color256(CLR_LINK, BG_NORMAL);
+        Terminal.Color256(CLR_LINK, BG_NORMAL);
         INC(col);  INC(sc)
 
       ELSIF (c = ']') & inLink THEN
@@ -794,16 +794,16 @@ BEGIN
     IF li < nlines THEN
       RenderLine(li, leftCol, COLS, lineState[li])
     ELSE
-      Graphics.Color256(240, 0);
+      Terminal.Color256(240, 0);
       Out.Char('~');
-      Graphics.Color256(0, 0);
+      Terminal.Color256(0, 0);
       FOR col := 1 TO COLS - 1 DO  Out.Char(' ')  END
     END
   END;
 
   (* status bar *)
   Terminal.Goto(1, ROWS);
-  Graphics.Color256(15, 239);
+  Terminal.Color256(15, 239);
   FOR col := 1 TO COLS DO  Out.Char(' ')  END;
   Terminal.Goto(1, ROWS);
   IF filename[0] = 0X THEN  Out.String(" [No Name]")
@@ -821,7 +821,7 @@ BEGIN
   Terminal.Goto(COLS - 42, ROWS);
   Out.String("^O ^S ^Q ^F ^K ^Y ^G ^R Shell");
 
-  Graphics.Reset;
+  Terminal.Reset;
   Terminal.Goto(cx - leftCol + 1, cy - topLine + 1)
 END Render;
 

@@ -1,6 +1,6 @@
 MODULE Main;
 
-IMPORT Menu, Graphics, In, Out, OS;
+IMPORT Menu, Terminal, In, Out, OS;
 
 VAR
   m: Menu.MenuData;
@@ -8,7 +8,7 @@ VAR
   buf: ARRAY 100 OF CHAR;
 
 BEGIN
-  Graphics.Clear();
+  Terminal.Clear();
   
   Menu.Init(m);
   m.bg := 4; (* Red Background for a "Warning" menu style *)
@@ -19,12 +19,12 @@ BEGIN
   Menu.Add(m, "Generate Report");
   Menu.Add(m, "Exit to DOS");
 
-  Graphics.Goto(5, 4);
+  Terminal.Goto(5, 4);
   Out.String("--- FoxPro Style Menu ---");
   
   choice := Menu.Run(m, 5, 6);
 
-  Graphics.Goto(1, 15);
+  Terminal.Goto(1, 15);
   IF choice = 3 THEN
 			 OS.Exit(0);
 	ELSIF choice = 0 THEN

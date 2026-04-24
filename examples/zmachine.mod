@@ -8,7 +8,7 @@ MODULE ZMachine;
  * Controls: type commands as normal text, Enter to submit.
  *           Backspace to edit.  Ctrl-C / QUIT to exit.
  *)
-IMPORT Terminal, Args, Strings, Files, Out;
+IMPORT Terminal, Args, Strings, Files, Out, Random;
 
 (* Debug: set dbgN > 0 to log first N steps to /tmp/zmdbg.txt *)
 CONST DBGMAX = 3000;
@@ -1444,7 +1444,7 @@ BEGIN
         ELSIF S16(ops[0]) < 0 THEN
           SetVar(storeVar, 0)
         ELSE
-          SetVar(storeVar, Terminal.Random(ops[0]) + 1)
+          SetVar(storeVar, Random.Int(ops[0]) + 1)
         END
     | 8 :                                          (* push *)
         Push(ops[0])

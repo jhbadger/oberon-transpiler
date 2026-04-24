@@ -10,7 +10,7 @@ MODULE Rogue;
  *   Rows 2..21  : map (80 wide x 20 tall)
  *   Row 22      : stats bar
  *)
-IMPORT Terminal, Graphics, Out, Random, Strings;
+IMPORT Terminal, Out, Random, Strings;
 
 CONST
   MW = 80;  MH = 20;
@@ -451,22 +451,22 @@ BEGIN
       Terminal.Goto(x + 1, y + 2);
       IF lit[y][x] THEN
         IF map[y][x] = WALL THEN
-          Graphics.Color256(243, 0);  Out.Char('#')
+          Terminal.Color256(243, 0);  Out.Char('#')
         ELSIF map[y][x] = STAIRS THEN
-          Graphics.Color256(46, 0);   Out.Char('>')
+          Terminal.Color256(46, 0);   Out.Char('>')
         ELSE
-          Graphics.Color256(238, 0);  Out.Char('.')
+          Terminal.Color256(238, 0);  Out.Char('.')
         END
       ELSIF seen[y][x] THEN
         IF map[y][x] = WALL THEN
-          Graphics.Color256(235, 0);  Out.Char('#')
+          Terminal.Color256(235, 0);  Out.Char('#')
         ELSIF map[y][x] = STAIRS THEN
-          Graphics.Color256(22, 0);   Out.Char('>')
+          Terminal.Color256(22, 0);   Out.Char('>')
         ELSE
-          Graphics.Color256(233, 0);  Out.Char('.')
+          Terminal.Color256(233, 0);  Out.Char('.')
         END
       ELSE
-        Graphics.Color(0, 0);  Out.Char(' ')
+        Terminal.Color(0, 0);  Out.Char(' ')
       END
     END
   END;
@@ -474,10 +474,10 @@ BEGIN
   FOR i := 0 TO nitems - 1 DO
     IF items[i].there & lit[items[i].y][items[i].x] THEN
       Terminal.Goto(items[i].x + 1, items[i].y + 2);
-      IF    items[i].kind = GOLD   THEN  Graphics.Color256(226, 0)
-      ELSIF items[i].kind = POTION THEN  Graphics.Color256(51,  0)
-      ELSIF items[i].kind = SWORD  THEN  Graphics.Color256(15,  0)
-      ELSE                               Graphics.Color256(214, 0)
+      IF    items[i].kind = GOLD   THEN  Terminal.Color256(226, 0)
+      ELSIF items[i].kind = POTION THEN  Terminal.Color256(51,  0)
+      ELSIF items[i].kind = SWORD  THEN  Terminal.Color256(15,  0)
+      ELSE                               Terminal.Color256(214, 0)
       END;
       Out.Char(items[i].ch)
     END
@@ -486,50 +486,50 @@ BEGIN
   FOR i := 0 TO nmons - 1 DO
     IF mons[i].alive & lit[mons[i].y][mons[i].x] THEN
       Terminal.Goto(mons[i].x + 1, mons[i].y + 2);
-      IF    mons[i].ch = 'r' THEN  Graphics.Color256(160, 0)
-      ELSIF mons[i].ch = 'g' THEN  Graphics.Color256(214, 0)
-      ELSIF mons[i].ch = 'o' THEN  Graphics.Color256(208, 0)
-      ELSE                         Graphics.Color256(196, 0)
+      IF    mons[i].ch = 'r' THEN  Terminal.Color256(160, 0)
+      ELSIF mons[i].ch = 'g' THEN  Terminal.Color256(214, 0)
+      ELSIF mons[i].ch = 'o' THEN  Terminal.Color256(208, 0)
+      ELSE                         Terminal.Color256(196, 0)
       END;
       Out.Char(mons[i].ch)
     END
   END;
 
   Terminal.Goto(px + 1, py + 2);
-  Graphics.Color256(15, 0);
+  Terminal.Color256(15, 0);
   Out.Char('@');
-  Graphics.Reset
+  Terminal.Reset
 END DrawMap;
 
 PROCEDURE DrawStats;
 BEGIN
   Terminal.Goto(1, 22);
-  Graphics.Color256(196, 0);
+  Terminal.Color256(196, 0);
   Out.String(" HP:");  Out.Int(php, 0);  Out.Char('/');  Out.Int(pmaxhp, 0);
-  Graphics.Color256(15, 0);
+  Terminal.Color256(15, 0);
   Out.String("  ATK:");  Out.Int(patk, 0);
   Out.String("  DEF:");  Out.Int(pdef, 0);
-  Graphics.Color256(226, 0);
+  Terminal.Color256(226, 0);
   Out.String("  Gold:");  Out.Int(pgold, 0);
-  Graphics.Color256(46, 0);
+  Terminal.Color256(46, 0);
   Out.String("  Depth:");  Out.Int(depth, 0);
-  Graphics.Color256(51, 0);
+  Terminal.Color256(51, 0);
   Out.String("  Lv:");  Out.Int(plevel, 0);
   Out.String("  XP:");  Out.Int(pxp, 0);  Out.Char('/');  Out.Int(pxpnext, 0);
-  Graphics.Color256(240, 0);
+  Terminal.Color256(240, 0);
   Out.String("  hjkl/>  ");
-  Graphics.Reset
+  Terminal.Reset
 END DrawStats;
 
 PROCEDURE DrawMsg;
 VAR i, len : INTEGER;
 BEGIN
   Terminal.Goto(1, 1);
-  Graphics.Color256(255, 0);
+  Terminal.Color256(255, 0);
   Out.String(msg);
   len := Strings.Length(msg);
   FOR i := len TO 79 DO  Out.Char(' ')  END;
-  Graphics.Reset
+  Terminal.Reset
 END DrawMsg;
 
 PROCEDURE Render;
@@ -596,21 +596,21 @@ BEGIN
     IF dead THEN
       Render;
       Terminal.Goto(25, 10);
-      Graphics.Color256(196, 0);
+      Terminal.Color256(196, 0);
       Out.String("  +-----------------+  ");
       Terminal.Goto(25, 11);
       Out.String("  |   YOU  DIED !   |  ");
       Terminal.Goto(25, 12);
       Out.String("  +-----------------+  ");
       Terminal.Goto(25, 13);
-      Graphics.Color256(226, 0);
+      Terminal.Color256(226, 0);
       Out.String("  Gold:");  Out.Int(pgold, 5);
       Out.String("  Depth:");  Out.Int(depth, 3);
       Out.String("  Lvl:");  Out.Int(plevel, 2);
       Terminal.Goto(25, 15);
-      Graphics.Color256(240, 0);
+      Terminal.Color256(240, 0);
       Out.String("  Press any key.  ");
-      Graphics.Reset;
+      Terminal.Reset;
       key := Terminal.ReadKey();
       EXIT
     END

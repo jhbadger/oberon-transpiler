@@ -1,17 +1,17 @@
 MODULE PlotRand;
 
-IMPORT Graphics, Random;
+IMPORT Terminal, Random;
 
 VAR 
   i,x,y,c: INTEGER;
   
 BEGIN
-  Graphics.Clear;
+  Terminal.Clear;
   FOR i := 1 TO 2000 DO
     c := Random.Int(215)+17;
     x := Random.Int(100);
     y := Random.Int(100);
-    Graphics.Plot(x, y, c);
+    Terminal.Plot(x, y, c);
   END;
-  Graphics.Flush;
+  Terminal.Flush;
 END PlotRand.

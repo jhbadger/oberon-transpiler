@@ -10,7 +10,7 @@ MODULE Sudoku;
  * M stored column-major: M[(col-1)*9 + (row-1)], row/col are 1..9.
  * xy1/xy2 store terminal (x,y) of each fixed (given) cell, 0-based index.
  *)
-IMPORT Terminal, Out;
+IMPORT Terminal, Out, Random;
 
 CONST
   KUp    = 0A0X;
@@ -107,7 +107,7 @@ BEGIN
         b := FALSE;
         WHILE ~b DO
           no1 := no1 + 1;
-          ch := CHR(ORD('1') + Terminal.Random(9));
+          ch := CHR(ORD('1') + Random.Int(9));
           b := TRUE;
           FOR j := 1 TO 9 DO
             IF ch = MCell(j, k) THEN  b := FALSE  END
@@ -215,8 +215,8 @@ PROCEDURE RunGame;
 BEGIN
   GenerateBoard;
   FOR i := 1 TO 38 DO
-    limi1 := Terminal.Random(9) + 1;
-    limi2 := Terminal.Random(9) + 1;
+    limi1 := Random.Int(9) + 1;
+    limi2 := Random.Int(9) + 1;
     SetCell(limi1, limi2, ' ')
   END;
   DrawBoard;

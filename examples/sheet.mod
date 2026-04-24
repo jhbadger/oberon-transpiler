@@ -20,7 +20,7 @@ MODULE sheet;
  *   =(A1+B1)/2        parentheses
  *)
 
-IMPORT DataFrame, Terminal, Graphics, Strings, Files, Args, Out;
+IMPORT DataFrame, Terminal,  Strings, Files, Args, Out;
 
 CONST
   ROWW     = 5;    (* row-number field width *)
@@ -467,8 +467,8 @@ VAR
   c, x, i, pad, llen: INTEGER;
   lbl: ARRAY 4 OF CHAR;
 BEGIN
-  Graphics.Goto(1, 2);
-  Graphics.Color256(CLR_HDR, BG_HDR);
+  Terminal.Goto(1, 2);
+  Terminal.Color256(CLR_HDR, BG_HDR);
   FOR i := 1 TO ROWW DO Out.Char(' ') END;
   Out.Char('|');
   x := ROWW + 1;
@@ -483,7 +483,7 @@ BEGIN
     x := x + colWidths[c] + 1
   END;
   WHILE x <= tCols DO Out.Char(' '); INC(x) END;
-  Graphics.Reset
+  Terminal.Reset
 END DrawColHeaders;
 
 (* ── draw one data row ──────────────────────────────────────────── *)
@@ -501,7 +501,7 @@ BEGIN
   IF freezeTop & (r = 0) THEN y := 3 END;
   IF (y < 3) OR (y > tRows - 1) THEN RETURN END;
 
-  Graphics.Goto(1, y);
+  Terminal.Goto(1, y);
 
   (* choose colours for frozen vs normal rows *)
   IF freezeTop & (r = 0) THEN
@@ -511,7 +511,7 @@ BEGIN
   END;
 
   (* 1. Row number gutter — exactly ROWW chars before '|' *)
-  Graphics.Color256(CLR_ROW, BG_ROW);
+  Terminal.Color256(CLR_ROW, BG_ROW);
   Strings.IntToStr(r + 1, rn);
   FOR i := Strings.Length(rn) TO ROWW - 1 DO Out.Char(' ') END;
   Out.String(rn);
@@ -530,22 +530,22 @@ BEGIN
       val[0] := 0X
     END;
     IF isSel THEN
-      Graphics.Color256(CLR_SEL, BG_SEL)
+      Terminal.Color256(CLR_SEL, BG_SEL)
     ELSIF isFormula THEN
-      Graphics.Color256(CLR_FML, BG_FML)
+      Terminal.Color256(CLR_FML, BG_FML)
     ELSE
-      Graphics.Color256(fgNorm, bgNorm)
+      Terminal.Color256(fgNorm, bgNorm)
     END;
     PadPrint(val, colWidths[c]);
-    Graphics.Color256(CLR_HDR, BG_HDR);
+    Terminal.Color256(CLR_HDR, BG_HDR);
     Out.Char('|');
     x := x + colWidths[c] + 1
   END;
 
   (* 3. Clear rest of line *)
-  Graphics.Color256(fgNorm, bgNorm);
+  Terminal.Color256(fgNorm, bgNorm);
   WHILE x <= tCols DO Out.Char(' '); INC(x) END;
-  Graphics.Reset
+  Terminal.Reset
 END DrawDataRow;
 
 (* ── formula / edit bar (row 1) ─────────────────────────────────── *)
@@ -553,8 +553,8 @@ PROCEDURE DrawFormulaBar();
 VAR addr: ARRAY 8 OF CHAR; raw: ARRAY DataFrame.CELLLEN OF CHAR;
     i, x: INTEGER;
 BEGIN
-  Graphics.Goto(1, 1);
-  Graphics.Color256(CLR_BAR, BG_BAR);
+  Terminal.Goto(1, 1);
+  Terminal.Color256(CLR_BAR, BG_BAR);
   CellAddr(curRow, curCol, addr);
   Out.String(addr); Out.String(": ");
   x := Strings.Length(addr) + 3;
@@ -571,25 +571,25 @@ BEGIN
   END;
   WHILE x <= tCols DO Out.Char(' '); INC(x) END;
   IF statusMsg[0] # 0X THEN
-    Graphics.Goto(tCols - Strings.Length(statusMsg) - 1, 1);
+    Terminal.Goto(tCols - Strings.Length(statusMsg) - 1, 1);
     Out.String(statusMsg)
   END;
-  Graphics.Reset
+  Terminal.Reset
 END DrawFormulaBar;
 
 (* ── help bar (last row) ────────────────────────────────────────── *)
 PROCEDURE DrawHelp();
 VAR s: ARRAY 128 OF CHAR;
 BEGIN
-  Graphics.Goto(1, tRows);
-  Graphics.Color256(CLR_HELP, BG_HELP);
+  Terminal.Goto(1, tRows);
+  Terminal.Color256(CLR_HELP, BG_HELP);
   IF mode = EDIT THEN
     s := "Enter:confirm  Esc:cancel  Backspace:delete"
   ELSE
     s := "Arrows:nav  Enter:edit  Del:clear  ^O:open  ^S:save  ^L:reload  ^F:freeze  /:search ^Q:quit"
   END;
   PadPrint(s, tCols - 1);
-  Graphics.Reset
+  Terminal.Reset
 END DrawHelp;
 
 (* ── full redraw ─────────────────────────────────────────────────── *)
@@ -597,7 +597,7 @@ PROCEDURE DrawAll();
 VAR r: INTEGER;
 BEGIN
   CalcVis();
-  Graphics.Clear();
+  Terminal.Clear();
   DrawFormulaBar();
   DrawColHeaders();
   (* draw frozen row at screen line 3 before the scrollable region *)
@@ -814,14 +814,14 @@ BEGIN
   result[0] := 0X; i := 0;
   plen := Strings.Length(prompt);
   LOOP
-    Graphics.Goto(1, 1);
-    Graphics.Color256(CLR_SEL, BG_SEL);
+    Terminal.Goto(1, 1);
+    Terminal.Color256(CLR_SEL, BG_SEL);
     x := 1;
     WHILE x <= tCols DO Out.Char(' '); INC(x) END;
-    Graphics.Goto(1, 1);
+    Terminal.Goto(1, 1);
     Out.String(prompt); Out.String(result);
-    Graphics.Reset;
-    Graphics.Goto(plen + i + 1, 1);
+    Terminal.Reset;
+    Terminal.Goto(plen + i + 1, 1);
     j := Terminal.ReadKey();
     IF j = KEY_ENTER THEN RETURN i > 0
     ELSIF j = KEY_ESC THEN result[0] := 0X; RETURN FALSE

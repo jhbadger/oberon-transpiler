@@ -11,7 +11,7 @@ MODULE Slots;
  *   Info    : rows 17-19
  *)
 
-IMPORT Graphics, Terminal, Out;
+IMPORT Terminal, Out, Random;
 
 CONST
   NSym   = 7;   (* number of symbols *)
@@ -91,11 +91,11 @@ BEGIN
     bg := bg - 4;
     IF bg < 16 THEN bg := 16 END
   END;
-  Graphics.Color256(fg, bg);
-  Graphics.Goto(x,     y);     Out.String("             ");
-  Graphics.Goto(x,     y + 1); Out.String("     "); DrawSymStr(sym); Out.String("     ");
-  Graphics.Goto(x,     y + 2); Out.String("             ");
-  Graphics.Reset
+  Terminal.Color256(fg, bg);
+  Terminal.Goto(x,     y);     Out.String("             ");
+  Terminal.Goto(x,     y + 1); Out.String("     "); DrawSymStr(sym); Out.String("     ");
+  Terminal.Goto(x,     y + 2); Out.String("             ");
+  Terminal.Reset
 END DrawCell;
 
 (* Draw the three cells of one reel column *)
@@ -121,15 +121,15 @@ BEGIN
   py := ReelY + PayRow * CellH + 1;
   bg := SymBg(sym);
   FOR f := 0 TO 3 DO
-    Graphics.Color256(0, 226);
-    Graphics.Goto(reelX[col], py);
+    Terminal.Color256(0, 226);
+    Terminal.Goto(reelX[col], py);
     Out.String("     "); DrawSymStr(sym); Out.String("     ");
-    Graphics.Reset;
+    Terminal.Reset;
     Delay(55);
-    Graphics.Color256(15, bg);
-    Graphics.Goto(reelX[col], py);
+    Terminal.Color256(15, bg);
+    Terminal.Goto(reelX[col], py);
     Out.String("     "); DrawSymStr(sym); Out.String("     ");
-    Graphics.Reset;
+    Terminal.Reset;
     Delay(55)
   END
 END FlashReel;
@@ -140,49 +140,49 @@ VAR py : INTEGER;
 BEGIN
   py := ReelY + PayRow * CellH + 1;
 
-  Graphics.Box(2, 3, 50, 14);
+  Terminal.Box(2, 3, 50, 14);
 
-  Graphics.Color256(11, 0);
-  Graphics.Goto(1,  py); Out.Char('>');
-  Graphics.Goto(52, py); Out.Char('<');
-  Graphics.Reset;
+  Terminal.Color256(11, 0);
+  Terminal.Goto(1,  py); Out.Char('>');
+  Terminal.Goto(52, py); Out.Char('<');
+  Terminal.Reset;
 
-  Graphics.Color256(14, 0);
-  Graphics.Goto(1, py - 1); Out.String("PAY");
-  Graphics.Goto(1, py + 1); Out.String("LNE");
-  Graphics.Reset
+  Terminal.Color256(14, 0);
+  Terminal.Goto(1, py - 1); Out.String("PAY");
+  Terminal.Goto(1, py + 1); Out.String("LNE");
+  Terminal.Reset
 END DrawFrame;
 
 (* Redraw the wins/spins counters *)
 PROCEDURE DrawStatus;
 BEGIN
-  Graphics.Color256(7, 0);
-  Graphics.Goto(4, 18);
+  Terminal.Color256(7, 0);
+  Terminal.Goto(4, 18);
   Out.String("Spins: "); Out.Int(spins, 3);
   Out.String("   Wins: "); Out.Int(wins, 3);
-  Graphics.Reset
+  Terminal.Reset
 END DrawStatus;
 
 PROCEDURE ClearResult;
 BEGIN
-  Graphics.Color256(0, 0);
-  Graphics.Goto(4, 17);
+  Terminal.Color256(0, 0);
+  Terminal.Goto(4, 17);
   Out.String("                                        ");
-  Graphics.Reset
+  Terminal.Reset
 END ClearResult;
 
 PROCEDURE ShowResult;
 BEGIN
-  Graphics.Goto(4, 17);
+  Terminal.Goto(4, 17);
   IF (result[0] = result[1]) & (result[1] = result[2]) THEN
-    Graphics.Color256(226, 0);
+    Terminal.Color256(226, 0);
     Out.String("*** JACKPOT!  You win! ***              ");
     INC(wins)
   ELSE
-    Graphics.Color256(8, 0);
+    Terminal.Color256(8, 0);
     Out.String("No match.  Try again!                   ")
   END;
-  Graphics.Reset
+  Terminal.Reset
 END ShowResult;
 
 (*
@@ -198,7 +198,7 @@ BEGIN
   stopped[0] := 0;  stopped[1] := 0;  stopped[2] := 0;
   f := 0;  delay := 45;
 
-  FOR rr := 0 TO NCols - 1 DO result[rr] := Terminal.Random(NSym) END;
+  FOR rr := 0 TO NCols - 1 DO result[rr] := Random.Int(NSym) END;
 
   LOOP
     INC(f);
@@ -207,7 +207,7 @@ BEGIN
     FOR rr := 0 TO NCols - 1 DO
       IF stopped[rr] = 0 THEN
         FOR row := 0 TO NRows - 1 DO
-          disp[rr][row] := Terminal.Random(NSym)
+          disp[rr][row] := Random.Int(NSym)
         END
       END
     END;
@@ -217,25 +217,25 @@ BEGIN
     (* lock reels one by one *)
     IF (f = 22) & (stopped[0] = 0) THEN
       stopped[0] := 1;
-      disp[0][0] := Terminal.Random(NSym);
+      disp[0][0] := Random.Int(NSym);
       disp[0][1] := result[0];
-      disp[0][2] := Terminal.Random(NSym);
+      disp[0][2] := Random.Int(NSym);
       DrawReel(0);
       FlashReel(0, result[0])
     END;
     IF (f = 30) & (stopped[1] = 0) THEN
       stopped[1] := 1;
-      disp[1][0] := Terminal.Random(NSym);
+      disp[1][0] := Random.Int(NSym);
       disp[1][1] := result[1];
-      disp[1][2] := Terminal.Random(NSym);
+      disp[1][2] := Random.Int(NSym);
       DrawReel(1);
       FlashReel(1, result[1])
     END;
     IF (f = 38) & (stopped[2] = 0) THEN
       stopped[2] := 1;
-      disp[2][0] := Terminal.Random(NSym);
+      disp[2][0] := Random.Int(NSym);
       disp[2][1] := result[2];
-      disp[2][2] := Terminal.Random(NSym);
+      disp[2][2] := Random.Int(NSym);
       DrawReel(2);
       FlashReel(2, result[2])
     END;
@@ -262,30 +262,30 @@ BEGIN
   wins  := 0;
   spins := 0;
 
-  Graphics.Clear;
+  Terminal.Clear;
 
   (* Title *)
-  Graphics.Color256(226, 0);
-  Graphics.Goto(12, 1);
+  Terminal.Color256(226, 0);
+  Terminal.Goto(12, 1);
   Out.String("S  L  O  T     M  A  C  H  I  N  E");
-  Graphics.Reset;
+  Terminal.Reset;
 
   DrawFrame;
 
   (* Seed display with random symbols *)
   FOR i := 0 TO NCols - 1 DO
     FOR j := 0 TO NRows - 1 DO
-      disp[i][j] := Terminal.Random(NSym)
+      disp[i][j] := Random.Int(NSym)
     END
   END;
 
   DrawAllReels;
   DrawStatus;
 
-  Graphics.Color256(7, 0);
-  Graphics.Goto(4, 19);
+  Terminal.Color256(7, 0);
+  Terminal.Goto(4, 19);
   Out.String("[ENTER] or [SPACE] to spin     [Q] to quit");
-  Graphics.Reset;
+  Terminal.Reset;
 
   (* Main loop *)
   LOOP
@@ -302,11 +302,12 @@ BEGIN
     END
   END;
 
-  Graphics.Clear;
-  Graphics.Goto(1, 1);
+  Terminal.Clear;
+  Terminal.Goto(1, 1);
   Out.String("Thanks for playing!  Spins: ");
   Out.Int(spins, 0);
   Out.String("  Wins: ");
   Out.Int(wins, 0);
   Out.Ln
 END Slots.
+

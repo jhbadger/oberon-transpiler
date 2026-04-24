@@ -2,7 +2,7 @@ MODULE Menu;
 
 (* Retro dBASE III/FoxPro text-based menu *)
 
-IMPORT Terminal, Graphics, Out, Strings;
+IMPORT Terminal, Out, Strings;
 
 TYPE
   Option* = ARRAY 64 OF CHAR;
@@ -42,24 +42,24 @@ PROCEDURE Draw(VAR m: MenuData; x, y, selected: INTEGER);
 VAR i: INTEGER;
 BEGIN
   (* Fill the background area *)
-  Graphics.Color(m.fg, m.bg);
-  Graphics.Fill(x, y, m.width, m.count + 2, ' ');
+  Terminal.Color(m.fg, m.bg);
+  Terminal.Fill(x, y, m.width, m.count + 2, ' ');
   
   (* Draw the surrounding box *)
-  Graphics.Box(x, y, m.width, m.count + 2);
+  Terminal.Box(x, y, m.width, m.count + 2);
   
   FOR i := 0 TO m.count - 1 DO
-    Graphics.Goto(x + 2, y + i + 1);
+    Terminal.Goto(x + 2, y + i + 1);
     IF i = selected THEN
-      Graphics.Color(m.highlightFg, m.highlightBg);
+      Terminal.Color(m.highlightFg, m.highlightBg);
     ELSE
-      Graphics.Color(m.fg, m.bg);
+      Terminal.Color(m.fg, m.bg);
     END;
     
     (* Output selection number and text *)
     Out.Int(i + 1, 1); Out.String(". "); Out.String(m.options[i]);
   END;
-  Graphics.Reset();
+  Terminal.Reset();
 END Draw;
 
 (** Execute the menu loop **)

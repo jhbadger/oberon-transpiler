@@ -10,7 +10,7 @@ MODULE Snake;
  * Controls: W A S D  or  arrow keys.   Esc = quit.
  *)
 
-IMPORT Terminal, Graphics, Out;
+IMPORT Terminal, Out, Random;
 
 CONST
   GW   = 38;   (* grid columns *)
@@ -55,19 +55,19 @@ VAR
 
 PROCEDURE DrawBorder;
 BEGIN
-  Graphics.Color(6, 0);
-  Graphics.Box(BL, BT, GW + 2, GH + 2);
-  Graphics.Reset
+  Terminal.Color(6, 0);
+  Terminal.Box(BL, BT, GW + 2, GH + 2);
+  Terminal.Reset
 END DrawBorder;
 
 PROCEDURE DrawScore;
 BEGIN
   Terminal.Goto(BL + 2, BT);
-  Graphics.Color(3, 0);
+  Terminal.Color(3, 0);
   Out.String(" Score:");  Out.Int(score, 4);
   Out.String("  Lvl:");   Out.Int(score DIV 5 + 1, 2);
   Out.String("  WASD / arrows  Esc:quit ");
-  Graphics.Reset
+  Terminal.Reset
 END DrawScore;
 
 PROCEDURE HeadChar() : CHAR;
@@ -82,12 +82,12 @@ END HeadChar;
 PROCEDURE DrawCell(x, y, kind : INTEGER);
 BEGIN
   Terminal.Goto(OX + x, OY + y);
-  IF    kind = 1 THEN  Graphics.Color(2, 0);  Out.Char('o')
-  ELSIF kind = 2 THEN  Graphics.Color(3, 0);  Out.Char(HeadChar())
-  ELSIF kind = 3 THEN  Graphics.Color(1, 0);  Out.Char('*')
-  ELSE                 Graphics.Reset;        Out.Char(' ')
+  IF    kind = 1 THEN  Terminal.Color(2, 0);  Out.Char('o')
+  ELSIF kind = 2 THEN  Terminal.Color(3, 0);  Out.Char(HeadChar())
+  ELSIF kind = 3 THEN  Terminal.Color(1, 0);  Out.Char('*')
+  ELSE                 Terminal.Reset;        Out.Char(' ')
   END;
-  Graphics.Reset
+  Terminal.Reset
 END DrawCell;
 
 (* ── Food ─────────────────────────────────────────────────────────── *)
@@ -95,8 +95,8 @@ END DrawCell;
 PROCEDURE PlaceFood;
 BEGIN
   REPEAT
-    fx := Terminal.Random(GW);
-    fy := Terminal.Random(GH)
+    fx := Random.Int(GW);
+    fy := Random.Int(GH)
   UNTIL grid[fy][fx] = 0;
   grid[fy][fx] := 3;
   DrawCell(fx, fy, 3)
@@ -132,9 +132,9 @@ BEGIN
 
   (* "Ready?" prompt — wait for first keypress *)
   Terminal.Goto(OX + GW DIV 2 - 10, OY + GH DIV 2 - 1);
-  Graphics.Color(7, 0);
+  Terminal.Color(7, 0);
   Out.String("  Press any arrow key  ");
-  Graphics.Reset;
+  Terminal.Reset;
   REPEAT  key := Terminal.ReadKey()
   UNTIL (key = KUp) OR (key = KDown) OR (key = KLeft) OR (key = KRight)
         OR (key = 'w') OR (key = 'a') OR (key = 's') OR (key = 'd');
@@ -219,21 +219,21 @@ BEGIN
   (* flash the crash point *)
   FOR i := 1 TO 8 DO
     Terminal.Goto(OX + bx[bhead], OY + by[bhead]);
-    IF i MOD 2 = 0 THEN  Graphics.Color(1,0); Out.Char('X')
-    ELSE                 Graphics.Color(7,0); Out.Char('+')
+    IF i MOD 2 = 0 THEN  Terminal.Color(1,0); Out.Char('X')
+    ELSE                 Terminal.Color(7,0); Out.Char('+')
     END;
-    Graphics.Reset;
+    Terminal.Reset;
     last := Terminal.GetTickCount() + 80;
     REPEAT  now := Terminal.GetTickCount()  UNTIL now >= last
   END;
 
   Terminal.Goto(cx, cy);
-  Graphics.Color(1, 0);  Out.String("    GAME  OVER    ");
+  Terminal.Color(1, 0);  Out.String("    GAME  OVER    ");
   Terminal.Goto(cx, cy + 1);
-  Graphics.Color(3, 0);  Out.String("  Final score: ");  Out.Int(score, 0);
+  Terminal.Color(3, 0);  Out.String("  Final score: ");  Out.Int(score, 0);
   Terminal.Goto(cx, cy + 3);
-  Graphics.Color(7, 0);  Out.String("  [Y] again   [N] quit  ");
-  Graphics.Reset;
+  Terminal.Color(7, 0);  Out.String("  [Y] again   [N] quit  ");
+  Terminal.Reset;
 
   REPEAT  key := Terminal.ReadKey()
   UNTIL (key = 'y') OR (key = 'n') OR (key = KEsc);

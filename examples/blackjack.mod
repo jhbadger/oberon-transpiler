@@ -26,7 +26,7 @@ MODULE Blackjack;
  *   Q             : quit
  *)
 
-IMPORT Graphics, Terminal, Out, Random;
+IMPORT Terminal, Out, Random;
 
 CONST
   Clubs = 0;  Diamonds = 1;  Hearts = 2;  Spades = 3;
@@ -148,35 +148,35 @@ BEGIN
   r := card MOD 13 + 1;
   s := card DIV 13;
   fg := SuitFg(s);
-  Graphics.Color256(fg, 231);
-  Graphics.Goto(x, y);     Out.String("+---------+");
-  Graphics.Goto(x, y + 1); Out.Char('|'); PrintRank(r); Out.String("        |");
-  Graphics.Goto(x, y + 2); Out.String("|    "); PrintSuit(s); Out.String("    |");
-  Graphics.Goto(x, y + 3); Out.String("|        "); PrintRank(r); Out.Char('|');
-  Graphics.Goto(x, y + 4); Out.String("+---------+");
-  Graphics.Reset
+  Terminal.Color256(fg, 231);
+  Terminal.Goto(x, y);     Out.String("+---------+");
+  Terminal.Goto(x, y + 1); Out.Char('|'); PrintRank(r); Out.String("        |");
+  Terminal.Goto(x, y + 2); Out.String("|    "); PrintSuit(s); Out.String("    |");
+  Terminal.Goto(x, y + 3); Out.String("|        "); PrintRank(r); Out.Char('|');
+  Terminal.Goto(x, y + 4); Out.String("+---------+");
+  Terminal.Reset
 END DrawCardAt;
 
 PROCEDURE DrawBackAt(x, y : INTEGER);
 BEGIN
-  Graphics.Color256(15, 17);
-  Graphics.Goto(x, y);     Out.String("+---------+");
-  Graphics.Goto(x, y + 1); Out.String("| * * * * |");
-  Graphics.Goto(x, y + 2); Out.String("| * * * * |");
-  Graphics.Goto(x, y + 3); Out.String("| * * * * |");
-  Graphics.Goto(x, y + 4); Out.String("+---------+");
-  Graphics.Reset
+  Terminal.Color256(15, 17);
+  Terminal.Goto(x, y);     Out.String("+---------+");
+  Terminal.Goto(x, y + 1); Out.String("| * * * * |");
+  Terminal.Goto(x, y + 2); Out.String("| * * * * |");
+  Terminal.Goto(x, y + 3); Out.String("| * * * * |");
+  Terminal.Goto(x, y + 4); Out.String("+---------+");
+  Terminal.Reset
 END DrawBackAt;
 
 PROCEDURE ClearCardSlot(x, y : INTEGER);
 VAR row : INTEGER;
 BEGIN
-  Graphics.Color256(0, 0);
+  Terminal.Color256(0, 0);
   FOR row := 0 TO 4 DO
-    Graphics.Goto(x, y + row);
+    Terminal.Goto(x, y + row);
     Out.String("           ")   (* 11 spaces *)
   END;
-  Graphics.Reset
+  Terminal.Reset
 END ClearCardSlot;
 
 (* Erase all visible card positions in a row (6 max) *)
@@ -212,120 +212,120 @@ END DrawPlayerHand;
 PROCEDURE DrawDealerLabel;
 VAR score : INTEGER;
 BEGIN
-  Graphics.Goto(1, DealerY - 2);
+  Terminal.Goto(1, DealerY - 2);
   IF hideHole THEN
-    Graphics.Color256(7, 0);
+    Terminal.Color256(7, 0);
     Out.String("DEALER: ?                               ")
   ELSE
     score := HandValue(dHand, dCount);
     IF score > 21 THEN
-      Graphics.Color256(46, 0);
+      Terminal.Color256(46, 0);
       Out.String("DEALER: BUST ("); Out.Int(score, 0); Out.String(")                ")
     ELSIF IsBlackjack(dHand, dCount) THEN
-      Graphics.Color256(226, 0);
+      Terminal.Color256(226, 0);
       Out.String("DEALER: BLACKJACK!                      ")
     ELSE
-      Graphics.Color256(7, 0);
+      Terminal.Color256(7, 0);
       Out.String("DEALER: "); Out.Int(score, 0);
       Out.String("                               ")
     END
   END;
-  Graphics.Reset
+  Terminal.Reset
 END DrawDealerLabel;
 
 PROCEDURE DrawPlayerLabel;
 VAR score : INTEGER;
 BEGIN
-  Graphics.Goto(1, PlayerY - 2);
+  Terminal.Goto(1, PlayerY - 2);
   score := HandValue(pHand, pCount);
   IF score > 21 THEN
-    Graphics.Color256(196, 0);
+    Terminal.Color256(196, 0);
     Out.String("PLAYER: BUST ("); Out.Int(score, 0); Out.String(")                ")
   ELSIF IsBlackjack(pHand, pCount) THEN
-    Graphics.Color256(226, 0);
+    Terminal.Color256(226, 0);
     Out.String("PLAYER: BLACKJACK!                      ")
   ELSE
-    Graphics.Color256(7, 0);
+    Terminal.Color256(7, 0);
     Out.String("PLAYER: "); Out.Int(score, 0);
     Out.String("                               ")
   END;
-  Graphics.Reset
+  Terminal.Reset
 END DrawPlayerLabel;
 
 (* ── UI panels ───────────────────────────────────────────────── *)
 
 PROCEDURE DrawTitle;
 BEGIN
-  Graphics.Color256(226, 0);
-  Graphics.Goto(36, 1); Out.String("BLACKJACK");
-  Graphics.Reset;
-  Graphics.Color256(7, 0);
-  Graphics.Goto(22, 1); Out.String("♠  ♥  ♦  ♣");
-  Graphics.Goto(48, 1); Out.String("♣  ♦  ♥  ♠");
-  Graphics.Reset
+  Terminal.Color256(226, 0);
+  Terminal.Goto(36, 1); Out.String("BLACKJACK");
+  Terminal.Reset;
+  Terminal.Color256(7, 0);
+  Terminal.Goto(22, 1); Out.String("♠  ♥  ♦  ♣");
+  Terminal.Goto(48, 1); Out.String("♣  ♦  ♥  ♠");
+  Terminal.Reset
 END DrawTitle;
 
 PROCEDURE DrawMoney;
 BEGIN
-  Graphics.Goto(1, 19);
+  Terminal.Goto(1, 19);
   IF money > 30 THEN
-    Graphics.Color256(46, 0)
+    Terminal.Color256(46, 0)
   ELSIF money > Bet THEN
-    Graphics.Color256(226, 0)
+    Terminal.Color256(226, 0)
   ELSE
-    Graphics.Color256(196, 0)
+    Terminal.Color256(196, 0)
   END;
   Out.String("  Balance: $"); Out.Int(money, 0);
-  Graphics.Color256(7, 0);
+  Terminal.Color256(7, 0);
   Out.String("    Bet: $"); Out.Int(currentBet, 0);
   Out.String("    Hands: "); Out.Int(games, 0);
   Out.String("           ");
-  Graphics.Reset
+  Terminal.Reset
 END DrawMoney;
 
 PROCEDURE ClearResult;
 BEGIN
-  Graphics.Color256(0, 0);
-  Graphics.Goto(1, 21);
+  Terminal.Color256(0, 0);
+  Terminal.Goto(1, 21);
   Out.String("                                                       ");
-  Graphics.Reset
+  Terminal.Reset
 END ClearResult;
 
 PROCEDURE DrawResult;
 BEGIN
-  Graphics.Goto(1, 21);
+  Terminal.Goto(1, 21);
   IF result = ResBlackjack THEN
-    Graphics.Color256(226, 0);
+    Terminal.Color256(226, 0);
     Out.String("  *** BLACKJACK!  You win $");
     Out.Int(currentBet * 3 DIV 2, 0);
     Out.String("! ***                    ")
   ELSIF result = ResWin THEN
-    Graphics.Color256(46, 0);
+    Terminal.Color256(46, 0);
     Out.String("  You win! +$"); Out.Int(currentBet, 0);
     Out.String("                              ")
   ELSIF result = ResPush THEN
-    Graphics.Color256(226, 0);
+    Terminal.Color256(226, 0);
     Out.String("  Push – bet returned.                                 ")
   ELSIF result = ResBust THEN
-    Graphics.Color256(196, 0);
+    Terminal.Color256(196, 0);
     Out.String("  Bust!  You lose $"); Out.Int(currentBet, 0);
     Out.String("                           ")
   ELSIF result = ResDealerBust THEN
-    Graphics.Color256(46, 0);
+    Terminal.Color256(46, 0);
     Out.String("  Dealer busts!  You win +$"); Out.Int(currentBet, 0);
     Out.String("                      ")
   ELSE
-    Graphics.Color256(196, 0);
+    Terminal.Color256(196, 0);
     Out.String("  Dealer wins.  You lose $"); Out.Int(currentBet, 0);
     Out.String("                     ")
   END;
-  Graphics.Reset
+  Terminal.Reset
 END DrawResult;
 
 PROCEDURE DrawControls;
 BEGIN
-  Graphics.Goto(1, 22);
-  Graphics.Color256(7, 0);
+  Terminal.Goto(1, 22);
+  Terminal.Color256(7, 0);
   IF phase = PhaseBet THEN
     Out.String("  ENTER/SPACE: deal    R: restart    Q: quit          ")
   ELSIF phase = PhasePlayer THEN
@@ -341,18 +341,18 @@ BEGIN
   ELSIF phase = PhaseOver THEN
     Out.String("  Out of money!             R: restart       Q: quit   ")
   END;
-  Graphics.Reset
+  Terminal.Reset
 END DrawControls;
 
 PROCEDURE DrawGameOver;
 BEGIN
-  Graphics.Color256(15, 88);
-  Graphics.Goto(17, 12); Out.String("                            ");
-  Graphics.Goto(17, 13); Out.String("   *** GAME  OVER ***       ");
-  Graphics.Goto(17, 14); Out.String("   You ran out of money!    ");
-  Graphics.Goto(17, 15); Out.String("   R = restart  Q = quit    ");
-  Graphics.Goto(17, 16); Out.String("                            ");
-  Graphics.Reset
+  Terminal.Color256(15, 88);
+  Terminal.Goto(17, 12); Out.String("                            ");
+  Terminal.Goto(17, 13); Out.String("   *** GAME  OVER ***       ");
+  Terminal.Goto(17, 14); Out.String("   You ran out of money!    ");
+  Terminal.Goto(17, 15); Out.String("   R = restart  Q = quit    ");
+  Terminal.Goto(17, 16); Out.String("                            ");
+  Terminal.Reset
 END DrawGameOver;
 
 PROCEDURE Delay(ms : INTEGER);
@@ -470,20 +470,20 @@ END StartRound;
 
 PROCEDURE InitScreen;
 BEGIN
-  Graphics.Clear;
+  Terminal.Clear;
   DrawTitle;
-  Graphics.Color256(8, 0);
-  Graphics.Goto(1, DealerY - 2); Out.String("DEALER:");
-  Graphics.Goto(1, PlayerY - 2); Out.String("PLAYER:");
-  Graphics.Reset;
+  Terminal.Color256(8, 0);
+  Terminal.Goto(1, DealerY - 2); Out.String("DEALER:");
+  Terminal.Goto(1, PlayerY - 2); Out.String("PLAYER:");
+  Terminal.Reset;
   phase := PhaseBet;
   result := ResNone;
   DrawMoney;
   ClearResult;
-  Graphics.Color256(242, 0);
-  Graphics.Goto(1, 21);
+  Terminal.Color256(242, 0);
+  Terminal.Goto(1, 21);
   Out.String("  Press ENTER or SPACE to deal.  ($5 per hand)");
-  Graphics.Reset;
+  Terminal.Reset;
   DrawControls
 END InitScreen;
 
@@ -579,9 +579,10 @@ BEGIN
     (* PhaseOver: R and Q only, handled above *)
   END;
 
-  Graphics.Clear;
-  Graphics.Goto(1, 1);
+  Terminal.Clear;
+  Terminal.Goto(1, 1);
   Out.String("Thanks for playing Blackjack!"); Out.Ln;
   Out.String("Final balance: $"); Out.Int(money, 0); Out.Ln;
   Out.String("Hands played:  "); Out.Int(games, 0); Out.Ln
 END Blackjack.
+

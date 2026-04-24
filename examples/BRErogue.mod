@@ -30,7 +30,7 @@ MODULE BRErogue;
  *   Vibro-Blade  '('  (melee ATK+)
  *   Scrap Armor  ']'  (DEF+, salvaged protection)
  *)
-IMPORT Terminal, Graphics, Out, Random, Strings;
+IMPORT Terminal, Out, Random, Strings;
 
 CONST
   MW = 80;  MH = 20;
@@ -621,22 +621,22 @@ BEGIN
       Terminal.Goto(x + 1, y + 2);
       IF lit[y][x] THEN
         IF map[y][x] = WALL THEN
-          Graphics.Color256(243, 0);  Out.Char('#')
+          Terminal.Color256(243, 0);  Out.Char('#')
         ELSIF map[y][x] = STAIRS THEN
-          Graphics.Color256(46, 0);   Out.Char('>')
+          Terminal.Color256(46, 0);   Out.Char('>')
         ELSE
-          Graphics.Color256(238, 0);  Out.Char('.')
+          Terminal.Color256(238, 0);  Out.Char('.')
         END
       ELSIF seen[y][x] THEN
         IF map[y][x] = WALL THEN
-          Graphics.Color256(235, 0);  Out.Char('#')
+          Terminal.Color256(235, 0);  Out.Char('#')
         ELSIF map[y][x] = STAIRS THEN
-          Graphics.Color256(22, 0);   Out.Char('>')
+          Terminal.Color256(22, 0);   Out.Char('>')
         ELSE
-          Graphics.Color256(233, 0);  Out.Char('.')
+          Terminal.Color256(233, 0);  Out.Char('.')
         END
       ELSE
-        Graphics.Color(0, 0);  Out.Char(' ')
+        Terminal.Color(0, 0);  Out.Char(' ')
       END
     END
   END;
@@ -644,11 +644,11 @@ BEGIN
   FOR i := 0 TO nitems - 1 DO
     IF items[i].there & lit[items[i].y][items[i].x] THEN
       Terminal.Goto(items[i].x + 1, items[i].y + 2);
-      IF    items[i].kind = COINS     THEN  Graphics.Color256(226, 0)
-      ELSIF items[i].kind = STIMPACK  THEN  Graphics.Color256(51,  0)
-      ELSIF items[i].kind = BLASTER   THEN  Graphics.Color256(214, 0)
-      ELSIF items[i].kind = VIBROBLADE THEN Graphics.Color256(15,  0)
-      ELSE                                  Graphics.Color256(240, 0)
+      IF    items[i].kind = COINS     THEN  Terminal.Color256(226, 0)
+      ELSIF items[i].kind = STIMPACK  THEN  Terminal.Color256(51,  0)
+      ELSIF items[i].kind = BLASTER   THEN  Terminal.Color256(214, 0)
+      ELSIF items[i].kind = VIBROBLADE THEN Terminal.Color256(15,  0)
+      ELSE                                  Terminal.Color256(240, 0)
       END;
       Out.Char(items[i].ch)
     END
@@ -658,67 +658,67 @@ BEGIN
     IF mons[i].alive & lit[mons[i].y][mons[i].x] THEN
       Terminal.Goto(mons[i].x + 1, mons[i].y + 2);
       (* Tier 1: dim colours *)
-      IF    mons[i].ch = 'c' THEN  Graphics.Color256(160, 0)   (* cultist: red *)
-      ELSIF mons[i].ch = 'r' THEN  Graphics.Color256(166, 0)   (* raider: orange-red *)
-      ELSIF mons[i].ch = 'a' THEN  Graphics.Color256(100, 0)   (* antmen worker: olive *)
-      ELSIF mons[i].ch = 's' THEN  Graphics.Color256(250, 0)   (* skeleton: grey *)
+      IF    mons[i].ch = 'c' THEN  Terminal.Color256(160, 0)   (* cultist: red *)
+      ELSIF mons[i].ch = 'r' THEN  Terminal.Color256(166, 0)   (* raider: orange-red *)
+      ELSIF mons[i].ch = 'a' THEN  Terminal.Color256(100, 0)   (* antmen worker: olive *)
+      ELSIF mons[i].ch = 's' THEN  Terminal.Color256(250, 0)   (* skeleton: grey *)
       (* Tier 2: mid colours *)
-      ELSIF mons[i].ch = 'B' THEN  Graphics.Color256(130, 0)   (* giant beetle: brown *)
-      ELSIF mons[i].ch = 'l' THEN  Graphics.Color256(64,  0)   (* giant lizard: green *)
-      ELSIF mons[i].ch = 'R' THEN  Graphics.Color256(202, 0)   (* flaming raider: bright orange *)
-      ELSIF mons[i].ch = 'K' THEN  Graphics.Color256(201, 0)   (* killer clown: magenta *)
+      ELSIF mons[i].ch = 'B' THEN  Terminal.Color256(130, 0)   (* giant beetle: brown *)
+      ELSIF mons[i].ch = 'l' THEN  Terminal.Color256(64,  0)   (* giant lizard: green *)
+      ELSIF mons[i].ch = 'R' THEN  Terminal.Color256(202, 0)   (* flaming raider: bright orange *)
+      ELSIF mons[i].ch = 'K' THEN  Terminal.Color256(201, 0)   (* killer clown: magenta *)
       (* Tier 3: bright danger colours *)
-      ELSIF mons[i].ch = 'd' THEN  Graphics.Color256(208, 0)   (* demon dog: orange *)
-      ELSIF mons[i].ch = 'L' THEN  Graphics.Color256(196, 0)   (* cult leader: bright red *)
-      ELSIF mons[i].ch = 'b' THEN  Graphics.Color256(51,  0)   (* robot: cyan *)
-      ELSIF mons[i].ch = 'F' THEN  Graphics.Color256(34,  0)   (* fungal killer: dark green *)
+      ELSIF mons[i].ch = 'd' THEN  Terminal.Color256(208, 0)   (* demon dog: orange *)
+      ELSIF mons[i].ch = 'L' THEN  Terminal.Color256(196, 0)   (* cult leader: bright red *)
+      ELSIF mons[i].ch = 'b' THEN  Terminal.Color256(51,  0)   (* robot: cyan *)
+      ELSIF mons[i].ch = 'F' THEN  Terminal.Color256(34,  0)   (* fungal killer: dark green *)
       (* Tier 4: boss colours *)
-      ELSIF mons[i].ch = 'A' THEN  Graphics.Color256(226, 0)   (* ape-oid: bright yellow *)
-      ELSIF mons[i].ch = 'Z' THEN  Graphics.Color256(227, 0)   (* lightning man: electric yellow *)
-      ELSIF mons[i].ch = 'G' THEN  Graphics.Color256(68,  0)   (* car golem: steel blue *)
-      ELSIF mons[i].ch = 'O' THEN  Graphics.Color256(135, 0)   (* sky octopus: purple *)
-      ELSE                         Graphics.Color256(196, 0)
+      ELSIF mons[i].ch = 'A' THEN  Terminal.Color256(226, 0)   (* ape-oid: bright yellow *)
+      ELSIF mons[i].ch = 'Z' THEN  Terminal.Color256(227, 0)   (* lightning man: electric yellow *)
+      ELSIF mons[i].ch = 'G' THEN  Terminal.Color256(68,  0)   (* car golem: steel blue *)
+      ELSIF mons[i].ch = 'O' THEN  Terminal.Color256(135, 0)   (* sky octopus: purple *)
+      ELSE                         Terminal.Color256(196, 0)
       END;
       Out.Char(mons[i].ch)
     END
   END;
 
   Terminal.Goto(px + 1, py + 2);
-  Graphics.Color256(15, 0);
+  Terminal.Color256(15, 0);
   Out.Char('@');
-  Graphics.Reset
+  Terminal.Reset
 END DrawMap;
 
 PROCEDURE DrawStats;
 BEGIN
   Terminal.Goto(1, 22);
-  Graphics.Color256(196, 0);
+  Terminal.Color256(196, 0);
   Out.String(" HP:");  Out.Int(php, 0);  Out.Char('/');  Out.Int(pmaxhp, 0);
-  Graphics.Color256(15, 0);
+  Terminal.Color256(15, 0);
   Out.String("  ATK:");  Out.Int(patk, 0);
   Out.String("  DEF:");  Out.Int(pdef, 0);
-  Graphics.Color256(214, 0);
+  Terminal.Color256(214, 0);
   Out.String("  Ammo:");  Out.Int(pammo, 0);
-  Graphics.Color256(226, 0);
+  Terminal.Color256(226, 0);
   Out.String("  Coins:");  Out.Int(pgold, 0);
-  Graphics.Color256(46, 0);
+  Terminal.Color256(46, 0);
   Out.String("  Lv:");  Out.Int(depth, 0);
-  Graphics.Color256(51, 0);
+  Terminal.Color256(51, 0);
   Out.String("  XP:");  Out.Int(pxp, 0);  Out.Char('/');  Out.Int(pxpnext, 0);
-  Graphics.Color256(240, 0);
+  Terminal.Color256(240, 0);
   Out.String("  f+dir=fire ");
-  Graphics.Reset
+  Terminal.Reset
 END DrawStats;
 
 PROCEDURE DrawMsg;
 VAR i, len : INTEGER;
 BEGIN
   Terminal.Goto(1, 1);
-  Graphics.Color256(255, 0);
+  Terminal.Color256(255, 0);
   Out.String(msg);
   len := Strings.Length(msg);
   FOR i := len TO 79 DO  Out.Char(' ')  END;
-  Graphics.Reset
+  Terminal.Reset
 END DrawMsg;
 
 PROCEDURE Render;
@@ -809,21 +809,21 @@ BEGIN
     IF dead THEN
       Render;
       Terminal.Goto(25, 10);
-      Graphics.Color256(196, 0);
+      Terminal.Color256(196, 0);
       Out.String("  +-----------------+  ");
       Terminal.Goto(25, 11);
       Out.String("  |   YOU  DIED !   |  ");
       Terminal.Goto(25, 12);
       Out.String("  +-----------------+  ");
       Terminal.Goto(25, 13);
-      Graphics.Color256(226, 0);
+      Terminal.Color256(226, 0);
       Out.String("  Coins:");  Out.Int(pgold, 5);
       Out.String("  Level:");  Out.Int(depth, 3);
       Out.String("  Lvl:");  Out.Int(plevel, 2);
       Terminal.Goto(25, 15);
-      Graphics.Color256(240, 0);
+      Terminal.Color256(240, 0);
       Out.String("  Press any key.  ");
-      Graphics.Reset;
+      Terminal.Reset;
       key := Terminal.ReadKey();
       EXIT
     END

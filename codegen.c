@@ -568,7 +568,7 @@ static const char *import_realname(const char *alias) {
  * Built-in module list
  * ----------------------------------------------------------------------- */
 static const char *g_builtins[] = {
-    "Out","In","Terminal","Graphics","Strings","Files","Args","Dict","Zip",
+    "Out","In","Terminal","Strings","Files","Args","Dict","Zip",
     "Env","OS","Time",NULL
 };
 static int is_builtin_module(const char *s) {
@@ -2155,8 +2155,6 @@ void codegen(Node *module, FILE *out, int is_main, const char *srcfile) {
     /* ── Detect imported modules ─────────────────────────────────── */
     int has_terminal = 0;
     for (int i=0;i<g_nimports;i++) if (!strcmp(g_imports[i],"Terminal")) { has_terminal=1; break; }
-    int has_graphics = 0;
-    for (int i=0;i<g_nimports;i++) if (!strcmp(g_imports[i],"Graphics")) { has_graphics=1; break; }
     int has_strings = 0;
     for (int i=0;i<g_nimports;i++) if (!strcmp(g_imports[i],"Strings"))  { has_strings=1;  break; }
     int has_files = 0;
@@ -2198,7 +2196,7 @@ void codegen(Node *module, FILE *out, int is_main, const char *srcfile) {
         emit(g,"        printf(\"\\033[?1000l\\033[?1006l\"); fflush(stdout);\n");
         emit(g,"    }\n");
         emit(g,"    tcsetattr(STDIN_FILENO, TCSANOW, &_term_orig);\n");
-        emit(g,"    printf(\"\\033[?25h\"); fflush(stdout);\n");
+        emit(g,"    printf(\"\\033[0m\\033[?25h\"); fflush(stdout);\n");
         emit(g,"}\n");
         /* _term_init */
         emit(g,"static void _term_init(void) {\n");
@@ -2288,9 +2286,6 @@ void codegen(Node *module, FILE *out, int is_main, const char *srcfile) {
         emit(g,"    struct winsize ws;\n");
         emit(g,"    if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == 0 && ws.ws_row > 0) return ws.ws_row;\n");
         emit(g,"    return 24;\n");
-        emit(g,"}\n");
-        emit(g,"static int Terminal_Random(int n) {\n");
-        emit(g,"    return n > 0 ? rand() %% n : 0;\n");
         emit(g,"}\n");
         emit(g,"static int Terminal_KeyPressed(void) {\n");
         emit(g,"    if (_term_kready) return 1;\n");
@@ -2430,52 +2425,35 @@ void codegen(Node *module, FILE *out, int is_main, const char *srcfile) {
         emit(g,"    }\n");
         emit(g,"    return c;\n");
         emit(g,"}\n");
-    }
-
-    /* ── Graphics module runtime (emitted when Graphics is imported) ─ */
-    if (has_graphics) {
-        emit(g,"\n");
-        emit(g,"static void _gfx_restore(void) {\n");
-        emit(g,"    printf(\"\\033[0m\\033[?25h\"); fflush(stdout);\n");
-        emit(g,"}\n");
-        emit(g,"static void Graphics_Init(void) {\n");
-        emit(g,"    printf(\"\\033[?25l\"); fflush(stdout);\n");
-        emit(g,"    atexit(_gfx_restore);\n");
-        emit(g,"}\n");
-        emit(g,"static void Graphics_Color(int fg, int bg) {\n");
+        /* ── Graphics functions (part of Terminal) ─────────────────── */
+        emit(g,"static void Terminal_Color(int fg, int bg) {\n");
         emit(g,"    printf(\"\\033[3%%d;4%%dm\", fg & 7, bg & 7); fflush(stdout);\n");
         emit(g,"}\n");
-        emit(g,"static void Graphics_Color256(int fg, int bg) {\n");
+        emit(g,"static void Terminal_Color256(int fg, int bg) {\n");
         emit(g,"    printf(\"\\033[38;5;%%d;48;5;%%dm\", fg & 255, bg & 255); fflush(stdout);\n");
         emit(g,"}\n");
-        emit(g,"static void Graphics_Reset(void) {\n");
+        emit(g,"static void Terminal_Reset(void) {\n");
         emit(g,"    printf(\"\\033[0m\"); fflush(stdout);\n");
         emit(g,"}\n");
-        emit(g,"static void Graphics_Goto(int x, int y) {\n");
-        emit(g,"    printf(\"\\033[%%d;%%dH\", y, x); fflush(stdout);\n");
-        emit(g,"}\n");
-        emit(g,"static void Graphics_Clear(void) {\n");
-        emit(g,"    printf(\"\\033[2J\\033[H\"); fflush(stdout);\n");
-        emit(g,"}\n");
-        emit(g,"static void Graphics_Fill(int x, int y, int w, int h, char ch) {\n");
+        emit(g,"static void Terminal_Fill(int x, int y, int w, int h, char ch) {\n");
         emit(g,"    for (int row = 0; row < h; row++) {\n");
         emit(g,"        printf(\"\\033[%%d;%%dH\", y + row, x);\n");
         emit(g,"        for (int col = 0; col < w; col++) putchar(ch);\n");
         emit(g,"    }\n");
         emit(g,"    fflush(stdout);\n");
         emit(g,"}\n");
-        emit(g,"static void Graphics_HLine(int x, int y, int len, char ch) {\n");
+        emit(g,"static void Terminal_HLine(int x, int y, int len, char ch) {\n");
         emit(g,"    printf(\"\\033[%%d;%%dH\", y, x);\n");
         emit(g,"    for (int i = 0; i < len; i++) putchar(ch);\n");
         emit(g,"    fflush(stdout);\n");
         emit(g,"}\n");
-        emit(g,"static void Graphics_VLine(int x, int y, int len, char ch) {\n");
+        emit(g,"static void Terminal_VLine(int x, int y, int len, char ch) {\n");
         emit(g,"    for (int i = 0; i < len; i++) {\n");
         emit(g,"        printf(\"\\033[%%d;%%dH\", y + i, x); putchar(ch);\n");
         emit(g,"    }\n");
         emit(g,"    fflush(stdout);\n");
         emit(g,"}\n");
-        emit(g,"static void Graphics_Box(int x, int y, int w, int h) {\n");
+        emit(g,"static void Terminal_Box(int x, int y, int w, int h) {\n");
         emit(g,"    if (w < 2 || h < 2) return;\n");
         emit(g,"    printf(\"\\033[%%d;%%dH\\xe2\\x94\\x8c\", y, x);\n");      /* ┌ */
         emit(g,"    for (int i=1;i<w-1;i++) fputs(\"\\xe2\\x94\\x80\",stdout);\n"); /* ─ */
@@ -2489,18 +2467,27 @@ void codegen(Node *module, FILE *out, int is_main, const char *srcfile) {
         emit(g,"    fputs(\"\\xe2\\x94\\x98\\n\",stdout);\n");                  /* ┘ */
         emit(g,"    fflush(stdout);\n");
         emit(g,"}\n");
+        emit(g,"static void Terminal_Sprite(int x, int y, const char *s, int color) {\n");
+        emit(g,"    printf(\"\\033[3%%dm\",color&7);\n");
+        emit(g,"    int cx=x,cy=y;\n");
+        emit(g,"    for(const char *p=s;*p;p++) {\n");
+        emit(g,"        if(*p=='\\n') { cy++; cx=x; printf(\"\\033[%%d;%%dH\",cy,cx); }\n");
+        emit(g,"        else { printf(\"\\033[%%d;%%dH\",cy,cx++); putchar(*p); }\n");
+        emit(g,"    }\n");
+        emit(g,"    printf(\"\\033[0m\"); fflush(stdout);\n");
+        emit(g,"}\n");
         /* ── Pixel buffer (half-block: each cell = 2 vertical pixels) ── */
         emit(g,"#define _GFX_W 240\n");
         emit(g,"#define _GFX_H 100\n");
         emit(g,"static int _gfx_buf[_GFX_H][_GFX_W];\n");
-        emit(g,"static void Graphics_ClearBuf(void) {\n");
+        emit(g,"static void Terminal_ClearBuf(void) {\n");
         emit(g,"    for(int r=0;r<_GFX_H;r++) for(int c=0;c<_GFX_W;c++) _gfx_buf[r][c]=0;\n");
         emit(g,"}\n");
-        emit(g,"static void Graphics_Plot(int x, int y, int color) {\n");
+        emit(g,"static void Terminal_Plot(int x, int y, int color) {\n");
         emit(g,"    if(x<0||x>=_GFX_W||y<0||y>=_GFX_H) return;\n");
         emit(g,"    _gfx_buf[y][x] = color ? color : 7;\n");
         emit(g,"}\n");
-        emit(g,"static void Graphics_Flush(void) {\n");
+        emit(g,"static void Terminal_Flush(void) {\n");
         emit(g,"    for(int row=0;row<_GFX_H;row+=2) {\n");
         /* Find the last non-empty column so we don't write trailing spaces
          * that would wrap onto the next terminal line on narrow terminals. */
@@ -2527,55 +2514,45 @@ void codegen(Node *module, FILE *out, int is_main, const char *srcfile) {
         emit(g,"    }\n");
         emit(g,"    printf(\"\\033[0m\"); fflush(stdout);\n");
         emit(g,"}\n");
-        /* Bresenham circle using Plot */
-        emit(g,"static void Graphics_Circle(int cx, int cy, int r, int color) {\n");
+        /* Bresenham circle */
+        emit(g,"static void Terminal_Circle(int cx, int cy, int r, int color) {\n");
         emit(g,"    int x=0,y=r,d=1-r;\n");
         emit(g,"    while(x<=y) {\n");
-        emit(g,"        Graphics_Plot(cx+x,cy+y,color); Graphics_Plot(cx-x,cy+y,color);\n");
-        emit(g,"        Graphics_Plot(cx+x,cy-y,color); Graphics_Plot(cx-x,cy-y,color);\n");
-        emit(g,"        Graphics_Plot(cx+y,cy+x,color); Graphics_Plot(cx-y,cy+x,color);\n");
-        emit(g,"        Graphics_Plot(cx+y,cy-x,color); Graphics_Plot(cx-y,cy-x,color);\n");
+        emit(g,"        Terminal_Plot(cx+x,cy+y,color); Terminal_Plot(cx-x,cy+y,color);\n");
+        emit(g,"        Terminal_Plot(cx+x,cy-y,color); Terminal_Plot(cx-x,cy-y,color);\n");
+        emit(g,"        Terminal_Plot(cx+y,cy+x,color); Terminal_Plot(cx-y,cy+x,color);\n");
+        emit(g,"        Terminal_Plot(cx+y,cy-x,color); Terminal_Plot(cx-y,cy-x,color);\n");
         emit(g,"        if(d<0) d+=2*x+3; else { d+=2*(x-y)+5; y--; } x++;\n");
         emit(g,"    }\n");
         emit(g,"}\n");
-        /* Sprite: draw multi-line string at (x,y) with ANSI color */
-        emit(g,"static void Graphics_Sprite(int x, int y, const char *s, int color) {\n");
-        emit(g,"    printf(\"\\033[3%%dm\",color&7);\n");
-        emit(g,"    int cx=x,cy=y;\n");
-        emit(g,"    for(const char *p=s;*p;p++) {\n");
-        emit(g,"        if(*p=='\\n') { cy++; cx=x; printf(\"\\033[%%d;%%dH\",cy,cx); }\n");
-        emit(g,"        else { printf(\"\\033[%%d;%%dH\",cy,cx++); putchar(*p); }\n");
-        emit(g,"    }\n");
-        emit(g,"    printf(\"\\033[0m\"); fflush(stdout);\n");
-        emit(g,"}\n");
         /* Bresenham line in pixel buffer */
-        emit(g,"static void Graphics_Line(int x0, int y0, int x1, int y1, int color) {\n");
+        emit(g,"static void Terminal_Line(int x0, int y0, int x1, int y1, int color) {\n");
         emit(g,"    int dx=x1-x0; if(dx<0)dx=-dx;\n");
         emit(g,"    int dy=y1-y0; if(dy<0)dy=-dy;\n");
         emit(g,"    int sx=x0<x1?1:-1, sy=y0<y1?1:-1, err=dx-dy;\n");
         emit(g,"    while(1) {\n");
-        emit(g,"        Graphics_Plot(x0,y0,color);\n");
+        emit(g,"        Terminal_Plot(x0,y0,color);\n");
         emit(g,"        if(x0==x1 && y0==y1) break;\n");
         emit(g,"        int e2=2*err;\n");
         emit(g,"        if(e2>-dy){err-=dy;x0+=sx;}\n");
         emit(g,"        if(e2< dx){err+=dx;y0+=sy;}\n");
         emit(g,"    }\n");
         emit(g,"}\n");
-        /* Filled circle in pixel buffer (Bresenham scan-fill) */
-        emit(g,"static void Graphics_FillCircle(int cx, int cy, int r, int color) {\n");
+        /* Filled circle (Bresenham scan-fill) */
+        emit(g,"static void Terminal_FillCircle(int cx, int cy, int r, int color) {\n");
         emit(g,"    int x=0,y=r,d=1-r,i;\n");
         emit(g,"    while(x<=y) {\n");
-        emit(g,"        for(i=cx-x;i<=cx+x;i++){Graphics_Plot(i,cy-y,color);Graphics_Plot(i,cy+y,color);}\n");
-        emit(g,"        for(i=cx-y;i<=cx+y;i++){Graphics_Plot(i,cy-x,color);Graphics_Plot(i,cy+x,color);}\n");
+        emit(g,"        for(i=cx-x;i<=cx+x;i++){Terminal_Plot(i,cy-y,color);Terminal_Plot(i,cy+y,color);}\n");
+        emit(g,"        for(i=cx-y;i<=cx+y;i++){Terminal_Plot(i,cy-x,color);Terminal_Plot(i,cy+x,color);}\n");
         emit(g,"        if(d<0)d+=2*x+3;else{d+=2*(x-y)+5;y--;} x++;\n");
         emit(g,"    }\n");
         emit(g,"}\n");
-        /* Fill entire pixel buffer with one color */
-        emit(g,"static void Graphics_FillBuf(int color) {\n");
+        /* Fill entire pixel buffer */
+        emit(g,"static void Terminal_FillBuf(int color) {\n");
         emit(g,"    for(int r=0;r<_GFX_H;r++) for(int c=0;c<_GFX_W;c++) _gfx_buf[r][c]=color;\n");
         emit(g,"}\n");
         /* Map RGB (0-255 each) to nearest xterm-256 color index */
-        emit(g,"static int Graphics_RGBColor(int r, int g, int b) {\n");
+        emit(g,"static int Terminal_RGBColor(int r, int g, int b) {\n");
         emit(g,"    if(r==g && g==b) {\n");
         emit(g,"        if(r<8)return 16; if(r>248)return 231;\n");
         emit(g,"        return (int)((r-8)/247.0*24.0+232.5);\n");
@@ -3305,7 +3282,6 @@ void codegen(Node *module, FILE *out, int is_main, const char *srcfile) {
             iemit(g,"_args_argv = _argv;\n");
         }
         if (has_terminal) iemit(g,"_term_init();\n");
-        if (has_graphics) iemit(g,"Graphics_Init();\n");
         for (int i=0;i<g_nimports;i++) {
             const char *real = g_import_real[i];
             if (!is_builtin_module(real) && !ffi_is_registered(real))
@@ -3328,7 +3304,6 @@ void codegen(Node *module, FILE *out, int is_main, const char *srcfile) {
         iemit(g,"static int _once = 0;\n");
         iemit(g,"if (_once) return; _once = 1;\n");
         if (has_terminal) iemit(g,"_term_init();\n");
-        if (has_graphics) iemit(g,"Graphics_Init();\n");
         /* Call each user-module dependency's init */
         for (int i=0;i<g_nimports;i++) {
             const char *real = g_import_real[i];

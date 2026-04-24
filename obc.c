@@ -17,7 +17,7 @@
  * Built-in module names (handled by codegen, not as .mod files)
  * ----------------------------------------------------------------------- */
 static const char *g_builtins[] = {
-    "Out","In","Terminal","Graphics","Strings","Files","Args","Dict","Zip",
+    "Out","In","Terminal","Strings","Files","Args","Dict","Zip",
     "Env","OS","Time",NULL
 };
 static int is_builtin(const char *s) {

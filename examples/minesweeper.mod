@@ -4,7 +4,7 @@ MODULE Minesweeper;
  *
  * Layout (terminal):
  *   Header   : row 1  (title + mine counter)
- *   Border   : row 2  (Graphics.Box)
+ *   Border   : row 2  (Terminal.Box)
  *   Grid     : rows 3..Height+2, cols 2..Width*2+1  (2 chars per cell)
  *   Status   : row Height+4
  *
@@ -12,7 +12,7 @@ MODULE Minesweeper;
  *           Left-click=Reveal   Right-click=Flag
  *)
 
-IMPORT Terminal, Random, Out, Graphics;
+IMPORT Terminal, Random, Out;
 
 CONST
   Width      = 10;
@@ -107,38 +107,38 @@ BEGIN
   IF grid[x, y].isRevealed THEN
     IF grid[x, y].isMine THEN
       (* Exploded mine: white-on-red at cursor, red elsewhere *)
-      IF cursor THEN Graphics.Color(7, 1) ELSE Graphics.Color(1, 0) END;
+      IF cursor THEN Terminal.Color(7, 1) ELSE Terminal.Color(1, 0) END;
       Out.String("* ");
     ELSIF grid[x, y].neighborMines > 0 THEN
       n := grid[x, y].neighborMines;
       IF cursor THEN
-        Graphics.Color(0, 6)     (* black on cyan for cursor *)
+        Terminal.Color(0, 6)     (* black on cyan for cursor *)
       ELSE
         (* Classic minesweeper number colours *)
-        IF    n = 1 THEN Graphics.Color(4, 0)   (* blue    *)
-        ELSIF n = 2 THEN Graphics.Color(2, 0)   (* green   *)
-        ELSIF n = 3 THEN Graphics.Color(1, 0)   (* red     *)
-        ELSIF n = 4 THEN Graphics.Color(5, 0)   (* magenta *)
-        ELSIF n = 5 THEN Graphics.Color(3, 0)   (* yellow  *)
-        ELSIF n = 6 THEN Graphics.Color(6, 0)   (* cyan    *)
-        ELSE             Graphics.Color(7, 0)   (* white   *)
+        IF    n = 1 THEN Terminal.Color(4, 0)   (* blue    *)
+        ELSIF n = 2 THEN Terminal.Color(2, 0)   (* green   *)
+        ELSIF n = 3 THEN Terminal.Color(1, 0)   (* red     *)
+        ELSIF n = 4 THEN Terminal.Color(5, 0)   (* magenta *)
+        ELSIF n = 5 THEN Terminal.Color(3, 0)   (* yellow  *)
+        ELSIF n = 6 THEN Terminal.Color(6, 0)   (* cyan    *)
+        ELSE             Terminal.Color(7, 0)   (* white   *)
         END;
       END;
       Out.Int(n, 0);  Out.Char(' ');
     ELSE
       (* Empty revealed cell *)
-      IF cursor THEN Graphics.Color(0, 6) ELSE Graphics.Color(0, 0) END;
+      IF cursor THEN Terminal.Color(0, 6) ELSE Terminal.Color(0, 0) END;
       Out.String(". ");
     END;
   ELSIF grid[x, y].isFlagged THEN
-    IF cursor THEN Graphics.Color(1, 3) ELSE Graphics.Color(1, 0) END;
+    IF cursor THEN Terminal.Color(1, 3) ELSE Terminal.Color(1, 0) END;
     Out.String("F ");
   ELSE
     (* Unrevealed *)
-    IF cursor THEN Graphics.Color(0, 3) ELSE Graphics.Color(7, 0) END;
+    IF cursor THEN Terminal.Color(0, 3) ELSE Terminal.Color(7, 0) END;
     Out.String("# ");
   END;
-  Graphics.Reset;
+  Terminal.Reset;
 END DrawCell;
 
 (* Draw full board *)
@@ -148,9 +148,9 @@ VAR x, y, flags : INTEGER;
 BEGIN
   (* Title *)
   Terminal.Goto(1, 1);
-  Graphics.Color(3, 0);
+  Terminal.Color(3, 0);
   Out.String(" *** MINESWEEPER ***");
-  Graphics.Reset;
+  Terminal.Reset;
 
   (* Remaining-mine counter *)
   flags := 0;
@@ -160,14 +160,14 @@ BEGIN
     END;
   END;
   Terminal.Goto(22, 1);
-  Graphics.Color(1, 0);
+  Terminal.Color(1, 0);
   Out.String("Mines:");  Out.Int(MinesCount - flags, 3);
-  Graphics.Reset;
+  Terminal.Reset;
 
   (* Border box *)
-  Graphics.Color(6, 0);
-  Graphics.Box(1, 2, Width * 2 + 2, Height + 2);
-  Graphics.Reset;
+  Terminal.Color(6, 0);
+  Terminal.Box(1, 2, Width * 2 + 2, Height + 2);
+  Terminal.Reset;
 
   (* Cells *)
   FOR y := 0 TO Height - 1 DO
@@ -178,9 +178,9 @@ BEGIN
 
   (* Controls hint *)
   Terminal.Goto(1, OY + Height + 1);
-  Graphics.Color(7, 0);
+  Terminal.Color(7, 0);
   Out.String("Arrows/Move  Space/Reveal  F/Flag  Q/Quit  Click=Reveal  RClick=Flag");
-  Graphics.Reset;
+  Terminal.Reset;
 END DrawBoard;
 
 (* Win Check *)
@@ -275,13 +275,13 @@ BEGIN
 
   Terminal.Goto(1, OY + Height + 2);
   IF gameWon THEN
-    Graphics.Color(2, 0);
+    Terminal.Color(2, 0);
     Out.String("*** CONGRATULATIONS! YOU WON! ***");
   ELSE
-    Graphics.Color(1, 0);
+    Terminal.Color(1, 0);
     Out.String("*** GAME OVER - BOOM! ***");
   END;
-  Graphics.Reset;
+  Terminal.Reset;
   Out.Ln;
 
   Terminal.MouseOff();
