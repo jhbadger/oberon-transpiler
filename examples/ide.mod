@@ -121,6 +121,7 @@ VAR
   lastEditor: EditorWin;       (* last editor that held focus — used when menu is active *)
   zoomedWin: EditorWin;        (* window currently zoomed full-screen, NIL = tiled mode *)
   pendingCloseWin: EditorWin; (* editor awaiting close confirmation *)
+  pendingClose:    BOOLEAN;   (* close-box click — processed in main loop *)
   (* inline prompt state *)
   promptMode: INTEGER;   (* 0=none 1=find 2=goto 3=confirmClose 4=confirmQuit
                             5=replaceSearch 6=replaceWith 7=replaceStep *)
@@ -1346,6 +1347,9 @@ BEGIN
     (* ── Border ── *)
     TUI.DrawBox(v.x, v.y, v.w, v.h, borderFg, borderBg);
 
+    (* ── Close box [×] on title bar ── *)
+    TUI.PutStr(v.x + 1, v.y, "[x]", TUI.Red, borderBg);
+
     (* ── Title (filename + modified indicator) ── *)
     IF v.title[0] = 0X THEN  Strings.Copy("[untitled]", titleBuf)
     ELSE  Strings.Copy(v.title, titleBuf)
@@ -1482,7 +1486,11 @@ BEGIN
       RETURN TRUE
 
     ELSIF ev.kind = TUI.EvMouse THEN
-      IF ev.mb = 64 THEN       (* wheel up *)
+      IF (ev.mb = 0) & (ev.my = v.y) &   (* close-box click *)
+         (ev.mx >= v.x + 1) & (ev.mx <= v.x + 3) THEN
+        pendingClose := TRUE;
+        RETURN TRUE
+      ELSIF ev.mb = 64 THEN       (* wheel up *)
         IF v.topLine > 0 THEN  DEC(v.topLine, 3) END;
         IF v.topLine < 0 THEN  v.topLine := 0 END
       ELSIF ev.mb = 65 THEN    (* wheel down *)
@@ -1923,8 +1931,17 @@ BEGIN
       END;
       outBuf[i] := 0X;
       Files.Close(f);
-      Strings.Copy(outBuf, statusMsg);
-      ParseErrorLoc(outBuf, errorFile, errorLine)
+      ParseErrorLoc(outBuf, errorFile, errorLine);
+      IF errorFile[0] # 0X THEN
+        (* skip "file:line:" prefix — show only the message part *)
+        i := Strings.Length(errorFile) + 1;
+        WHILE (outBuf[i] # 0X) & (outBuf[i] # ':') DO INC(i) END;
+        IF outBuf[i] = ':' THEN INC(i) END;
+        IF outBuf[i] = ' ' THEN INC(i) END;
+        Strings.Extract(outBuf, i, Strings.Length(outBuf) - i, statusMsg)
+      ELSE
+        Strings.Copy(outBuf, statusMsg)
+      END
     ELSE
       Strings.Copy("Compile failed.", statusMsg);
       errorLine := 0
@@ -2623,8 +2640,9 @@ BEGIN
   promptPos := 0;
   replaceBuf[0] := 0X;
   replacePos := 0;
-  acActive   := FALSE;
-  acCount    := 0;
+  acActive      := FALSE;
+  acCount       := 0;
+  pendingClose  := FALSE;
   clipNLines := 0;
   recentCount := 0;
   errorLine := 0;  errorFile[0] := 0X;
@@ -2746,7 +2764,8 @@ BEGIN
     ELSIF ev.kind = TUI.EvMouse THEN
       (* Dismiss autocomplete on any real click *)
       IF (ev.mb # 32) & (ev.mb # 3) THEN  acActive := FALSE  END;
-      IF ~TUI.Dispatch(ev) THEN  END
+      IF ~TUI.Dispatch(ev) THEN  END;
+      IF pendingClose THEN  pendingClose := FALSE;  OnMenuCmd(CmdClose)  END
 
     ELSIF ev.kind = TUI.EvResize THEN
       sline.y := TUI.Rows;
