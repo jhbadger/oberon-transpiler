@@ -1225,11 +1225,12 @@ VAR
   inStr: BOOLEAN;
   closingParen: BOOLEAN;
   kwEnd, kwFg, j, kwLen: INTEGER;
+  vc, leftVcol, seqLen: INTEGER;
+  c2, c3, c4: CHAR;
+  bg: INTEGER;
 BEGIN
-  len := LineLen(ew, li);
-  (* InvalidateLine forces Flush to emit every cell in this row without
-     skipping, keeping multi-byte UTF-8 sequences intact. *)
-  TUI.InvalidateLine(sy);
+  len      := LineLen(ew, li);
+  leftVcol := ByteToCol(ew.lines[li], leftByte);
 
   depth        := cmtD;
   inStr        := FALSE;
@@ -1237,63 +1238,86 @@ BEGIN
   kwEnd        := 0;
   kwFg         := TUI.White;
 
-  i := 0;
+  vc := 0;  (* visual column, one per logical character *)
+  i  := 0;
   WHILE i < len DO
     ch := ew.lines[li][i];
-    IF i + 1 < len THEN  nextCh := ew.lines[li][i + 1]  ELSE  nextCh := 0X  END;
 
-    (* ── Determine colour ── *)
-    IF closingParen THEN
-      fg := TUI.Green;  closingParen := FALSE
-    ELSIF depth > 0 THEN
-      fg := TUI.Green;
-      IF (ch = '*') & (nextCh = ')') THEN
-        IF depth > 0 THEN  DEC(depth)  END;
-        closingParen := TRUE
-      END
-    ELSIF inStr THEN
-      fg := TUI.Yellow;
-      IF ch = '"' THEN  inStr := FALSE  END
-    ELSIF i < kwEnd THEN
-      fg := kwFg
-    ELSIF (ch = '(') & (nextCh = '*') THEN
-      INC(depth);  fg := TUI.Green
-    ELSIF ch = '"' THEN
-      inStr := TRUE;  fg := TUI.Yellow
-    ELSIF (ch >= 'A') & (ch <= 'Z') & ~IsUtf8Cont(ch) THEN
-      (* Scan ahead for the full identifier *)
-      j := i;
-      WHILE (j < len) &
-            (((ew.lines[li][j] >= 'A') & (ew.lines[li][j] <= 'Z')) OR
-             ((ew.lines[li][j] >= 'a') & (ew.lines[li][j] <= 'z')) OR
-             ((ew.lines[li][j] >= '0') & (ew.lines[li][j] <= '9')) OR
-             (ew.lines[li][j] = '_')) DO
-        INC(j)
+    IF IsUtf8Cont(ch) THEN
+      (* Unexpected bare continuation byte (malformed UTF-8): skip. *)
+      INC(i)
+    ELSE
+      (* Determine byte-length of this UTF-8 sequence. *)
+      IF    ORD(ch) >= 0F0H THEN  seqLen := 4
+      ELSIF ORD(ch) >= 0E0H THEN  seqLen := 3
+      ELSIF ORD(ch) >= 0C0H THEN  seqLen := 2
+      ELSE                        seqLen := 1
       END;
-      kwLen := j - i;
-      IF IsKeyword(ew.lines[li], i, kwLen) THEN
-        kwEnd := i + kwLen;  kwFg := TUI.Cyan;  fg := TUI.Cyan
+
+      (* nextCh: first byte of the following logical character. *)
+      IF i + seqLen < len THEN  nextCh := ew.lines[li][i + seqLen]
+      ELSE                      nextCh := 0X
+      END;
+
+      (* ── Determine colour ── *)
+      IF closingParen THEN
+        fg := TUI.Green;  closingParen := FALSE
+      ELSIF depth > 0 THEN
+        fg := TUI.Green;
+        IF (ch = '*') & (nextCh = ')') THEN
+          IF depth > 0 THEN  DEC(depth)  END;
+          closingParen := TRUE
+        END
+      ELSIF inStr THEN
+        fg := TUI.Yellow;
+        IF ch = '"' THEN  inStr := FALSE  END
+      ELSIF i < kwEnd THEN
+        fg := kwFg
+      ELSIF (ch = '(') & (nextCh = '*') THEN
+        INC(depth);  fg := TUI.Green
+      ELSIF ch = '"' THEN
+        inStr := TRUE;  fg := TUI.Yellow
+      ELSIF (ch >= 'A') & (ch <= 'Z') THEN
+        (* Scan ahead for the full identifier (ASCII only). *)
+        j := i;
+        WHILE (j < len) &
+              (((ew.lines[li][j] >= 'A') & (ew.lines[li][j] <= 'Z')) OR
+               ((ew.lines[li][j] >= 'a') & (ew.lines[li][j] <= 'z')) OR
+               ((ew.lines[li][j] >= '0') & (ew.lines[li][j] <= '9')) OR
+               (ew.lines[li][j] = '_')) DO
+          INC(j)
+        END;
+        kwLen := j - i;
+        IF IsKeyword(ew.lines[li], i, kwLen) THEN
+          kwEnd := i + kwLen;  kwFg := TUI.Cyan;  fg := TUI.Cyan
+        ELSE
+          fg := TUI.White
+        END
       ELSE
         fg := TUI.White
-      END
-    ELSIF IsUtf8Cont(ch) THEN
-      fg := TUI.White   (* continuation byte — inherits colour from start byte *)
-    ELSE
-      fg := TUI.White
-    END;
+      END;
 
-    (* ── Output if in the visible range ── *)
-    sc := i - leftByte;
-    IF (sc >= 0) & (sc < innerW) THEN
-      IF InSel(ew, li, i) THEN
-        TUI.PutCell(innerX + sc, sy, ch, fg, TUI.Blue)
-      ELSE
-        TUI.PutCell(innerX + sc, sy, ch, fg, TUI.Black)
-      END
-    END;
-    INC(i)
+      (* ── Output into the TUI back buffer if in the visible column range ── *)
+      sc := vc - leftVcol;
+      IF (sc >= 0) & (sc < innerW) THEN
+        IF InSel(ew, li, i) THEN  bg := TUI.Blue  ELSE  bg := TUI.Black  END;
+        (* Gather continuation bytes so the whole sequence lives in one cell. *)
+        c2 := 0X;  c3 := 0X;  c4 := 0X;
+        IF (seqLen >= 2) & (i + 1 < len) THEN  c2 := ew.lines[li][i + 1]  END;
+        IF (seqLen >= 3) & (i + 2 < len) THEN  c3 := ew.lines[li][i + 2]  END;
+        IF (seqLen >= 4) & (i + 3 < len) THEN  c4 := ew.lines[li][i + 3]  END;
+        IF c2 = 0X THEN
+          TUI.PutCell(innerX + sc, sy, ch, fg, bg)
+        ELSE
+          TUI.PutCellMB(innerX + sc, sy, ch, c2, c3, c4, fg, bg)
+        END
+      END;
+
+      INC(vc);
+      i := i + seqLen
+    END
   END
-  (* Cells beyond line length remain as spaces from DrawEditor's FillRect *)
+  (* Cells beyond line length remain as spaces from DrawEditor's FillRect. *)
 END RenderEdLine;
 
 (* Draw an editor window — called by TUI.DrawAll via the view's draw proc. *)

@@ -123,9 +123,12 @@ CONST
 (* ── Types ────────────────────────────────────────────────────────────── *)
 
 TYPE
-  (* Screen cell: character + 16-color foreground/background *)
+  (* Screen cell: one terminal column.  ch holds the first (or only) byte;
+     c2..c4 hold continuation bytes for multi-byte UTF-8 characters (0X if
+     unused).  Box-drawing pseudo-codes (0xC0-0xC5) always have c2=c3=c4=0X
+     and are expanded by EmitBoxChar in Flush. *)
   Cell = RECORD
-    ch: CHAR;
+    ch, c2, c3, c4: CHAR;
     fg, bg: INTEGER
   END;
 
@@ -222,6 +225,9 @@ BEGIN
   FOR r := 0 TO Rows - 1 DO
     FOR c := 0 TO Cols - 1 DO
       back[r][c].ch := ' ';
+      back[r][c].c2 := 0X;
+      back[r][c].c3 := 0X;
+      back[r][c].c4 := 0X;
       back[r][c].fg := fg;
       back[r][c].bg := bg
     END
@@ -235,10 +241,28 @@ BEGIN
   c := x - 1;  r := y - 1;
   IF (r >= 0) & (r < Rows) & (c >= 0) & (c < Cols) THEN
     back[r][c].ch := ch;
+    back[r][c].c2 := 0X;
+    back[r][c].c3 := 0X;
+    back[r][c].c4 := 0X;
     back[r][c].fg := fg;
     back[r][c].bg := bg
   END
 END PutCell;
+
+(** PutCellMB — write a multi-byte UTF-8 character into one cell (1-based). **)
+PROCEDURE PutCellMB*(x, y: INTEGER; ch, c2, c3, c4: CHAR; fg, bg: INTEGER);
+VAR r, c: INTEGER;
+BEGIN
+  c := x - 1;  r := y - 1;
+  IF (r >= 0) & (r < Rows) & (c >= 0) & (c < Cols) THEN
+    back[r][c].ch := ch;
+    back[r][c].c2 := c2;
+    back[r][c].c3 := c3;
+    back[r][c].c4 := c4;
+    back[r][c].fg := fg;
+    back[r][c].bg := bg
+  END
+END PutCellMB;
 
 (** PutStr — write a string left-to-right starting at (x, y). **)
 PROCEDURE PutStr*(x, y: INTEGER; s: ARRAY OF CHAR; fg, bg: INTEGER);
@@ -248,6 +272,9 @@ BEGIN
   WHILE (s[k] # 0X) & (col < Cols) DO
     IF (row >= 0) & (row < Rows) & (col >= 0) THEN
       back[row][col].ch := s[k];
+      back[row][col].c2 := 0X;
+      back[row][col].c3 := 0X;
+      back[row][col].c4 := 0X;
       back[row][col].fg := fg;
       back[row][col].bg := bg
     END;
@@ -323,12 +350,13 @@ BEGIN
     prevC := -2;
     FOR c := 0 TO Cols - 1 DO
       IF (back[r][c].ch # front[r][c].ch) OR
+         (back[r][c].c2 # front[r][c].c2) OR
+         (back[r][c].c3 # front[r][c].c3) OR
+         (back[r][c].c4 # front[r][c].c4) OR
          (back[r][c].fg # front[r][c].fg) OR
          (back[r][c].bg # front[r][c].bg) THEN
 
-        (* Only emit a Goto when there's a gap — consecutive dirty cells
-           in the same row are output without repositioning, so multi-byte
-           UTF-8 sequences stored across adjacent cells render correctly. *)
+        (* Only emit a Goto when there's a gap in consecutive dirty cells. *)
         IF c # prevC + 1 THEN  Terminal.Goto(c + 1, r + 1)  END;
         prevC := c;
 
@@ -342,7 +370,10 @@ BEGIN
         IF isBox THEN
           EmitBoxChar(back[r][c].ch)
         ELSE
-          Out.Char(back[r][c].ch)
+          Out.Char(back[r][c].ch);
+          IF back[r][c].c2 # 0X THEN  Out.Char(back[r][c].c2)  END;
+          IF back[r][c].c3 # 0X THEN  Out.Char(back[r][c].c3)  END;
+          IF back[r][c].c4 # 0X THEN  Out.Char(back[r][c].c4)  END
         END;
 
         front[r][c] := back[r][c]
@@ -360,6 +391,9 @@ BEGIN
   FOR r := 0 TO MaxRows - 1 DO
     FOR c := 0 TO MaxCols - 1 DO
       front[r][c].ch := 0X;
+      front[r][c].c2 := 0X;
+      front[r][c].c3 := 0X;
+      front[r][c].c4 := 0X;
       front[r][c].fg := -1;
       front[r][c].bg := -1
     END
