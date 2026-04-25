@@ -43,6 +43,76 @@ static void add_ldflag(const char *lib) {
 }
 
 /* -----------------------------------------------------------------------
+ * Extra compiler / linker flags from PKGCONFIG directives in .ffi files
+ * ----------------------------------------------------------------------- */
+#define MAX_EXTRA_FLAGS 64
+static char g_extra_cflags[MAX_EXTRA_FLAGS][256];
+static int  g_n_extra_cflags = 0;
+static char g_extra_ldirs[MAX_EXTRA_FLAGS][256];
+static int  g_n_extra_ldirs = 0;
+
+static void add_extra_cflag(const char *f) {
+    for (int i = 0; i < g_n_extra_cflags; i++)
+        if (!strcmp(g_extra_cflags[i], f)) return;
+    if (g_n_extra_cflags < MAX_EXTRA_FLAGS) {
+        strncpy(g_extra_cflags[g_n_extra_cflags], f,
+                sizeof(g_extra_cflags[0]) - 1);
+        g_extra_cflags[g_n_extra_cflags][sizeof(g_extra_cflags[0])-1] = '\0';
+        g_n_extra_cflags++;
+    }
+}
+static void add_extra_ldir(const char *d) {
+    for (int i = 0; i < g_n_extra_ldirs; i++)
+        if (!strcmp(g_extra_ldirs[i], d)) return;
+    if (g_n_extra_ldirs < MAX_EXTRA_FLAGS) {
+        strncpy(g_extra_ldirs[g_n_extra_ldirs], d,
+                sizeof(g_extra_ldirs[0]) - 1);
+        g_extra_ldirs[g_n_extra_ldirs][sizeof(g_extra_ldirs[0])-1] = '\0';
+        g_n_extra_ldirs++;
+    }
+}
+
+/* Run pkg-config for pkgname, parse output tokens and accumulate flags. */
+static void pkgconfig_query(const char *pkgname) {
+    char cmd[256];
+    char buf[1024];
+    FILE *pipe;
+
+    /* --cflags */
+    snprintf(cmd, sizeof(cmd), "pkg-config --cflags %s 2>/dev/null", pkgname);
+    pipe = popen(cmd, "r");
+    if (pipe) {
+        if (fgets(buf, sizeof(buf), pipe)) {
+            char *tok = strtok(buf, " \t\r\n");
+            while (tok) {
+                if (tok[0] != '\0') add_extra_cflag(tok);
+                tok = strtok(NULL, " \t\r\n");
+            }
+        }
+        pclose(pipe);
+    }
+
+    /* --libs */
+    snprintf(cmd, sizeof(cmd), "pkg-config --libs %s 2>/dev/null", pkgname);
+    pipe = popen(cmd, "r");
+    if (pipe) {
+        if (fgets(buf, sizeof(buf), pipe)) {
+            char *tok = strtok(buf, " \t\r\n");
+            while (tok) {
+                if (tok[0] == '-' && tok[1] == 'l' && tok[2] != '\0')
+                    add_ldflag(tok + 2);
+                else if (tok[0] == '-' && tok[1] == 'L' && tok[2] != '\0')
+                    add_extra_ldir(tok);
+                else if (tok[0] == '-' && tok[1] == 'f') /* e.g. -framework */
+                    add_extra_ldir(tok);          /* pass through verbatim */
+                tok = strtok(NULL, " \t\r\n");
+            }
+        }
+        pclose(pipe);
+    }
+}
+
+/* -----------------------------------------------------------------------
  * Compiled-module registry (avoids compiling the same module twice)
  * ----------------------------------------------------------------------- */
 #define MAX_COMPILED 64
@@ -363,6 +433,12 @@ static int parse_ffi_file(const char *ffifile, const char *modname)
             maps[nmaps].cname[sizeof(maps[0].cname)-1] = '\0';
             nmaps++;
 
+        } else if (strncmp(p, "PKGCONFIG", 9) == 0 && (p[9]==' ' || p[9]=='\t')) {
+            p += 10;
+            while (*p == ' ' || *p == '\t') p++;
+            trim_trailing(p);
+            if (*p) pkgconfig_query(p);
+
         } else if (strncmp(p, "CSRC", 4) == 0 && (p[4] == ' ' || p[4] == '\t')) {
             p += 5;
             while (*p == ' ' || *p == '\t') p++;
@@ -632,6 +708,11 @@ int main(int argc, char *argv[]) {
                             " -I%s", g_incdirs[i]);
         }
 
+        for (int i = 0; i < g_n_extra_cflags && pos < (int)sizeof(cmd); i++) {
+            pos += snprintf(cmd + pos, sizeof(cmd) - (size_t)pos,
+                            " %s", g_extra_cflags[i]);
+        }
+
         for (int i = 0; i < g_ncfiles && pos < (int)sizeof(cmd); i++) {
             pos += snprintf(cmd + pos, sizeof(cmd) - (size_t)pos,
                             " %s", g_cfiles[i]);
@@ -640,6 +721,11 @@ int main(int argc, char *argv[]) {
         for (int i = 0; i < g_ncsrcfiles && pos < (int)sizeof(cmd); i++) {
             pos += snprintf(cmd + pos, sizeof(cmd) - (size_t)pos,
                             " %s", g_csrcfiles[i]);
+        }
+
+        for (int i = 0; i < g_n_extra_ldirs && pos < (int)sizeof(cmd); i++) {
+            pos += snprintf(cmd + pos, sizeof(cmd) - (size_t)pos,
+                            " %s", g_extra_ldirs[i]);
         }
 
         for (int i = 0; i < g_nldflags && pos < (int)sizeof(cmd); i++) {
