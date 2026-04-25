@@ -1,9 +1,6 @@
 CC       = gcc
-CXX      = g++
 CFLAGS   = -Wall -O -std=c99
-CXXFLAGS = -O
 PREFIX   = $(HOME)
-TVISION  = ./tvision
 
 OBC_SRCS = obc.c codegen.c parser.c lexer.c
 OBC_HDRS = codegen.h parser.h lexer.h
@@ -18,7 +15,7 @@ obc: $(OBC_SRCS) $(OBC_HDRS)
 OBERON_MODS = $(wildcard Modules/*.mod) $(wildcard examples/*.mod)
 
 oberon: obc $(OBERON_MODS)
-	./obc examples/ide.mod -o oberon
+	./obc -I Modules/ examples/ide.mod -o oberon
 
 lextest: lextest.c lexer.c lexer.h
 	$(CC) $(CFLAGS) -o $@ lextest.c lexer.c
