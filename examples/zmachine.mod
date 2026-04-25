@@ -11,7 +11,7 @@ MODULE ZMachine;
 IMPORT Terminal, Args, Strings, Files, Out, Random;
 
 (* Debug: set dbgN > 0 to log first N steps to /tmp/zmdbg.txt *)
-CONST DBGMAX = 3000;
+CONST DBGMAX = 20000;
 
 CONST
   MEMSIZE   = 524288;   (* 512 KB *)
@@ -1251,7 +1251,6 @@ BEGIN
           END
         END
     | 7 :                       (* restart *)
-        (* reload initial pc; simplest restart = re-init execution *)
         pc := iPC;
         fp := -1;  sp := 0
     | 8 : DoReturn(Pop())       (* ret_popped *)
@@ -1724,19 +1723,21 @@ BEGIN
   IF zver >= 4 THEN
     WB(1, BitSet(RB(1), 0))  (* colours available *)
   END;
-  WB(32, screenW);   (* screen width in chars (byte) *)
-  WB(33, screenH);   (* screen height in lines (byte) *)
+  WB(32, screenH);   (* screen height in lines (byte) *)
+  WB(33, screenW);   (* screen width in chars (byte) *)
   IF zver >= 5 THEN
     WW(34, screenW);   (* screen width in units *)
     WW(36, screenH);   (* screen height in units *)
     WB(38, 1);         (* font width in units *)
     WB(39, 1);         (* font height in units *)
     WB(44, 1);         (* default background colour: black *)
-    WB(45, 9)          (* default foreground colour: white *)
+    WB(45, 9);         (* default foreground colour: white *)
+    WB(50, 1);         (* standard revision major *)
+    WB(51, 0)          (* standard revision minor *)
   END;
 
-  (* v1-4: header word 6 is initial byte PC directly.
-     v5+: header word 6 is initial byte PC (main routine entry point). *)
+  (* v1-5: header word 6 is the byte address of the first instruction.
+     v6/7: it would be a packed routine address, but we don't support those. *)
   pc := iPC
 END Init;
 
