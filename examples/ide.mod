@@ -1701,6 +1701,22 @@ END NextEditorWin;
    File I/O
    ════════════════════════════════════════════════════════════════ *)
 
+(* Resolve a relative path to absolute by prepending the cwd. *)
+PROCEDURE AbsPath(rel: ARRAY OF CHAR; VAR abs: ARRAY OF CHAR);
+VAR cwd: ARRAY 512 OF CHAR;
+    n: INTEGER;
+BEGIN
+  IF rel[0] = '/' THEN
+    Strings.Copy(rel, abs)
+  ELSE
+    OS.GetCwd(cwd);
+    n := Strings.Length(cwd);
+    IF (n > 0) & (cwd[n - 1] # '/') THEN  Strings.Append("/", cwd)  END;
+    Strings.Copy(cwd, abs);
+    Strings.Append(rel, abs)
+  END
+END AbsPath;
+
 PROCEDURE LoadFile(ew: EditorWin; name: ARRAY OF CHAR): BOOLEAN;
 VAR f: Files.File;
     r: Files.Rider;
@@ -1740,7 +1756,7 @@ BEGIN
   ew.lines[li][col] := 0X;
   ew.nlines := li + 1;
   Files.Close(f);
-  Strings.Copy(name, ew.title);
+  AbsPath(name, ew.title);
   ew.cx := 0;  ew.cy := 0;
   ew.topLine := 0;  ew.leftCol := 0;
   ew.modified := FALSE;
@@ -2624,9 +2640,9 @@ BEGIN
     Args.Get(1, fn);
     IF ~LoadFile(ew, fn) THEN
       Strings.Copy("New file: ", statusMsg);  Strings.Append(fn, statusMsg);
-      Strings.Copy(fn, ew.title)
+      AbsPath(fn, ew.title)
     ELSE
-      AddRecentFile(fn);  RebuildMenuBar()
+      AddRecentFile(ew.title);  RebuildMenuBar()
     END
   END;
 
