@@ -21,6 +21,8 @@ These identifiers are always in scope without any IMPORT statement.
 | `NEW(VAR p: Pointer)` | Allocate heap memory for the pointed-to type. |
 | `HALT(code: INTEGER)` | Terminate program with exit code `code`. |
 | `ASSERT(cond: BOOLEAN)` | Abort with a C `assert` failure if `cond` is FALSE. |
+| `INCL(VAR s: SET; x: INTEGER)` | Include element `x` in set `s` (`s \|= 1u << x`). |
+| `EXCL(VAR s: SET; x: INTEGER)` | Exclude element `x` from set `s` (`s &= ~(1u << x)`). |
 | `COPY(src: ARRAY OF CHAR; VAR dst: ARRAY OF CHAR)` | Copy string `src` into `dst` (`strcpy`). |
 | `PACK(VAR x: REAL; n: INTEGER)` | Multiply `x` by 2ⁿ in place: `x := x * 2^n`. Equivalent to adjusting the floating-point exponent by `n`. |
 | `UNPK(VAR x: REAL; VAR n: INTEGER)` | Decompose `x` into a normalised mantissa and exponent. After the call `x` is in `[1.0, 2.0)` and `n` holds the original exponent such that the previous value of `x` equals `x * 2^n`. |
@@ -33,6 +35,8 @@ These identifiers are always in scope without any IMPORT statement.
 | `ODD(x: INTEGER)` | BOOLEAN | TRUE if `x` is odd. |
 | `ORD(x: CHAR)` | INTEGER | Character code of `x`. |
 | `CHR(n: INTEGER)` | CHAR | Character with code `n`. |
+| `CAP(c: CHAR)` | CHAR | Uppercase equivalent of `c` (uses C `toupper`). |
+| `FLOOR(x: REAL)` | INTEGER | Largest integer not greater than `x` (uses C `floor`, cast to `int`). |
 | `LEN(a: ARRAY)` | INTEGER | Number of elements in array `a`. |
 | `FLT(x: INTEGER)` | REAL | Convert integer `x` to a floating-point value (`(double)x`). |
 | `ASR(x: INTEGER; n: INTEGER)` | INTEGER | Arithmetic shift right: `x` shifted right by `n` bits, sign-extending the MSB. Equivalent to `x DIV 2^n` with floor semantics. `n` is masked to `[0, 31]`. |

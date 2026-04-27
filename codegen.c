@@ -822,7 +822,8 @@ static void emit_var_decl_raw(CG *g, const char *name, Node *t, int is_var) {
 static int is_builtin(const char *n) {
     return !strcasecmp(n,"INC")||!strcasecmp(n,"DEC")||!strcasecmp(n,"NEW")||
            !strcasecmp(n,"HALT")||!strcasecmp(n,"ASSERT")||!strcasecmp(n,"ABS")||
-           !strcasecmp(n,"ODD")||!strcasecmp(n,"ORD")||!strcasecmp(n,"CHR")||
+           !strcasecmp(n,"ODD")||!strcasecmp(n,"ORD")||!strcasecmp(n,"CHR")||!strcasecmp(n,"CAP")||
+           !strcasecmp(n,"FLOOR")||!strcasecmp(n,"INCL")||!strcasecmp(n,"EXCL")||
            !strcasecmp(n,"LEN")||!strcasecmp(n,"WRITE")||!strcasecmp(n,"READ")||
            !strcasecmp(n,"WRITELN")||!strcasecmp(n,"COPY")||
            !strcasecmp(n,"FLT")||!strcasecmp(n,"ASR")||!strcasecmp(n,"LSL")||
@@ -941,6 +942,14 @@ static void emit_builtin(CG *g, const char *name, Node *args) {
         emit(g,"((int)(unsigned char)("); if(a0) emit_expr(g,a0); emit(g,"))");
     } else if (!strcasecmp(name,"CHR")) {
         emit(g,"((char)("); if(a0) emit_expr(g,a0); emit(g,"))");
+    } else if (!strcasecmp(name,"CAP")) {
+        emit(g,"((char)toupper((unsigned char)("); if(a0) emit_expr(g,a0); emit(g,")))");
+    } else if (!strcasecmp(name,"FLOOR")) {
+        emit(g,"((int)floor("); if(a0) emit_expr(g,a0); emit(g,"))");
+    } else if (!strcasecmp(name,"INCL")) {
+        if(a0) emit_expr(g,a0); emit(g," |= (1u << ("); if(a1) emit_expr(g,a1); emit(g,"))");
+    } else if (!strcasecmp(name,"EXCL")) {
+        if(a0) emit_expr(g,a0); emit(g," &= ~(1u << ("); if(a1) emit_expr(g,a1); emit(g,"))");
     } else if (!strcasecmp(name,"LEN")) {
         /* Open array param → use hidden _len; fixed array → sizeof trick */
         if (a0 && a0->kind==ND_IDENT && is_open_array(sym_type(a0->str))) {
