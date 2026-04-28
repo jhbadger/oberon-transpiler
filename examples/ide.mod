@@ -1933,9 +1933,11 @@ BEGIN
       Files.Close(f);
       ParseErrorLoc(outBuf, errorFile, errorLine);
       IF errorFile[0] # 0X THEN
-        (* skip "file:line:" prefix — show only the message part *)
+        (* skip "file:line:col: " prefix — show only the message part *)
         i := Strings.Length(errorFile) + 1;
-        WHILE (outBuf[i] # 0X) & (outBuf[i] # ':') DO INC(i) END;
+        WHILE (outBuf[i] # 0X) & (outBuf[i] # ':') DO INC(i) END;  (* past line digits *)
+        IF outBuf[i] = ':' THEN INC(i) END;
+        WHILE (outBuf[i] # 0X) & (outBuf[i] # ':') DO INC(i) END;  (* past col digits *)
         IF outBuf[i] = ':' THEN INC(i) END;
         IF outBuf[i] = ' ' THEN INC(i) END;
         Strings.Extract(outBuf, i, Strings.Length(outBuf) - i, statusMsg)
