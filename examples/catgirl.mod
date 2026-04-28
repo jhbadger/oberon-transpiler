@@ -1,6 +1,6 @@
 MODULE CatgirlEliza;
 
-IMPORT In, Out, Strings, Random;
+IMPORT Out, Strings, Random, History;
 
 VAR
   input: ARRAY 256 OF CHAR;
@@ -100,8 +100,7 @@ BEGIN
   Out.String("Nyaa! I'm finally awake! What's your name, Master?"); Out.Ln;
 
   REPEAT
-    Out.String("> ");
-    In.Line(input);
+    History.ReadLine("> ", input);
     IF input # "" THEN
       Reply;
     END;

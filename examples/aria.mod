@@ -25,7 +25,7 @@ MODULE Aria;
  * ============================================================
  *)
 
-IMPORT In, Out, Strings, Random, Args, OS, Files;
+IMPORT Out, Strings, Random, Args, OS, Files, History;
 
 CONST
   NRULES  = 150;
@@ -750,8 +750,7 @@ BEGIN
         Out.String("You : "); Out.String(input); Out.Ln
       END
     ELSE
-      Out.String("You : ");
-      In.Line(input)
+      History.ReadLine("You : ", input)
     END;
     Strings.Trim(input);
 
