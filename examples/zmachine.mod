@@ -8,7 +8,7 @@ MODULE ZMachine;
  * Controls: type commands as normal text, Enter to submit.
  *           Backspace to edit.  Ctrl-C / QUIT to exit.
  *)
-IMPORT Terminal, Args, Strings, Files, Out, Random;
+IMPORT Terminal, Args, Strings, Files, Out, Random, History;
 
 (* Debug: set dbgN > 0 to log first N steps to /tmp/zmdbg.txt *)
 CONST DBGMAX = 20000;
@@ -897,54 +897,40 @@ END ShowStatus;
    ══════════════════════════════════════════════════════════════ *)
 
 PROCEDURE ReadLine(textBuf: INTEGER);
-(* Read a line of text into Z-machine text buffer.
-   textBuf[0] = max chars, textBuf[1..] = text, null-terminated.
-   (In v5+ textBuf[1] = initial text length; we ignore that.) *)
+(* Read a line via History (readline-style editing + history navigation)
+   and store it into the Z-machine text buffer. *)
 VAR
-  maxLen, n : INTEGER;
-  c         : CHAR;
-  k         : INTEGER;
+  maxLen, n, k : INTEGER;
+  tmpLine      : ARRAY 256 OF CHAR;
 BEGIN
   maxLen := RB(textBuf) - 1;
-  n      := 0;
-  IF zver >= 5 THEN
-    (* v5: textBuf[1] = pre-loaded chars count; we clear it for now *)
-    WB(textBuf + 1, 0)
-  END;
+  IF zver >= 5 THEN WB(textBuf + 1, 0) END;
 
   Terminal.ShowCursor;
-  LOOP
-    c := Terminal.ReadKey();
-    k := ORD(c);
-    IF (k = KEY_ENTER) OR (k = 0AX) THEN
-      EXIT
-    ELSIF k = KEY_BS THEN
-      IF n > 0 THEN
-        DEC(n);
-        Out.Char(8X);  Out.Char(' ');  Out.Char(8X)
-      END
-    ELSIF (k = KEY_CTRLC) OR (k = KEY_CTRLD) THEN
-      running := FALSE;
-      EXIT
-    ELSIF (k >= 32) & (k < 127) & (n < maxLen) THEN
-      IF (k >= ORD('A')) & (k <= ORD('Z')) THEN k := k + 32 END;  (* lowercase *)
-      Out.Char(CHR(k));
-      IF zver >= 5 THEN
-        WB(textBuf + 2 + n, k)
-      ELSE
-        WB(textBuf + 1 + n, k)
-      END;
-      INC(n)
-    END
-  END;
+  History.ReadLine("> ", tmpLine);
   Terminal.HideCursor;
+
+  (* Copy into Z-machine buffer, forcing lowercase as the spec requires *)
+  n := 0;
+  WHILE (tmpLine[n] # 0X) & (n < maxLen) DO
+    k := ORD(tmpLine[n]);
+    IF (k >= ORD('A')) & (k <= ORD('Z')) THEN k := k + 32 END;
+    IF zver >= 5 THEN
+      WB(textBuf + 2 + n, k)
+    ELSE
+      WB(textBuf + 1 + n, k)
+    END;
+    INC(n)
+  END;
+
   IF zver >= 5 THEN
     WB(textBuf + 1, n);
     WB(textBuf + 2 + n, 0)
   ELSE
     WB(textBuf + 1 + n, 0)
   END;
-  EmitNewline
+  curCol := 1
+  (* History.ReadLine already emitted \r\n; no EmitNewline needed *)
 END ReadLine;
 
 (* ══════════════════════════════════════════════════════════════
@@ -1421,8 +1407,6 @@ BEGIN
           ShowStatus
         END;
         FlushWord;
-        Out.String("> ");
-        curCol := 3;
         ReadLine(ops[0]);
         IF zver <= 4 THEN
           IF nops >= 2 THEN Tokenise(ops[0], ops[1]) END
