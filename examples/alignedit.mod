@@ -3,8 +3,8 @@ MODULE FastaEditor;
 IMPORT Terminal, Files, Strings, Args, Out;
 
 CONST
-  MaxSeqs = 64;
-  HeaderWidth = 20;
+  MaxSeqs = 100;
+  HeaderWidth = 25;
 
 TYPE
   SeqData = POINTER TO ARRAY OF CHAR;
@@ -32,9 +32,6 @@ BEGIN
   Files.Set(r, f, 0);
   maxLen := 0; currentLen := 0;
 
-  (* FIX 1: Process every line including the last one.
-     ReadLine sets r.eof only after a read finds no characters,
-     so check eof AFTER reading, not as the loop condition. *)
   REPEAT
     Files.ReadLine(r, line);
     IF line[0] = ">" THEN
@@ -64,8 +61,6 @@ BEGIN
 
   Files.Set(r, f, 0);
   numSeqs := -1;
-
-  (* FIX 2: Same REPEAT/UNTIL pattern so the last data line is processed. *)
   REPEAT
     Files.ReadLine(r, line);
     IF line[0] = ">" THEN
@@ -74,10 +69,6 @@ BEGIN
       NEW(seqs[numSeqs].data, maxLen);
       Strings.Copy("", seqs[numSeqs].data^)
     ELSIF (numSeqs >= 0) & (line[0] # 0X) THEN
-      (* FIX 3: Dereference the pointer with ^ so Strings.Append receives
-         an ARRAY OF CHAR, not a pointer.  Without ^, the compiler was
-         passing the pointer value and the append went to a wrong location,
-         giving you only the first few characters. *)
       Strings.Append(line, seqs[numSeqs].data^);
     END;
   UNTIL r.eof;
@@ -95,7 +86,6 @@ BEGIN
   Files.Set(r, f, 0);
   FOR i := 0 TO numSeqs - 1 DO
     Files.WriteLine(r, seqs[i].header);
-    (* FIX 3 (same): dereference pointer when passing to file procedures *)
     Files.WriteLine(r, seqs[i].data^);
   END;
   Files.Register(f);
@@ -129,7 +119,6 @@ BEGIN
 
       Terminal.Color(7, 0);
       Terminal.Goto(HeaderWidth + 1, i + 2);
-      (* FIX 3 (same): dereference for Strings.Extract *)
       Strings.Extract(seqs[screenRow].data^, scrollX, viewW, sub);
       Out.String(sub);
     END;
@@ -168,7 +157,6 @@ BEGIN
       | 0A2X: IF cursorX > 0 THEN DEC(cursorX) END
       | 0A3X: IF cursorX < maxLen - 2 THEN INC(cursorX) END
       | "g", "G":
-          (* FIX 3 (same): dereference for Strings.Length and Strings.Insert *)
           IF Strings.Length(seqs[cursorY].data^) < maxLen - 1 THEN
             Strings.Insert(gapStr, cursorX, seqs[cursorY].data^)
           END
@@ -200,4 +188,6 @@ BEGIN
     Terminal.Clear();
   END;
 END FastaEditor.
+
+
 
