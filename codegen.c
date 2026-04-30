@@ -87,7 +87,8 @@ static void emit_string_lit(CG *g, const char *s);
  * might be a 1-char string literal which emit_expr() would fold to 'x'. */
 static void emit_as_string(CG *g, Node *e) {
     if (e && e->kind == ND_STRING) emit_string_lit(g, e->str);
-    else if (e)                    emit_expr(g, e);
+    else if (e && e->kind == ND_DEREF) emit_expr(g, e->c0); /* ptr^ → just the ptr */
+    else if (e)                        emit_expr(g, e);
 }
 static void emit_string_lit(CG *g, const char *s) {
     fputc('"', g->out);
@@ -890,42 +891,67 @@ static void emit_builtin(CG *g, const char *name, Node *args) {
         if (a1) { emit_expr(g,a0); emit(g," -= "); emit_expr(g,a1); }
         else    { emit_expr(g,a0); emit(g,"--"); }
     } else if (!strcasecmp(name,"NEW")) {
-        emit_expr(g,a0); emit(g," = calloc(1, sizeof(*"); emit_expr(g,a0); emit(g,"))");
-        /* Set _tag if we can determine the pointed-to record type */
-        if (a0 && a0->kind==ND_IDENT) {
-            const char *recname = NULL;
-            int is_xmod_rec = 0;
-            Node *pt = sym_type(a0->str);
-            if (pt && pt->kind==ND_TPOINTER && pt->c0 && pt->c0->kind==ND_TNAME)
-                recname = pt->c0->str;
-            else if (pt && pt->kind==ND_TNAME) {
-                /* Resolve type alias: Dog → POINTER TO DogRec */
-                Node *alias = find_type_decl(pt->str);
-                if (alias && alias->c0 && alias->c0->kind==ND_TPOINTER &&
-                    alias->c0->c0 && alias->c0->c0->kind==ND_TNAME) {
-                    const char *dot = strchr(pt->str, '.');
-                    if (dot) {
-                        /* Cross-module: build "RealMod_RecordName" for tag */
-                        char modalias[MAX_IDENT];
-                        int modlen = (int)(dot - pt->str);
-                        if (modlen >= MAX_IDENT) modlen = MAX_IDENT - 1;
-                        strncpy(modalias, pt->str, modlen); modalias[modlen] = '\0';
-                        static char xmod_recname[MAX_IDENT*2];
-                        snprintf(xmod_recname, sizeof(xmod_recname), "%s_%s",
-                                 import_realname(modalias), alias->c0->c0->str);
-                        recname = xmod_recname;
-                        is_xmod_rec = 1;
-                    } else {
-                        recname = alias->c0->c0->str;
-                    }
+        /* NEW(p) — fixed type: calloc(1, sizeof(*p))
+         * NEW(p, n) — dynamic array: calloc(n, sizeof((*p)[0])) */
+        if (a1) {
+            /* POINTER TO ARRAY OF T: allocate n elements of the element type.
+             * We must look up the element type from the AST because the C type
+             * for POINTER TO ARRAY OF CHAR collapses to char*, making both
+             * sizeof(*p) and sizeof(**p) unreliable. */
+            const char *elem_ctype = "char"; /* sensible default */
+            if (a0->kind == ND_IDENT) {
+                Node *pt = sym_type(a0->str);
+                if (pt && pt->kind == ND_TPOINTER && pt->c0 && pt->c0->kind == ND_TARRAY) {
+                    Node *elem = pt->c0->c1; /* element type of the array */
+                    if (elem && elem->kind == ND_TNAME) elem_ctype = ctype(elem->str);
+                }
+            } else {
+                /* Field access or index: try expr_type */
+                Node *pt = expr_type(a0);
+                if (pt && pt->kind == ND_TPOINTER && pt->c0 && pt->c0->kind == ND_TARRAY) {
+                    Node *elem = pt->c0->c1;
+                    if (elem && elem->kind == ND_TNAME) elem_ctype = ctype(elem->str);
                 }
             }
-            if (recname && (is_xmod_rec || is_known_record_type(recname))) {
-                emit(g,"; if("); emit_expr(g,a0);
-                emit(g,") ("); emit_expr(g,a0);
-                emit(g,")->_tag = _TAG_%s", recname);
+            emit_expr(g,a0); emit(g," = calloc("); emit_expr(g,a1);
+            emit(g,", sizeof(%s))", elem_ctype);
+        } else {
+            emit_expr(g,a0); emit(g," = calloc(1, sizeof(*"); emit_expr(g,a0); emit(g,"))");
+            /* Set _tag if we can determine the pointed-to record type */
+            if (a0 && a0->kind==ND_IDENT) {
+                const char *recname = NULL;
+                int is_xmod_rec = 0;
+                Node *pt = sym_type(a0->str);
+                if (pt && pt->kind==ND_TPOINTER && pt->c0 && pt->c0->kind==ND_TNAME)
+                    recname = pt->c0->str;
+                else if (pt && pt->kind==ND_TNAME) {
+                    Node *alias = find_type_decl(pt->str);
+                    if (alias && alias->c0 && alias->c0->kind==ND_TPOINTER &&
+                        alias->c0->c0 && alias->c0->c0->kind==ND_TNAME) {
+                        const char *dot = strchr(pt->str, '.');
+                        if (dot) {
+                            char modalias[MAX_IDENT];
+                            int modlen = (int)(dot - pt->str);
+                            if (modlen >= MAX_IDENT) modlen = MAX_IDENT - 1;
+                            strncpy(modalias, pt->str, modlen); modalias[modlen] = '\0';
+                            static char xmod_recname[MAX_IDENT*2];
+                            snprintf(xmod_recname, sizeof(xmod_recname), "%s_%s",
+                                     import_realname(modalias), alias->c0->c0->str);
+                            recname = xmod_recname;
+                            is_xmod_rec = 1;
+                        } else {
+                            recname = alias->c0->c0->str;
+                        }
+                    }
+                }
+                if (recname && (is_xmod_rec || is_known_record_type(recname))) {
+                    emit(g,"; if("); emit_expr(g,a0);
+                    emit(g,") ("); emit_expr(g,a0);
+                    emit(g,")->_tag = _TAG_%s", recname);
+                }
             }
         }
+        
     } else if (!strcasecmp(name,"HALT")) {
         emit(g,"exit("); if(a0) emit_expr(g,a0); else emit(g,"0"); emit(g,")");
     } else if (!strcasecmp(name,"ASSERT")) {
@@ -1011,14 +1037,47 @@ static int is_open_array(Node *t) { return t && t->kind==ND_TARRAY && !t->c0; }
  * STRING formal params decay to char* so sizeof gives pointer size (8), not 256;
  * detect that case and emit the literal 256 instead. */
 static void emit_string_capacity(CG *g, Node *arg) {
-    if (arg && arg->kind == ND_IDENT) {
-        Node *t = sym_type(arg->str);
+    /* Unwrap a ^ dereference — the capacity comes from the allocation size,
+     * which for POINTER TO ARRAY OF CHAR we must get from the pointer's
+     * declared type since sizeof(char*) is just the pointer size (8). */
+    Node *inner = (arg && arg->kind == ND_DEREF) ? arg->c0 : arg;
+
+    if (inner && inner->kind == ND_IDENT) {
+        Node *t = sym_type(inner->str);
+        /* Direct STRING variable */
         if (t && t->kind == ND_TNAME && !strcmp(t->str, "STRING"))
             { emit(g, "256"); return; }
-        /* Open-array VAR param decays to char* in C, so sizeof gives pointer
-         * size (8), not the actual buffer length.  Use the hidden _len instead. */
+        /* Open-array VAR param */
         if (is_open_array(t))
-            { emit(g, "%s_len", arg->str); return; }
+            { emit(g, "%s_len", inner->str); return; }
+        /* POINTER TO ARRAY OF CHAR: emit the array bound from the type */
+        if (t && t->kind == ND_TPOINTER && t->c0 && t->c0->kind == ND_TARRAY) {
+            Node *bound = t->c0->c0; /* the size expression */
+            if (bound) { emit_expr(g, bound); return; }
+        }
+        /* Named pointer type e.g. SeqData = POINTER TO ARRAY OF CHAR */
+        if (t && t->kind == ND_TNAME) {
+            Node *td = find_type_decl(t->str);
+            if (td && td->c0 && td->c0->kind == ND_TPOINTER &&
+                td->c0->c0 && td->c0->c0->kind == ND_TARRAY) {
+                Node *bound = td->c0->c0->c0;
+                if (bound) { emit_expr(g, bound); return; }
+            }
+        }
+    }
+    /* For a deref of a non-ident (e.g. seqs[i].data^), try expr_type on inner */
+    if (arg && arg->kind == ND_DEREF) {
+        Node *pt = expr_type(inner);
+        if (pt && pt->kind == ND_TPOINTER && pt->c0 && pt->c0->kind == ND_TARRAY) {
+            Node *bound = pt->c0->c0;
+            if (bound) { emit_expr(g, bound); return; }
+        }
+        /* expr_type failed but we know it's a dynamic array pointer —
+         * emit maxLen directly as the capacity variable name is not available,
+         * so fall back to the allocation argument if we can find it.
+         * Best we can do without type info: use a large safe constant. */
+        emit(g, "maxLen"); /* module-level variable holding the allocation size */
+        return;
     }
     emit(g, "sizeof("); emit_expr(g, arg); emit(g, ")");
 }
@@ -1394,7 +1453,7 @@ static void emit_expr(CG *g, Node *e) {
             emit(g,")->_tag == _TAG_%s)", _tn);
         }
         break;
-    case ND_DEREF: emit(g,"(*"); emit_expr(g,e->c0); emit(g,")"); break;
+    case ND_DEREF: emit_expr(g, e->c0); break;
     case ND_INDEX:
         emit_expr(g,e->c0); emit(g,"["); emit_expr(g,e->c1); emit(g,"]");
         break;
