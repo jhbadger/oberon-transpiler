@@ -868,48 +868,6 @@ Line and column numbers in the API are **1-based**.
 
 ---
 
-## FastaParser - FASTA Sequence File Parser
-
-```
-IMPORT FastaParser;
-```
-
-Streaming parser for FASTA-format files.  Iterates records without loading the
-entire file into memory.
-
-### Constants
-
-| Constant | Value | Description |
-|----------|-------|-------------|
-| `FastaParser.MaxIdLen` | 128 | Maximum bytes in a sequence identifier |
-
-### Types
-
-| Type | Description |
-|------|-------------|
-| `FastaParser.Scanner` | Parser state record.  Declare `VAR s: FastaParser.Scanner`.  Public field: `eof: BOOLEAN`. |
-
-### Procedures
-
-| Procedure / Function | Description |
-|----------------------|-------------|
-| `FastaParser.InitScanner(VAR s: Scanner; f: Files.File)` | Initialize `s` to read from file `f` (already opened with `Files.Old`). |
-| `FastaParser.NextRecord(VAR s: Scanner; VAR id: ARRAY OF CHAR): BOOLEAN` | Advance to the next `>` header.  Copies the identifier into `id` (up to `LEN(id)-1` bytes) and returns TRUE.  Returns FALSE at end of file. |
-| `FastaParser.ReadChunk(VAR s: Scanner; VAR buffer: ARRAY OF CHAR): INTEGER` | Read sequence data for the current record into `buffer`.  Returns the number of characters written.  Whitespace is stripped.  Must call `NextRecord` first.  Returns 0 and sets `buffer[0] := 0X` if called out of sequence. |
-
-**Typical pattern:**
-```oberon
-VAR s: FastaParser.Scanner; id: ARRAY 128 OF CHAR; seq: ARRAY 4096 OF CHAR;
-f := Files.Old("sequences.fasta");
-FastaParser.InitScanner(s, f);
-WHILE FastaParser.NextRecord(s, id) DO
-  n := FastaParser.ReadChunk(s, seq);
-  (* process id and seq *)
-END
-```
-
----
-
 ## DataFrame - Tabular Data
 
 ```
@@ -1348,25 +1306,3 @@ IMPORT NumberTheory;
 
 ---
 
-## MathUtils - Simple Math Utilities
-
-```
-IMPORT MathUtils;
-```
-
-A small demonstration module with a call counter.
-
-### Constants and Variables
-
-| Name | Type | Description |
-|------|------|-------------|
-| `MathUtils.MaxVal` | INTEGER constant | Compile-time constant with value 1000 |
-| `MathUtils.CallCount` | INTEGER variable | Running count of `Square` and `Cube` calls; starts at 0 |
-
-### Procedures
-
-| Function / Procedure | Description |
-|----------------------|-------------|
-| `MathUtils.Square(n: INTEGER): INTEGER` | Return `n * n`.  Increments `CallCount`. |
-| `MathUtils.Cube(n: INTEGER): INTEGER` | Return `n * n * n`.  Increments `CallCount`. |
-| `MathUtils.PrintInfo()` | Print `"MathUtils loaded. MaxVal = 1000"` to stdout. |
