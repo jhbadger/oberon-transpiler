@@ -20,6 +20,7 @@ VAR
   maxLen: INTEGER;
   filename: ARRAY 256 OF CHAR;
   cmdname:  ARRAY 256 OF CHAR;
+  showDots: BOOLEAN;
 
 PROCEDURE CalculateRequiredSize(name: ARRAY OF CHAR);
 VAR
@@ -95,9 +96,10 @@ END Save;
 
 PROCEDURE Draw;
 VAR
-  i, j, viewW, viewH, screenRow: INTEGER;
+  i, j, k, viewW, viewH, screenRow, colIndex: INTEGER;
   sub: ARRAY 512 OF CHAR;
-  ch: CHAR;
+  ch, refCh: CHAR;
+  isIdentical: BOOLEAN;
 BEGIN
   Terminal.HideCursor();
   Terminal.Clear();
@@ -109,7 +111,7 @@ BEGIN
   Terminal.Goto(2, 1);
   Out.String("FILE: "); Out.String(filename);
   Out.String(" | Buf: "); Out.Int(maxLen, 0);
-  Out.String(" | G: Gap | DEL: Rem | S: Save");
+  Out.String(" | .: Toggle Dots | G: Gap | DEL: Rem | S: Save");
 
   FOR i := 0 TO viewH - 1 DO
     screenRow := i + scrollY;
@@ -125,27 +127,43 @@ BEGIN
       (* Draw sequence with colors *)
       FOR j := 0 TO Strings.Length(sub) - 1 DO
         ch := sub[j];
+        colIndex := scrollX + j;
+
+        (* NEW LOGIC: Check if the column is identical across all sequences *)
+        IF showDots & (numSeqs > 1) THEN
+          isIdentical := TRUE;
+          IF colIndex < Strings.Length(seqs[0].data^) THEN
+            refCh := seqs[0].data^[colIndex];
+            FOR k := 1 TO numSeqs - 1 DO
+              IF (colIndex >= Strings.Length(seqs[k].data^)) OR (seqs[k].data^[colIndex] # refCh) THEN
+                isIdentical := FALSE;
+              END;
+            END;
+          ELSE
+            isIdentical := FALSE;
+          END;
+
+          (* If identical (and not a gap), replace the character with a dot *)
+          IF isIdentical & (ch # "-") & (ch # 0X) THEN
+            ch := ".";
+          END;
+        END;
+
         CASE ch OF
           "A", "a": Terminal.Color(1, 0) (* Red *)
           |"T", "t", "U", "u": Terminal.Color(4, 0) (* Blue *)
           |"G", "g": Terminal.Color(3, 0) (* Yellow *)
           |"C", "c": Terminal.Color(2, 0) (* Green *)
           
-          (* Hydrophobic *)
-          |"V", "v", "I", "i", "L", "l", "M", "m", "F", "f", "Y", "y", "W", "w": Terminal.Color(7, 0) (* White *)
-          
-          (* Polar/Hydrophilic *)
-          |"S", "s", "P", "p", "Q", "q", "N", "n": Terminal.Color(6, 0) (* Cyan *)
-
-          (* Charged *)
-          |"D", "d", "E", "e", "K", "k", "R", "r", "H", "h": Terminal.Color(5, 0) (* Magenta *)
+          |"V", "v", "I", "i", "L", "l", "M", "m", "F", "f", "Y", "y", "W", "w": Terminal.Color(7, 0) 
+          |"S", "s", "P", "p", "Q", "q", "N", "n": Terminal.Color(6, 0) 
+          |"D", "d", "E", "e", "K", "k", "R", "r", "H", "h": Terminal.Color(5, 0) 
           
         ELSE
-          Terminal.Color(7, 0) (* Default: White *)
+          Terminal.Color(7, 0) (* Default: White, also used for our new "." characters *)
         END;
         Out.Char(ch);
       END;
-
     END;
   END;
 
@@ -166,6 +184,7 @@ VAR
   viewW, viewH, actualMax, i: INTEGER;
   gapStr: ARRAY 2 OF CHAR;
 BEGIN
+  showDots := FALSE;
   looping := TRUE;
   cursorX := 0; cursorY := 0; scrollX := 0; scrollY := 0;
   gapStr[0] := "-"; gapStr[1] := 0X;
@@ -186,7 +205,8 @@ BEGIN
     IF actualMax = 0 THEN actualMax := 1 END; (* Prevent underflow if empty *)
 
     CASE ch OF
-      0A0X: IF cursorY > 0 THEN DEC(cursorY) END
+      ".": showDots := ~showDots
+      | 0A0X: IF cursorY > 0 THEN DEC(cursorY) END
       | 0A1X: IF cursorY < numSeqs - 1 THEN INC(cursorY) END
       | 0A2X: IF cursorX > 0 THEN DEC(cursorX) END
       | 0A3X: IF cursorX < actualMax THEN INC(cursorX) END
@@ -229,7 +249,6 @@ BEGIN
 
   END;
 END Run;
-
 BEGIN
   Args.Get(0, cmdname);
   IF Args.Count() < 1 THEN
@@ -245,5 +264,6 @@ BEGIN
     Terminal.Clear();
   END;
 END FastaEditor.
+
 
 
