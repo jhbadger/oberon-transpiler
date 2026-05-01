@@ -171,7 +171,7 @@ BEGIN
   Terminal.Goto(1, Terminal.Rows());
   Out.String("X:"); Out.Int(cursorX, 0);
   Out.String(" Y:"); Out.Int(cursorY, 0);
-  Out.String(" | Up/Dn/PgUp/PgDn/Home/End | J: Jump | F: Find | Q: Quit");
+  Out.String(" | Up/Dn/PgUp/PgDn/Home/End: Move | Sh-Up/Dn: Reorder | J: Jump | F: Find | Q: Quit");
 
   Terminal.Goto((HeaderWidth + 1) + (cursorX - scrollX), (cursorY - scrollY) + 2);
   Terminal.ShowCursor();
@@ -218,6 +218,7 @@ VAR
   viewW, viewH, actualMax, i, j, val, patLen: INTEGER;
   gapStr: ARRAY 2 OF CHAR;
   inputStr: ARRAY 256 OF CHAR;
+  tempSeq: Sequence; (* For swapping sequences *)
 BEGIN
   looping := TRUE;
   cursorX := 0; cursorY := 0; scrollX := 0; scrollY := 0;
@@ -246,35 +247,47 @@ BEGIN
       | 0A2X: IF cursorX > 0 THEN DEC(cursorX) END
       | 0A3X: IF cursorX < actualMax THEN INC(cursorX) END
       
+      (* --- NEW: Sequence Reordering --- *)
+      | 0A5X: (* Shift+Up *)
+          IF cursorY > 0 THEN
+            tempSeq := seqs[cursorY];
+            seqs[cursorY] := seqs[cursorY - 1];
+            seqs[cursorY - 1] := tempSeq;
+            DEC(cursorY);
+          END
+      | 0A6X: (* Shift+Down *)
+          IF cursorY < numSeqs - 1 THEN
+            tempSeq := seqs[cursorY];
+            seqs[cursorY] := seqs[cursorY + 1];
+            seqs[cursorY + 1] := tempSeq;
+            INC(cursorY);
+          END
+      (* --- End Reordering --- *)
+
       | 80X: IF cursorX > viewW THEN DEC(cursorX, viewW) ELSE cursorX := 0 END
       | 81X: IF cursorX + viewW < actualMax THEN INC(cursorX, viewW) ELSE cursorX := actualMax - 1 END
       | 82X: cursorX := 0
       | 83X: cursorX := actualMax - 1
 
-      (* -- NEW: Jump To -- *)
       | "j", "J":
           ReadInput("Jump to position (1-based): ", inputStr);
           val := 0; i := 0;
-          (* Simple string-to-integer conversion *)
           WHILE (inputStr[i] >= "0") & (inputStr[i] <= "9") DO
             val := val * 10 + (ORD(inputStr[i]) - ORD("0"));
             INC(i);
           END;
           IF val > 0 THEN 
-            cursorX := val - 1; (* Convert to 0-based index *)
+            cursorX := val - 1;
           END;
 
-      (* -- NEW: Find -- *)
       | "f", "F":
           ReadInput("Find sequence: ", inputStr);
           patLen := Strings.Length(inputStr);
           IF patLen > 0 THEN
             i := cursorX + 1; found := FALSE;
-            (* Search from current position forward *)
             WHILE (i <= actualMax - patLen) & ~found DO
               match := TRUE; j := 0;
               WHILE (j < patLen) & match DO
-                (* Exact case-sensitive match *)
                 IF seqs[cursorY].data^[i + j] # inputStr[j] THEN match := FALSE END;
                 INC(j);
               END;
@@ -296,11 +309,9 @@ BEGIN
     ELSE
     END;
 
-    (* Clamping guarantees Jump doesn't exceed bounds *)
     IF cursorX < 0 THEN cursorX := 0 END;
     IF cursorX > actualMax THEN cursorX := actualMax END;
 
-    (* Auto-scroll ensures the cursor is always visible after Jump/Find *)
     IF cursorY < scrollY THEN scrollY := cursorY
     ELSIF cursorY >= scrollY + viewH THEN scrollY := cursorY - viewH + 1
     END;
@@ -310,7 +321,7 @@ BEGIN
     END;
 
   END;
-END Run;
+END Run;   
 
 BEGIN
   Args.Get(0, cmdname);
@@ -327,6 +338,7 @@ BEGIN
     Terminal.Clear();
   END;
 END FastaEditor.
+
 
 
 
