@@ -19,6 +19,7 @@ VAR
   numSeqs, cursorX, cursorY, scrollX, scrollY: INTEGER;
   maxLen: INTEGER;
   filename: ARRAY 256 OF CHAR;
+  cmdname:  ARRAY 256 OF CHAR;
 
 PROCEDURE CalculateRequiredSize(name: ARRAY OF CHAR);
 VAR
@@ -94,8 +95,9 @@ END Save;
 
 PROCEDURE Draw;
 VAR
-  i, viewW, viewH, screenRow: INTEGER;
+  i, j, viewW, viewH, screenRow: INTEGER;
   sub: ARRAY 512 OF CHAR;
+  ch: CHAR;
 BEGIN
   Terminal.HideCursor();
   Terminal.Clear();
@@ -117,10 +119,33 @@ BEGIN
       Strings.Extract(seqs[screenRow].header, 1, HeaderWidth, sub);
       Out.String(sub);
 
-      Terminal.Color(7, 0);
       Terminal.Goto(HeaderWidth + 1, i + 2);
       Strings.Extract(seqs[screenRow].data^, scrollX, viewW, sub);
-      Out.String(sub);
+      
+      (* Draw sequence with colors *)
+      FOR j := 0 TO Strings.Length(sub) - 1 DO
+        ch := sub[j];
+        CASE ch OF
+          "A", "a": Terminal.Color(1, 0) (* Red *)
+          |"T", "t", "U", "u": Terminal.Color(4, 0) (* Blue *)
+          |"G", "g": Terminal.Color(3, 0) (* Yellow *)
+          |"C", "c": Terminal.Color(2, 0) (* Green *)
+          
+          (* Hydrophobic *)
+          |"V", "v", "I", "i", "L", "l", "M", "m", "F", "f", "Y", "y", "W", "w": Terminal.Color(7, 0) (* White *)
+          
+          (* Polar/Hydrophilic *)
+          |"S", "s", "P", "p", "Q", "q", "N", "n": Terminal.Color(6, 0) (* Cyan *)
+
+          (* Charged *)
+          |"D", "d", "E", "e", "K", "k", "R", "r", "H", "h": Terminal.Color(5, 0) (* Magenta *)
+          
+        ELSE
+          Terminal.Color(7, 0) (* Default: White *)
+        END;
+        Out.Char(ch);
+      END;
+
     END;
   END;
 
@@ -128,7 +153,7 @@ BEGIN
   Terminal.Goto(1, Terminal.Rows());
   Out.String("X:"); Out.Int(cursorX, 0);
   Out.String(" Y:"); Out.Int(cursorY, 0);
-  Out.String(" | Up/Dn to scroll seqs | Q: Quit");
+  Out.String(" | Up/Dn/PgUp/PgDn/Home/End | Q: Quit");
 
   Terminal.Goto((HeaderWidth + 1) + (cursorX - scrollX), (cursorY - scrollY) + 2);
   Terminal.ShowCursor();
@@ -138,7 +163,7 @@ PROCEDURE Run;
 VAR
   ch: CHAR;
   looping: BOOLEAN;
-  viewW, viewH: INTEGER;
+  viewW, viewH, actualMax, i: INTEGER;
   gapStr: ARRAY 2 OF CHAR;
 BEGIN
   looping := TRUE;
@@ -151,11 +176,34 @@ BEGIN
     Draw();
     ch := Terminal.ReadKey();
 
+    (* Calculate the actual max length of the current alignment *)
+    actualMax := 0;
+    FOR i := 0 TO numSeqs - 1 DO
+      IF Strings.Length(seqs[i].data^) > actualMax THEN
+        actualMax := Strings.Length(seqs[i].data^)
+      END;
+    END;
+    IF actualMax = 0 THEN actualMax := 1 END; (* Prevent underflow if empty *)
+
     CASE ch OF
       0A0X: IF cursorY > 0 THEN DEC(cursorY) END
       | 0A1X: IF cursorY < numSeqs - 1 THEN INC(cursorY) END
       | 0A2X: IF cursorX > 0 THEN DEC(cursorX) END
-      | 0A3X: IF cursorX < maxLen - 2 THEN INC(cursorX) END
+      | 0A3X: IF cursorX < actualMax THEN INC(cursorX) END
+      
+      | 80X: (* PgUp *)
+          IF cursorX > viewW THEN DEC(cursorX, viewW) ELSE cursorX := 0 END
+      | 81X: (* PgDn *)
+          IF cursorX + viewW < actualMax THEN 
+            INC(cursorX, viewW) 
+          ELSE 
+            cursorX := actualMax - 1 
+          END
+      | 82X: (* Home *)
+          cursorX := 0
+      | 83X: (* End *)
+          cursorX := actualMax - 1
+
       | "g", "G":
           IF Strings.Length(seqs[cursorY].data^) < maxLen - 1 THEN
             Strings.Insert(gapStr, cursorX, seqs[cursorY].data^)
@@ -167,6 +215,10 @@ BEGIN
     ELSE
     END;
 
+    (* Clamp cursorX to ensure it never goes out of valid bounds *)
+    IF cursorX < 0 THEN cursorX := 0 END;
+    IF cursorX > actualMax THEN cursorX := actualMax END;
+
     IF cursorY < scrollY THEN scrollY := cursorY
     ELSIF cursorY >= scrollY + viewH THEN scrollY := cursorY - viewH + 1
     END;
@@ -174,12 +226,17 @@ BEGIN
     IF cursorX < scrollX THEN scrollX := cursorX
     ELSIF cursorX >= scrollX + viewW THEN scrollX := cursorX - viewW + 1
     END;
+
   END;
 END Run;
 
 BEGIN
+  Args.Get(0, cmdname);
   IF Args.Count() < 1 THEN
-    Out.String("Usage: FastaEditor <file.fasta>"); Out.Ln;
+    Out.String("Usage: ");
+    Out.String(cmdname);
+    Out.String(" <file.fasta>"); 
+    Out.Ln;
   ELSE
     Args.Get(1, filename);
     Load(filename);
@@ -188,6 +245,5 @@ BEGIN
     Terminal.Clear();
   END;
 END FastaEditor.
-
 
 
