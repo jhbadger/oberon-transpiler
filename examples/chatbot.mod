@@ -20,7 +20,7 @@ MODULE Chatbot;
  *   --listen  record speech via sox + whisper instead of keyboard input
  *)
 
-IMPORT Out, Strings, Random, History, Files, Args, OS;
+IMPORT Out, Strings, Random, History, Files, Args, OS, Env;
 
 CONST
   MAXRULES = 200;
@@ -241,6 +241,42 @@ BEGIN
   END
 END Listen;
 
+PROCEDURE PrintWrapped(pfx, text : ARRAY OF CHAR);
+VAR
+  width, col, plen, i, j, wlen : INTEGER;
+  colStr : ARRAY 16 OF CHAR;
+BEGIN
+  Env.Get("COLUMNS", colStr);
+  IF ~Strings.StrToInt(colStr, width) OR (width < 40) THEN width := 80 END;
+  plen := Strings.Length(pfx) + 1;
+  Out.String(pfx); Out.Char(' ');
+  col := plen;
+  i := 0;
+  WHILE text[i] # 0X DO
+    IF (text[i] = ' ') & (col = plen) THEN
+      INC(i)
+    ELSIF text[i] = ' ' THEN
+      Out.Char(' '); INC(col); INC(i)
+    ELSE
+      j := i; wlen := 0;
+      WHILE (text[j] # 0X) & (text[j] # ' ') DO INC(j); INC(wlen) END;
+      IF (col + wlen > width) & (col > plen) THEN
+        Out.Ln;
+        j := 0;
+        WHILE j < plen DO Out.Char(' '); INC(j) END;
+        col := plen
+      END;
+      j := i;
+      WHILE (text[j] # 0X) & (text[j] # ' ') DO
+        Out.Char(text[j]); INC(j)
+      END;
+      col := col + wlen;
+      i := j
+    END
+  END;
+  Out.Ln
+END PrintWrapped;
+
 PROCEDURE Reply;
 VAR
   i, j    : INTEGER;
@@ -256,7 +292,7 @@ BEGIN
     IF Strings.Pos(quitKeys[i], norm) # -1 THEN
       IF farewell[0] # 0X THEN COPY(farewell, resp)
       ELSE COPY("Goodbye!", resp) END;
-      Out.String(prompt); Out.Char(' '); Out.String(resp); Out.Ln;
+      PrintWrapped(prompt, resp);
       IF talkMode THEN Say(resp) END;
       done := TRUE;
       RETURN
@@ -290,7 +326,7 @@ BEGIN
     END
   END;
 
-  Out.String(prompt); Out.Char(' '); Out.String(resp); Out.Ln;
+  PrintWrapped(prompt, resp);
   IF talkMode THEN Say(resp) END
 END Reply;
 
@@ -335,8 +371,7 @@ BEGIN
     END;
     Out.Ln;
     IF greeting[0] # 0X THEN
-      Out.String(prompt); Out.Char(' ');
-      Out.String(greeting); Out.Ln;
+      PrintWrapped(prompt, greeting);
       IF talkMode THEN Say(greeting) END
     END;
 
