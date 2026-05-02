@@ -102,6 +102,7 @@ VAR
   isIdentical: BOOLEAN;
 BEGIN
   Terminal.HideCursor();
+  Terminal.Reset();
   Terminal.Clear();
   viewW := Terminal.Cols() - (HeaderWidth + 1);
   viewH := Terminal.Rows() - 2;
@@ -168,10 +169,11 @@ BEGIN
   END;
 
   Terminal.Color(0, 7);
+  Terminal.Fill(1, Terminal.Rows(), Terminal.Cols(), 1, " ");
   Terminal.Goto(1, Terminal.Rows());
-  Out.String("X:"); Out.Int(cursorX, 0);
-  Out.String(" Y:"); Out.Int(cursorY, 0);
-  Out.String(" | Up/Dn/PgUp/PgDn/Home/End: Move | Sh-Up/Dn: Reorder | J: Jump | F: Find | Q: Quit");
+  Out.String("X:"); Out.Int(cursorX + 1, 0);
+  Out.String(" Y:"); Out.Int(cursorY + 1, 0);
+  Out.String(" | G:Gap Del .:Dots S:Save J:Jump F:Find Q:Quit | ShArr:Reorder");
 
   Terminal.Goto((HeaderWidth + 1) + (cursorX - scrollX), (cursorY - scrollY) + 2);
   Terminal.ShowCursor();
@@ -311,6 +313,8 @@ BEGIN
 
     IF cursorX < 0 THEN cursorX := 0 END;
     IF cursorX > actualMax THEN cursorX := actualMax END;
+    IF cursorY < 0 THEN cursorY := 0 END;
+    IF cursorY > numSeqs - 1 THEN cursorY := numSeqs - 1 END;
 
     IF cursorY < scrollY THEN scrollY := cursorY
     ELSIF cursorY >= scrollY + viewH THEN scrollY := cursorY - viewH + 1

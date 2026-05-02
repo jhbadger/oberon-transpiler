@@ -2285,7 +2285,7 @@ void codegen(Node *module, FILE *out, int is_main, const char *srcfile) {
         emit(g,"    raw.c_cc[VLNEXT] = _POSIX_VDISABLE;\n");
         emit(g,"#endif\n");
         emit(g,"    tcsetattr(STDIN_FILENO, TCSANOW, &raw);\n");
-        emit(g,"    setvbuf(stdout, NULL, _IONBF, 0);\n");
+        emit(g,"    setvbuf(stdout, NULL, _IOFBF, 65536);\n");
         emit(g,"    printf(\"\\033[?25l\"); fflush(stdout);\n");
         emit(g,"    atexit(_term_restore);\n");
         emit(g,"    srand((unsigned)time(NULL));\n");
@@ -2307,19 +2307,19 @@ void codegen(Node *module, FILE *out, int is_main, const char *srcfile) {
 				emit(g,"    raw.c_cc[VLNEXT] = _POSIX_VDISABLE;\n");
 				emit(g,"#endif\n");
 				emit(g,"    tcsetattr(STDIN_FILENO, TCSANOW, &raw);\n");
-				emit(g,"    setvbuf(stdout, NULL, _IONBF, 0);\n");
+				emit(g,"    setvbuf(stdout, NULL, _IOFBF, 65536);\n");
 				emit(g,"    printf(\"\\033[?25l\"); fflush(stdout);\n");
 				emit(g,"}\n");
         /* Mouse on/off */
         emit(g,"static void Terminal_MouseOn(void) {\n");
         emit(g,"    if (!_term_mouse_on) {\n");
-        emit(g,"        printf(\"\\033[?1000h\\033[?1003h\\033[?1006h\"); fflush(stdout);\n");
+        emit(g,"        printf(\"\\033[?1000h\\033[?1003h\\033[?1006h\");\n");
         emit(g,"        _term_mouse_on = 1;\n");
         emit(g,"    }\n");
         emit(g,"}\n");
         emit(g,"static void Terminal_MouseOff(void) {\n");
         emit(g,"    if (_term_mouse_on) {\n");
-        emit(g,"        printf(\"\\033[?1000l\\033[?1003l\\033[?1006l\"); fflush(stdout);\n");
+        emit(g,"        printf(\"\\033[?1000l\\033[?1003l\\033[?1006l\");\n");
         emit(g,"        _term_mouse_on = 0;\n");
         emit(g,"    }\n");
         emit(g,"}\n");
@@ -2329,16 +2329,16 @@ void codegen(Node *module, FILE *out, int is_main, const char *srcfile) {
         emit(g,"static int Terminal_MouseBtn(void) { return _term_mouse_btn; }\n");
         /* Standard procedures */
         emit(g,"static void Terminal_Goto(int x, int y) {\n");
-        emit(g,"    printf(\"\\033[%%d;%%dH\", y, x); fflush(stdout);\n");
+        emit(g,"    printf(\"\\033[%%d;%%dH\", y, x);\n");
         emit(g,"}\n");
         emit(g,"static void Terminal_ShowCursor(void) {\n");
         emit(g,"    printf(\"\\033[?25h\"); fflush(stdout);\n");
         emit(g,"}\n");
         emit(g,"static void Terminal_HideCursor(void) {\n");
-        emit(g,"    printf(\"\\033[?25l\"); fflush(stdout);\n");
+        emit(g,"    printf(\"\\033[?25l\");\n");
         emit(g,"}\n");
         emit(g,"static void Terminal_Clear(void) {\n");
-        emit(g,"    printf(\"\\033[2J\\033[H\"); fflush(stdout);\n");
+        emit(g,"    printf(\"\\033[2J\\033[H\");\n");
         emit(g,"}\n");
         emit(g,"static long Terminal_GetTickCount(void) {\n");
         emit(g,"    struct timeval tv;\n");
@@ -2376,6 +2376,7 @@ void codegen(Node *module, FILE *out, int is_main, const char *srcfile) {
          *   0  left press     1  middle press   2  right press
          *   3  any release    64 wheel up        65 wheel down    */
         emit(g,"static char Terminal_ReadKey(void) {\n");
+        emit(g,"    fflush(stdout);\n");
         emit(g,"    char c;\n");
         emit(g,"    if (_term_kready) { _term_kready=0; c=_term_kbuf; }\n");
         emit(g,"    else {\n");
@@ -2495,31 +2496,28 @@ void codegen(Node *module, FILE *out, int is_main, const char *srcfile) {
         emit(g,"}\n");
         /* ── Graphics functions (part of Terminal) ─────────────────── */
         emit(g,"static void Terminal_Color(int fg, int bg) {\n");
-        emit(g,"    printf(\"\\033[3%%d;4%%dm\", fg & 7, bg & 7); fflush(stdout);\n");
+        emit(g,"    printf(\"\\033[3%%d;4%%dm\", fg & 7, bg & 7);\n");
         emit(g,"}\n");
         emit(g,"static void Terminal_Color256(int fg, int bg) {\n");
-        emit(g,"    printf(\"\\033[38;5;%%d;48;5;%%dm\", fg & 255, bg & 255); fflush(stdout);\n");
+        emit(g,"    printf(\"\\033[38;5;%%d;48;5;%%dm\", fg & 255, bg & 255);\n");
         emit(g,"}\n");
         emit(g,"static void Terminal_Reset(void) {\n");
-        emit(g,"    printf(\"\\033[0m\"); fflush(stdout);\n");
+        emit(g,"    printf(\"\\033[0m\");\n");
         emit(g,"}\n");
         emit(g,"static void Terminal_Fill(int x, int y, int w, int h, char ch) {\n");
         emit(g,"    for (int row = 0; row < h; row++) {\n");
         emit(g,"        printf(\"\\033[%%d;%%dH\", y + row, x);\n");
         emit(g,"        for (int col = 0; col < w; col++) putchar(ch);\n");
         emit(g,"    }\n");
-        emit(g,"    fflush(stdout);\n");
         emit(g,"}\n");
         emit(g,"static void Terminal_HLine(int x, int y, int len, char ch) {\n");
         emit(g,"    printf(\"\\033[%%d;%%dH\", y, x);\n");
         emit(g,"    for (int i = 0; i < len; i++) putchar(ch);\n");
-        emit(g,"    fflush(stdout);\n");
         emit(g,"}\n");
         emit(g,"static void Terminal_VLine(int x, int y, int len, char ch) {\n");
         emit(g,"    for (int i = 0; i < len; i++) {\n");
         emit(g,"        printf(\"\\033[%%d;%%dH\", y + i, x); putchar(ch);\n");
         emit(g,"    }\n");
-        emit(g,"    fflush(stdout);\n");
         emit(g,"}\n");
         emit(g,"static void Terminal_Box(int x, int y, int w, int h) {\n");
         emit(g,"    if (w < 2 || h < 2) return;\n");
@@ -2533,7 +2531,6 @@ void codegen(Node *module, FILE *out, int is_main, const char *srcfile) {
         emit(g,"    printf(\"\\033[%%d;%%dH\\xe2\\x94\\x94\", y+h-1, x);\n");  /* └ */
         emit(g,"    for (int i=1;i<w-1;i++) fputs(\"\\xe2\\x94\\x80\",stdout);\n");
         emit(g,"    fputs(\"\\xe2\\x94\\x98\\n\",stdout);\n");                  /* ┘ */
-        emit(g,"    fflush(stdout);\n");
         emit(g,"}\n");
         emit(g,"static void Terminal_Sprite(int x, int y, const char *s, int color) {\n");
         emit(g,"    printf(\"\\033[3%%dm\",color&7);\n");
@@ -2542,7 +2539,7 @@ void codegen(Node *module, FILE *out, int is_main, const char *srcfile) {
         emit(g,"        if(*p=='\\n') { cy++; cx=x; printf(\"\\033[%%d;%%dH\",cy,cx); }\n");
         emit(g,"        else { printf(\"\\033[%%d;%%dH\",cy,cx++); putchar(*p); }\n");
         emit(g,"    }\n");
-        emit(g,"    printf(\"\\033[0m\"); fflush(stdout);\n");
+        emit(g,"    printf(\"\\033[0m\");\n");
         emit(g,"}\n");
         /* ── Pixel buffer (half-block: each cell = 2 vertical pixels) ── */
         emit(g,"#define _GFX_W 240\n");
