@@ -3,7 +3,7 @@ MODULE SpeedScript;
 IMPORT Terminal, Files, Out, Strings, Args;
 
 CONST
-  MaxText = 65536;
+  MaxText = 65536*3;
   BufSize = 4096;
   MaxName = 256;
   RetChar  = 1FX;   (* hard paragraph break, displayed as < *)
