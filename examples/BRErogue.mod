@@ -838,7 +838,7 @@ BEGIN
       ELSIF mons[i].ch = 'R' THEN  Terminal.Color256(202, 0)
       ELSIF mons[i].ch = 'K' THEN  Terminal.Color256(201, 0)
       ELSIF mons[i].ch = 'C' THEN  Terminal.Color256(40,  0)  (* croc-man: bright green *)
-      ELSIF mons[i].ch = 'w' THEN  Terminal.Color256(94,  0)  (* wasteland wolf: brown *)
+      ELSIF mons[i].ch = 'w' THEN  Terminal.Color256(180, 0)  (* wasteland wolf: sandy tan *)
       (* Tier 3 *)
       ELSIF mons[i].ch = 'd' THEN  Terminal.Color256(208, 0)
       ELSIF mons[i].ch = 'L' THEN  Terminal.Color256(196, 0)
