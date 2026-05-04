@@ -1,6 +1,6 @@
 MODULE SpeedScript;
 
-IMPORT Terminal, Files, Out, Strings, Args;
+IMPORT Terminal, Files, Out, Strings, Args, OS;
 
 CONST
   MaxText = 65536*3;
@@ -11,7 +11,8 @@ CONST
   UndoIns  = 0;
   UndoDel  = 1;
 
-  HLANG_NONE = 0; HLANG_C = 1; HLANG_CPP = 2; HLANG_OBN = 3;
+  HLANG_NONE  = 0; HLANG_C   = 1; HLANG_CPP = 2; HLANG_OBN  = 3;
+  HLANG_R     = 4; HLANG_RUBY = 5; HLANG_SWIFT = 6;
   HNormal  = 0; HKeyword = 1; HString  = 2;
   HComment = 3; HNumber  = 4; HPrepro  = 5;
 
@@ -92,8 +93,6 @@ END IsWord;
 
 (* ── Undo ───────────────────────────────────────────────────────────── *)
 
-(* Record that len chars were inserted starting at pos.
-   Consecutive single-char inserts are coalesced into one record. *)
 PROCEDURE RecordIns(pos, len: INTEGER);
 VAR tail: INTEGER;
 BEGIN
@@ -113,7 +112,6 @@ BEGIN
   END
 END RecordIns;
 
-(* Record that len chars starting at src[off] were deleted from pos. *)
 PROCEDURE RecordDel(pos, len: INTEGER; VAR src: ARRAY OF CHAR; off: INTEGER);
 VAR tail, i: INTEGER;
 BEGIN
@@ -149,7 +147,6 @@ END DoUndo;
 
 (* ── Visual line helpers ─────────────────────────────────────────────── *)
 
-(* Start of visual line containing pos; scans forward from scanFrom *)
 PROCEDURE LineStartFrom(scanFrom, pos: INTEGER): INTEGER;
 VAR i, x, w, ls: INTEGER;
 BEGIN
@@ -165,7 +162,6 @@ BEGIN
   RETURN ls
 END LineStartFrom;
 
-(* Given a visual line start, return the start of the next visual line *)
 PROCEDURE NextVisLine(lineStart: INTEGER): INTEGER;
 VAR i, x, w: INTEGER;
 BEGIN
@@ -180,8 +176,6 @@ BEGIN
   RETURN lastLine
 END NextVisLine;
 
-(* Scan from 0 to find the start of the visual line BEFORE the line
-   that contains pos. Returns 0 if pos is already on the first line. *)
 PROCEDURE PrevVisLine(pos: INTEGER): INTEGER;
 VAR i, x, w, prev, cur: INTEGER;
 BEGIN
@@ -200,8 +194,6 @@ BEGIN
   RETURN cur
 END PrevVisLine;
 
-(* Advance at most (col-1) chars from lineStart, stopping at line end.
-   Returns the buffer position for visual column col on that line. *)
 PROCEDURE AdvanceOnLine(lineStart, col: INTEGER): INTEGER;
 VAR i, x, w: INTEGER;
 BEGIN
@@ -215,7 +207,6 @@ BEGIN
   RETURN i
 END AdvanceOnLine;
 
-(* Compute visual pos (vx, vy) of buffer position pos from topLin *)
 PROCEDURE ComputeVis(pos: INTEGER; VAR vx, vy: INTEGER);
 VAR i, x, y, w: INTEGER;
 BEGIN
@@ -253,17 +244,13 @@ BEGIN
   IF (mb # 0) & (mb # 3) THEN RETURN END;
   w := Terminal.Cols();
   rows := Terminal.Rows() - 1;
-  tx := 1; ty := 2; (* Starting position of text area in Refresh *)
+  tx := 1; ty := 2;
   i := topLin;
-
-  (* Scan through visible text to find match for mx, my *)
   WHILE (i <= lastLine) & (ty <= rows) DO
     IF tx > w THEN tx := 1; INC(ty) END;
-
     IF (mx = tx) & (my = ty) THEN
       curr := i; RETURN
     END;
-
     IF i = lastLine THEN i := lastLine + 1
     ELSIF text[i] = RetChar THEN
       tx := 1; INC(ty); INC(i)
@@ -277,9 +264,13 @@ END HandleMouse;
 
 PROCEDURE DetectLang;
 BEGIN
-  IF Strings.EndsWith(fname, ".c") THEN lang := HLANG_C
-  ELSIF Strings.EndsWith(fname, ".cpp") THEN lang := HLANG_CPP
-  ELSIF Strings.EndsWith(fname, ".mod") THEN lang := HLANG_OBN
+  IF    Strings.EndsWith(fname, ".c")     THEN lang := HLANG_C
+  ELSIF Strings.EndsWith(fname, ".cpp")   THEN lang := HLANG_CPP
+  ELSIF Strings.EndsWith(fname, ".mod")   THEN lang := HLANG_OBN
+  ELSIF Strings.EndsWith(fname, ".r")     THEN lang := HLANG_R
+  ELSIF Strings.EndsWith(fname, ".R")     THEN lang := HLANG_R
+  ELSIF Strings.EndsWith(fname, ".rb")    THEN lang := HLANG_RUBY
+  ELSIF Strings.EndsWith(fname, ".swift") THEN lang := HLANG_SWIFT
   ELSE lang := HLANG_NONE
   END
 END DetectLang;
@@ -304,6 +295,7 @@ END InList;
 PROCEDURE IsKW(VAR word: ARRAY OF CHAR): BOOLEAN;
 VAR kw: ARRAY 256 OF CHAR;
 BEGIN
+  (* ── C ── *)
   IF (lang = HLANG_C) OR (lang = HLANG_CPP) THEN
     COPY(" auto break case char const continue default do double else ", kw);
     IF InList(word, kw) THEN RETURN TRUE END;
@@ -314,6 +306,7 @@ BEGIN
     COPY(" union unsigned void volatile while NULL true false ", kw);
     IF InList(word, kw) THEN RETURN TRUE END
   END;
+  (* ── C++ extras ── *)
   IF lang = HLANG_CPP THEN
     COPY(" bool catch class constexpr delete explicit export friend ", kw);
     IF InList(word, kw) THEN RETURN TRUE END;
@@ -324,6 +317,7 @@ BEGIN
     COPY(" template this throw try typeid typename using virtual ", kw);
     IF InList(word, kw) THEN RETURN TRUE END
   END;
+  (* ── Oberon ── *)
   IF lang = HLANG_OBN THEN
     COPY(" MODULE IMPORT CONST TYPE VAR PROCEDURE BEGIN END RETURN ", kw);
     IF InList(word, kw) THEN RETURN TRUE END;
@@ -340,88 +334,278 @@ BEGIN
     COPY(" ASR LSL ROR INC DEC PACK UNPK ", kw);
     IF InList(word, kw) THEN RETURN TRUE END
   END;
+  (* ── R ── *)
+  IF lang = HLANG_R THEN
+    COPY(" if else for while repeat break next return function ", kw);
+    IF InList(word, kw) THEN RETURN TRUE END;
+    COPY(" TRUE FALSE NULL NA Inf NaN NA_integer_ NA_real_ ", kw);
+    IF InList(word, kw) THEN RETURN TRUE END;
+    COPY(" NA_complex_ NA_character_ LETTERS letters month.abb ", kw);
+    IF InList(word, kw) THEN RETURN TRUE END;
+    COPY(" library require source print cat paste paste0 sprintf ", kw);
+    IF InList(word, kw) THEN RETURN TRUE END;
+    COPY(" c list vector matrix array data.frame read.csv write.csv ", kw);
+    IF InList(word, kw) THEN RETURN TRUE END;
+    COPY(" lapply sapply vapply tapply mapply apply which length ", kw);
+    IF InList(word, kw) THEN RETURN TRUE END;
+    COPY(" nrow ncol dim str summary head tail subset merge order ", kw);
+    IF InList(word, kw) THEN RETURN TRUE END
+  END;
+  (* ── Ruby ── *)
+  IF lang = HLANG_RUBY THEN
+    COPY(" BEGIN END alias and begin break case class def defined ", kw);
+    IF InList(word, kw) THEN RETURN TRUE END;
+    COPY(" do else elsif end ensure false for if in module next nil ", kw);
+    IF InList(word, kw) THEN RETURN TRUE END;
+    COPY(" not or redo rescue retry return self super then true undef ", kw);
+    IF InList(word, kw) THEN RETURN TRUE END;
+    COPY(" unless until when while yield __FILE__ __LINE__ __method__ ", kw);
+    IF InList(word, kw) THEN RETURN TRUE END;
+    COPY(" attr_reader attr_writer attr_accessor include extend require ", kw);
+    IF InList(word, kw) THEN RETURN TRUE END;
+    COPY(" raise puts print p lambda proc frozen_string_literal ", kw);
+    IF InList(word, kw) THEN RETURN TRUE END
+  END;
+  (* ── Swift ── *)
+  IF lang = HLANG_SWIFT THEN
+    COPY(" associatedtype class deinit enum extension fileprivate func ", kw);
+    IF InList(word, kw) THEN RETURN TRUE END;
+    COPY(" import init inout internal let open operator private protocol ", kw);
+    IF InList(word, kw) THEN RETURN TRUE END;
+    COPY(" public rethrows static struct subscript typealias var break ", kw);
+    IF InList(word, kw) THEN RETURN TRUE END;
+    COPY(" case continue default defer do else fallthrough for guard if ", kw);
+    IF InList(word, kw) THEN RETURN TRUE END;
+    COPY(" in repeat return throw switch where while as catch false is ", kw);
+    IF InList(word, kw) THEN RETURN TRUE END;
+    COPY(" nil super self Self true try throws async await actor ", kw);
+    IF InList(word, kw) THEN RETURN TRUE END;
+    COPY(" Any AnyObject Bool Int Float Double String Character Optional ", kw);
+    IF InList(word, kw) THEN RETURN TRUE END;
+    COPY(" Array Dictionary Set Void Never UInt UInt8 Int8 Int32 Int64 ", kw);
+    IF InList(word, kw) THEN RETURN TRUE END;
+    COPY(" override final required convenience weak unowned mutating ", kw);
+    IF InList(word, kw) THEN RETURN TRUE END;
+    COPY(" nonmutating dynamic lazy some @escaping @objc @IBOutlet ", kw);
+    IF InList(word, kw) THEN RETURN TRUE END
+  END;
   RETURN FALSE
 END IsKW;
 
 PROCEDURE Highlight;
-(* state: 0=normal 1=line-comment 2=block-comment 3=dbl-string 4=sgl-string 5=prepro *)
+(*
+   States:
+     0 = normal
+     1 = line comment  (//, #)
+     2 = block comment  (* *) or /* */
+     3 = double-quoted string
+     4 = single-quoted string
+     5 = preprocessor (C/C++ # lines)
+     6 = Ruby =begin ... =end block comment
+     7 = backtick string / R backtick identifier
+*)
 VAR
   i, state, wStart, wlen, j: INTEGER;
   atLineStart: BOOLEAN;
   word: ARRAY 64 OF CHAR;
+
+  PROCEDURE AtWord(i: INTEGER; kw: ARRAY OF CHAR): BOOLEAN;
+  VAR klen, jj: INTEGER;
+  BEGIN
+    klen := Strings.Length(kw);
+    IF i + klen > lastLine THEN RETURN FALSE END;
+    FOR jj := 0 TO klen - 1 DO
+      IF text[i + jj] # kw[jj] THEN RETURN FALSE END
+    END;
+    IF (i + klen < lastLine) & IsIdChar(text[i + klen]) THEN RETURN FALSE END;
+    RETURN TRUE
+  END AtWord;
+
 BEGIN
   FOR i := 0 TO lastLine - 1 DO hlColor[i] := HNormal END;
   IF lang = HLANG_NONE THEN RETURN END;
+
   i := 0; state := 0; atLineStart := TRUE;
+
   WHILE i < lastLine DO
+
     IF state = 0 THEN (* normal *)
+
       IF text[i] = RetChar THEN
         atLineStart := TRUE; INC(i)
-      ELSIF (lang # HLANG_OBN) & (text[i] = "/") & (i+1 < lastLine) & (text[i+1] = "/") THEN
-        hlColor[i] := HComment; hlColor[i+1] := HComment; INC(i, 2); state := 1
-      ELSIF (lang # HLANG_OBN) & (text[i] = "/") & (i+1 < lastLine) & (text[i+1] = "*") THEN
-        hlColor[i] := HComment; hlColor[i+1] := HComment; INC(i, 2); state := 2
-      ELSIF (lang = HLANG_OBN) & (text[i] = "(") & (i+1 < lastLine) & (text[i+1] = "*") THEN
-        hlColor[i] := HComment; hlColor[i+1] := HComment; INC(i, 2); state := 2
-      ELSIF (lang # HLANG_OBN) & (text[i] = "#") & atLineStart THEN
+
+      (* C / C++ / Swift: // line comment *)
+      ELSIF ((lang = HLANG_C) OR (lang = HLANG_CPP) OR (lang = HLANG_SWIFT)) &
+            (text[i] = "/") & (i+1 < lastLine) & (text[i+1] = "/") THEN
+        hlColor[i] := HComment; hlColor[i+1] := HComment;
+        INC(i, 2); state := 1
+
+      (* C / C++ / Swift: /* block comment *)
+      ELSIF ((lang = HLANG_C) OR (lang = HLANG_CPP) OR (lang = HLANG_SWIFT)) &
+            (text[i] = "/") & (i+1 < lastLine) & (text[i+1] = "*") THEN
+        hlColor[i] := HComment; hlColor[i+1] := HComment;
+        INC(i, 2); state := 2
+
+      (* Oberon: block comment *)
+      ELSIF (lang = HLANG_OBN) &
+            (text[i] = "(") & (i+1 < lastLine) & (text[i+1] = "*") THEN
+        hlColor[i] := HComment; hlColor[i+1] := HComment;
+        INC(i, 2); state := 2
+
+      (* C / C++: # preprocessor (line start only) *)
+      ELSIF ((lang = HLANG_C) OR (lang = HLANG_CPP)) &
+            (text[i] = "#") & atLineStart THEN
         hlColor[i] := HPrepro; INC(i); state := 5; atLineStart := FALSE
+
+      (* R: # line comment (anywhere) *)
+      ELSIF (lang = HLANG_R) & (text[i] = "#") THEN
+        hlColor[i] := HComment; INC(i); state := 1
+
+      (* Ruby: # line comment *)
+      ELSIF (lang = HLANG_RUBY) & (text[i] = "#") THEN
+        hlColor[i] := HComment; INC(i); state := 1
+
+      (* Ruby: =begin block comment — must start at column 1 *)
+      ELSIF (lang = HLANG_RUBY) & atLineStart & AtWord(i, "=begin") THEN
+        j := i;
+        WHILE j < i + 6 DO hlColor[j] := HComment; INC(j) END;
+        INC(i, 6); state := 6
+
+      (* Double-quoted string — all languages *)
       ELSIF text[i] = CHR(34) THEN
         hlColor[i] := HString; INC(i); state := 3; atLineStart := FALSE
-      ELSIF text[i] = "'" THEN
+
+      (* Single-quoted string — all languages except Swift *)
+      ELSIF (lang # HLANG_SWIFT) & (text[i] = "'") THEN
         hlColor[i] := HString; INC(i); state := 4; atLineStart := FALSE
+
+      (* R / Ruby: backtick identifier or string *)
+      ELSIF ((lang = HLANG_R) OR (lang = HLANG_RUBY)) & (text[i] = "`") THEN
+        hlColor[i] := HString; INC(i); state := 7; atLineStart := FALSE
+
+      (* Number literal *)
       ELSIF (text[i] >= "0") & (text[i] <= "9") THEN
-        WHILE (i < lastLine) & (IsIdChar(text[i]) OR (text[i] = ".")) DO
+        WHILE (i < lastLine) &
+              (IsIdChar(text[i]) OR (text[i] = ".") OR (text[i] = "_")) DO
           hlColor[i] := HNumber; INC(i)
         END;
         atLineStart := FALSE
+
+      (* Identifier / keyword *)
       ELSIF ((text[i] >= "a") & (text[i] <= "z")) OR
-            ((text[i] >= "A") & (text[i] <= "Z")) OR (text[i] = "_") THEN
+            ((text[i] >= "A") & (text[i] <= "Z")) OR
+            (text[i] = "_") OR
+            ((lang = HLANG_R) & (text[i] = ".")) THEN
         wStart := i;
-        WHILE (i < lastLine) & IsIdChar(text[i]) DO INC(i) END;
-        wlen := i - wStart; IF wlen > 63 THEN wlen := 63 END;
+        WHILE (i < lastLine) &
+              (IsIdChar(text[i]) OR ((lang = HLANG_R) & (text[i] = "."))) DO
+          INC(i)
+        END;
+        wlen := i - wStart;
+        IF wlen > 63 THEN wlen := 63 END;
         FOR j := 0 TO wlen - 1 DO word[j] := text[wStart + j] END;
         word[wlen] := 0X;
         IF IsKW(word) THEN
           FOR j := wStart TO wStart + wlen - 1 DO hlColor[j] := HKeyword END
         END;
         atLineStart := FALSE
+
+      (* Ruby symbol :name — coloured as string *)
+      ELSIF (lang = HLANG_RUBY) & (text[i] = ":") &
+            (i+1 < lastLine) & IsIdChar(text[i+1]) THEN
+        hlColor[i] := HString; INC(i);
+        WHILE (i < lastLine) & IsIdChar(text[i]) DO
+          hlColor[i] := HString; INC(i)
+        END;
+        atLineStart := FALSE
+
+      (* Swift attribute @identifier — coloured as preprocessor *)
+      ELSIF (lang = HLANG_SWIFT) & (text[i] = "@") &
+            (i+1 < lastLine) & IsIdChar(text[i+1]) THEN
+        hlColor[i] := HPrepro; INC(i);
+        WHILE (i < lastLine) & IsIdChar(text[i]) DO
+          hlColor[i] := HPrepro; INC(i)
+        END;
+        atLineStart := FALSE
+
       ELSE
-        INC(i); atLineStart := FALSE
+        IF text[i] # " " THEN atLineStart := FALSE END;
+        INC(i)
       END
-    ELSIF state = 1 THEN (* C/C++ line comment *)
-      IF text[i] = RetChar THEN state := 0; atLineStart := TRUE; INC(i)
-      ELSE hlColor[i] := HComment; INC(i)
+
+    ELSIF state = 1 THEN (* single-line comment *)
+      IF text[i] = RetChar THEN
+        state := 0; atLineStart := TRUE; INC(i)
+      ELSE
+        hlColor[i] := HComment; INC(i)
       END
+
     ELSIF state = 2 THEN (* block comment *)
       hlColor[i] := HComment;
-      IF (lang = HLANG_OBN) & (text[i] = "*") & (i+1 < lastLine) & (text[i+1] = ")") THEN
+      IF (lang = HLANG_OBN) &
+         (text[i] = "*") & (i+1 < lastLine) & (text[i+1] = ")") THEN
         hlColor[i+1] := HComment; INC(i, 2); state := 0
-      ELSIF (lang # HLANG_OBN) & (text[i] = "*") & (i+1 < lastLine) & (text[i+1] = "/") THEN
+      ELSIF ((lang = HLANG_C) OR (lang = HLANG_CPP) OR (lang = HLANG_SWIFT)) &
+            (text[i] = "*") & (i+1 < lastLine) & (text[i+1] = "/") THEN
         hlColor[i+1] := HComment; INC(i, 2); state := 0
-      ELSE INC(i)
+      ELSE
+        IF text[i] = RetChar THEN atLineStart := TRUE END;
+        INC(i)
       END
+
     ELSIF state = 3 THEN (* double-quoted string *)
       hlColor[i] := HString;
       IF (lang # HLANG_OBN) & (text[i] = CHR(92)) THEN
-        IF i+1 < lastLine THEN hlColor[i+1] := HString; INC(i, 2) ELSE INC(i) END
+        IF i+1 < lastLine THEN hlColor[i+1] := HString; INC(i, 2)
+        ELSE INC(i)
+        END
       ELSIF (text[i] = CHR(34)) OR (text[i] = RetChar) THEN
         INC(i); state := 0
       ELSE INC(i)
       END
-    ELSIF state = 4 THEN (* single-quoted string / char literal *)
+
+    ELSIF state = 4 THEN (* single-quoted string *)
       hlColor[i] := HString;
-      IF (lang # HLANG_OBN) & (text[i] = CHR(92)) THEN
-        IF i+1 < lastLine THEN hlColor[i+1] := HString; INC(i, 2) ELSE INC(i) END
+      IF ((lang = HLANG_RUBY) OR (lang = HLANG_R)) & (text[i] = CHR(92)) THEN
+        IF i+1 < lastLine THEN hlColor[i+1] := HString; INC(i, 2)
+        ELSE INC(i)
+        END
       ELSIF (text[i] = "'") OR (text[i] = RetChar) THEN
         INC(i); state := 0
       ELSE INC(i)
       END
-    ELSIF state = 5 THEN (* C/C++ preprocessor *)
-      IF text[i] = RetChar THEN state := 0; atLineStart := TRUE; INC(i)
-      ELSE hlColor[i] := HPrepro; INC(i)
+
+    ELSIF state = 5 THEN (* C/C++ preprocessor line *)
+      IF text[i] = RetChar THEN
+        state := 0; atLineStart := TRUE; INC(i)
+      ELSE
+        hlColor[i] := HPrepro; INC(i)
+      END
+
+    ELSIF state = 6 THEN (* Ruby =begin ... =end block comment *)
+      hlColor[i] := HComment;
+      IF atLineStart & AtWord(i, "=end") THEN
+        j := i;
+        WHILE (j < lastLine) & (text[j] # RetChar) DO
+          hlColor[j] := HComment; INC(j)
+        END;
+        i := j; state := 0
+      ELSE
+        IF text[i] = RetChar THEN atLineStart := TRUE
+        ELSE atLineStart := FALSE
+        END;
+        INC(i)
+      END
+
+    ELSIF state = 7 THEN (* backtick identifier / string (R and Ruby) *)
+      hlColor[i] := HString;
+      IF (text[i] = "`") OR (text[i] = RetChar) THEN
+        INC(i); state := 0
+      ELSE INC(i)
       END
     END
-  END
+
+  END (* WHILE *)
 END Highlight;
 
 PROCEDURE FGColor(n: INTEGER);
@@ -500,7 +684,7 @@ BEGIN
   WHILE (i <= lastLine) & (y <= rows) DO
     IF x > w THEN x := 1; INC(y) END;
     IF i = curr THEN cx := x; cy := y END;
-    IF i = lastLine THEN (* end of text, stop *)
+    IF i = lastLine THEN
       i := lastLine + 1
     ELSIF y <= rows THEN
       Terminal.Goto(x, y);
@@ -512,7 +696,7 @@ BEGIN
         Out.Char(text[i]); INC(i); INC(x)
       END
     ELSE
-      INC(i)  (* off-screen, just advance *)
+      INC(i)
     END
   END;
   IF lang # HLANG_NONE THEN Terminal.Reset END;
@@ -525,7 +709,6 @@ END Refresh;
 PROCEDURE Prompt(msg: ARRAY OF CHAR);
 BEGIN ShowStatus(msg) END Prompt;
 
-(* Read a string at the status line.  Returns FALSE if ESC pressed. *)
 PROCEDURE ReadStr(label: ARRAY OF CHAR; VAR result: ARRAY OF CHAR): BOOLEAN;
 VAR
   len, k, plen, maxlen: INTEGER;
@@ -593,15 +776,11 @@ BEGIN
   END
 END DeleteFwd;
 
-(* Kill from curr to end of visual line; if at line end, kill the break *)
 PROCEDURE KillToEOL;
 VAR ls, le, n, i: INTEGER;
 BEGIN
   ls := LineStartFrom(topLin, curr);
   le := NextVisLine(ls);
-  (* le = first char of next visual line.
-     If line ends with RetChar (le-1 is the RetChar), kill up to but not
-     including it — unless curr IS the RetChar, in which case kill it. *)
   n := le - curr;
   IF (le > 0) & (le - 1 < lastLine) & (text[le - 1] = RetChar) & (curr < le - 1) THEN
     n := le - 1 - curr
@@ -617,7 +796,6 @@ BEGIN
   modified := TRUE
 END KillToEOL;
 
-(* Delete one word backward *)
 PROCEDURE KillWordBack;
 VAR start, n, i: INTEGER;
 BEGIN
@@ -742,22 +920,19 @@ VAR
   tmpname: ARRAY MaxName OF CHAR;
   i: INTEGER;
 BEGIN
-  (* Only prompt if fname is empty *)
   IF fname[0] = 0X THEN
     IF ReadStr("Save as: ", tmpname) THEN
       IF tmpname[0] = 0X THEN Prompt("No filename."); RETURN END;
       COPY(tmpname, fname); DetectLang
     ELSE
-      RETURN (* User cancelled prompt *)
+      RETURN
     END
   END;
-
   f := Files.New(fname);
   IF f = NIL THEN Prompt("Cannot create file."); RETURN END;
-  
   Files.Set(r, f, 0);
   FOR i := 0 TO lastLine - 1 DO
-    IF text[i] = RetChar THEN Files.Write(r, ORD(0AX))   (* LF *)
+    IF text[i] = RetChar THEN Files.Write(r, ORD(0AX))
     ELSE Files.Write(r, ORD(text[i]))
     END
   END;
@@ -803,7 +978,7 @@ BEGIN
     WHILE ~r.eof & (count < MaxText - 1) DO
       Files.Read(r, b);
       IF ~r.eof THEN
-        IF b = ORD(0AX) THEN text[count] := RetChar; INC(count)   (* LF → RetChar *)
+        IF b = ORD(0AX) THEN text[count] := RetChar; INC(count)
         ELSIF b = ORD(0DX) THEN (* skip CR *)
         ELSE text[count] := CHR(b); INC(count)
         END
@@ -871,7 +1046,93 @@ BEGIN
   Prompt(s)
 END DoFindReplace;
 
-(* ── New document ───────────────────────────────────────────────────── *)
+(* ── Compile / Run (F5) ─────────────────────────────────────────────── *)
+
+(* Strip the last dot-extension from src into dst.
+   If there is no dot, dst is a copy of src. *)
+PROCEDURE StripExt(src: ARRAY OF CHAR; VAR dst: ARRAY OF CHAR);
+VAR dot, i, slen: INTEGER;
+BEGIN
+  slen := Strings.Length(src);
+  (* Search for the last '.' in the name *)
+  dot := -1;
+  FOR i := 0 TO slen - 1 DO
+    IF src[i] = "." THEN dot := i END
+  END;
+  IF dot > 0 THEN
+    Strings.Extract(src, 0, dot, dst)
+  ELSE
+    COPY(src, dst)
+  END
+END StripExt;
+
+PROCEDURE CompileRun;
+VAR
+  base, cmd: ARRAY 512 OF CHAR;
+BEGIN
+  (* Must have a named file *)
+  IF fname[0] = 0X THEN
+    Prompt("F5: save the file first.");
+    RETURN
+  END;
+
+  (* Auto-save if modified so we always run the current buffer *)
+  IF modified THEN SaveFile END;
+
+  StripExt(fname, base);
+
+  CASE lang OF
+    HLANG_C:
+      (* compile then run; stderr merged so errors appear in the window *)
+      Strings.Copy("cc -o ", cmd);
+      Strings.Append(base, cmd);
+      Strings.Append(" ", cmd);
+      Strings.Append(fname, cmd);
+      Strings.Append(" 2>&1 && ./", cmd);
+      Strings.Append(base, cmd)
+  | HLANG_CPP:
+      Strings.Copy("c++ -o ", cmd);
+      Strings.Append(base, cmd);
+      Strings.Append(" ", cmd);
+      Strings.Append(fname, cmd);
+      Strings.Append(" 2>&1 && ./", cmd);
+      Strings.Append(base, cmd)
+  | HLANG_OBN:
+      (* obc produces a binary named after the module file without extension *)
+      Strings.Copy("obc ", cmd);
+      Strings.Append(fname, cmd);
+      Strings.Append(" 2>&1 && ./", cmd);
+      Strings.Append(base, cmd)
+  | HLANG_R:
+      Strings.Copy("Rscript ", cmd);
+      Strings.Append(fname, cmd);
+      Strings.Append(" 2>&1", cmd)
+  | HLANG_RUBY:
+      Strings.Copy("ruby ", cmd);
+      Strings.Append(fname, cmd);
+      Strings.Append(" 2>&1", cmd)
+  | HLANG_SWIFT:
+      (* swiftc produces a binary; fall back gracefully if only interpreter
+         available by trying swift directly when swiftc is absent *)
+      Strings.Copy("swiftc -o ", cmd);
+      Strings.Append(base, cmd);
+      Strings.Append(" ", cmd);
+      Strings.Append(fname, cmd);
+      Strings.Append(" 2>&1 && ./", cmd);
+      Strings.Append(base, cmd)
+  ELSE
+    Prompt("F5: no language detected — save with a known extension first.");
+    RETURN
+  END;
+
+  (* Terminal.Shell suspends raw mode, runs the command via the system
+     shell (stdout+stderr go straight to the terminal), prints
+     "-- Press Enter to return --", waits, then restores raw mode. *)
+  Terminal.Clear;
+  Terminal.Shell(cmd)
+END CompileRun;
+
+(* ── Help ───────────────────────────────────────────────────────────── *)
 
 PROCEDURE ShowHelp;
 VAR row, c2, w, h, i: INTEGER;
@@ -880,16 +1141,13 @@ BEGIN
   Terminal.HideCursor;
   Terminal.Clear;
 
-  (* Title bar *)
   ShowStatus("  SpeedScript 3.0  Key Bindings  (press any key to return)  ");
 
-  (* Horizontal rule row 2 *)
   Terminal.Goto(1, 2);
   FGColor(8);
   FOR i := 1 TO w DO Out.Char("-") END;
   Terminal.Reset;
 
-  (* ── Left column ────────────────────────────────────── *)
   row := 3;
   Terminal.Goto(1, row); FGColor(14); Out.String("Navigation");     Terminal.Reset; INC(row);
   Terminal.Goto(1, row); FGColor(11); Out.String("Arrow keys  ");   FGColor(7); Out.String("Move cursor");          Terminal.Reset; INC(row);
@@ -908,9 +1166,9 @@ BEGIN
   INC(row);
   Terminal.Goto(1, row); FGColor(14); Out.String("Other");          Terminal.Reset; INC(row);
   Terminal.Goto(1, row); FGColor(11); Out.String("F1          ");   FGColor(7); Out.String("  This help screen");        Terminal.Reset; INC(row);
+  Terminal.Goto(1, row); FGColor(11); Out.String("F5          ");   FGColor(7); Out.String("  Compile / run");           Terminal.Reset; INC(row);
   Terminal.Goto(1, row); FGColor(11); Out.String("Esc         ");   FGColor(7); Out.String("  Quit");                    Terminal.Reset;
 
-  (* ── Right column ───────────────────────────────────── *)
   row := 3;
   Terminal.Goto(c2, row); FGColor(14); Out.String("Cut & Paste");    Terminal.Reset; INC(row);
   Terminal.Goto(c2, row); FGColor(11); Out.String("Ctrl-K  ");       FGColor(7); Out.String("Kill to end of line");    Terminal.Reset; INC(row);
@@ -926,6 +1184,10 @@ BEGIN
   Terminal.Goto(c2, row); FGColor(11); Out.String("F2      ");       FGColor(7); Out.String("Save as (new filename)"); Terminal.Reset; INC(row);
   Terminal.Goto(c2, row); FGColor(11); Out.String("Ctrl-L  ");       FGColor(7); Out.String("Load file");              Terminal.Reset; INC(row);
   Terminal.Goto(c2, row); FGColor(11); Out.String("Ctrl-N  ");       FGColor(7); Out.String("New document");           Terminal.Reset; INC(row);
+  INC(row);
+  Terminal.Goto(c2, row); FGColor(14); Out.String("Syntax HL");      Terminal.Reset; INC(row);
+  Terminal.Goto(c2, row); FGColor(7);  Out.String(".c .cpp .mod");   Terminal.Reset; INC(row);
+  Terminal.Goto(c2, row); FGColor(7);  Out.String(".r .R .rb .swift"); Terminal.Reset; INC(row);
   INC(row);
   Terminal.Goto(c2, row); FGColor(14); Out.String("Text symbols");   Terminal.Reset; INC(row);
   Terminal.Goto(c2, row); FGColor(11); Out.String("<       ");        FGColor(7); Out.String("Hard paragraph break");   Terminal.Reset;
@@ -959,7 +1221,6 @@ BEGIN
   undoHead := 0; undoCnt := 0; lang := HLANG_NONE;
   insMode := TRUE; modified := FALSE; running := TRUE;
 
-  (* Load filename from command line if given *)
   IF Args.Count() > 0 THEN
     Args.Get(1, fname);
     DetectLang;
@@ -987,48 +1248,49 @@ BEGIN
 
     CASE k OF
       KEY_ESC:
-      IF modified THEN
+        IF modified THEN
           IF ReadStr("Unsaved changes. Exit? (y/n): ", searchStr) THEN
             IF (searchStr[0] = "y") OR (searchStr[0] = "Y") THEN
               running := FALSE
             END
           END;
-          Refresh (* Restore screen after prompt *)
+          Refresh
         ELSE
           running := FALSE
         END
-    | KEY_MOUSE:  HandleMouse
+    | KEY_MOUSE:       HandleMouse
     | KEY_BS, 127:     Backspace
-    | KEY_DEL:    DeleteFwd
-    | KEY_ENTER:  Insert(RetChar)
-    | KEY_TAB:    insMode := ~insMode
-    | KEY_UP:     MoveUp
-    | KEY_DOWN:   MoveDown
+    | KEY_DEL:         DeleteFwd
+    | KEY_ENTER:       Insert(RetChar)
+    | KEY_TAB:         insMode := ~insMode
+    | KEY_UP:          MoveUp
+    | KEY_DOWN:        MoveDown
     | KEY_LEFT:
         IF curr > 0 THEN DEC(curr) END
     | KEY_RIGHT:
         IF curr < lastLine THEN INC(curr) END
-    | KEY_WLEFT:  WordLeft
-    | KEY_WRIGHT: WordRight
+    | KEY_WLEFT:       WordLeft
+    | KEY_WRIGHT:      WordRight
     | KEY_HOME, KEY_FHOME:
         curr := 0; topLin := 0
     | KEY_END, KEY_FEND:
         curr := lastLine
-    | KEY_PGUP:   PageUp
-    | KEY_PGDN:   PageDown
-    | KEY_CTRL_S: SaveFile
-    | KEY_CTRL_L: LoadFile
-    | KEY_CTRL_N: NewDoc
-    | KEY_CTRL_F: DoFind
-    | KEY_CTRL_G: DoFindReplace
-    | KEY_CTRL_K: KillToEOL
-    | KEY_CTRL_W: KillWordBack
-    | KEY_CTRL_R: Paste
-    | KEY_CTRL_T: Transpose
-    | KEY_CTRL_X: ToggleCase
-    | KEY_CTRL_Z: DoUndo
-    | KEY_F1:    ShowHelp
-    | KEY_F2:    SaveFileAs
+    | KEY_PGUP:        PageUp
+    | KEY_PGDN:        PageDown
+    | KEY_CTRL_S:      SaveFile
+    | KEY_CTRL_L:      LoadFile
+    | KEY_CTRL_N:      NewDoc
+    | KEY_CTRL_F:      DoFind
+    | KEY_CTRL_G:      DoFindReplace
+    | KEY_CTRL_K:      KillToEOL
+    | KEY_CTRL_W:      KillWordBack
+    | KEY_CTRL_R:      Paste
+    | KEY_CTRL_T:      Transpose
+    | KEY_CTRL_X:      ToggleCase
+    | KEY_CTRL_Z:      DoUndo
+    | KEY_F1:          ShowHelp
+    | KEY_F2:          SaveFileAs
+    | KEY_F5:          CompileRun
     ELSE
       IF (k >= 32) & (k < 127) THEN Insert(CHR(k)) END
     END
@@ -1043,6 +1305,4 @@ BEGIN
   Run;
   Terminal.MouseOff;
 END SpeedScript.
-
-
 
