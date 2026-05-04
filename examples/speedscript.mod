@@ -424,16 +424,31 @@ BEGIN
   END
 END Highlight;
 
+PROCEDURE FGColor(n: INTEGER);
+VAR s: ARRAY 8 OF CHAR; code: INTEGER;
+BEGIN
+  Out.Char(CHR(27)); Out.Char("[");
+  IF n < 8 THEN code := 30 + n ELSE code := 82 + n END;
+  Strings.IntToStr(code, s); Out.String(s); Out.Char("m")
+END FGColor;
+
+PROCEDURE FGColor256(n: INTEGER);
+VAR s: ARRAY 8 OF CHAR;
+BEGIN
+  Out.Char(CHR(27)); Out.String("[38;5;");
+  Strings.IntToStr(n, s); Out.String(s); Out.Char("m")
+END FGColor256;
+
 PROCEDURE SetHL(hl: INTEGER);
 BEGIN
   IF hl # hlLast THEN
     hlLast := hl;
     CASE hl OF
-      HKeyword: Terminal.Color256(81, 0)
-    | HString:  Terminal.Color256(114, 0)
-    | HComment: Terminal.Color256(244, 0)
-    | HNumber:  Terminal.Color256(215, 0)
-    | HPrepro:  Terminal.Color256(183, 0)
+      HKeyword: FGColor256(81)
+    | HString:  FGColor256(114)
+    | HComment: FGColor256(244)
+    | HNumber:  FGColor256(215)
+    | HPrepro:  FGColor256(183)
     ELSE Terminal.Reset
     END
   END
@@ -490,7 +505,7 @@ BEGIN
     ELSIF y <= rows THEN
       Terminal.Goto(x, y);
       IF text[i] = RetChar THEN
-        Terminal.Color(8, 0); Out.Char("<"); Terminal.Reset; hlLast := -1;
+        FGColor(8); Out.Char("<"); Terminal.Reset; hlLast := -1;
         x := 1; INC(y); INC(i)
       ELSE
         SetHL(hlColor[i]);
@@ -870,50 +885,50 @@ BEGIN
 
   (* Horizontal rule row 2 *)
   Terminal.Goto(1, 2);
-  Terminal.Color(8, 0);
+  FGColor(8);
   FOR i := 1 TO w DO Out.Char("-") END;
   Terminal.Reset;
 
   (* ── Left column ────────────────────────────────────── *)
   row := 3;
-  Terminal.Goto(1, row); Terminal.Color(14, 0); Out.String("Navigation");     Terminal.Reset; INC(row);
-  Terminal.Goto(1, row); Terminal.Color(11, 0); Out.String("Arrow keys  ");   Terminal.Color(7, 0); Out.String("Move cursor");          Terminal.Reset; INC(row);
-  Terminal.Goto(1, row); Terminal.Color(11, 0); Out.String("Ctrl-Left/Rt");   Terminal.Color(7, 0); Out.String("  Word left / right");  Terminal.Reset; INC(row);
-  Terminal.Goto(1, row); Terminal.Color(11, 0); Out.String("Home / End  ");   Terminal.Color(7, 0); Out.String("  Start / end of doc"); Terminal.Reset; INC(row);
-  Terminal.Goto(1, row); Terminal.Color(11, 0); Out.String("PgUp / PgDn ");   Terminal.Color(7, 0); Out.String("  Page up / down");     Terminal.Reset; INC(row);
+  Terminal.Goto(1, row); FGColor(14); Out.String("Navigation");     Terminal.Reset; INC(row);
+  Terminal.Goto(1, row); FGColor(11); Out.String("Arrow keys  ");   FGColor(7); Out.String("Move cursor");          Terminal.Reset; INC(row);
+  Terminal.Goto(1, row); FGColor(11); Out.String("Ctrl-Left/Rt");   FGColor(7); Out.String("  Word left / right");  Terminal.Reset; INC(row);
+  Terminal.Goto(1, row); FGColor(11); Out.String("Home / End  ");   FGColor(7); Out.String("  Start / end of doc"); Terminal.Reset; INC(row);
+  Terminal.Goto(1, row); FGColor(11); Out.String("PgUp / PgDn ");   FGColor(7); Out.String("  Page up / down");     Terminal.Reset; INC(row);
   INC(row);
-  Terminal.Goto(1, row); Terminal.Color(14, 0); Out.String("Editing");        Terminal.Reset; INC(row);
-  Terminal.Goto(1, row); Terminal.Color(11, 0); Out.String("Backspace   ");   Terminal.Color(7, 0); Out.String("  Delete char left");       Terminal.Reset; INC(row);
-  Terminal.Goto(1, row); Terminal.Color(11, 0); Out.String("Del         ");   Terminal.Color(7, 0); Out.String("  Delete char at cursor");   Terminal.Reset; INC(row);
-  Terminal.Goto(1, row); Terminal.Color(11, 0); Out.String("Enter       ");   Terminal.Color(7, 0); Out.String("  Insert paragraph break");  Terminal.Reset; INC(row);
-  Terminal.Goto(1, row); Terminal.Color(11, 0); Out.String("Tab         ");   Terminal.Color(7, 0); Out.String("  Toggle insert/overwrite"); Terminal.Reset; INC(row);
-  Terminal.Goto(1, row); Terminal.Color(11, 0); Out.String("Ctrl-T      ");   Terminal.Color(7, 0); Out.String("  Transpose chars");         Terminal.Reset; INC(row);
-  Terminal.Goto(1, row); Terminal.Color(11, 0); Out.String("Ctrl-X      ");   Terminal.Color(7, 0); Out.String("  Toggle case");             Terminal.Reset; INC(row);
-  Terminal.Goto(1, row); Terminal.Color(11, 0); Out.String("Ctrl-Z      ");   Terminal.Color(7, 0); Out.String("  Undo");                    Terminal.Reset; INC(row);
+  Terminal.Goto(1, row); FGColor(14); Out.String("Editing");        Terminal.Reset; INC(row);
+  Terminal.Goto(1, row); FGColor(11); Out.String("Backspace   ");   FGColor(7); Out.String("  Delete char left");       Terminal.Reset; INC(row);
+  Terminal.Goto(1, row); FGColor(11); Out.String("Del         ");   FGColor(7); Out.String("  Delete char at cursor");   Terminal.Reset; INC(row);
+  Terminal.Goto(1, row); FGColor(11); Out.String("Enter       ");   FGColor(7); Out.String("  Insert paragraph break");  Terminal.Reset; INC(row);
+  Terminal.Goto(1, row); FGColor(11); Out.String("Tab         ");   FGColor(7); Out.String("  Toggle insert/overwrite"); Terminal.Reset; INC(row);
+  Terminal.Goto(1, row); FGColor(11); Out.String("Ctrl-T      ");   FGColor(7); Out.String("  Transpose chars");         Terminal.Reset; INC(row);
+  Terminal.Goto(1, row); FGColor(11); Out.String("Ctrl-X      ");   FGColor(7); Out.String("  Toggle case");             Terminal.Reset; INC(row);
+  Terminal.Goto(1, row); FGColor(11); Out.String("Ctrl-Z      ");   FGColor(7); Out.String("  Undo");                    Terminal.Reset; INC(row);
   INC(row);
-  Terminal.Goto(1, row); Terminal.Color(14, 0); Out.String("Other");          Terminal.Reset; INC(row);
-  Terminal.Goto(1, row); Terminal.Color(11, 0); Out.String("F1          ");   Terminal.Color(7, 0); Out.String("  This help screen");        Terminal.Reset; INC(row);
-  Terminal.Goto(1, row); Terminal.Color(11, 0); Out.String("Esc         ");   Terminal.Color(7, 0); Out.String("  Quit");                    Terminal.Reset;
+  Terminal.Goto(1, row); FGColor(14); Out.String("Other");          Terminal.Reset; INC(row);
+  Terminal.Goto(1, row); FGColor(11); Out.String("F1          ");   FGColor(7); Out.String("  This help screen");        Terminal.Reset; INC(row);
+  Terminal.Goto(1, row); FGColor(11); Out.String("Esc         ");   FGColor(7); Out.String("  Quit");                    Terminal.Reset;
 
   (* ── Right column ───────────────────────────────────── *)
   row := 3;
-  Terminal.Goto(c2, row); Terminal.Color(14, 0); Out.String("Cut & Paste");    Terminal.Reset; INC(row);
-  Terminal.Goto(c2, row); Terminal.Color(11, 0); Out.String("Ctrl-K  ");       Terminal.Color(7, 0); Out.String("Kill to end of line");    Terminal.Reset; INC(row);
-  Terminal.Goto(c2, row); Terminal.Color(11, 0); Out.String("Ctrl-W  ");       Terminal.Color(7, 0); Out.String("Delete word backward");   Terminal.Reset; INC(row);
-  Terminal.Goto(c2, row); Terminal.Color(11, 0); Out.String("Ctrl-R  ");       Terminal.Color(7, 0); Out.String("Paste (restore) buffer"); Terminal.Reset; INC(row);
+  Terminal.Goto(c2, row); FGColor(14); Out.String("Cut & Paste");    Terminal.Reset; INC(row);
+  Terminal.Goto(c2, row); FGColor(11); Out.String("Ctrl-K  ");       FGColor(7); Out.String("Kill to end of line");    Terminal.Reset; INC(row);
+  Terminal.Goto(c2, row); FGColor(11); Out.String("Ctrl-W  ");       FGColor(7); Out.String("Delete word backward");   Terminal.Reset; INC(row);
+  Terminal.Goto(c2, row); FGColor(11); Out.String("Ctrl-R  ");       FGColor(7); Out.String("Paste (restore) buffer"); Terminal.Reset; INC(row);
   INC(row);
-  Terminal.Goto(c2, row); Terminal.Color(14, 0); Out.String("Search");         Terminal.Reset; INC(row);
-  Terminal.Goto(c2, row); Terminal.Color(11, 0); Out.String("Ctrl-F  ");       Terminal.Color(7, 0); Out.String("Find (Enter=repeat)");    Terminal.Reset; INC(row);
-  Terminal.Goto(c2, row); Terminal.Color(11, 0); Out.String("Ctrl-G  ");       Terminal.Color(7, 0); Out.String("Find and replace all");   Terminal.Reset; INC(row);
+  Terminal.Goto(c2, row); FGColor(14); Out.String("Search");         Terminal.Reset; INC(row);
+  Terminal.Goto(c2, row); FGColor(11); Out.String("Ctrl-F  ");       FGColor(7); Out.String("Find (Enter=repeat)");    Terminal.Reset; INC(row);
+  Terminal.Goto(c2, row); FGColor(11); Out.String("Ctrl-G  ");       FGColor(7); Out.String("Find and replace all");   Terminal.Reset; INC(row);
   INC(row);
-  Terminal.Goto(c2, row); Terminal.Color(14, 0); Out.String("File");           Terminal.Reset; INC(row);
-  Terminal.Goto(c2, row); Terminal.Color(11, 0); Out.String("Ctrl-S  ");       Terminal.Color(7, 0); Out.String("Save");                   Terminal.Reset; INC(row);
-  Terminal.Goto(c2, row); Terminal.Color(11, 0); Out.String("F2      ");       Terminal.Color(7, 0); Out.String("Save as (new filename)"); Terminal.Reset; INC(row);
-  Terminal.Goto(c2, row); Terminal.Color(11, 0); Out.String("Ctrl-L  ");       Terminal.Color(7, 0); Out.String("Load file");              Terminal.Reset; INC(row);
-  Terminal.Goto(c2, row); Terminal.Color(11, 0); Out.String("Ctrl-N  ");       Terminal.Color(7, 0); Out.String("New document");           Terminal.Reset; INC(row);
+  Terminal.Goto(c2, row); FGColor(14); Out.String("File");           Terminal.Reset; INC(row);
+  Terminal.Goto(c2, row); FGColor(11); Out.String("Ctrl-S  ");       FGColor(7); Out.String("Save");                   Terminal.Reset; INC(row);
+  Terminal.Goto(c2, row); FGColor(11); Out.String("F2      ");       FGColor(7); Out.String("Save as (new filename)"); Terminal.Reset; INC(row);
+  Terminal.Goto(c2, row); FGColor(11); Out.String("Ctrl-L  ");       FGColor(7); Out.String("Load file");              Terminal.Reset; INC(row);
+  Terminal.Goto(c2, row); FGColor(11); Out.String("Ctrl-N  ");       FGColor(7); Out.String("New document");           Terminal.Reset; INC(row);
   INC(row);
-  Terminal.Goto(c2, row); Terminal.Color(14, 0); Out.String("Text symbols");   Terminal.Reset; INC(row);
-  Terminal.Goto(c2, row); Terminal.Color(11, 0); Out.String("<       ");        Terminal.Color(7, 0); Out.String("Hard paragraph break");   Terminal.Reset;
+  Terminal.Goto(c2, row); FGColor(14); Out.String("Text symbols");   Terminal.Reset; INC(row);
+  Terminal.Goto(c2, row); FGColor(11); Out.String("<       ");        FGColor(7); Out.String("Hard paragraph break");   Terminal.Reset;
 
   i := Terminal.ReadKey();
   Terminal.ShowCursor
