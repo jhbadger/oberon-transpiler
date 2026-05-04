@@ -1283,7 +1283,15 @@ BEGIN
     statusMsg[0] := 0X;
 
     IF k = KEY_MOUSE THEN
-      HandleMouse()
+      HandleMouse();
+      IF (scrRow # prevScrRow) OR (scrCol # prevScrCol) THEN
+        DrawAll()
+      ELSIF (curRow # prevRow) OR (curCol # prevCol) THEN
+        DrawDataRow(prevRow);
+        RedrawCur()
+      ELSE
+        DrawFormulaBar()
+      END
     ELSIF k = KEY_F1 THEN
       ShowHelp()
     ELSIF k = 14X THEN (* Ctrl+T: sort current column *)
