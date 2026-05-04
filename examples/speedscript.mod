@@ -6,7 +6,14 @@ CONST
   MaxText = 65536;
   BufSize = 4096;
   MaxName = 256;
-  RetChar = 1FX;   (* hard paragraph break, displayed as < *)
+  RetChar  = 1FX;   (* hard paragraph break, displayed as < *)
+  MaxUndo  = 32;
+  UndoIns  = 0;
+  UndoDel  = 1;
+
+  HLANG_NONE = 0; HLANG_C = 1; HLANG_CPP = 2; HLANG_OBN = 3;
+  HNormal  = 0; HKeyword = 1; HString  = 2;
+  HComment = 3; HNumber  = 4; HPrepro  = 5;
 
   (* Integer key codes *)
   KEY_UP    = 0A0X;   KEY_DOWN  = 0A1X;
@@ -24,22 +31,39 @@ CONST
   KEY_CTRL_T = 20;  (* Transpose *)
   KEY_CTRL_W = 23;  (* Delete word backward *)
   KEY_CTRL_X = 24;  (* Toggle case *)
+  KEY_CTRL_Z = 26;  (* Undo *)
   KEY_PGUP   = 80X; KEY_PGDN   = 81X;
   KEY_HOME   = 82X; KEY_END    = 83X;
   KEY_DEL    = 84X;
-  KEY_WLEFT  = 261; KEY_WRIGHT = 262;
-  KEY_FHOME  = 263; KEY_FEND   = 264;
-  KEY_F1     = 089X; KEY_F2     = 266;
-  KEY_F3     = 267; KEY_F4     = 268;
-  KEY_F5     = 269; KEY_F6     = 270;
-  KEY_F7     = 271; KEY_F8     = 272;
-  KEY_F9     = 273; KEY_F10    = 274;
-  KEY_F11    = 275; KEY_F12    = 276;
+  KEY_WLEFT  = 085X; KEY_WRIGHT = 086X;
+  KEY_FHOME  = 087X; KEY_FEND   = 088X;
+  KEY_F1     = 089X; KEY_F2     = 08AX;
+  KEY_F3     = 08BX; KEY_F4     = 08CX;
+  KEY_F5     = 08DX; KEY_F6     = 08EX;
+  KEY_F7     = 08FX; KEY_F8     = 090X;
+  KEY_F9     = 091X; KEY_F10    = 092X;
+  KEY_F11    = 093X; KEY_F12    = 094X;
+
+TYPE
+  UndoRec = RECORD
+    kind: INTEGER;
+    pos:  INTEGER;
+    len:  INTEGER;
+    data: ARRAY BufSize OF CHAR
+  END;
 
 VAR
   text:    ARRAY MaxText OF CHAR;
   cutBuf:  ARRAY BufSize OF CHAR;
   cutLen:  INTEGER;
+
+  undoBuf:  ARRAY MaxUndo OF UndoRec;
+  undoHead: INTEGER;
+  undoCnt:  INTEGER;
+
+  lang:    INTEGER;
+  hlColor: ARRAY MaxText OF INTEGER;
+  hlLast:  INTEGER;
 
   fname:     ARRAY MaxName OF CHAR;
   searchStr: ARRAY 128 OF CHAR;
@@ -65,6 +89,63 @@ PROCEDURE IsWord(ch: CHAR): BOOLEAN;
 BEGIN
   RETURN (ch # " ") & (ch # RetChar) & (ORD(ch) >= 33) & (ORD(ch) < 127)
 END IsWord;
+
+(* ── Undo ───────────────────────────────────────────────────────────── *)
+
+(* Record that len chars were inserted starting at pos.
+   Consecutive single-char inserts are coalesced into one record. *)
+PROCEDURE RecordIns(pos, len: INTEGER);
+VAR tail: INTEGER;
+BEGIN
+  IF undoCnt > 0 THEN
+    tail := (undoHead + undoCnt - 1) MOD MaxUndo;
+    IF (undoBuf[tail].kind = UndoIns) &
+       (undoBuf[tail].pos + undoBuf[tail].len = pos) THEN
+      INC(undoBuf[tail].len); RETURN
+    END
+  END;
+  tail := (undoHead + undoCnt) MOD MaxUndo;
+  undoBuf[tail].kind := UndoIns;
+  undoBuf[tail].pos  := pos;
+  undoBuf[tail].len  := len;
+  IF undoCnt < MaxUndo THEN INC(undoCnt)
+  ELSE undoHead := (undoHead + 1) MOD MaxUndo
+  END
+END RecordIns;
+
+(* Record that len chars starting at src[off] were deleted from pos. *)
+PROCEDURE RecordDel(pos, len: INTEGER; VAR src: ARRAY OF CHAR; off: INTEGER);
+VAR tail, i: INTEGER;
+BEGIN
+  IF len > BufSize THEN len := BufSize END;
+  tail := (undoHead + undoCnt) MOD MaxUndo;
+  undoBuf[tail].kind := UndoDel;
+  undoBuf[tail].pos  := pos;
+  undoBuf[tail].len  := len;
+  FOR i := 0 TO len - 1 DO undoBuf[tail].data[i] := src[off + i] END;
+  IF undoCnt < MaxUndo THEN INC(undoCnt)
+  ELSE undoHead := (undoHead + 1) MOD MaxUndo
+  END
+END RecordDel;
+
+PROCEDURE DoUndo;
+VAR tail, i: INTEGER;
+BEGIN
+  IF undoCnt = 0 THEN Prompt("Nothing to undo."); RETURN END;
+  DEC(undoCnt);
+  tail := (undoHead + undoCnt) MOD MaxUndo;
+  curr := undoBuf[tail].pos;
+  IF undoBuf[tail].kind = UndoIns THEN
+    MoveText(curr + undoBuf[tail].len, curr, lastLine - (curr + undoBuf[tail].len));
+    DEC(lastLine, undoBuf[tail].len)
+  ELSE
+    MoveText(curr, curr + undoBuf[tail].len, lastLine - curr);
+    FOR i := 0 TO undoBuf[tail].len - 1 DO text[curr + i] := undoBuf[tail].data[i] END;
+    INC(lastLine, undoBuf[tail].len);
+    INC(curr, undoBuf[tail].len)
+  END;
+  modified := TRUE
+END DoUndo;
 
 (* ── Visual line helpers ─────────────────────────────────────────────── *)
 
@@ -169,29 +250,194 @@ BEGIN
   mx := Terminal.MouseX();
   my := Terminal.MouseY();
   mb := Terminal.MouseBtn();
-  IF mb # 0 & mb # 3 THEN RETURN;
-    w := Terminal.Cols(); 
-    rows := Terminal.Rows() - 1;
-    tx := 1; ty := 2; (* Starting position of text area in Refresh *)
-    i := topLin;
-    
-    (* Scan through visible text to find match for mx, my *)
-    WHILE (i <= lastLine) & (ty <= rows) DO
-      IF tx > w THEN tx := 1; INC(ty) END;
-      
-      IF (mx = tx) & (my = ty) THEN
-        curr := i; RETURN 
-      END;
+  IF (mb # 0) & (mb # 3) THEN RETURN END;
+  w := Terminal.Cols();
+  rows := Terminal.Rows() - 1;
+  tx := 1; ty := 2; (* Starting position of text area in Refresh *)
+  i := topLin;
 
-      IF i = lastLine THEN i := lastLine + 1
-      ELSIF text[i] = RetChar THEN
-        tx := 1; INC(ty); INC(i)
-      ELSE
-        INC(i); INC(tx)
-      END
+  (* Scan through visible text to find match for mx, my *)
+  WHILE (i <= lastLine) & (ty <= rows) DO
+    IF tx > w THEN tx := 1; INC(ty) END;
+
+    IF (mx = tx) & (my = ty) THEN
+      curr := i; RETURN
+    END;
+
+    IF i = lastLine THEN i := lastLine + 1
+    ELSIF text[i] = RetChar THEN
+      tx := 1; INC(ty); INC(i)
+    ELSE
+      INC(i); INC(tx)
     END
   END
 END HandleMouse;
+
+(* ── Syntax Highlighting ────────────────────────────────────────────── *)
+
+PROCEDURE DetectLang;
+BEGIN
+  IF Strings.EndsWith(fname, ".c") THEN lang := HLANG_C
+  ELSIF Strings.EndsWith(fname, ".cpp") THEN lang := HLANG_CPP
+  ELSIF Strings.EndsWith(fname, ".mod") THEN lang := HLANG_OBN
+  ELSE lang := HLANG_NONE
+  END
+END DetectLang;
+
+PROCEDURE IsIdChar(ch: CHAR): BOOLEAN;
+BEGIN
+  RETURN ((ch >= "a") & (ch <= "z")) OR ((ch >= "A") & (ch <= "Z")) OR
+         ((ch >= "0") & (ch <= "9")) OR (ch = "_")
+END IsIdChar;
+
+PROCEDURE InList(VAR word, list: ARRAY OF CHAR): BOOLEAN;
+VAR w: ARRAY 66 OF CHAR; wlen, i: INTEGER;
+BEGIN
+  wlen := Strings.Length(word);
+  IF (wlen = 0) OR (wlen > 63) THEN RETURN FALSE END;
+  w[0] := " ";
+  FOR i := 0 TO wlen - 1 DO w[i + 1] := word[i] END;
+  w[wlen + 1] := " "; w[wlen + 2] := 0X;
+  RETURN Strings.Pos(w, list) >= 0
+END InList;
+
+PROCEDURE IsKW(VAR word: ARRAY OF CHAR): BOOLEAN;
+VAR kw: ARRAY 256 OF CHAR;
+BEGIN
+  IF (lang = HLANG_C) OR (lang = HLANG_CPP) THEN
+    COPY(" auto break case char const continue default do double else ", kw);
+    IF InList(word, kw) THEN RETURN TRUE END;
+    COPY(" enum extern float for goto if inline int long register ", kw);
+    IF InList(word, kw) THEN RETURN TRUE END;
+    COPY(" return short signed sizeof static struct switch typedef ", kw);
+    IF InList(word, kw) THEN RETURN TRUE END;
+    COPY(" union unsigned void volatile while NULL true false ", kw);
+    IF InList(word, kw) THEN RETURN TRUE END
+  END;
+  IF lang = HLANG_CPP THEN
+    COPY(" bool catch class constexpr delete explicit export friend ", kw);
+    IF InList(word, kw) THEN RETURN TRUE END;
+    COPY(" mutable namespace new noexcept nullptr operator override ", kw);
+    IF InList(word, kw) THEN RETURN TRUE END;
+    COPY(" private protected public static_assert static_cast ", kw);
+    IF InList(word, kw) THEN RETURN TRUE END;
+    COPY(" template this throw try typeid typename using virtual ", kw);
+    IF InList(word, kw) THEN RETURN TRUE END
+  END;
+  IF lang = HLANG_OBN THEN
+    COPY(" MODULE IMPORT CONST TYPE VAR PROCEDURE BEGIN END RETURN ", kw);
+    IF InList(word, kw) THEN RETURN TRUE END;
+    COPY(" IF THEN ELSIF ELSE WHILE DO REPEAT UNTIL FOR BY TO LOOP ", kw);
+    IF InList(word, kw) THEN RETURN TRUE END;
+    COPY(" EXIT CASE OF WITH ARRAY RECORD POINTER BOOLEAN BYTE ", kw);
+    IF InList(word, kw) THEN RETURN TRUE END;
+    COPY(" SHORTINT INTEGER LONGINT REAL LONGREAL CHAR SET STRING ", kw);
+    IF InList(word, kw) THEN RETURN TRUE END;
+    COPY(" NIL DIV MOD OR IN IS TRUE FALSE NEW FREE HALT ASSERT ", kw);
+    IF InList(word, kw) THEN RETURN TRUE END;
+    COPY(" INCL EXCL COPY ABS ODD ORD CHR CAP FLOOR LEN FLT ", kw);
+    IF InList(word, kw) THEN RETURN TRUE END;
+    COPY(" ASR LSL ROR INC DEC PACK UNPK ", kw);
+    IF InList(word, kw) THEN RETURN TRUE END
+  END;
+  RETURN FALSE
+END IsKW;
+
+PROCEDURE Highlight;
+(* state: 0=normal 1=line-comment 2=block-comment 3=dbl-string 4=sgl-string 5=prepro *)
+VAR
+  i, state, wStart, wlen, j: INTEGER;
+  atLineStart: BOOLEAN;
+  word: ARRAY 64 OF CHAR;
+BEGIN
+  FOR i := 0 TO lastLine - 1 DO hlColor[i] := HNormal END;
+  IF lang = HLANG_NONE THEN RETURN END;
+  i := 0; state := 0; atLineStart := TRUE;
+  WHILE i < lastLine DO
+    IF state = 0 THEN (* normal *)
+      IF text[i] = RetChar THEN
+        atLineStart := TRUE; INC(i)
+      ELSIF (lang # HLANG_OBN) & (text[i] = "/") & (i+1 < lastLine) & (text[i+1] = "/") THEN
+        hlColor[i] := HComment; hlColor[i+1] := HComment; INC(i, 2); state := 1
+      ELSIF (lang # HLANG_OBN) & (text[i] = "/") & (i+1 < lastLine) & (text[i+1] = "*") THEN
+        hlColor[i] := HComment; hlColor[i+1] := HComment; INC(i, 2); state := 2
+      ELSIF (lang = HLANG_OBN) & (text[i] = "(") & (i+1 < lastLine) & (text[i+1] = "*") THEN
+        hlColor[i] := HComment; hlColor[i+1] := HComment; INC(i, 2); state := 2
+      ELSIF (lang # HLANG_OBN) & (text[i] = "#") & atLineStart THEN
+        hlColor[i] := HPrepro; INC(i); state := 5; atLineStart := FALSE
+      ELSIF text[i] = CHR(34) THEN
+        hlColor[i] := HString; INC(i); state := 3; atLineStart := FALSE
+      ELSIF text[i] = "'" THEN
+        hlColor[i] := HString; INC(i); state := 4; atLineStart := FALSE
+      ELSIF (text[i] >= "0") & (text[i] <= "9") THEN
+        WHILE (i < lastLine) & (IsIdChar(text[i]) OR (text[i] = ".")) DO
+          hlColor[i] := HNumber; INC(i)
+        END;
+        atLineStart := FALSE
+      ELSIF ((text[i] >= "a") & (text[i] <= "z")) OR
+            ((text[i] >= "A") & (text[i] <= "Z")) OR (text[i] = "_") THEN
+        wStart := i;
+        WHILE (i < lastLine) & IsIdChar(text[i]) DO INC(i) END;
+        wlen := i - wStart; IF wlen > 63 THEN wlen := 63 END;
+        FOR j := 0 TO wlen - 1 DO word[j] := text[wStart + j] END;
+        word[wlen] := 0X;
+        IF IsKW(word) THEN
+          FOR j := wStart TO wStart + wlen - 1 DO hlColor[j] := HKeyword END
+        END;
+        atLineStart := FALSE
+      ELSE
+        INC(i); atLineStart := FALSE
+      END
+    ELSIF state = 1 THEN (* C/C++ line comment *)
+      IF text[i] = RetChar THEN state := 0; atLineStart := TRUE; INC(i)
+      ELSE hlColor[i] := HComment; INC(i)
+      END
+    ELSIF state = 2 THEN (* block comment *)
+      hlColor[i] := HComment;
+      IF (lang = HLANG_OBN) & (text[i] = "*") & (i+1 < lastLine) & (text[i+1] = ")") THEN
+        hlColor[i+1] := HComment; INC(i, 2); state := 0
+      ELSIF (lang # HLANG_OBN) & (text[i] = "*") & (i+1 < lastLine) & (text[i+1] = "/") THEN
+        hlColor[i+1] := HComment; INC(i, 2); state := 0
+      ELSE INC(i)
+      END
+    ELSIF state = 3 THEN (* double-quoted string *)
+      hlColor[i] := HString;
+      IF (lang # HLANG_OBN) & (text[i] = CHR(92)) THEN
+        IF i+1 < lastLine THEN hlColor[i+1] := HString; INC(i, 2) ELSE INC(i) END
+      ELSIF (text[i] = CHR(34)) OR (text[i] = RetChar) THEN
+        INC(i); state := 0
+      ELSE INC(i)
+      END
+    ELSIF state = 4 THEN (* single-quoted string / char literal *)
+      hlColor[i] := HString;
+      IF (lang # HLANG_OBN) & (text[i] = CHR(92)) THEN
+        IF i+1 < lastLine THEN hlColor[i+1] := HString; INC(i, 2) ELSE INC(i) END
+      ELSIF (text[i] = "'") OR (text[i] = RetChar) THEN
+        INC(i); state := 0
+      ELSE INC(i)
+      END
+    ELSIF state = 5 THEN (* C/C++ preprocessor *)
+      IF text[i] = RetChar THEN state := 0; atLineStart := TRUE; INC(i)
+      ELSE hlColor[i] := HPrepro; INC(i)
+      END
+    END
+  END
+END Highlight;
+
+PROCEDURE SetHL(hl: INTEGER);
+BEGIN
+  IF hl # hlLast THEN
+    hlLast := hl;
+    CASE hl OF
+      HKeyword: Terminal.Color256(81, 0)
+    | HString:  Terminal.Color256(114, 0)
+    | HComment: Terminal.Color256(244, 0)
+    | HNumber:  Terminal.Color256(215, 0)
+    | HPrepro:  Terminal.Color256(183, 0)
+    ELSE Terminal.Reset
+    END
+  END
+END SetHL;
 
 (* ── Display ────────────────────────────────────────────────────────── *)
 
@@ -234,6 +480,7 @@ BEGIN
   w := Terminal.Cols(); rows := Terminal.Rows() - 1;
   DrawStatus;
   x := 1; y := 2; cx := 1; cy := 2;
+  hlLast := -1;
   i := topLin;
   WHILE (i <= lastLine) & (y <= rows) DO
     IF x > w THEN x := 1; INC(y) END;
@@ -243,15 +490,17 @@ BEGIN
     ELSIF y <= rows THEN
       Terminal.Goto(x, y);
       IF text[i] = RetChar THEN
-        Terminal.Color(8, 0); Out.Char("<"); Terminal.Reset;
+        Terminal.Color(8, 0); Out.Char("<"); Terminal.Reset; hlLast := -1;
         x := 1; INC(y); INC(i)
       ELSE
+        SetHL(hlColor[i]);
         Out.Char(text[i]); INC(i); INC(x)
       END
     ELSE
       INC(i)  (* off-screen, just advance *)
     END
   END;
+  IF lang # HLANG_NONE THEN Terminal.Reset END;
   Terminal.Goto(cx, cy);
   Terminal.ShowCursor
 END Refresh;
@@ -302,7 +551,9 @@ BEGIN
     MoveText(curr, curr + 1, lastLine - curr);
     INC(lastLine)
   END;
-  text[curr] := ch; INC(curr);
+  text[curr] := ch;
+  RecordIns(curr, 1);
+  INC(curr);
   IF curr > lastLine THEN lastLine := curr END;
   modified := TRUE
 END Insert;
@@ -310,6 +561,7 @@ END Insert;
 PROCEDURE Backspace;
 BEGIN
   IF curr > 0 THEN
+    RecordDel(curr - 1, 1, text, curr - 1);
     DEC(curr); DEC(lastLine);
     MoveText(curr + 1, curr, lastLine - curr);
     modified := TRUE
@@ -319,6 +571,7 @@ END Backspace;
 PROCEDURE DeleteFwd;
 BEGIN
   IF curr < lastLine THEN
+    RecordDel(curr, 1, text, curr);
     DEC(lastLine);
     MoveText(curr + 1, curr, lastLine - curr);
     modified := TRUE
@@ -343,6 +596,7 @@ BEGIN
   IF n <= 0 THEN RETURN END;
   cutLen := n;
   FOR i := 0 TO n - 1 DO cutBuf[i] := text[curr + i] END;
+  RecordDel(curr, n, text, curr);
   MoveText(curr + n, curr, lastLine - (curr + n));
   DEC(lastLine, n);
   modified := TRUE
@@ -361,6 +615,7 @@ BEGIN
   IF n > BufSize THEN n := BufSize END;
   cutLen := n;
   FOR i := 0 TO n - 1 DO cutBuf[i] := text[start + i] END;
+  RecordDel(start, n, text, start);
   curr := start;
   MoveText(curr + n, curr, lastLine - (curr + n));
   DEC(lastLine, n);
@@ -368,14 +623,16 @@ BEGIN
 END KillWordBack;
 
 PROCEDURE Paste;
-VAR i: INTEGER;
+VAR i, old: INTEGER;
 BEGIN
   IF cutLen = 0 THEN RETURN END;
   IF lastLine + cutLen >= MaxText THEN RETURN END;
+  old := curr;
   MoveText(curr, curr + cutLen, lastLine - curr);
   FOR i := 0 TO cutLen - 1 DO text[curr + i] := cutBuf[i] END;
   INC(lastLine, cutLen);
   INC(curr, cutLen);
+  RecordIns(old, cutLen);
   modified := TRUE
 END Paste;
 
@@ -445,16 +702,20 @@ VAR rows, i: INTEGER;
 BEGIN
   rows := Terminal.Rows() - 2;
   FOR i := 1 TO rows DO topLin := NextVisLine(topLin) END;
+  IF curr < topLin THEN curr := topLin END;
   ComputeVis(curr, cx, cy)
 END PageDown;
 
 PROCEDURE PageUp;
-VAR rows, i: INTEGER;
+VAR rows, i, bot: INTEGER;
 BEGIN
   rows := Terminal.Rows() - 2;
   FOR i := 1 TO rows DO
     IF topLin > 0 THEN topLin := PrevVisLine(topLin) END
   END;
+  bot := topLin;
+  FOR i := 1 TO rows DO bot := NextVisLine(bot) END;
+  IF curr > bot THEN curr := bot END;
   ComputeVis(curr, cx, cy)
 END PageUp;
 
@@ -470,7 +731,7 @@ BEGIN
   IF fname[0] = 0X THEN
     IF ReadStr("Save as: ", tmpname) THEN
       IF tmpname[0] = 0X THEN Prompt("No filename."); RETURN END;
-      COPY(tmpname, fname)
+      COPY(tmpname, fname); DetectLang
     ELSE
       RETURN (* User cancelled prompt *)
     END
@@ -490,6 +751,28 @@ BEGIN
   Prompt("Saved.")
 END SaveFile;
 
+PROCEDURE SaveFileAs;
+VAR
+  f: Files.File; r: Files.Rider;
+  newname: ARRAY MaxName OF CHAR;
+  i: INTEGER;
+BEGIN
+  IF ~ReadStr("Save as: ", newname) THEN RETURN END;
+  IF newname[0] = 0X THEN Prompt("No filename."); RETURN END;
+  f := Files.New(newname);
+  IF f = NIL THEN Prompt("Cannot create file."); RETURN END;
+  Files.Set(r, f, 0);
+  FOR i := 0 TO lastLine - 1 DO
+    IF text[i] = RetChar THEN Files.Write(r, ORD(0AX))
+    ELSE Files.Write(r, ORD(text[i]))
+    END
+  END;
+  Files.Register(f);
+  COPY(newname, fname);
+  modified := FALSE; DetectLang;
+  Prompt("Saved.")
+END SaveFileAs;
+
 PROCEDURE LoadFile;
 VAR
   f: Files.File; r: Files.Rider;
@@ -505,17 +788,17 @@ BEGIN
     WHILE ~r.eof & (count < MaxText - 1) DO
       Files.Read(r, b);
       IF ~r.eof THEN
-        IF b = ORD(0AX) THEN text[count] := RetChar   (* LF → RetChar *)
+        IF b = ORD(0AX) THEN text[count] := RetChar; INC(count)   (* LF → RetChar *)
         ELSIF b = ORD(0DX) THEN (* skip CR *)
-        ELSE text[count] := CHR(b)
-        END;
-        INC(count)
+        ELSE text[count] := CHR(b); INC(count)
+        END
       END
     END;
     Files.Close(f);
     COPY(tmpname, fname);
     curr := 0; lastLine := count; topLin := 0;
-    modified := FALSE;
+    modified := FALSE; undoHead := 0; undoCnt := 0;
+    DetectLang;
     Prompt("Loaded.")
   END
 END LoadFile;
@@ -538,8 +821,11 @@ BEGIN
 END FindNext;
 
 PROCEDURE DoFind;
+VAR s: ARRAY 128 OF CHAR;
 BEGIN
-  IF ReadStr("Find: ", searchStr) THEN
+  IF ReadStr("Find: ", s) THEN
+    IF s[0] # 0X THEN COPY(s, searchStr) END;
+    IF searchStr[0] = 0X THEN RETURN END;
     IF FindNext() THEN Prompt("Found.")
     ELSE Prompt("Not found.")
     END
@@ -603,6 +889,7 @@ BEGIN
   Terminal.Goto(1, row); Terminal.Color(11, 0); Out.String("Tab         ");   Terminal.Color(7, 0); Out.String("  Toggle insert/overwrite"); Terminal.Reset; INC(row);
   Terminal.Goto(1, row); Terminal.Color(11, 0); Out.String("Ctrl-T      ");   Terminal.Color(7, 0); Out.String("  Transpose chars");         Terminal.Reset; INC(row);
   Terminal.Goto(1, row); Terminal.Color(11, 0); Out.String("Ctrl-X      ");   Terminal.Color(7, 0); Out.String("  Toggle case");             Terminal.Reset; INC(row);
+  Terminal.Goto(1, row); Terminal.Color(11, 0); Out.String("Ctrl-Z      ");   Terminal.Color(7, 0); Out.String("  Undo");                    Terminal.Reset; INC(row);
   INC(row);
   Terminal.Goto(1, row); Terminal.Color(14, 0); Out.String("Other");          Terminal.Reset; INC(row);
   Terminal.Goto(1, row); Terminal.Color(11, 0); Out.String("F1          ");   Terminal.Color(7, 0); Out.String("  This help screen");        Terminal.Reset; INC(row);
@@ -616,11 +903,12 @@ BEGIN
   Terminal.Goto(c2, row); Terminal.Color(11, 0); Out.String("Ctrl-R  ");       Terminal.Color(7, 0); Out.String("Paste (restore) buffer"); Terminal.Reset; INC(row);
   INC(row);
   Terminal.Goto(c2, row); Terminal.Color(14, 0); Out.String("Search");         Terminal.Reset; INC(row);
-  Terminal.Goto(c2, row); Terminal.Color(11, 0); Out.String("Ctrl-F  ");       Terminal.Color(7, 0); Out.String("Find");                   Terminal.Reset; INC(row);
+  Terminal.Goto(c2, row); Terminal.Color(11, 0); Out.String("Ctrl-F  ");       Terminal.Color(7, 0); Out.String("Find (Enter=repeat)");    Terminal.Reset; INC(row);
   Terminal.Goto(c2, row); Terminal.Color(11, 0); Out.String("Ctrl-G  ");       Terminal.Color(7, 0); Out.String("Find and replace all");   Terminal.Reset; INC(row);
   INC(row);
   Terminal.Goto(c2, row); Terminal.Color(14, 0); Out.String("File");           Terminal.Reset; INC(row);
-  Terminal.Goto(c2, row); Terminal.Color(11, 0); Out.String("Ctrl-S  ");       Terminal.Color(7, 0); Out.String("Save (prompts filename)");Terminal.Reset; INC(row);
+  Terminal.Goto(c2, row); Terminal.Color(11, 0); Out.String("Ctrl-S  ");       Terminal.Color(7, 0); Out.String("Save");                   Terminal.Reset; INC(row);
+  Terminal.Goto(c2, row); Terminal.Color(11, 0); Out.String("F2      ");       Terminal.Color(7, 0); Out.String("Save as (new filename)"); Terminal.Reset; INC(row);
   Terminal.Goto(c2, row); Terminal.Color(11, 0); Out.String("Ctrl-L  ");       Terminal.Color(7, 0); Out.String("Load file");              Terminal.Reset; INC(row);
   Terminal.Goto(c2, row); Terminal.Color(11, 0); Out.String("Ctrl-N  ");       Terminal.Color(7, 0); Out.String("New document");           Terminal.Reset; INC(row);
   INC(row);
@@ -639,6 +927,7 @@ BEGIN
   IF (k = ORD("y")) OR (k = ORD("Y")) THEN
     curr := 0; lastLine := 0; topLin := 0;
     fname[0] := 0X; modified := FALSE;
+    undoHead := 0; undoCnt := 0; lang := HLANG_NONE;
     Prompt("New document.")
   END
 END NewDoc;
@@ -652,11 +941,13 @@ BEGIN
   fname[0] := 0X;
   searchStr[0] := 0X; replStr[0] := 0X;
   cutLen := 0;
+  undoHead := 0; undoCnt := 0; lang := HLANG_NONE;
   insMode := TRUE; modified := FALSE; running := TRUE;
 
   (* Load filename from command line if given *)
   IF Args.Count() > 0 THEN
     Args.Get(1, fname);
+    DetectLang;
     f := Files.Old(fname);
     IF f # NIL THEN
       Files.Set(r, f, 0);
@@ -675,6 +966,7 @@ BEGIN
 
   WHILE running DO
     AdjustScroll;
+    IF lang # HLANG_NONE THEN Highlight END;
     Refresh;
     k := Terminal.ReadKey();
 
@@ -719,7 +1011,9 @@ BEGIN
     | KEY_CTRL_R: Paste
     | KEY_CTRL_T: Transpose
     | KEY_CTRL_X: ToggleCase
+    | KEY_CTRL_Z: DoUndo
     | KEY_F1:    ShowHelp
+    | KEY_F2:    SaveFileAs
     ELSE
       IF (k >= 32) & (k < 127) THEN Insert(CHR(k)) END
     END
