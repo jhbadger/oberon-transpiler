@@ -11,16 +11,23 @@ MODULE sheet;
  *   Ctrl+L             reload from disk
  *   Ctrl+N             new empty sheet
  *   Ctrl+F             freeze/unfreeze top row
+ *   F1                 show this help page
+ *   Ctrl+C             copy current cell
+ *   Ctrl+X             cut current cell
+ *   Ctrl+V             paste to current cell
+ *   F3                 insert blank column before current
+ *   F4                 delete current column
  *   Esc / Ctrl+Q       quit
  *
  * Formulas (start with =):
  *   =A1               cell reference
  *   =A1+B2*3.14       arithmetic  (+  -  *  /)
- *   =SUM(A1:A10)      range functions: SUM AVG MIN MAX COUNT
+ *   =SUM(A1:A10)      range functions: SUM AVG MIN MAX COUNT STDEV MEDIAN
+ *   =ABS(A1-B1)       scalar functions: ABS  ROUND(expr, decimals)
  *   =(A1+B1)/2        parentheses
  *)
 
-IMPORT DataFrame, Terminal,  Strings, Files, Args, Out;
+IMPORT DataFrame, Terminal, Strings, Files, Args, Out, Math;
 
 CONST
   ROWW     = 5;    (* row-number field width *)
@@ -47,13 +54,19 @@ CONST
   KEY_PGUP  = 80X; KEY_PGDN  = 81X;
   KEY_HOME  = 82X; KEY_END   = 83X;
   KEY_DEL   = 84X;
+  KEY_F1    = 89X;   (* help *)
   KEY_F2    = 8AX;
+  KEY_F3    = 8BX;   (* insert column *)
+  KEY_F4    = 8CX;   (* delete column *)
   KEY_CTRL_O = 15;
   KEY_CTRL_S = 19;
   KEY_CTRL_L = 12;
   KEY_CTRL_N = 14;
   KEY_CTRL_Q = 17;
+  KEY_CTRL_C = 3;
   KEY_CTRL_F = 6;
+  KEY_CTRL_V = 22;
+  KEY_CTRL_X = 24;
   KEY_SLASH = 47;
   
 VAR
@@ -80,6 +93,7 @@ VAR
   fmPos     : INTEGER;
   fmErr     : BOOLEAN;
   fmDepth   : INTEGER;
+  clipboard : ARRAY DataFrame.CELLLEN OF CHAR;
 
 (* ── column label: 0→"A", 25→"Z", 26→"AA" ─────────────────────── *)
 PROCEDURE ColLabel(c: INTEGER; VAR s: ARRAY OF CHAR);
@@ -179,16 +193,20 @@ END FindBelowInColumn;
 
 (* ── range: collect cells A1:B3 into a result ───────────────────── *)
 PROCEDURE RangeFunc(fname2: ARRAY OF CHAR): REAL;
-VAR r1, c1, r2, c2, r, c: INTEGER;
-    v, acc: REAL; n: INTEGER;
-    kind: INTEGER;  (* 0=SUM 1=AVG 2=MIN 3=MAX 4=COUNT *)
+VAR r1, c1, r2, c2, r, c, i, j: INTEGER;
+    v, acc, sum2, tmp: REAL; n: INTEGER;
+    kind: INTEGER;  (* 0=SUM 1=AVG 2=MIN 3=MAX 4=COUNT 5=STDEV 6=MEDIAN *)
+    raw: ARRAY DataFrame.CELLLEN OF CHAR;
+    vals: ARRAY 1024 OF REAL;
 BEGIN
   kind := -1;
-  IF Strings.Compare(fname2, "SUM")   = 0 THEN kind := 0
-  ELSIF Strings.Compare(fname2, "AVG") = 0 THEN kind := 1
-  ELSIF Strings.Compare(fname2, "MIN") = 0 THEN kind := 2
-  ELSIF Strings.Compare(fname2, "MAX") = 0 THEN kind := 3
-  ELSIF Strings.Compare(fname2, "COUNT") = 0 THEN kind := 4
+  IF    Strings.Compare(fname2, "SUM")    = 0 THEN kind := 0
+  ELSIF Strings.Compare(fname2, "AVG")    = 0 THEN kind := 1
+  ELSIF Strings.Compare(fname2, "MIN")    = 0 THEN kind := 2
+  ELSIF Strings.Compare(fname2, "MAX")    = 0 THEN kind := 3
+  ELSIF Strings.Compare(fname2, "COUNT")  = 0 THEN kind := 4
+  ELSIF Strings.Compare(fname2, "STDEV")  = 0 THEN kind := 5
+  ELSIF Strings.Compare(fname2, "MEDIAN") = 0 THEN kind := 6
   END;
   IF kind < 0 THEN fmErr := TRUE; RETURN 0.0 END;
   IF FmGet() # '(' THEN fmErr := TRUE; RETURN 0.0 END;
@@ -210,30 +228,57 @@ BEGIN
   DEC(r2);
   FmSkipWS();
   IF FmGet() # ')' THEN fmErr := TRUE; RETURN 0.0 END;
-  acc := 0.0; n := 0;
+  acc := 0.0; sum2 := 0.0; n := 0;
   IF kind = 2 THEN acc := 1.0E30  END;
   IF kind = 3 THEN acc := -1.0E30 END;
   FOR r := r1 TO r2 DO
     FOR c := c1 TO c2 DO
-      v := EvalCell(r, c, fmDepth);
-      INC(n);
-      IF kind = 0 THEN acc := acc + v END;
-      IF kind = 1 THEN acc := acc + v END;
-      IF (kind = 2) & (v < acc) THEN acc := v END;
-      IF (kind = 3) & (v > acc) THEN acc := v END
+      DataFrame.GetStr(df, r, c, raw);
+      IF raw[0] # 0X THEN
+        v := EvalCell(r, c, fmDepth);
+        INC(n);
+        IF kind = 0 THEN acc := acc + v END;
+        IF kind = 1 THEN acc := acc + v END;
+        IF (kind = 2) & (v < acc) THEN acc := v END;
+        IF (kind = 3) & (v > acc) THEN acc := v END;
+        IF kind = 5 THEN acc := acc + v; sum2 := sum2 + v * v END;
+        IF (kind = 6) & (n <= 1024) THEN vals[n - 1] := v END
+      END
     END
   END;
-  IF kind = 1 THEN IF n > 0 THEN acc := acc / n ELSE acc := 0.0 END END;
-  IF kind = 4 THEN acc := n END;
+  IF kind = 1 THEN
+    IF n > 0 THEN acc := acc / FLT(n) ELSE acc := 0.0 END
+  ELSIF kind = 4 THEN
+    acc := FLT(n)
+  ELSIF kind = 5 THEN
+    IF n > 1 THEN
+      acc := Math.sqrt((sum2 - acc * acc / FLT(n)) / FLT(n - 1))
+    ELSE
+      acc := 0.0
+    END
+  ELSIF kind = 6 THEN
+    (* insertion sort vals[0..n-1] then pick median *)
+    FOR i := 1 TO n - 1 DO
+      tmp := vals[i]; j := i - 1;
+      WHILE (j >= 0) & (vals[j] > tmp) DO vals[j + 1] := vals[j]; DEC(j) END;
+      vals[j + 1] := tmp
+    END;
+    IF n MOD 2 = 1 THEN
+      acc := vals[n DIV 2]
+    ELSIF n > 0 THEN
+      acc := (vals[n DIV 2 - 1] + vals[n DIV 2]) / 2.0
+    END
+  END;
   RETURN acc
 END RangeFunc;
 
 (* ── recursive descent formula parser ──────────────────────────── *)
 PROCEDURE ParsePrimary(): REAL;
 VAR v: REAL; neg: BOOLEAN;
-    name: ARRAY 16 OF CHAR; ni: INTEGER;
+    name: ARRAY 16 OF CHAR; ni, nd, di: INTEGER;
     col, row: INTEGER;
     ok: BOOLEAN; s: ARRAY 32 OF CHAR;
+    scale: REAL;
 BEGIN
   FmSkipWS();
   v := 0.0; neg := FALSE;
@@ -252,7 +297,26 @@ BEGIN
     name[ni] := 0X;
     FmSkipWS();
     IF FmPeek() = '(' THEN
-      v := RangeFunc(name)
+      IF Strings.Compare(name, "ABS") = 0 THEN
+        FmGet(); FmSkipWS();
+        v := ParseAdd(); FmSkipWS();
+        IF FmGet() # ')' THEN fmErr := TRUE END;
+        IF v < 0.0 THEN v := -v END
+      ELSIF Strings.Compare(name, "ROUND") = 0 THEN
+        FmGet(); FmSkipWS();
+        v := ParseAdd(); FmSkipWS();
+        nd := 0;
+        IF FmPeek() = ',' THEN
+          FmGet(); FmSkipWS();
+          nd := FLOOR(ParseAdd()); FmSkipWS()
+        END;
+        IF FmGet() # ')' THEN fmErr := TRUE END;
+        scale := 1.0; di := 0;
+        WHILE di < nd DO scale := scale * 10.0; INC(di) END;
+        v := Math.round(v * scale) / scale
+      ELSE
+        v := RangeFunc(name)
+      END
     ELSIF (FmPeek() >= '0') & (FmPeek() <= '9') THEN
       IF (ni = 1) THEN col := ORD(name[0]) - ORD('A')
       ELSIF (ni = 2) THEN
@@ -586,7 +650,7 @@ BEGIN
   IF mode = EDIT THEN
     s := "Enter:confirm  Esc:cancel  Backspace:delete"
   ELSE
-    s := "Arrows:nav  Enter:edit  Del:clear  ^O:open  ^S:save  ^L:reload  ^F:freeze  /:search ^Q:quit"
+    s := "F1:help  Arrows:nav  Enter:edit  Del:clear  ^C:copy  ^X:cut  ^V:paste  ^O:open  ^S:save  ^Q:quit"
   END;
   PadPrint(s, tCols - 1);
   Terminal.Reset
@@ -832,6 +896,75 @@ BEGIN
   END
 END Prompt;
 
+(* ── confirm discard of unsaved changes ─────────────────────────── *)
+(* ── full-screen help overlay, dismissed by any key ─────────────── *)
+PROCEDURE ShowHelp();
+VAR k, x, y, i: INTEGER;
+
+  PROCEDURE Sep();
+  BEGIN
+    Terminal.Goto(x, y); INC(y);
+    Terminal.Color256(CLR_HDR, BG_HDR);
+    Out.Char('+');
+    FOR i := 1 TO 56 DO Out.Char('-') END;
+    Out.Char('+')
+  END Sep;
+
+  PROCEDURE HL(s: ARRAY OF CHAR; fg, bg: INTEGER);
+  VAR len: INTEGER;
+  BEGIN
+    Terminal.Goto(x, y); INC(y);
+    Terminal.Color256(fg, bg);
+    Out.Char('|'); Out.Char(' ');
+    len := Strings.Length(s);
+    Out.String(s);
+    FOR i := len TO 53 DO Out.Char(' ') END;
+    Out.Char(' '); Out.Char('|')
+  END HL;
+
+BEGIN
+  x := (tCols - 58) DIV 2;
+  IF x < 1 THEN x := 1 END;
+  y := (tRows - 22) DIV 2;
+  IF y < 1 THEN y := 1 END;
+  Terminal.Clear();
+  Sep();
+  HL("                    SHEET HELP                     ", CLR_HDR, BG_HDR);
+  Sep();
+  HL("NAVIGATION", CLR_FML, BG_NORM);
+  HL("  Arrows  PgUp/PgDn  Home/End    move cursor", CLR_NORM, BG_NORM);
+  HL("  Mouse click / scroll   /       navigate / search", CLR_NORM, BG_NORM);
+  HL("EDITING", CLR_FML, BG_NORM);
+  HL("  Enter / F2             edit cell (keep content)", CLR_NORM, BG_NORM);
+  HL("  Any printable key      replace and start editing", CLR_NORM, BG_NORM);
+  HL("  Delete  Ctrl+C/X/V     clear / copy / cut / paste", CLR_NORM, BG_NORM);
+  HL("FILES", CLR_FML, BG_NORM);
+  HL("  Ctrl+O / S / L / N     open / save / reload / new", CLR_NORM, BG_NORM);
+  HL("COLUMNS", CLR_FML, BG_NORM);
+  HL("  F3 / F4                insert / delete column", CLR_NORM, BG_NORM);
+  HL("  Ctrl+T  Ctrl+F         sort col / freeze top row", CLR_NORM, BG_NORM);
+  HL("FORMULAS  (cell content starts with =)", CLR_FML, BG_NORM);
+  HL("  =A1+B2*3   =(A1+B1)/2  refs and arithmetic", CLR_NORM, BG_NORM);
+  HL("  =SUM(A1:B10)  =AVG  =MIN  =MAX  =COUNT", CLR_NORM, BG_NORM);
+  HL("  =STDEV  =MEDIAN  =ABS(A1)  =ROUND(A1,2)", CLR_NORM, BG_NORM);
+  HL("", CLR_NORM, BG_NORM);
+  HL("                Press any key to close", CLR_HELP, BG_HELP);
+  Sep();
+  Terminal.Reset();
+  k := Terminal.ReadKey();
+  DrawAll()
+END ShowHelp;
+
+PROCEDURE OkToDiscard(): BOOLEAN;
+VAR ans: ARRAY 8 OF CHAR;
+BEGIN
+  IF ~dirty THEN RETURN TRUE END;
+  IF Prompt("Unsaved changes. Discard? (y/N): ", ans) THEN
+    RETURN (ans[0] = 'y') OR (ans[0] = 'Y')
+  END;
+  RETURN FALSE
+END OkToDiscard;
+
 (* ── handle a key in NORMAL mode ───────────────────────────────── *)
 PROCEDURE HandleNormal(k: INTEGER);
 VAR nr, nc: INTEGER;
@@ -890,30 +1023,61 @@ BEGIN
       COPY("Reloaded.", statusMsg)
     END
   ELSIF k = KEY_CTRL_N THEN
-    df := DataFrame.Create();
-    fname[0] := 0X; dirty := FALSE; freezeTop := FALSE;
-    curRow := 0; curCol := 0; scrRow := 0; scrCol := 0;
-    COPY("New sheet.", statusMsg)
+    IF OkToDiscard() THEN
+      df := DataFrame.Create();
+      fname[0] := 0X; dirty := FALSE; freezeTop := FALSE;
+      curRow := 0; curCol := 0; scrRow := 0; scrCol := 0;
+      COPY("New sheet.", statusMsg)
+    END
   ELSIF k = KEY_CTRL_O THEN
-    IF Prompt("Open: ", fname) THEN
-      IF IsTSV(fname) THEN
-        df := DataFrame.LoadTSV(fname, FALSE, nc)
+    IF OkToDiscard() THEN
+      IF Prompt("Open: ", fname) THEN
+        IF IsTSV(fname) THEN
+          df := DataFrame.LoadTSV(fname, FALSE, nc)
+        ELSE
+          df := DataFrame.LoadCSV(fname, FALSE, nc)
+        END;
+        IF df = NIL THEN
+          df := DataFrame.Create(); COPY("New file.", statusMsg)
+        ELSE
+          dirty := FALSE; curRow := 0; curCol := 0;
+          scrRow := 0; scrCol := 0;
+          RecalcAllColWidths();
+          COPY("Opened.", statusMsg)
+        END
       ELSE
-        df := DataFrame.LoadCSV(fname, FALSE, nc)
-      END;
-      IF df = NIL THEN
-        df := DataFrame.Create(); COPY("New file.", statusMsg)
-      ELSE
-        dirty := FALSE; curRow := 0; curCol := 0;
-        scrRow := 0; scrCol := 0;
-        RecalcAllColWidths();
-        COPY("Opened.", statusMsg)
+        fname[0] := 0X
       END
-    ELSE
-      fname[0] := 0X
     END
   ELSIF (k = KEY_CTRL_Q) OR (k = KEY_ESC) THEN
-    running := FALSE
+    IF OkToDiscard() THEN running := FALSE END
+  ELSIF k = KEY_CTRL_C THEN
+    IF (curRow < DataFrame.NRows(df)) & (curCol < DataFrame.NCols(df)) THEN
+      DataFrame.GetStr(df, curRow, curCol, clipboard)
+    ELSE
+      clipboard[0] := 0X
+    END;
+    COPY("Copied.", statusMsg)
+  ELSIF k = KEY_CTRL_X THEN
+    IF (curRow < DataFrame.NRows(df)) & (curCol < DataFrame.NCols(df)) THEN
+      DataFrame.GetStr(df, curRow, curCol, clipboard);
+      DataFrame.SetStr(df, curRow, curCol, "");
+      RecalcColWidth(curCol);
+      dirty := TRUE
+    ELSE
+      clipboard[0] := 0X
+    END;
+    COPY("Cut.", statusMsg)
+  ELSIF k = KEY_CTRL_V THEN
+    IF clipboard[0] # 0X THEN
+      EnsureSize(curRow, curCol);
+      DataFrame.SetStr(df, curRow, curCol, clipboard);
+      RecalcColWidth(curCol);
+      dirty := TRUE;
+      COPY("Pasted.", statusMsg)
+    END
+  ELSIF k = KEY_F3 THEN InsertCurrentColumn()
+  ELSIF k = KEY_F4 THEN DeleteCurrentColumn()
   ELSIF k = KEY_SLASH THEN
     FindBelowInColumn()
   ELSIF (k >= 32) & (k < 127) THEN
@@ -932,8 +1096,7 @@ BEGIN
   my  := Terminal.MouseY();
   btn := Terminal.MouseBtn();
 
-  IF (btn # 0 & btn # 3 & btn # 64 & btn # 65) THEN RETURN END;
-  DrawAll();
+  IF (btn # 0) & (btn # 64) & (btn # 65) THEN RETURN END;
 
   IF my = 1 THEN
     IF mode = NORMAL THEN StartEdit(FALSE) END;
@@ -984,7 +1147,7 @@ END HandleMouse;
 
 PROCEDURE SortCurrentColumn;
 VAR
-  i, j, maxRow: INTEGER;
+  i, j, maxRow, startRow: INTEGER;
   valI, valJ: REAL;
   strI, strJ: ARRAY DataFrame.CELLLEN OF CHAR;
 
@@ -1008,8 +1171,9 @@ BEGIN
   statusMsg := "Sorting...";
   DrawAll(); (* Show status *)
 
-  (* Simple Selection Sort *)
-  FOR i := 1 TO maxRow - 2 DO
+  IF freezeTop THEN startRow := 1 ELSE startRow := 0 END;
+  (* Simple Selection Sort — skip row 0 only when it is frozen as a header *)
+  FOR i := startRow TO maxRow - 2 DO
     FOR j := i + 1 TO maxRow - 1 DO
       DataFrame.GetStr(df, i, curCol, strI);
       DataFrame.GetStr(df, j, curCol, strJ);
@@ -1028,6 +1192,56 @@ BEGIN
   statusMsg := "Sort complete.";
   DrawAll()
 END SortCurrentColumn;
+
+(* ── insert a blank column before the current column ────────────── *)
+PROCEDURE InsertCurrentColumn();
+VAR r, c, nr, nc, i: INTEGER;
+    cell: ARRAY DataFrame.CELLLEN OF CHAR;
+BEGIN
+  nc := DataFrame.NCols(df);
+  nr := DataFrame.NRows(df);
+  i  := DataFrame.AddCol(df, "");  (* append one column at end *)
+  (* shift each row's cells from curCol..nc-1 one place to the right *)
+  FOR r := 0 TO nr - 1 DO
+    FOR c := nc - 1 TO curCol BY -1 DO
+      DataFrame.GetStr(df, r, c, cell);
+      DataFrame.SetStr(df, r, c + 1, cell)
+    END;
+    DataFrame.SetStr(df, r, curCol, "")
+  END;
+  RecalcAllColWidths();
+  dirty := TRUE;
+  COPY("Column inserted.", statusMsg)
+END InsertCurrentColumn;
+
+(* ── delete the current column, rebuilding the DataFrame ─────────── *)
+PROCEDURE DeleteCurrentColumn();
+VAR newDf: DataFrame.DataFrame;
+    r, c, nr, nc, i: INTEGER;
+    cell: ARRAY DataFrame.CELLLEN OF CHAR;
+BEGIN
+  nc := DataFrame.NCols(df);
+  nr := DataFrame.NRows(df);
+  IF nc <= 1 THEN COPY("Can't delete last column.", statusMsg); RETURN END;
+  newDf := DataFrame.Create();
+  FOR c := 0 TO nc - 2 DO i := DataFrame.AddCol(newDf, "") END;
+  FOR r := 0 TO nr - 1 DO
+    i := DataFrame.AddRow(newDf);
+    FOR c := 0 TO curCol - 1 DO
+      DataFrame.GetStr(df, r, c, cell);
+      DataFrame.SetStr(newDf, r, c, cell)
+    END;
+    FOR c := curCol + 1 TO nc - 1 DO
+      DataFrame.GetStr(df, r, c, cell);
+      DataFrame.SetStr(newDf, r, c - 1, cell)
+    END
+  END;
+  df := newDf;
+  IF curCol >= DataFrame.NCols(df) THEN curCol := DataFrame.NCols(df) - 1 END;
+  RecalcAllColWidths();
+  dirty := TRUE;
+  COPY("Column deleted.", statusMsg)
+END DeleteCurrentColumn;
 
 (* ── main ────────────────────────────────────────────────────────── *)
 VAR
@@ -1070,6 +1284,8 @@ BEGIN
 
     IF k = KEY_MOUSE THEN
       HandleMouse()
+    ELSIF k = KEY_F1 THEN
+      ShowHelp()
     ELSIF k = 14X THEN (* Ctrl+T: sort current column *)
       SortCurrentColumn()
     ELSIF mode = EDIT THEN
