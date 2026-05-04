@@ -19,6 +19,7 @@ These identifiers are always in scope without any IMPORT statement.
 | `DEC(VAR x: INTEGER)` | Decrement `x` by 1. |
 | `DEC(VAR x: INTEGER; n: INTEGER)` | Decrement `x` by `n`. |
 | `NEW(VAR p: Pointer)` | Allocate heap memory for the pointed-to type. |
+| `FREE(VAR p: Pointer)` | Free heap memory allocated by `NEW` and set `p` to `NIL`. |
 | `HALT(code: INTEGER)` | Terminate program with exit code `code`. |
 | `ASSERT(cond: BOOLEAN)` | Abort with a C `assert` failure if `cond` is FALSE. |
 | `INCL(VAR s: SET; x: INTEGER)` | Include element `x` in set `s` (`s \|= 1u << x`). |

@@ -487,27 +487,32 @@ static int has_nested_procs(Node *proc) {
 /* Fill g->frame_* with all params + locals of proc. */
 static void build_frame(CG *g, Node *proc) {
     g->n_frame = 0;
+    int overflow = 0;
     strncpy(g->outer_proc_name, proc->str, MAX_IDENT-1);
     for (Node *fp=proc->c0;fp;fp=fp->next) {
         int isv=(fp->flags&FLAG_VAR_PARAM)!=0;
         for (Node *id=fp->c0;id;id=id->next) {
-            if (g->n_frame>=128) break;
+            if (g->n_frame>=128) { overflow=1; break; }
             strncpy(g->frame_names[g->n_frame],id->str,MAX_IDENT-1);
             g->frame_types[g->n_frame]=fp->c1;
             g->frame_is_var[g->n_frame]=isv;
             g->n_frame++;
         }
+        if (overflow) break;
     }
     for (Node *d=proc->c2;d;d=d->next) {
         if (d->kind!=ND_VAR_DECL) continue;
         for (Node *id=d->c0;id;id=id->next) {
-            if (g->n_frame>=128) break;
+            if (g->n_frame>=128) { overflow=1; break; }
             strncpy(g->frame_names[g->n_frame],id->str,MAX_IDENT-1);
             g->frame_types[g->n_frame]=d->c1;
             g->frame_is_var[g->n_frame]=0;
             g->n_frame++;
         }
+        if (overflow) break;
     }
+    if (overflow)
+        fprintf(stderr, "Warning: procedure '%s' exceeds 128-variable frame limit; nested procedures may not see all outer variables\n", proc->str);
 }
 
 static void collect_nested_names(CG *g, Node *proc) {
@@ -822,6 +827,7 @@ static void emit_var_decl_raw(CG *g, const char *name, Node *t, int is_var) {
 
 static int is_builtin(const char *n) {
     return !strcasecmp(n,"INC")||!strcasecmp(n,"DEC")||!strcasecmp(n,"NEW")||
+           !strcasecmp(n,"FREE")||
            !strcasecmp(n,"HALT")||!strcasecmp(n,"ASSERT")||!strcasecmp(n,"ABS")||
            !strcasecmp(n,"ODD")||!strcasecmp(n,"ORD")||!strcasecmp(n,"CHR")||!strcasecmp(n,"CAP")||
            !strcasecmp(n,"FLOOR")||!strcasecmp(n,"INCL")||!strcasecmp(n,"EXCL")||
@@ -952,6 +958,10 @@ static void emit_builtin(CG *g, const char *name, Node *args) {
             }
         }
         
+    } else if (!strcasecmp(name,"FREE")) {
+        /* FREE(p) — free heap memory and set pointer to NIL */
+        emit(g,"free("); emit_expr(g,a0); emit(g,"); ");
+        emit_expr(g,a0); emit(g," = NULL");
     } else if (!strcasecmp(name,"HALT")) {
         emit(g,"exit("); if(a0) emit_expr(g,a0); else emit(g,"0"); emit(g,")");
     } else if (!strcasecmp(name,"ASSERT")) {
@@ -992,9 +1002,20 @@ static void emit_builtin(CG *g, const char *name, Node *args) {
     } else if (!strcasecmp(name,"READ")) {
         emit_read(g, a0);
     } else if (!strcasecmp(name,"COPY")) {
-        /* COPY(src, dst) → strcpy(dst, src) */
-        emit(g,"strcpy("); if(a1) emit_expr(g,a1); emit(g,", ");
-        if(a0) emit_expr(g,a0); emit(g,")");
+        /* COPY(src, dst) — bounded copy; dst is ARRAY OF CHAR.
+         * Open-array VAR params are char* in C so sizeof gives pointer size;
+         * use the hidden _len parameter instead. */
+        int dst_open = a1 && a1->kind==ND_IDENT && is_open_array(sym_type(a1->str));
+        if (dst_open) {
+            emit(g,"(strncpy("); emit_expr(g,a1); emit(g,",");
+            if(a0) emit_expr(g,a0);
+            emit(g,",%s_len-1),(", a1->str); emit_expr(g,a1); emit(g,")[%s_len-1]=0)", a1->str);
+        } else {
+            emit(g,"(strncpy("); emit_expr(g,a1); emit(g,",");
+            if(a0) emit_expr(g,a0);
+            emit(g,",sizeof("); emit_expr(g,a1); emit(g,")-1),(");
+            emit_expr(g,a1); emit(g,")[sizeof("); emit_expr(g,a1); emit(g,")-1]=0)");
+        }
     } else if (!strcasecmp(name,"FLT")) {
         emit(g,"(double)("); if(a0) emit_expr(g,a0); emit(g,")");
     } else if (!strcasecmp(name,"ASR")) {
@@ -1588,14 +1609,36 @@ static void emit_stmt(CG *g, Node *s) {
                 is_arr = 1;
         }
         if (is_str) {
-            iemit(g,"strcpy("); emit_expr(g,lhs); emit(g,",");
-            /* Always emit RHS as string literal for strcpy */
-            if (rhs->kind == ND_STRING) emit_string_lit(g, rhs->str);
-            else emit_expr(g,rhs);
-            emit(g,");\n");
+            /* Bounded copy — open-array VAR params are char* so sizeof gives
+             * pointer size; use the hidden _len parameter in that case. */
+            int lhs_open = lhs->kind==ND_IDENT && is_open_array(lt);
+            if (lhs_open) {
+                iemit(g,"strncpy("); emit_expr(g,lhs); emit(g,",");
+                if (rhs->kind == ND_STRING) emit_string_lit(g, rhs->str);
+                else emit_expr(g,rhs);
+                emit(g,",%s_len-1);\n", lhs->str);
+                iemit(g,""); emit_expr(g,lhs); emit(g,"[%s_len-1]=0;\n", lhs->str);
+            } else {
+                iemit(g,"strncpy("); emit_expr(g,lhs); emit(g,",");
+                if (rhs->kind == ND_STRING) emit_string_lit(g, rhs->str);
+                else emit_expr(g,rhs);
+                emit(g,",sizeof("); emit_expr(g,lhs); emit(g,")-1);\n");
+                iemit(g,""); emit_expr(g,lhs);
+                emit(g,"[sizeof("); emit_expr(g,lhs); emit(g,")-1]=0;\n");
+            }
         } else if (is_arr) {
-            iemit(g,"memcpy("); emit_expr(g,lhs); emit(g,",");
-            emit_expr(g,rhs); emit(g,",sizeof("); emit_expr(g,lhs); emit(g,"));\n");
+            /* For open non-char arrays (VAR params), sizeof gives pointer size;
+             * use _len * element size instead. */
+            int lhs_open = lhs->kind==ND_IDENT && is_open_array(lt);
+            if (lhs_open) {
+                iemit(g,"memcpy("); emit_expr(g,lhs); emit(g,",");
+                emit_expr(g,rhs);
+                emit(g,",(size_t)%s_len*sizeof(", lhs->str);
+                emit_expr(g,lhs); emit(g,"[0]));\n");
+            } else {
+                iemit(g,"memcpy("); emit_expr(g,lhs); emit(g,",");
+                emit_expr(g,rhs); emit(g,",sizeof("); emit_expr(g,lhs); emit(g,"));\n");
+            }
         } else {
             iemit(g,""); emit_expr(g,lhs);
             emit(g," = "); emit_expr(g,rhs); emit(g,";\n");
@@ -2898,31 +2941,33 @@ void codegen(Node *module, FILE *out, int is_main, const char *srcfile) {
         emit(g,"static Files_File Files_Old(const char *name) {\n");
         emit(g,"    FILE *fp=fopen(name,\"rb\"); if(!fp) return NULL;\n");
         emit(g,"    Files_File f=(Files_File)malloc(sizeof(_Files_Rec));\n");
+        emit(g,"    if(!f){fclose(fp);return NULL;}\n");
         emit(g,"    f->fp=fp; strncpy(f->name,name,511); f->name[511]=0; return f;\n");
         emit(g,"}\n");
         /* New(name): File */
         emit(g,"static Files_File Files_New(const char *name) {\n");
         emit(g,"    FILE *fp=fopen(name,\"w+b\"); if(!fp) return NULL;\n");
         emit(g,"    Files_File f=(Files_File)malloc(sizeof(_Files_Rec));\n");
+        emit(g,"    if(!f){fclose(fp);return NULL;}\n");
         emit(g,"    f->fp=fp; strncpy(f->name,name,511); f->name[511]=0; return f;\n");
         emit(g,"}\n");
         /* Register(f) — no-op here (file is already on disk) */
         emit(g,"static void Files_Register(Files_File f) { if(f) fflush(f->fp); }\n");
         /* Close(f) */
         emit(g,"static void Files_Close(Files_File f) { if(f){fclose(f->fp);free(f);} }\n");
-        /* Length(f): INTEGER */
-        emit(g,"static int Files_Length(Files_File f) {\n");
+        /* Length(f): LONGINT — returns long to avoid truncating files >2GB */
+        emit(g,"static long Files_Length(Files_File f) {\n");
         emit(g,"    if(!f) return 0;\n");
         emit(g,"    long p=ftell(f->fp); fseek(f->fp,0,SEEK_END);\n");
-        emit(g,"    long len=ftell(f->fp); fseek(f->fp,p,SEEK_SET); return (int)len;\n");
+        emit(g,"    long len=ftell(f->fp); fseek(f->fp,p,SEEK_SET); return len;\n");
         emit(g,"}\n");
         /* Set(VAR r, f, pos) */
-        emit(g,"static void Files_Set(Files_Rider *r, Files_File f, int pos) {\n");
+        emit(g,"static void Files_Set(Files_Rider *r, Files_File f, long pos) {\n");
         emit(g,"    r->f=f; r->eof=0;\n");
-        emit(g,"    if(f){fseek(f->fp,(long)pos,SEEK_SET);r->pos=pos;}else r->pos=0;\n");
+        emit(g,"    if(f){fseek(f->fp,pos,SEEK_SET);r->pos=pos;}else r->pos=0;\n");
         emit(g,"}\n");
-        /* Pos(VAR r): INTEGER */
-        emit(g,"static int Files_Pos(Files_Rider *r) { return (int)r->pos; }\n");
+        /* Pos(VAR r): LONGINT */
+        emit(g,"static long Files_Pos(Files_Rider *r) { return r->pos; }\n");
         /* Base(VAR r): File */
         emit(g,"static Files_File Files_Base(Files_Rider *r) { return r->f; }\n");
         /* Read(VAR r, VAR x: BYTE) */
@@ -3188,6 +3233,8 @@ void codegen(Node *module, FILE *out, int is_main, const char *srcfile) {
         emit(g,"        e->name[nn]=0;\n");
         emit(g,"        fseek(fp,xl+cl,SEEK_CUR);\n");
         emit(g,"    }\n");
+        emit(g,"    if(nent>ZIP_MAX_ENTRIES)\n");
+        emit(g,"        fprintf(stderr,\"Zip.Open: archive has %%d entries, only %%d loaded (ZIP_MAX_ENTRIES)\\n\",nent,ZIP_MAX_ENTRIES);\n");
         emit(g,"    return z;\n");
         emit(g,"}\n");
         emit(g,"static int Zip_Count(Zip_Archive z){return z?z->count:0;}\n");
