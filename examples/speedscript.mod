@@ -27,6 +27,7 @@ CONST
   KEY_CTRL_K = 11;  (* Kill to end of line *)
   KEY_CTRL_L = 12;  (* Load file *)
   KEY_CTRL_N = 14;  (* New document *)
+  KEY_CTRL_Q = 17;
   KEY_CTRL_R = 18;  (* Restore / paste buffer *)
   KEY_CTRL_S = 19;  (* Save *)
   KEY_CTRL_T = 20;  (* Transpose *)
@@ -1247,7 +1248,7 @@ BEGIN
     k := Terminal.ReadKey();
 
     CASE k OF
-      KEY_ESC:
+      KEY_ESC, KEY_CTRL_Q:
         IF modified THEN
           IF ReadStr("Unsaved changes. Exit? (y/n): ", searchStr) THEN
             IF (searchStr[0] = "y") OR (searchStr[0] = "Y") THEN
