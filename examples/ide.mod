@@ -2677,7 +2677,8 @@ BEGIN
     ew := FocusedEditor();
     IF ew # NIL THEN
       CursorScreenPos(ew, sx, sy);
-      TUI.SetCursor(sx, sy)
+      TUI.SetCursor(sx, sy);
+      Terminal.ShowCursor();
     END;
 
     TUI.WaitEvent(ev);
