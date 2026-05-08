@@ -125,11 +125,13 @@ BEGIN
     Terminal.Goto(reelX[col], py);
     Out.String("     "); DrawSymStr(sym); Out.String("     ");
     Terminal.Reset;
+    Out.Flush;
     Delay(55);
     Terminal.Color256(15, bg);
     Terminal.Goto(reelX[col], py);
     Out.String("     "); DrawSymStr(sym); Out.String("     ");
     Terminal.Reset;
+    Out.Flush;
     Delay(55)
   END
 END FlashReel;
@@ -213,6 +215,7 @@ BEGIN
     END;
 
     DrawAllReels;
+    Out.Flush;
 
     (* lock reels one by one *)
     IF (f = 22) & (stopped[0] = 0) THEN
@@ -286,6 +289,7 @@ BEGIN
   Terminal.Goto(4, 19);
   Out.String("[ENTER] or [SPACE] to spin     [Q] to quit");
   Terminal.Reset;
+  Out.Flush;
 
   (* Main loop *)
   LOOP
