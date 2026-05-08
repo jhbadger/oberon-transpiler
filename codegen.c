@@ -1167,6 +1167,7 @@ static int try_emit_import(CG *g, Node *fa, Node *args) {
                                         if(a1) emit_expr(g,a1); emit(g,",");
                                         if(a1&&a1->next) emit_expr(g,a1->next);
                                         emit(g,","); emit_expr(g,a0); emit(g,")"); return 1; }
+        if (!strcmp(proc,"Flush"))   { emit(g,"fflush(stdout)"); return 1; }
     }
     /* In module */
     if (!strcmp(mod,"In")) {

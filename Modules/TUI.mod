@@ -380,7 +380,8 @@ BEGIN
       END
     END
   END;
-  ResetColor
+  ResetColor;
+  Out.Flush
 END Flush;
 
 (** InvalidateFront — force the next Flush to repaint every cell.
