@@ -181,6 +181,7 @@ BEGIN
   Terminal.Color(7, 0);
   Out.String("Arrows/Move  Space/Reveal  F/Flag  Q/Quit  Click=Reveal  RClick=Flag");
   Terminal.Reset;
+  Out.Flush
 END DrawBoard;
 
 (* Win Check *)

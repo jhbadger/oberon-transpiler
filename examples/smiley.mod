@@ -48,6 +48,7 @@ BEGIN
 
   x := 37;  y := 11;  color := 3;
   DrawFace(x, y, color);
+  Out.Flush;
 
   done := FALSE;
   WHILE done = FALSE DO

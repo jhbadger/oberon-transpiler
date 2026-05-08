@@ -536,7 +536,8 @@ PROCEDURE Render;
 BEGIN
   DrawMap;
   DrawStats;
-  DrawMsg
+  DrawMsg;
+  Out.Flush
 END Render;
 
 

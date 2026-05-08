@@ -378,6 +378,7 @@ BEGIN
     hideHole := FALSE;
     DrawDealerHand;
     DrawDealerLabel;
+    Out.Flush;
     Delay(700);
     LOOP
       ds := HandValue(dHand, dCount);
@@ -386,6 +387,7 @@ BEGIN
       INC(dCount);
       DrawDealerHand;
       DrawDealerLabel;
+      Out.Flush;
       Delay(600)
     END
   END;

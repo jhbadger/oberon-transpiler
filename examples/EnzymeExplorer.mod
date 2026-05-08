@@ -38,6 +38,7 @@ VAR
     END;
   END;
   Out.Ln; Out.String("Press any key...");
+  Out.Flush;
   dummy := Terminal.ReadKey();
 END ListFirstTen;
 
@@ -73,6 +74,7 @@ VAR
       (* Pagination: Pause every 15 results *)
       IF (found > 0) & (found MOD 15 = 0) THEN
         Out.String("-- Press any key for more --");
+        Out.Flush;
         dummy := Terminal.ReadKey();
         Out.Ln;
       END
@@ -88,6 +90,7 @@ VAR
   END;
   
   Out.Ln; Out.String("Press any key to return to menu...");
+  Out.Flush;
   dummy := Terminal.ReadKey();
 END SearchData;
 

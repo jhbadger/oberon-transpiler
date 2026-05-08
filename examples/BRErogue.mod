@@ -941,7 +941,8 @@ BEGIN
   DrawMap;
   DrawStats;
   DrawClassBar;
-  DrawMsg
+  DrawMsg;
+  Out.Flush
 END Render;
 
 

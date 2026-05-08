@@ -360,13 +360,15 @@ BEGIN
           dropTime := Terminal.GetTickCount() + dropInt
         ELSIF key = KEsc   THEN
           alive := FALSE;  quitting := TRUE
-        END
+        END;
+        Out.Flush
       END;
 
       now := Terminal.GetTickCount();
       IF now >= dropTime THEN
         DropOne;
-        dropTime := now + dropInt
+        dropTime := now + dropInt;
+        Out.Flush
       END
     END;
 

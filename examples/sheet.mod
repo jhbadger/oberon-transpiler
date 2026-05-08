@@ -671,7 +671,8 @@ BEGIN
   FOR r := scrRow TO scrRow + visRows - 1 DO
     DrawDataRow(r)
   END;
-  DrawHelp()
+  DrawHelp();
+  Out.Flush
 END DrawAll;
 
 (* ── partial redraw: just current cell (after move) ─────────────── *)

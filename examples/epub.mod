@@ -817,7 +817,8 @@ BEGIN
   FOR r := 1 TO visRows DO
     DrawLine(li, r); INC(li)
   END;
-  DrawStatus()
+  DrawStatus();
+  Out.Flush
 END DrawAll;
 
 (* ── position file ───────────────────────────────────────────── *)

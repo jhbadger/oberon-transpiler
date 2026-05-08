@@ -277,6 +277,7 @@ BEGIN
   END;
   Terminal.Goto(1, VIEW_H+3);
   Out.String("Arrows: move / turn   Q: quit");
+  Out.Flush
 END DrawScene;
 
 (* ------------------------------------------------------------------ *)

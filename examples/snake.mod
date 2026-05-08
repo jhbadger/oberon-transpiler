@@ -205,7 +205,8 @@ BEGIN
     END;
     DrawScore;
     PlaceFood
-  END
+  END;
+  Out.Flush
 END Step;
 
 (* ── Game-over screen ─────────────────────────────────────────────── *)
