@@ -2462,10 +2462,13 @@ VAR i, j: INTEGER;
     tmp: ARRAY 512 OF CHAR;
 BEGIN
   IF path[0] = 0X THEN  RETURN  END;
+  (* Copy path before the dedup shift loop, which may overwrite recentFiles[i]
+     when the caller passes recentFiles[i] directly (aliasing). *)
+  Strings.Copy(path, tmp);
   (* Remove existing entry for this path *)
   i := 0;
   WHILE i < recentCount DO
-    IF Strings.Compare(recentFiles[i], path) = 0 THEN
+    IF Strings.Compare(recentFiles[i], tmp) = 0 THEN
       FOR j := i TO recentCount - 2 DO
         Strings.Copy(recentFiles[j + 1], recentFiles[j])
       END;
@@ -2479,7 +2482,7 @@ BEGIN
   FOR i := recentCount - 1 TO 0 BY -1 DO
     Strings.Copy(recentFiles[i], recentFiles[i + 1])
   END;
-  Strings.Copy(path, recentFiles[0]);
+  Strings.Copy(tmp, recentFiles[0]);
   INC(recentCount);
   SaveRecentFiles
 END AddRecentFile;
