@@ -16,10 +16,10 @@ CONST
   COLOR_FISH   = 2;
   COLOR_SHARK  = 1;
   PLOT_LEFT    = 3;
-  PLOT_RIGHT   = GRID_WIDTH - 4;   (* = 196 *)
+  PLOT_RIGHT   = GRID_WIDTH - 4;   
   PLOT_TOP     = 2;
-  PLOT_BOTTOM  = GRID_HEIGHT - 5;  (* = 85, x-axis drawn here *)
-  MAX_HISTORY  = PLOT_RIGHT - PLOT_LEFT;  (* = 193 data columns *)
+  PLOT_BOTTOM  = GRID_HEIGHT - 5;  
+  MAX_HISTORY  = PLOT_RIGHT - PLOT_LEFT;
 
 TYPE
   StateGrid    = ARRAY GRID_HEIGHT, GRID_WIDTH OF INTEGER;
@@ -145,6 +145,7 @@ VAR
   i, x, prevX, maxPop, fishY, sharkY, prevFishY, prevSharkY, dataH, plotBase: INTEGER;
 BEGIN
   Terminal.ClearBuf();
+  Terminal.Clear();
   FOR i := PLOT_LEFT TO PLOT_RIGHT DO
     Terminal.Plot(i, PLOT_BOTTOM, 7);
   END;
@@ -326,4 +327,5 @@ BEGIN
   END;
   Terminal.Reset();
 END Wator.
+
 
