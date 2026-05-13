@@ -3,8 +3,8 @@ MODULE Wator;
 IMPORT Out, Terminal, Random;
 
 CONST
-  GRID_WIDTH   = 200;
-  GRID_HEIGHT  = 90;
+  GRID_WIDTH   = 80;
+  GRID_HEIGHT  = 50;
   EMPTY        = 0;
   FISH         = 1;
   SHARK        = 2;
@@ -326,3 +326,4 @@ BEGIN
   END;
   Terminal.Reset();
 END Wator.
+
