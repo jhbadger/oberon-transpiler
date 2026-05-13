@@ -59,6 +59,7 @@ CONST
   CmdHelp    = 50;
   CmdJumpError = 51;
   CmdCopy    = 60;   CmdCut     = 61;   CmdPaste   = 62;   CmdSelAll  = 63;
+  CmdReindent = 80;
 
   (* ── Recent files ── *)
   MaxRecent      = 8;
@@ -1177,6 +1178,58 @@ BEGIN
     DEC(ew.cx, removed)
   END
 END CheckAutoDeindent;
+
+(* Re-indent every line in the buffer using the same rules as auto-indent:
+   dedent keywords (END UNTIL ELSE ELSIF) pull the line back one level;
+   opener keywords (BEGIN THEN ELSE DO REPEAT RECORD OF WITH LOOP) push
+   the next line forward one level.  Lines inside block comments are skipped. *)
+PROCEDURE DoReindent(ew: EditorWin);
+VAR li, indent, curIndent, newIndent, len, pos, wLen, k: INTEGER;
+    spaces: ARRAY LLEN OF CHAR;
+    w: ARRAY 16 OF CHAR;
+BEGIN
+  ComputeDepths(ew);
+  indent := 0;
+  FOR li := 0 TO ew.nlines - 1 DO
+    IF ew.cmtDepth[li] = 0 THEN
+      len := LineLen(ew, li);
+      pos := 0;
+      WHILE (pos < len) & (ew.lines[li][pos] = ' ') DO  INC(pos)  END;
+      IF pos < len THEN
+        wLen := 0;  k := pos;
+        WHILE (k < len) & (wLen < 15) &
+              (((ew.lines[li][k] >= 'A') & (ew.lines[li][k] <= 'Z')) OR
+               ((ew.lines[li][k] >= 'a') & (ew.lines[li][k] <= 'z'))) DO
+          w[wLen] := ew.lines[li][k];  INC(wLen);  INC(k)
+        END;
+        w[wLen] := 0X;
+        newIndent := indent;
+        IF (Strings.Compare(w, "END")   = 0) OR
+           (Strings.Compare(w, "UNTIL") = 0) OR
+           (Strings.Compare(w, "ELSE")  = 0) OR
+           (Strings.Compare(w, "ELSIF") = 0) THEN
+          IF newIndent >= 4 THEN  DEC(newIndent, 4)  ELSE  newIndent := 0  END
+        END;
+        curIndent := pos;
+        IF curIndent # newIndent THEN
+          PushUndo(ew, UOpEdit, li);
+          DeleteBytesAt(ew, li, 0, curIndent);
+          FOR k := 0 TO newIndent - 1 DO  spaces[k] := ' '  END;
+          IF newIndent > 0 THEN
+            InsertBytesAt(ew, li, 0, spaces, newIndent)
+          END
+        END;
+        indent := newIndent;
+        IF LineEndsWithOpener(ew, li, LineLen(ew, li)) THEN
+          INC(indent, 4)
+        END
+      END
+    END
+  END;
+  IF ew.cx > LineLen(ew, ew.cy) THEN  ew.cx := LineLen(ew, ew.cy)  END;
+  ScrollToCursor(ew);
+  Strings.Copy("Reindented.", statusMsg)
+END DoReindent;
 
 (* ════════════════════════════════════════════════════════════════
    Rendering
@@ -2310,10 +2363,11 @@ BEGIN
   ELSIF cmd = CmdFullScreen THEN
     ZoomCurrentWin
 
-  ELSIF cmd = CmdCopy   THEN  IF ew # NIL THEN  DoCopy(ew)   END
-  ELSIF cmd = CmdCut    THEN  IF ew # NIL THEN  DoCut(ew)    END
-  ELSIF cmd = CmdPaste  THEN  IF ew # NIL THEN  DoPaste(ew)  END
-  ELSIF cmd = CmdSelAll THEN  IF ew # NIL THEN  DoSelAll(ew) END
+  ELSIF cmd = CmdCopy     THEN  IF ew # NIL THEN  DoCopy(ew)     END
+  ELSIF cmd = CmdCut      THEN  IF ew # NIL THEN  DoCut(ew)      END
+  ELSIF cmd = CmdPaste    THEN  IF ew # NIL THEN  DoPaste(ew)    END
+  ELSIF cmd = CmdSelAll   THEN  IF ew # NIL THEN  DoSelAll(ew)   END
+  ELSIF cmd = CmdReindent THEN  IF ew # NIL THEN  DoReindent(ew) END
 
   ELSIF cmd = CmdHelp THEN
     (* F1: help on word under cursor; open dialog with empty query if no editor *)
@@ -2536,6 +2590,8 @@ BEGIN
   Widgets.MenuBarAddItem(mbar, 1, "Find Next     F3",     CmdFindNext);
   Widgets.MenuBarAddItem(mbar, 1, "Replace...    Ctrl+R", CmdReplace);
   Widgets.MenuBarAddItem(mbar, 1, "Go to Line... Ctrl+G", CmdGoto);
+  Widgets.MenuBarAddSep (mbar, 1);
+  Widgets.MenuBarAddItem(mbar, 1, "Reindent", CmdReindent);
 
   (* Build menu *)
   Widgets.MenuBarAddMenu(mbar, "Build");
@@ -2587,6 +2643,8 @@ BEGIN
   Widgets.MenuBarAddItem(mbar, 1, "Find Next     F3",     CmdFindNext);
   Widgets.MenuBarAddItem(mbar, 1, "Replace...    Ctrl+R", CmdReplace);
   Widgets.MenuBarAddItem(mbar, 1, "Go to Line... Ctrl+G", CmdGoto);
+  Widgets.MenuBarAddSep (mbar, 1);
+  Widgets.MenuBarAddItem(mbar, 1, "Reindent", CmdReindent);
 
   (* Build menu *)
   Widgets.MenuBarAddMenu(mbar, "Build");
