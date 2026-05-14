@@ -1179,27 +1179,24 @@ static int try_emit_import(CG *g, Node *fa, Node *args) {
         if (!strcmp(proc,"Real"))   { emit(g,"scanf(\"%%lf\",&"); emit_expr(g,a0); emit(g,")"); return 1; }
         if (!strcmp(proc,"Char"))   { emit(g,"("); emit_expr(g,a0); emit(g," = (char)getchar())"); return 1; }
         if (!strcmp(proc,"String")) {
-					emit(g, "({ static char _buf[256]; ");
-					emit(g, "fflush(stdout); ");
-					emit(g, "if (fgets(_buf, sizeof(_buf), stdin)) { ");
-					emit(g, "  size_t l = strlen(_buf); ");
-					emit(g, "  if (l > 0 && _buf[l-1] == '\\n') _buf[l-1] = 0; ");
-					emit(g, "  strncpy("); emit_expr(g, a0); emit(g, ", _buf, 255); ");
+					emit(g, "({ fflush(stdout); ");
+					emit(g, "if (fgets("); emit_expr(g, a0); emit(g, ", (int)sizeof("); emit_expr(g, a0); emit(g, "), stdin)) { ");
+					emit(g, "  size_t _l = strlen("); emit_expr(g, a0); emit(g, "); ");
+					emit(g, "  if (_l > 0 && ("); emit_expr(g, a0); emit(g, ")[_l-1] == '\\n') ("); emit_expr(g, a0); emit(g, ")[_l-1] = 0; ");
 					emit(g, "}})");
 					return 1;
 				}
 				if (!strcmp(proc, "Line")) {
 					/* Use an inline block to handle the buffer sync issue */
 					emit(g, "({ ");
-					emit(g, "  int c; char *p = "); emit_expr(g, a0); emit(g, "; ");
-					emit(g, "  int i = 0; fflush(stdout); ");
+					emit(g, "  int c; int i = 0; fflush(stdout); ");
 					/* 1. Skip any leftover newlines or carriage returns from the menu */
 					emit(g, "  while ((c = getchar()) == '\\n' || c == '\\r'); ");
 					/* 2. Read the actual input until the next newline */
-					emit(g, "  if (c != EOF) p[i++] = (char)c; ");
-					emit(g, "  while (i < 255 && (c = getchar()) != '\\n' && c != '\\r' && c != EOF) ");
-					emit(g, "    p[i++] = (char)c; ");
-					emit(g, "  p[i] = 0; ");
+					emit(g, "  if (c != EOF) ("); emit_expr(g, a0); emit(g, ")[i++] = (char)c; ");
+					emit(g, "  while (i < (int)sizeof("); emit_expr(g, a0); emit(g, ")-1 && (c = getchar()) != '\\n' && c != '\\r' && c != EOF) ");
+					emit(g, "    ("); emit_expr(g, a0); emit(g, ")[i++] = (char)c; ");
+					emit(g, "  ("); emit_expr(g, a0); emit(g, ")[i] = 0; ");
 					emit(g, "})");
 					return 1;
 				}
