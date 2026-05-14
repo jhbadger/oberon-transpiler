@@ -2243,6 +2243,7 @@ void codegen(Node *module, FILE *out, int is_main, const char *srcfile) {
     emit(g,"#include <stdio.h>\n");
     emit(g,"#include <stdlib.h>\n");
     emit(g,"#include <string.h>\n");
+		emit(g,"#include <ctype.h>\n");
     emit(g,"#include <math.h>\n");
     emit(g,"#include <assert.h>\n");
     /* Floor-division and floor-mod macros (Oberon-07 semantics) */
