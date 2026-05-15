@@ -99,6 +99,94 @@ BEGIN
   END;
 END Display;
 
+PROCEDURE KingPos(side: INTEGER): INTEGER;
+VAR i: INTEGER;
+BEGIN
+  FOR i := 0 TO 127 DO
+    IF IsOnBoard(i) & (board[i] MOD 8 = KING) &
+       (((board[i] DIV SIDE) MOD 2) * SIDE = side) THEN
+      RETURN i
+    END
+  END;
+  RETURN -1
+END KingPos;
+
+PROCEDURE IsAttacked(pos, bySide: INTEGER): BOOLEAN;
+VAR i, sq: INTEGER;
+BEGIN
+  FOR i := 0 TO 7 DO
+    sq := pos + knightVec[i];
+    IF IsOnBoard(sq) & (board[sq] MOD 8 = KNIGHT) &
+       (((board[sq] DIV SIDE) MOD 2) * SIDE = bySide) THEN
+      RETURN TRUE
+    END
+  END;
+  FOR i := 0 TO 3 DO
+    sq := pos + rookVec[i];
+    LOOP
+      IF ~IsOnBoard(sq) THEN EXIT END;
+      IF board[sq] # EMPTY THEN
+        IF (((board[sq] DIV SIDE) MOD 2) * SIDE = bySide) &
+           ((board[sq] MOD 8 = ROOK) OR (board[sq] MOD 8 = QUEEN)) THEN
+          RETURN TRUE
+        END;
+        EXIT
+      END;
+      sq := sq + rookVec[i]
+    END
+  END;
+  FOR i := 0 TO 3 DO
+    sq := pos + bishopVec[i];
+    LOOP
+      IF ~IsOnBoard(sq) THEN EXIT END;
+      IF board[sq] # EMPTY THEN
+        IF (((board[sq] DIV SIDE) MOD 2) * SIDE = bySide) &
+           ((board[sq] MOD 8 = BISHOP) OR (board[sq] MOD 8 = QUEEN)) THEN
+          RETURN TRUE
+        END;
+        EXIT
+      END;
+      sq := sq + bishopVec[i]
+    END
+  END;
+  FOR i := 0 TO 3 DO
+    sq := pos + rookVec[i];
+    IF IsOnBoard(sq) & (board[sq] MOD 8 = KING) &
+       (((board[sq] DIV SIDE) MOD 2) * SIDE = bySide) THEN
+      RETURN TRUE
+    END;
+    sq := pos + bishopVec[i];
+    IF IsOnBoard(sq) & (board[sq] MOD 8 = KING) &
+       (((board[sq] DIV SIDE) MOD 2) * SIDE = bySide) THEN
+      RETURN TRUE
+    END
+  END;
+  IF bySide = SIDE THEN
+    sq := pos + 17;
+    IF IsOnBoard(sq) & (board[sq] MOD 8 = PAWN) &
+       (((board[sq] DIV SIDE) MOD 2) * SIDE = SIDE) THEN RETURN TRUE END;
+    sq := pos + 15;
+    IF IsOnBoard(sq) & (board[sq] MOD 8 = PAWN) &
+       (((board[sq] DIV SIDE) MOD 2) * SIDE = SIDE) THEN RETURN TRUE END
+  ELSE
+    sq := pos - 17;
+    IF IsOnBoard(sq) & (board[sq] MOD 8 = PAWN) &
+       (((board[sq] DIV SIDE) MOD 2) * SIDE = 0) THEN RETURN TRUE END;
+    sq := pos - 15;
+    IF IsOnBoard(sq) & (board[sq] MOD 8 = PAWN) &
+       (((board[sq] DIV SIDE) MOD 2) * SIDE = 0) THEN RETURN TRUE END
+  END;
+  RETURN FALSE
+END IsAttacked;
+
+PROCEDURE InCheck(side: INTEGER): BOOLEAN;
+VAR kpos: INTEGER;
+BEGIN
+  kpos := KingPos(side);
+  IF kpos < 0 THEN RETURN FALSE END;
+  RETURN IsAttacked(kpos, SIDE - side)
+END InCheck;
+
 (* Alpha-beta minimax. score = captureValue - Evaluate(opponent).
    Window [alpha, beta] is from the current player's perspective.
    Recursive call uses the transformed window (cv-beta, cv-alpha). *)
@@ -199,27 +287,34 @@ BEGIN
             IF target = 7   THEN ClearCastle(4) END;
             IF target = 0   THEN ClearCastle(8) END;
 
-            IF isEP THEN captureValue := pieceValues[epCapturedPiece MOD 8]
-            ELSE captureValue := pieceValues[captured MOD 8]
-            END;
-            IF (p = PAWN) & ((target < 8) OR (target >= 112)) THEN
-              captureValue := captureValue + pieceValues[QUEEN] - pieceValues[PAWN];
-            END;
+            IF ~InCheck(turn) THEN
+              IF isEP THEN captureValue := pieceValues[epCapturedPiece MOD 8]
+              ELSE captureValue := pieceValues[captured MOD 8]
+              END;
+              IF (p = PAWN) & ((target < 8) OR (target >= 112)) THEN
+                captureValue := captureValue + pieceValues[QUEEN] - pieceValues[PAWN];
+              END;
 
-            score := captureValue - Evaluate(SIDE - turn, depth - 1,
-                       captureValue - beta, captureValue - alpha, dummyF, dummyT);
+              score := captureValue - Evaluate(SIDE - turn, depth - 1,
+                         captureValue - beta, captureValue - alpha, dummyF, dummyT);
 
-            (* Unmake move *)
-            board[f] := movingP; board[target] := captured;
-            IF isEP THEN board[epCapturePos] := epCapturedPiece END;
-            epSquare := savedEP;
-            castleRights := savedCastle;
+              (* Unmake move *)
+              board[f] := movingP; board[target] := captured;
+              IF isEP THEN board[epCapturePos] := epCapturedPiece END;
+              epSquare := savedEP;
+              castleRights := savedCastle;
 
-            IF score > bestScore THEN
-              bestScore := score;
-              IF depth = maxDepth THEN bestF := f; bestT := target END;
-              alpha := bestScore;
-              IF alpha >= beta THEN RETURN bestScore END;  (* beta cutoff *)
+              IF score > bestScore THEN
+                bestScore := score;
+                IF depth = maxDepth THEN bestF := f; bestT := target END;
+                alpha := bestScore;
+                IF alpha >= beta THEN RETURN bestScore END;  (* beta cutoff *)
+              END;
+            ELSE
+              board[f] := movingP; board[target] := captured;
+              IF isEP THEN board[epCapturePos] := epCapturedPiece END;
+              epSquare := savedEP;
+              castleRights := savedCastle;
             END;
 
             IF (captured # EMPTY) OR (p = KNIGHT) OR (p = KING) OR (p = PAWN) THEN EXIT END;
