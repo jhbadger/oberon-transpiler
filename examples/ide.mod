@@ -372,7 +372,7 @@ BEGIN
 
   (* Smart indent: opener keywords add one extra level *)
   extra := 0;
-  IF LineEndsWithOpener(ew, ew.cy, ew.cx) THEN extra := 4 END;
+  IF LineEndsWithOpener(ew, ew.cy, ew.cx) THEN extra := 2 END;
   totalIndent := baseIndent + extra;
 
   InsertLineAt(ew, ew.cy + 1);
@@ -1172,7 +1172,7 @@ BEGIN
      (Strings.Compare(kw, "UNTIL") = 0) OR
      (Strings.Compare(kw, "ELSE")  = 0) OR
      (Strings.Compare(kw, "ELSIF") = 0) THEN
-    removed := 4;
+    removed := 2;
     IF removed > indent THEN  removed := indent  END;
     DeleteBytesAt(ew, ew.cy, 0, removed);
     DEC(ew.cx, removed)
@@ -1208,7 +1208,7 @@ BEGIN
            (Strings.Compare(w, "UNTIL") = 0) OR
            (Strings.Compare(w, "ELSE")  = 0) OR
            (Strings.Compare(w, "ELSIF") = 0) THEN
-          IF newIndent >= 4 THEN  DEC(newIndent, 4)  ELSE  newIndent := 0  END
+          IF newIndent >= 2 THEN  DEC(newIndent, 2)  ELSE  newIndent := 0  END
         END;
         curIndent := pos;
         IF curIndent # newIndent THEN
@@ -1221,7 +1221,7 @@ BEGIN
         END;
         indent := newIndent;
         IF LineEndsWithOpener(ew, li, LineLen(ew, li)) THEN
-          INC(indent, 4)
+          INC(indent, 2)
         END
       END
     END
@@ -2848,6 +2848,7 @@ BEGIN
 
   TUI.Done()
 END IDE.
+
 
 
 
