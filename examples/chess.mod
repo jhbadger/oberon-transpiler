@@ -313,119 +313,163 @@ END Evaluate;
 
 PROCEDURE Run*;
 VAR input: ARRAY 16 OF CHAR;
+    choice: ARRAY 4 OF CHAR;
     from, to, bf, bt, res, movingP: INTEGER;
     isHumanEP, isComputerEP: BOOLEAN;
     isCastle, isComputerCastle: BOOLEAN;
+    humanSide, computerSide: INTEGER;
+    computerFirst: BOOLEAN;
 BEGIN
   InitBoard;
   Out.String("Search depth (1=easy, 3=medium, 5=hard): ");
   In.Int(maxDepth);
+  Out.String("Play as (w)hite or (b)lack? ");
+  In.Line(choice);
+  IF (choice[0] = "b") OR (choice[0] = "B") THEN
+    humanSide := 0; computerSide := SIDE;
+    Out.String("You play Black; computer plays White."); Out.Ln;
+  ELSE
+    humanSide := SIDE; computerSide := 0;
+    Out.String("You play White; computer plays Black."); Out.Ln;
+  END;
+  computerFirst := computerSide = SIDE;
+
   LOOP
     Display;
-    Out.String("Your move (e.g. e2e4, e1g1 to castle): ");
-    In.String(input);
-
-    from := (8 - (ORD(input[1]) - ORD("0"))) * 16 + (ORD(input[0]) - ORD("a"));
-    to   := (8 - (ORD(input[3]) - ORD("0"))) * 16 + (ORD(input[2]) - ORD("a"));
-
-    IF IsOnBoard(from) & IsOnBoard(to) THEN
-      movingP   := board[from];
-      isHumanEP := (movingP MOD 8 = PAWN) & (to = epSquare);
-      isCastle  := (movingP MOD 8 = KING) & ((to - from = 2) OR (to - from = -2));
-
-      board[to] := movingP; board[from] := EMPTY;
-
-      IF isHumanEP THEN board[to + 16] := EMPTY END;
-      IF isCastle THEN
-        IF to - from = 2 THEN  (* kingside: h1(119)->f1(117) *)
-          board[to - 1] := board[to + 1]; board[to + 1] := EMPTY;
-        ELSE                   (* queenside: a1(112)->d1(115) *)
-          board[to + 1] := board[to - 2]; board[to - 2] := EMPTY;
-        END;
-      END;
-      (* Pawn promotion for human (auto-queen) *)
-      IF (movingP MOD 8 = PAWN) & (to < 8) THEN
-        board[to] := QUEEN + SIDE;
-        Out.String("Pawn promoted to queen."); Out.Ln;
-      END;
-
-      IF (movingP MOD 8 = PAWN) & (to - from = -32) THEN
-        epSquare := from - 16;
-      ELSE
-        epSquare := -1;
-      END;
-
-      IF movingP MOD 8 = KING THEN ClearCastle(1); ClearCastle(2)
-      ELSIF from = 119 THEN ClearCastle(1)
-      ELSIF from = 112 THEN ClearCastle(2)
-      END;
-      IF to = 7 THEN ClearCastle(4) END;
-      IF to = 0 THEN ClearCastle(8) END;
-
-      (* Game over: human captured black king *)
-      IF ~KingFound(0) THEN
-        Display;
-        Out.String("You win!"); Out.Ln;
-        EXIT
-      END;
-
-      Out.String("Thinking..."); Out.Ln;
-      bf := -1; bt := -1;
-      res := Evaluate(0, maxDepth, -2000, 2000, bf, bt);
-
-      IF ~IsOnBoard(bf) OR ~IsOnBoard(bt) THEN
-        Display;
-        Out.String("Checkmate or stalemate — game over."); Out.Ln;
-        EXIT
-      END;
-
-      isComputerEP     := (board[bf] MOD 8 = PAWN) & (bt = epSquare);
-      isComputerCastle := (board[bf] MOD 8 = KING) & ((bt - bf = 2) OR (bt - bf = -2));
-
-      Out.String("Computer plays: ");
-      Out.Char(CHR(ORD("a") + (bf MOD 16)));
-      Out.Char(CHR(ORD("0") + 8 - (bf DIV 16)));
-      Out.Char(CHR(ORD("a") + (bt MOD 16)));
-      Out.Char(CHR(ORD("0") + 8 - (bt DIV 16)));
-      Out.Ln;
-
-      board[bt] := board[bf]; board[bf] := EMPTY;
-
-      IF isComputerEP THEN board[bt - 16] := EMPTY END;
-      IF isComputerCastle THEN
-        IF bt - bf = 2 THEN  (* kingside: h8(7)->f8(5) *)
-          board[bt - 1] := board[bt + 1]; board[bt + 1] := EMPTY;
-        ELSE                 (* queenside: a8(0)->d8(3) *)
-          board[bt + 1] := board[bt - 2]; board[bt - 2] := EMPTY;
-        END;
-      END;
-      (* Pawn promotion for computer (auto-queen) *)
-      IF (board[bt] MOD 8 = PAWN) & (bt >= 112) THEN
-        board[bt] := QUEEN;
-        Out.String("Computer promotes to queen."); Out.Ln;
-      END;
-
-      IF (board[bt] MOD 8 = PAWN) & (bt - bf = 32) THEN
-        epSquare := bf + 16;
-      ELSE
-        epSquare := -1;
-      END;
-
-      IF board[bt] MOD 8 = KING THEN ClearCastle(4); ClearCastle(8)
-      ELSIF bf = 7 THEN ClearCastle(4)
-      ELSIF bf = 0 THEN ClearCastle(8)
-      END;
-      IF bt = 119 THEN ClearCastle(1) END;
-      IF bt = 112 THEN ClearCastle(2) END;
-
-      (* Game over: computer captured white king *)
-      IF ~KingFound(SIDE) THEN
-        Display;
-        Out.String("Computer wins!"); Out.Ln;
-        EXIT
-      END;
+    IF computerFirst THEN
+      computerFirst := FALSE;
     ELSE
-      Out.String("Invalid move format."); Out.Ln;
+      Out.String("Your move (e.g. e2e4, e1g1 to castle): ");
+      In.String(input);
+
+      from := (8 - (ORD(input[1]) - ORD("0"))) * 16 + (ORD(input[0]) - ORD("a"));
+      to   := (8 - (ORD(input[3]) - ORD("0"))) * 16 + (ORD(input[2]) - ORD("a"));
+
+      IF IsOnBoard(from) & IsOnBoard(to) THEN
+        movingP   := board[from];
+        isHumanEP := (movingP MOD 8 = PAWN) & (to = epSquare);
+        isCastle  := (movingP MOD 8 = KING) & ((to - from = 2) OR (to - from = -2));
+
+        board[to] := movingP; board[from] := EMPTY;
+
+        IF isHumanEP THEN
+          IF humanSide = SIDE THEN board[to + 16] := EMPTY
+          ELSE board[to - 16] := EMPTY
+          END
+        END;
+        IF isCastle THEN
+          IF to - from = 2 THEN
+            board[to - 1] := board[to + 1]; board[to + 1] := EMPTY;
+          ELSE
+            board[to + 1] := board[to - 2]; board[to - 2] := EMPTY;
+          END;
+        END;
+        IF (movingP MOD 8 = PAWN) &
+           ((humanSide = SIDE) & (to < 8) OR (humanSide = 0) & (to >= 112)) THEN
+          board[to] := QUEEN + humanSide;
+          Out.String("Pawn promoted to queen."); Out.Ln;
+        END;
+
+        IF (movingP MOD 8 = PAWN) &
+           ((humanSide = SIDE) & (to - from = -32) OR (humanSide = 0) & (to - from = 32)) THEN
+          epSquare := (from + to) DIV 2;
+        ELSE
+          epSquare := -1;
+        END;
+
+        IF movingP MOD 8 = KING THEN
+          IF humanSide = SIDE THEN ClearCastle(1); ClearCastle(2)
+          ELSE ClearCastle(4); ClearCastle(8)
+          END
+        ELSIF humanSide = SIDE THEN
+          IF from = 119 THEN ClearCastle(1) END;
+          IF from = 112 THEN ClearCastle(2) END;
+        ELSE
+          IF from = 7 THEN ClearCastle(4) END;
+          IF from = 0 THEN ClearCastle(8) END;
+        END;
+        IF to = 7   THEN ClearCastle(4) END;
+        IF to = 0   THEN ClearCastle(8) END;
+        IF to = 119 THEN ClearCastle(1) END;
+        IF to = 112 THEN ClearCastle(2) END;
+
+        IF ~KingFound(computerSide) THEN
+          Display;
+          Out.String("You win!"); Out.Ln;
+          EXIT
+        END;
+      ELSE
+        Out.String("Invalid move format."); Out.Ln;
+      END;
+    END;
+
+    Out.String("Thinking..."); Out.Ln;
+    bf := -1; bt := -1;
+    res := Evaluate(computerSide, maxDepth, -2000, 2000, bf, bt);
+
+    IF ~IsOnBoard(bf) OR ~IsOnBoard(bt) THEN
+      Display;
+      Out.String("Checkmate or stalemate — game over."); Out.Ln;
+      EXIT
+    END;
+
+    isComputerEP     := (board[bf] MOD 8 = PAWN) & (bt = epSquare);
+    isComputerCastle := (board[bf] MOD 8 = KING) & ((bt - bf = 2) OR (bt - bf = -2));
+
+    Out.String("Computer plays: ");
+    Out.Char(CHR(ORD("a") + (bf MOD 16)));
+    Out.Char(CHR(ORD("0") + 8 - (bf DIV 16)));
+    Out.Char(CHR(ORD("a") + (bt MOD 16)));
+    Out.Char(CHR(ORD("0") + 8 - (bt DIV 16)));
+    Out.Ln;
+
+    board[bt] := board[bf]; board[bf] := EMPTY;
+
+    IF isComputerEP THEN
+      IF computerSide = 0 THEN board[bt - 16] := EMPTY
+      ELSE board[bt + 16] := EMPTY
+      END
+    END;
+    IF isComputerCastle THEN
+      IF bt - bf = 2 THEN
+        board[bt - 1] := board[bt + 1]; board[bt + 1] := EMPTY;
+      ELSE
+        board[bt + 1] := board[bt - 2]; board[bt - 2] := EMPTY;
+      END;
+    END;
+    IF (board[bt] MOD 8 = PAWN) &
+       ((computerSide = 0) & (bt >= 112) OR (computerSide = SIDE) & (bt < 8)) THEN
+      board[bt] := QUEEN + computerSide;
+      Out.String("Computer promotes to queen."); Out.Ln;
+    END;
+
+    IF (board[bt] MOD 8 = PAWN) &
+       ((computerSide = 0) & (bt - bf = 32) OR (computerSide = SIDE) & (bt - bf = -32)) THEN
+      epSquare := (bf + bt) DIV 2;
+    ELSE
+      epSquare := -1;
+    END;
+
+    IF board[bt] MOD 8 = KING THEN
+      IF computerSide = 0 THEN ClearCastle(4); ClearCastle(8)
+      ELSE ClearCastle(1); ClearCastle(2)
+      END
+    ELSIF computerSide = 0 THEN
+      IF bf = 7   THEN ClearCastle(4) END;
+      IF bf = 0   THEN ClearCastle(8) END;
+    ELSE
+      IF bf = 119 THEN ClearCastle(1) END;
+      IF bf = 112 THEN ClearCastle(2) END;
+    END;
+    IF bt = 7   THEN ClearCastle(4) END;
+    IF bt = 0   THEN ClearCastle(8) END;
+    IF bt = 119 THEN ClearCastle(1) END;
+    IF bt = 112 THEN ClearCastle(2) END;
+
+    IF ~KingFound(humanSide) THEN
+      Display;
+      Out.String("Computer wins!"); Out.Ln;
+      EXIT
     END;
   END;
 END Run;

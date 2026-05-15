@@ -1180,6 +1180,7 @@ static int try_emit_import(CG *g, Node *fa, Node *args) {
         if (!strcmp(proc,"Char"))   { emit(g,"("); emit_expr(g,a0); emit(g," = (char)getchar())"); return 1; }
         if (!strcmp(proc,"String")) {
 					emit(g, "({ fflush(stdout); ");
+					emit(g, "{ int _c; while ((_c = getchar()) == '\\n' || _c == '\\r'); ungetc(_c, stdin); } ");
 					emit(g, "if (fgets("); emit_expr(g, a0); emit(g, ", (int)sizeof("); emit_expr(g, a0); emit(g, "), stdin)) { ");
 					emit(g, "  size_t _l = strlen("); emit_expr(g, a0); emit(g, "); ");
 					emit(g, "  if (_l > 0 && ("); emit_expr(g, a0); emit(g, ")[_l-1] == '\\n') ("); emit_expr(g, a0); emit(g, ")[_l-1] = 0; ");
