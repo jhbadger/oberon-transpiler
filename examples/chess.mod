@@ -19,7 +19,8 @@ VAR
   board: ARRAY 128 OF INTEGER;
   pieceValues: ARRAY 7 OF INTEGER;
   pieceChars: ARRAY 8 OF CHAR;
-  
+  maxDepth: INTEGER;
+
   (* Movement Vectors *)
   rookVec, bishopVec: ARRAY 4 OF INTEGER;
   knightVec: ARRAY 8 OF INTEGER;
@@ -119,7 +120,7 @@ BEGIN
 
             IF score > bestScore THEN
               bestScore := score;
-              IF depth = 3 THEN bestF := f; bestT := target END;
+              IF depth = maxDepth THEN bestF := f; bestT := target END;
             END;
 
             IF (captured # EMPTY) OR (p = KNIGHT) OR (p = KING) OR (p = PAWN) THEN EXIT END;
@@ -136,6 +137,8 @@ VAR input: ARRAY 16 OF CHAR;
     from, to, bf, bt, res: INTEGER;
 BEGIN
   InitBoard;
+  Out.String("Search depth (1=easy, 3=medium, 5=hard): ");
+  In.Int(maxDepth);
   LOOP
     Display;
     Out.String("Your move (e.g. e2e4): ");
@@ -148,8 +151,14 @@ BEGIN
     IF IsOnBoard(from) & IsOnBoard(to) THEN
       board[to] := board[from]; board[from] := EMPTY;
       Out.String("Thinking..."); Out.Ln;
-      res := Evaluate(0, 3, bf, bt); 
+      res := Evaluate(0, maxDepth, bf, bt);
       IF IsOnBoard(bf) & IsOnBoard(bt) THEN
+        Out.String("Computer plays: ");
+        Out.Char(CHR(ORD("a") + (bf MOD 16)));
+        Out.Char(CHR(ORD("0") + 8 - (bf DIV 16)));
+        Out.Char(CHR(ORD("a") + (bt MOD 16)));
+        Out.Char(CHR(ORD("0") + 8 - (bt DIV 16)));
+        Out.Ln;
         board[bt] := board[bf]; board[bf] := EMPTY;
       END;
     ELSE
