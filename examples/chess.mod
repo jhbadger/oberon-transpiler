@@ -27,11 +27,22 @@ VAR
   rookVec, bishopVec: ARRAY 4 OF INTEGER;
   knightVec: ARRAY 8 OF INTEGER;
 
-(* Clear a single castling-rights bit (1, 2, 4, or 8). *)
 PROCEDURE ClearCastle(bit: INTEGER);
 BEGIN
   IF castleRights MOD (bit * 2) >= bit THEN castleRights := castleRights - bit END;
 END ClearCastle;
+
+PROCEDURE KingFound(side: INTEGER): BOOLEAN;
+VAR i: INTEGER;
+BEGIN
+  FOR i := 0 TO 127 DO
+    IF IsOnBoard(i) & (board[i] MOD 8 = KING) &
+       (((board[i] DIV SIDE) MOD 2) * SIDE = side) THEN
+      RETURN TRUE
+    END
+  END;
+  RETURN FALSE
+END KingFound;
 
 PROCEDURE InitBoard;
 VAR i: INTEGER;
@@ -52,15 +63,14 @@ BEGIN
   knightVec[4] := 14; knightVec[5] := 18; knightVec[6] := 31; knightVec[7] := 33;
 
   FOR i := 0 TO 127 DO
-    (* Check bit 3 (value 8) - this is the 0x88 test *)
     IF (i DIV 8) MOD 2 = 1 THEN board[i] := FRONTIER ELSE board[i] := EMPTY END;
   END;
 
   FOR i := 0 TO 7 DO
-    board[i] := rank[i];                 (* Black Back Rank *)
-    board[i + 16] := PAWN;               (* Black Pawns *)
-    board[i + 96] := PAWN + SIDE;        (* White Pawns *)
-    board[i + 112] := rank[i] + SIDE;    (* White Back Rank *)
+    board[i] := rank[i];              (* Black Back Rank *)
+    board[i + 16] := PAWN;            (* Black Pawns *)
+    board[i + 96] := PAWN + SIDE;     (* White Pawns *)
+    board[i + 112] := rank[i] + SIDE; (* White Back Rank *)
   END;
   epSquare := -1;
   castleRights := 15;
@@ -68,7 +78,6 @@ END InitBoard;
 
 PROCEDURE IsOnBoard(pos: INTEGER): BOOLEAN;
 BEGIN
-  (* A square is on board if (pos AND 0x88) == 0 *)
   RETURN (pos >= 0) & (pos <= 127) & ((pos DIV 8) MOD 2 = 0) & ((pos DIV 128) = 0);
 END IsOnBoard;
 
@@ -90,7 +99,10 @@ BEGIN
   END;
 END Display;
 
-PROCEDURE Evaluate(turn, depth: INTEGER; VAR bestF, bestT: INTEGER): INTEGER;
+(* Alpha-beta minimax. score = captureValue - Evaluate(opponent).
+   Window [alpha, beta] is from the current player's perspective.
+   Recursive call uses the transformed window (cv-beta, cv-alpha). *)
+PROCEDURE Evaluate(turn, depth, alpha, beta: INTEGER; VAR bestF, bestT: INTEGER): INTEGER;
 VAR f, t, p, i, step, target, score, bestScore, captured, movingP: INTEGER;
     dummyF, dummyT: INTEGER;
     isPawnDiag, isEP: BOOLEAN;
@@ -98,7 +110,7 @@ VAR f, t, p, i, step, target, score, bestScore, captured, movingP: INTEGER;
     savedCastle: INTEGER;
 BEGIN
   IF depth = 0 THEN RETURN 0 END;
-  bestScore := -2000;
+  bestScore := alpha;  (* fail-low sentinel; any improvement updates alpha *)
 
   FOR f := 0 TO 127 DO
     IF IsOnBoard(f) & (board[f] # EMPTY) & (((board[f] DIV SIDE) MOD 2) * SIDE = turn) THEN
@@ -150,8 +162,16 @@ BEGIN
               END;
             END;
 
+            (* Make move *)
             movingP := board[f];
             board[target] := movingP; board[f] := EMPTY;
+
+            (* Pawn promotion: replace with queen on last rank *)
+            IF (p = PAWN) & ((target < 8) OR (target >= 112)) THEN
+              IF turn = SIDE THEN board[target] := QUEEN + SIDE
+              ELSE board[target] := QUEEN
+              END;
+            END;
 
             epCapturedPiece := EMPTY;
             IF isEP THEN
@@ -166,25 +186,30 @@ BEGIN
               epSquare := -1;
             END;
 
-            (* Revoke castling rights for this move *)
             savedCastle := castleRights;
             IF f = 116 THEN ClearCastle(1); ClearCastle(2)
             ELSIF f = 119 THEN ClearCastle(1)
             ELSIF f = 112 THEN ClearCastle(2)
-            ELSIF f = 4 THEN ClearCastle(4); ClearCastle(8)
-            ELSIF f = 7 THEN ClearCastle(4)
-            ELSIF f = 0 THEN ClearCastle(8)
+            ELSIF f = 4   THEN ClearCastle(4); ClearCastle(8)
+            ELSIF f = 7   THEN ClearCastle(4)
+            ELSIF f = 0   THEN ClearCastle(8)
             END;
             IF target = 119 THEN ClearCastle(1) END;
             IF target = 112 THEN ClearCastle(2) END;
-            IF target = 7  THEN ClearCastle(4) END;
-            IF target = 0  THEN ClearCastle(8) END;
+            IF target = 7   THEN ClearCastle(4) END;
+            IF target = 0   THEN ClearCastle(8) END;
 
             IF isEP THEN captureValue := pieceValues[epCapturedPiece MOD 8]
             ELSE captureValue := pieceValues[captured MOD 8]
             END;
-            score := captureValue - Evaluate(SIDE - turn, depth - 1, dummyF, dummyT);
+            IF (p = PAWN) & ((target < 8) OR (target >= 112)) THEN
+              captureValue := captureValue + pieceValues[QUEEN] - pieceValues[PAWN];
+            END;
 
+            score := captureValue - Evaluate(SIDE - turn, depth - 1,
+                       captureValue - beta, captureValue - alpha, dummyF, dummyT);
+
+            (* Unmake move *)
             board[f] := movingP; board[target] := captured;
             IF isEP THEN board[epCapturePos] := epCapturedPiece END;
             epSquare := savedEP;
@@ -193,6 +218,8 @@ BEGIN
             IF score > bestScore THEN
               bestScore := score;
               IF depth = maxDepth THEN bestF := f; bestT := target END;
+              alpha := bestScore;
+              IF alpha >= beta THEN RETURN bestScore END;  (* beta cutoff *)
             END;
 
             IF (captured # EMPTY) OR (p = KNIGHT) OR (p = KING) OR (p = PAWN) THEN EXIT END;
@@ -200,7 +227,7 @@ BEGIN
         END;
       END;
 
-      (* Castling: king at starting square, path clear, rights intact *)
+      (* Castling *)
       IF p = KING THEN
         IF turn = SIDE THEN
           (* White kingside: e1(116)->g1(118), h1(119)->f1(117) *)
@@ -210,13 +237,15 @@ BEGIN
             board[117] := ROOK + SIDE; board[119] := EMPTY;
             savedEP := epSquare; epSquare := -1;
             savedCastle := castleRights; ClearCastle(1); ClearCastle(2);
-            score := -Evaluate(SIDE - turn, depth - 1, dummyF, dummyT);
+            score := -Evaluate(SIDE - turn, depth - 1, -beta, -alpha, dummyF, dummyT);
             board[116] := KING + SIDE; board[118] := EMPTY;
             board[119] := ROOK + SIDE; board[117] := EMPTY;
             epSquare := savedEP; castleRights := savedCastle;
             IF score > bestScore THEN
               bestScore := score;
               IF depth = maxDepth THEN bestF := 116; bestT := 118 END;
+              alpha := bestScore;
+              IF alpha >= beta THEN RETURN bestScore END;
             END;
           END;
           (* White queenside: e1(116)->c1(114), a1(112)->d1(115) *)
@@ -226,13 +255,15 @@ BEGIN
             board[115] := ROOK + SIDE; board[112] := EMPTY;
             savedEP := epSquare; epSquare := -1;
             savedCastle := castleRights; ClearCastle(1); ClearCastle(2);
-            score := -Evaluate(SIDE - turn, depth - 1, dummyF, dummyT);
+            score := -Evaluate(SIDE - turn, depth - 1, -beta, -alpha, dummyF, dummyT);
             board[116] := KING + SIDE; board[114] := EMPTY;
             board[112] := ROOK + SIDE; board[115] := EMPTY;
             epSquare := savedEP; castleRights := savedCastle;
             IF score > bestScore THEN
               bestScore := score;
               IF depth = maxDepth THEN bestF := 116; bestT := 114 END;
+              alpha := bestScore;
+              IF alpha >= beta THEN RETURN bestScore END;
             END;
           END;
         ELSE
@@ -243,13 +274,15 @@ BEGIN
             board[5] := ROOK; board[7] := EMPTY;
             savedEP := epSquare; epSquare := -1;
             savedCastle := castleRights; ClearCastle(4); ClearCastle(8);
-            score := -Evaluate(SIDE - turn, depth - 1, dummyF, dummyT);
+            score := -Evaluate(SIDE - turn, depth - 1, -beta, -alpha, dummyF, dummyT);
             board[4] := KING; board[6] := EMPTY;
             board[7] := ROOK; board[5] := EMPTY;
             epSquare := savedEP; castleRights := savedCastle;
             IF score > bestScore THEN
               bestScore := score;
               IF depth = maxDepth THEN bestF := 4; bestT := 6 END;
+              alpha := bestScore;
+              IF alpha >= beta THEN RETURN bestScore END;
             END;
           END;
           (* Black queenside: e8(4)->c8(2), a8(0)->d8(3) *)
@@ -259,13 +292,15 @@ BEGIN
             board[3] := ROOK; board[0] := EMPTY;
             savedEP := epSquare; epSquare := -1;
             savedCastle := castleRights; ClearCastle(4); ClearCastle(8);
-            score := -Evaluate(SIDE - turn, depth - 1, dummyF, dummyT);
+            score := -Evaluate(SIDE - turn, depth - 1, -beta, -alpha, dummyF, dummyT);
             board[4] := KING; board[2] := EMPTY;
             board[0] := ROOK; board[3] := EMPTY;
             epSquare := savedEP; castleRights := savedCastle;
             IF score > bestScore THEN
               bestScore := score;
               IF depth = maxDepth THEN bestF := 4; bestT := 2 END;
+              alpha := bestScore;
+              IF alpha >= beta THEN RETURN bestScore END;
             END;
           END;
         END;
@@ -294,15 +329,13 @@ BEGIN
     to   := (8 - (ORD(input[3]) - ORD("0"))) * 16 + (ORD(input[2]) - ORD("a"));
 
     IF IsOnBoard(from) & IsOnBoard(to) THEN
-      movingP := board[from];
-      isHumanEP    := (movingP MOD 8 = PAWN) & (to = epSquare);
-      isCastle     := (movingP MOD 8 = KING) & ((to - from = 2) OR (to - from = -2));
+      movingP   := board[from];
+      isHumanEP := (movingP MOD 8 = PAWN) & (to = epSquare);
+      isCastle  := (movingP MOD 8 = KING) & ((to - from = 2) OR (to - from = -2));
 
       board[to] := movingP; board[from] := EMPTY;
 
-      IF isHumanEP THEN
-        board[to + 16] := EMPTY;  (* remove captured pawn below ep square *)
-      END;
+      IF isHumanEP THEN board[to + 16] := EMPTY END;
       IF isCastle THEN
         IF to - from = 2 THEN  (* kingside: h1(119)->f1(117) *)
           board[to - 1] := board[to + 1]; board[to + 1] := EMPTY;
@@ -310,15 +343,18 @@ BEGIN
           board[to + 1] := board[to - 2]; board[to - 2] := EMPTY;
         END;
       END;
+      (* Pawn promotion for human (auto-queen) *)
+      IF (movingP MOD 8 = PAWN) & (to < 8) THEN
+        board[to] := QUEEN + SIDE;
+        Out.String("Pawn promoted to queen."); Out.Ln;
+      END;
 
-      (* Update epSquare after human move *)
       IF (movingP MOD 8 = PAWN) & (to - from = -32) THEN
         epSquare := from - 16;
       ELSE
         epSquare := -1;
       END;
 
-      (* Revoke castling rights after human move *)
       IF movingP MOD 8 = KING THEN ClearCastle(1); ClearCastle(2)
       ELSIF from = 119 THEN ClearCastle(1)
       ELSIF from = 112 THEN ClearCastle(2)
@@ -326,46 +362,67 @@ BEGIN
       IF to = 7 THEN ClearCastle(4) END;
       IF to = 0 THEN ClearCastle(8) END;
 
+      (* Game over: human captured black king *)
+      IF ~KingFound(0) THEN
+        Display;
+        Out.String("You win!"); Out.Ln;
+        EXIT
+      END;
+
       Out.String("Thinking..."); Out.Ln;
-      res := Evaluate(0, maxDepth, bf, bt);
-      IF IsOnBoard(bf) & IsOnBoard(bt) THEN
-        isComputerEP     := (board[bf] MOD 8 = PAWN) & (bt = epSquare);
-        isComputerCastle := (board[bf] MOD 8 = KING) & ((bt - bf = 2) OR (bt - bf = -2));
+      bf := -1; bt := -1;
+      res := Evaluate(0, maxDepth, -2000, 2000, bf, bt);
 
-        Out.String("Computer plays: ");
-        Out.Char(CHR(ORD("a") + (bf MOD 16)));
-        Out.Char(CHR(ORD("0") + 8 - (bf DIV 16)));
-        Out.Char(CHR(ORD("a") + (bt MOD 16)));
-        Out.Char(CHR(ORD("0") + 8 - (bt DIV 16)));
-        Out.Ln;
+      IF ~IsOnBoard(bf) OR ~IsOnBoard(bt) THEN
+        Display;
+        Out.String("Checkmate or stalemate — game over."); Out.Ln;
+        EXIT
+      END;
 
-        board[bt] := board[bf]; board[bf] := EMPTY;
+      isComputerEP     := (board[bf] MOD 8 = PAWN) & (bt = epSquare);
+      isComputerCastle := (board[bf] MOD 8 = KING) & ((bt - bf = 2) OR (bt - bf = -2));
 
-        IF isComputerEP THEN
-          board[bt - 16] := EMPTY;  (* remove captured pawn above ep square *)
+      Out.String("Computer plays: ");
+      Out.Char(CHR(ORD("a") + (bf MOD 16)));
+      Out.Char(CHR(ORD("0") + 8 - (bf DIV 16)));
+      Out.Char(CHR(ORD("a") + (bt MOD 16)));
+      Out.Char(CHR(ORD("0") + 8 - (bt DIV 16)));
+      Out.Ln;
+
+      board[bt] := board[bf]; board[bf] := EMPTY;
+
+      IF isComputerEP THEN board[bt - 16] := EMPTY END;
+      IF isComputerCastle THEN
+        IF bt - bf = 2 THEN  (* kingside: h8(7)->f8(5) *)
+          board[bt - 1] := board[bt + 1]; board[bt + 1] := EMPTY;
+        ELSE                 (* queenside: a8(0)->d8(3) *)
+          board[bt + 1] := board[bt - 2]; board[bt - 2] := EMPTY;
         END;
-        IF isComputerCastle THEN
-          IF bt - bf = 2 THEN  (* kingside: h8(7)->f8(5) *)
-            board[bt - 1] := board[bt + 1]; board[bt + 1] := EMPTY;
-          ELSE                 (* queenside: a8(0)->d8(3) *)
-            board[bt + 1] := board[bt - 2]; board[bt - 2] := EMPTY;
-          END;
-        END;
+      END;
+      (* Pawn promotion for computer (auto-queen) *)
+      IF (board[bt] MOD 8 = PAWN) & (bt >= 112) THEN
+        board[bt] := QUEEN;
+        Out.String("Computer promotes to queen."); Out.Ln;
+      END;
 
-        (* Update epSquare after computer move *)
-        IF (board[bt] MOD 8 = PAWN) & (bt - bf = 32) THEN
-          epSquare := bf + 16;
-        ELSE
-          epSquare := -1;
-        END;
+      IF (board[bt] MOD 8 = PAWN) & (bt - bf = 32) THEN
+        epSquare := bf + 16;
+      ELSE
+        epSquare := -1;
+      END;
 
-        (* Revoke castling rights after computer move *)
-        IF board[bt] MOD 8 = KING THEN ClearCastle(4); ClearCastle(8)
-        ELSIF bf = 7 THEN ClearCastle(4)
-        ELSIF bf = 0 THEN ClearCastle(8)
-        END;
-        IF bt = 119 THEN ClearCastle(1) END;
-        IF bt = 112 THEN ClearCastle(2) END;
+      IF board[bt] MOD 8 = KING THEN ClearCastle(4); ClearCastle(8)
+      ELSIF bf = 7 THEN ClearCastle(4)
+      ELSIF bf = 0 THEN ClearCastle(8)
+      END;
+      IF bt = 119 THEN ClearCastle(1) END;
+      IF bt = 112 THEN ClearCastle(2) END;
+
+      (* Game over: computer captured white king *)
+      IF ~KingFound(SIDE) THEN
+        Display;
+        Out.String("Computer wins!"); Out.Ln;
+        EXIT
       END;
     ELSE
       Out.String("Invalid move format."); Out.Ln;
