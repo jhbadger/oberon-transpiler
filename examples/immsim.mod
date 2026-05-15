@@ -5,38 +5,38 @@ MODULE ImmSim;
 IMPORT Out, Files, Strings, Random, Terminal;
 
 CONST
-  GridSize        = 20;
+  GridSize        = 50;
   BitLen          = 16;
-  NSteps          = 300;
-  Challenge2      = 150;
-  AntigenDose     = 20;
+  NSteps          = 1000;
+  Challenge2      = 500;
+  AntigenDose     = 100;
 
   EncounterProb   = 0.6;
   AffinityThresh  = 0.55;
   CloneThreshold  = 2;
   MemoryThreshold = 1;
-  PlasmaLifetime  = 30;
+  PlasmaLifetime  = 50;
   MemoryFraction  = 0.4;
-  AbLifetime      = 25;
-  AgLifetime      = 60;
+  AbLifetime      = 40;
+  AgLifetime      = 100;
   PresentDuration = 25;
 
-  InitialB        = 60;
-  InitialTh       = 50;
-  InitialTc       = 20;
-  InitialMac      = 25;
-  InitialEC       = 60;
-  PrecursorB      = 4;
-  PrecursorTh     = 4;
+  InitialB        = 250;
+  InitialTh       = 200;
+  InitialTc       = 100;
+  InitialMac      = 120;
+  InitialEC       = 300;
+  PrecursorB      = 20;
+  PrecursorTh     = 20;
 
-  MaxAntigens     = 8000;
-  MaxAntibodies   = 8000;
-  MaxBCells       = 4000;
-  MaxTHelpers     = 1000;
-  MaxTCytos       = 1000;
-  MaxMacrophages  = 500;
-  MaxEpithelial   = 500;
-  MaxHistory      = 400;
+  MaxAntigens     = 20000;
+  MaxAntibodies   = 20000;
+  MaxBCells       = 10000;
+  MaxTHelpers     = 4000;
+  MaxTCytos       = 4000;
+  MaxMacrophages  = 2000;
+  MaxEpithelial   = 2000;
+  MaxHistory      = 1200;
 
   BitMask         = 65535;
 
@@ -908,3 +908,4 @@ BEGIN
   WriteCSV("immsim_results.csv");
   DrawPlot
 END ImmSim.
+
