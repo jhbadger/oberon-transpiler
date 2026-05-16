@@ -64,6 +64,7 @@ VAR
   humanMoves   : ARRAY MAXMOVES OF MoveStr;
   compMoves    : ARRAY MAXMOVES OF MoveStr;
   moveCount    : INTEGER;
+  listTop      : INTEGER;
 
   curCol, curRow: INTEGER;
   selSquare     : INTEGER;
@@ -575,25 +576,29 @@ BEGIN
 END DrawBoardScreen;
 
 PROCEDURE DrawListScreen;
-VAR i, row, startRow, maxVis, promptY: INTEGER;
+VAR i, row, maxVis, maxTop, promptY: INTEGER;
     numBuf: ARRAY 8 OF CHAR;
 BEGIN
+  maxVis := TUI.Rows - 5;
+  maxTop := moveCount - maxVis;
+  IF maxTop < 0 THEN maxTop := 0 END;
+  IF listTop > maxTop THEN listTop := maxTop END;
+  IF listTop < 0     THEN listTop := 0      END;
+
   TUI.ClearBack(TUI.White, TUI.Black);
   TUI.PutStr(0, 0, "Chess  [Tab=Board view]  [Ctrl-Q=Quit]", TUI.Yellow, TUI.Black);
   TUI.PutStr(1, 1, "#    Your move  Computer", TUI.Cyan, TUI.Black);
 
-  maxVis   := TUI.Rows - 5;
-  startRow := moveCount - maxVis;
-  IF startRow < 0 THEN startRow := 0 END;
-
-  FOR i := startRow TO moveCount - 1 DO
-    row := 2 + (i - startRow);
+  i := listTop;
+  WHILE (i < moveCount) & (i < listTop + maxVis) DO
+    row := 2 + (i - listTop);
     numBuf[0] := CHR(ORD("0") + (i + 1) DIV 10);
     numBuf[1] := CHR(ORD("0") + (i + 1) MOD 10);
     numBuf[2] := "."; numBuf[3] := " "; numBuf[4] := 0X;
     TUI.PutStr(1,  row, numBuf,         TUI.White, TUI.Black);
     TUI.PutStr(5,  row, humanMoves[i],  TUI.Green, TUI.Black);
     TUI.PutStr(17, row, compMoves[i],   TUI.Red,   TUI.Black);
+    INC(i)
   END;
 
   promptY := TUI.Rows - 3;
@@ -602,7 +607,9 @@ BEGIN
   TUI.SetCursor(6 + inputLen, promptY);
 
   IF gameOver THEN
-    TUI.PutStr(0, TUI.Rows-1, "Game over. Press Ctrl-Q to quit.", TUI.Red, TUI.Black);
+    TUI.PutStr(0, TUI.Rows-1, "Game over. Press Ctrl-Q to quit.      ", TUI.Red, TUI.Black);
+  ELSIF moveCount > maxVis THEN
+    TUI.PutStr(0, TUI.Rows-1, "Up/Dn/PgUp/PgDn=scroll  End=latest   ", TUI.White, TUI.Black);
   ELSE
     TUI.PutStr(0, TUI.Rows-1, "Type move (e.g. e2e4) then Enter.", TUI.White, TUI.Black);
   END;
@@ -708,9 +715,17 @@ BEGIN
 END HandleBoardMouse;
 
 PROCEDURE HandleListKey(key: CHAR);
-VAR from, to: INTEGER;
+VAR from, to, maxVis: INTEGER;
 BEGIN
-  IF key = TUI.KEnter THEN
+  maxVis := TUI.Rows - 5;
+  IF    key = TUI.KUp   THEN IF listTop > 0 THEN DEC(listTop) END
+  ELSIF key = TUI.KDown THEN INC(listTop)
+  ELSIF key = TUI.KPgUp THEN
+    IF listTop > maxVis THEN listTop := listTop - maxVis ELSE listTop := 0 END
+  ELSIF key = TUI.KPgDn THEN listTop := listTop + maxVis
+  ELSIF key = TUI.KHome THEN listTop := 0
+  ELSIF key = TUI.KEnd  THEN listTop := MAXMOVES
+  ELSIF key = TUI.KEnter THEN
     IF inputLen = 0 THEN RETURN END;
     inputBuf[inputLen] := 0X;
     IF ParseAlg(inputBuf, from, to) THEN
@@ -774,7 +789,7 @@ BEGIN
 
   screen    := BOARD;
   gameOver  := FALSE;
-  moveCount := 0;
+  moveCount := 0; listTop := 0;
   curCol    := 0; curRow    := 0;
   selSquare := -1;
   inputLen  := 0; inputBuf[0] := 0X;
@@ -787,12 +802,12 @@ BEGIN
     IF ev.kind = TUI.EvKey THEN
       IF ev.key = 17 THEN EXIT END;
       IF ev.key = TUI.KTab THEN
-        IF screen = BOARD THEN screen := LIST ELSE screen := BOARD END
+        IF screen = BOARD THEN screen := LIST; listTop := MAXMOVES
+        ELSE screen := BOARD END
       ELSIF ~gameOver THEN
-        IF screen = BOARD THEN HandleBoardKey(ev.key)
-        ELSE HandleListKey(ev.key)
-        END
+        IF screen = BOARD THEN HandleBoardKey(ev.key) END
       END;
+      IF (screen = LIST) & (ev.key # TUI.KTab) THEN HandleListKey(ev.key) END;
       DrawScreen;
     ELSIF ev.kind = TUI.EvMouse THEN
       IF (screen = BOARD) & ~gameOver THEN HandleBoardMouse(ev.mx, ev.my, ev.mb) END;
