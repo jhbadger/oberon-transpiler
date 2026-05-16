@@ -184,6 +184,24 @@ BEGIN
   IF (movingP = EMPTY) OR (((movingP DIV SIDE) MOD 2) * SIDE # side) THEN RETURN FALSE END;
   IF (board[to] # EMPTY) & (((board[to] DIV SIDE) MOD 2) * SIDE = side) THEN RETURN FALSE END;
 
+  IF movingP MOD 8 = PAWN THEN
+    IF side = SIDE THEN
+      IF to = from - 16 THEN
+        IF board[to] # EMPTY THEN RETURN FALSE END
+      ELSIF (to = from - 17) OR (to = from - 15) THEN
+        IF board[to] = EMPTY THEN RETURN FALSE END
+      ELSE RETURN FALSE
+      END
+    ELSE
+      IF to = from + 16 THEN
+        IF board[to] # EMPTY THEN RETURN FALSE END
+      ELSIF (to = from + 17) OR (to = from + 15) THEN
+        IF board[to] = EMPTY THEN RETURN FALSE END
+      ELSE RETURN FALSE
+      END
+    END
+  END;
+
   savedTarget := board[to];
   board[to] := movingP; board[from] := EMPTY;
 
