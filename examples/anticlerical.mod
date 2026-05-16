@@ -357,7 +357,7 @@ BEGIN
 END DrawPiece;
 
 PROCEDURE DrawBoardScreen;
-VAR r, c, sq, piece, bg, fg, sx, sy: INTEGER; ch: CHAR;
+VAR r, c, sq, piece, bg, fg, sx, sy, kingPos: INTEGER; ch: CHAR; inCheck: BOOLEAN;
 BEGIN
   TUI.ClearBack(TUI.White, TUI.Black);
   TUI.PutStr(0, 0, "Anti-Clerical Chess  [Tab=Move list]  [Ctrl-Q=Quit]", TUI.Yellow, TUI.Black);
@@ -371,15 +371,19 @@ BEGIN
     TUI.PutCell(BOARDX + c * CELLW + 1, BOARDY + 6 * CELLH, ch, TUI.White, TUI.Black);
   END;
 
+  kingPos := KingPos(humanSide);
+  inCheck := InCheck(humanSide);
+
   FOR r := 0 TO 5 DO
     FOR c := 0 TO 5 DO
       sq    := r * 16 + c;
       piece := board[sq];
 
-      IF (c = curCol) & (r = curRow) THEN bg := CURSOR_BG; fg := TUI.Black
-      ELSIF sq = selSquare             THEN bg := SEL_BG;    fg := TUI.Black
-      ELSIF (r + c) MOD 2 = 0         THEN bg := LIGHT_BG;  fg := TUI.Black
-      ELSE                                  bg := DARK_BG;   fg := TUI.White
+      IF (c = curCol) & (r = curRow) THEN bg := CURSOR_BG;    fg := TUI.Black
+      ELSIF sq = selSquare             THEN bg := SEL_BG;       fg := TUI.Black
+      ELSIF inCheck & (sq = kingPos)   THEN bg := TUI.Magenta;  fg := TUI.White
+      ELSIF (r + c) MOD 2 = 0         THEN bg := LIGHT_BG;     fg := TUI.Black
+      ELSE                                  bg := DARK_BG;      fg := TUI.White
       END;
 
       sx := BOARDX + c * CELLW;
@@ -390,11 +394,15 @@ BEGIN
   END;
 
   IF gameOver THEN
-    TUI.PutStr(0, TUI.Rows-1, "Game over. Press Ctrl-Q to quit.       ", TUI.Red,   TUI.Black);
+    TUI.PutStr(0, TUI.Rows-1, "Game over. Press Ctrl-Q to quit.       ", TUI.Red,     TUI.Black);
+  ELSIF inCheck & (selSquare >= 0) THEN
+    TUI.PutStr(0, TUI.Rows-1, "CHECK! Select destination (Enter/click).", TUI.Magenta, TUI.Black);
+  ELSIF inCheck THEN
+    TUI.PutStr(0, TUI.Rows-1, "CHECK! Select piece to move.  Tab=list  ", TUI.Magenta, TUI.Black);
   ELSIF selSquare >= 0 THEN
-    TUI.PutStr(0, TUI.Rows-1, "Select destination (Enter/click).   ", TUI.Cyan,  TUI.Black);
+    TUI.PutStr(0, TUI.Rows-1, "Select destination (Enter/click).   ", TUI.Cyan,     TUI.Black);
   ELSE
-    TUI.PutStr(0, TUI.Rows-1, "Select piece (Enter/click). Tab=list", TUI.White, TUI.Black);
+    TUI.PutStr(0, TUI.Rows-1, "Select piece (Enter/click). Tab=list", TUI.White,    TUI.Black);
   END;
   TUI.Flush
 END DrawBoardScreen;
