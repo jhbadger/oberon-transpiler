@@ -364,7 +364,7 @@ PROCEDURE DrawBoardScreen;
 VAR r, c, sq, piece, bg, fg, sx, sy, kingPos: INTEGER; ch: CHAR; inCheck: BOOLEAN;
 BEGIN
   TUI.ClearBack(TUI.White, TUI.Black);
-  TUI.PutStr(0, 0, "Gardner's Minichess  [Tab=Move list]  [Esc=Quit]", TUI.Yellow, TUI.Black);
+  TUI.PutStr(1, 0, "Gardner's Minichess  [Tab=Move list]  [Esc=Quit]", TUI.Yellow, TUI.Black);
 
   FOR r := 0 TO 4 DO
     ch := CHR(ORD("5") - r);
@@ -398,15 +398,15 @@ BEGIN
   END;
 
   IF gameOver THEN
-    TUI.PutStr(0, TUI.Rows-1, "Game over. Press Esc to quit.          ", TUI.Red,     TUI.Black);
+    TUI.PutStr(1, TUI.Rows-1, "Game over. Press Esc to quit.          ", TUI.Red,     TUI.Black);
   ELSIF inCheck & (selSquare >= 0) THEN
-    TUI.PutStr(0, TUI.Rows-1, "CHECK! Select destination (Enter/click).", TUI.Magenta, TUI.Black);
+    TUI.PutStr(1, TUI.Rows-1, "CHECK! Select destination (Enter/click).", TUI.Magenta, TUI.Black);
   ELSIF inCheck THEN
-    TUI.PutStr(0, TUI.Rows-1, "CHECK! Select piece to move.  Tab=list  ", TUI.Magenta, TUI.Black);
+    TUI.PutStr(1, TUI.Rows-1, "CHECK! Select piece to move.  Tab=list  ", TUI.Magenta, TUI.Black);
   ELSIF selSquare >= 0 THEN
-    TUI.PutStr(0, TUI.Rows-1, "Select destination (Enter/click).   ", TUI.Cyan,     TUI.Black);
+    TUI.PutStr(1, TUI.Rows-1, "Select destination (Enter/click).   ", TUI.Cyan,     TUI.Black);
   ELSE
-    TUI.PutStr(0, TUI.Rows-1, "Select piece (Enter/click). Tab=list", TUI.White,    TUI.Black);
+    TUI.PutStr(1, TUI.Rows-1, "Select piece (Enter/click). Tab=list", TUI.White,    TUI.Black);
   END;
   TUI.Flush
 END DrawBoardScreen;
@@ -422,7 +422,7 @@ BEGIN
   IF listTop < 0     THEN listTop := 0      END;
 
   TUI.ClearBack(TUI.White, TUI.Black);
-  TUI.PutStr(0, 0, "Gardner's Minichess  [Tab=Board view]  [Esc=Quit]", TUI.Yellow, TUI.Black);
+  TUI.PutStr(1, 0, "Gardner's Minichess  [Tab=Board view]  [Esc=Quit]", TUI.Yellow, TUI.Black);
   TUI.PutStr(1, 1, "#    Your move  Computer", TUI.Cyan, TUI.Black);
 
   i := listTop;
@@ -438,16 +438,16 @@ BEGIN
   END;
 
   promptY := TUI.Rows - 3;
-  TUI.PutStr(0, promptY, "Move: ",  TUI.White,  TUI.Black);
+  TUI.PutStr(1, promptY, "Move: ",  TUI.White,  TUI.Black);
   TUI.PutStr(6, promptY, inputBuf,  TUI.Yellow, TUI.Black);
   TUI.SetCursor(6 + inputLen, promptY);
 
   IF gameOver THEN
-    TUI.PutStr(0, TUI.Rows-1, "Game over. Press Esc to quit.         ", TUI.Red, TUI.Black);
+    TUI.PutStr(1, TUI.Rows-1, "Game over. Press Esc to quit.         ", TUI.Red, TUI.Black);
   ELSIF moveCount > maxVis THEN
-    TUI.PutStr(0, TUI.Rows-1, "Up/Dn/PgUp/PgDn=scroll  End=latest   ", TUI.White, TUI.Black);
+    TUI.PutStr(1, TUI.Rows-1, "Up/Dn/PgUp/PgDn=scroll  End=latest   ", TUI.White, TUI.Black);
   ELSE
-    TUI.PutStr(0, TUI.Rows-1, "Type move (e.g. a2a3) then Enter.", TUI.White, TUI.Black);
+    TUI.PutStr(1, TUI.Rows-1, "Type move (e.g. a2a3) then Enter.", TUI.White, TUI.Black);
   END;
   TUI.Flush
 END DrawListScreen;
@@ -464,7 +464,7 @@ END DrawScreen;
 PROCEDURE DoComputerMove;
 VAR bf, bt: INTEGER; promoted: BOOLEAN;
 BEGIN
-  TUI.PutStr(0, TUI.Rows-1, "Computer is thinking...             ", TUI.Yellow, TUI.Black);
+  TUI.PutStr(1, TUI.Rows-1, "Computer is thinking...             ", TUI.Yellow, TUI.Black);
   TUI.Flush;
   GetComputerMove(compSide, bf, bt);
   IF ~IsOnBoard(bf) OR ~IsOnBoard(bt) THEN gameOver := TRUE; RETURN END;
@@ -517,7 +517,7 @@ BEGIN
     ELSE
       from := selSquare; to := sq; selSquare := -1;
       IF ~TryHumanMove(from, to) THEN
-        TUI.PutStr(0, TUI.Rows-1, "Illegal move.                       ", TUI.Red, TUI.Black);
+        TUI.PutStr(1, TUI.Rows-1, "Illegal move.                       ", TUI.Red, TUI.Black);
         TUI.Flush
       END
     END
@@ -543,7 +543,7 @@ BEGIN
     ELSE
       from := selSquare; to := sq; selSquare := -1;
       IF ~TryHumanMove(from, to) THEN
-        TUI.PutStr(0, TUI.Rows-1, "Illegal move.                       ", TUI.Red, TUI.Black);
+        TUI.PutStr(1, TUI.Rows-1, "Illegal move.                       ", TUI.Red, TUI.Black);
         TUI.Flush
       END
     END
@@ -566,11 +566,11 @@ BEGIN
     inputBuf[inputLen] := 0X;
     IF ParseAlg(inputBuf, from, to) THEN
       IF ~TryHumanMove(from, to) THEN
-        TUI.PutStr(0, TUI.Rows-1, "Illegal move.                       ", TUI.Red, TUI.Black);
+        TUI.PutStr(1, TUI.Rows-1, "Illegal move.                       ", TUI.Red, TUI.Black);
         TUI.Flush
       END
     ELSE
-      TUI.PutStr(0, TUI.Rows-1, "Bad format — use a2a3.              ", TUI.Red, TUI.Black);
+      TUI.PutStr(1, TUI.Rows-1, "Bad format — use a2a3.              ", TUI.Red, TUI.Black);
       TUI.Flush
     END;
     inputLen := 0; inputBuf[0] := 0X;

@@ -402,7 +402,7 @@ PROCEDURE DrawBoardScreen;
 VAR r, c, idx, color, bg, sx, sy, bs, ws, col: INTEGER; ch: CHAR;
 BEGIN
   TUI.ClearBack(TUI.White, TUI.Black);
-  TUI.PutStr(0, 0, "Go 9x9  [Tab=Move list]  [P=Pass]  [Ctrl-Q=Quit]",
+  TUI.PutStr(1, 0, "Go 9x9  [Tab=Move list]  [P=Pass]  [Ctrl-Q=Quit]",
              TUI.Yellow, TUI.Black);
 
   FOR r := 0 TO SIZE - 1 DO
@@ -451,17 +451,17 @@ BEGIN
 
   IF gameOver THEN
     IF bs > ws THEN
-      TUI.PutStr(0, TUI.Rows - 1, "Game over — Black wins! Ctrl-Q to quit.  ",
+      TUI.PutStr(1, TUI.Rows - 1, "Game over — Black wins! Ctrl-Q to quit.  ",
                  TUI.Green,  TUI.Black)
     ELSIF ws > bs THEN
-      TUI.PutStr(0, TUI.Rows - 1, "Game over — White wins! Ctrl-Q to quit.  ",
+      TUI.PutStr(1, TUI.Rows - 1, "Game over — White wins! Ctrl-Q to quit.  ",
                  TUI.White,  TUI.Black)
     ELSE
-      TUI.PutStr(0, TUI.Rows - 1, "Game over — Tie!        Ctrl-Q to quit.  ",
+      TUI.PutStr(1, TUI.Rows - 1, "Game over — Tie!        Ctrl-Q to quit.  ",
                  TUI.Yellow, TUI.Black)
     END
   ELSE
-    TUI.PutStr(0, TUI.Rows - 1, "Arrow=move  Enter=place  P=pass  Tab=list",
+    TUI.PutStr(1, TUI.Rows - 1, "Arrow=move  Enter=place  P=pass  Tab=list",
                TUI.White, TUI.Black)
   END;
   TUI.Flush
@@ -480,7 +480,7 @@ BEGIN
   IF listTop < 0 THEN listTop := 0 END;
 
   TUI.ClearBack(TUI.White, TUI.Black);
-  TUI.PutStr(0, 0, "Go 9x9  [Tab=Board]  [Ctrl-Q=Quit]", TUI.Yellow, TUI.Black);
+  TUI.PutStr(1, 0, "Go 9x9  [Tab=Board]  [Ctrl-Q=Quit]", TUI.Yellow, TUI.Black);
   TUI.PutStr(1, 1, "#    You       Computer", TUI.Cyan, TUI.Black);
 
   i := listTop;
@@ -502,13 +502,13 @@ BEGIN
   TUI.PutInt(27, TUI.Rows - 3, ws,               TUI.White, TUI.Black);
 
   IF gameOver THEN
-    TUI.PutStr(0, TUI.Rows - 1, "Game over. Press Ctrl-Q to quit.            ",
+    TUI.PutStr(1, TUI.Rows - 1, "Game over. Press Ctrl-Q to quit.            ",
                TUI.Red, TUI.Black)
   ELSIF moveCount > maxVis THEN
-    TUI.PutStr(0, TUI.Rows - 1, "Up/Dn/PgUp/PgDn=scroll  End=latest  Tab=board",
+    TUI.PutStr(1, TUI.Rows - 1, "Up/Dn/PgUp/PgDn=scroll  End=latest  Tab=board",
                TUI.White, TUI.Black)
   ELSE
-    TUI.PutStr(0, TUI.Rows - 1, "Tab=board view", TUI.White, TUI.Black)
+    TUI.PutStr(1, TUI.Rows - 1, "Tab=board view", TUI.White, TUI.Black)
   END;
   TUI.Flush
 END DrawListScreen;
@@ -545,7 +545,7 @@ END RecordCompMove;
 PROCEDURE DoComputerMove;
 VAR mr, mc: INTEGER;
 BEGIN
-  TUI.PutStr(0, TUI.Rows - 1, "Computer thinking...                       ",
+  TUI.PutStr(1, TUI.Rows - 1, "Computer thinking...                       ",
              TUI.Yellow, TUI.Black);
   TUI.Flush;
   GetComputerMove(compColor, mr, mc);
@@ -594,7 +594,7 @@ BEGIN
   ELSIF key = TUI.KRight THEN IF curCol < SIZE - 1  THEN INC(curCol) END
   ELSIF key = TUI.KEnter THEN
     IF ~TryHumanMove(curRow, curCol) THEN
-      TUI.PutStr(0, TUI.Rows - 1, "Illegal move (occupied / suicide / ko).   ",
+      TUI.PutStr(1, TUI.Rows - 1, "Illegal move (occupied / suicide / ko).   ",
                  TUI.Red, TUI.Black);
       TUI.Flush
     END
@@ -626,7 +626,7 @@ BEGIN
   curCol := col; curRow := row;
   IF mb = 0 THEN
     IF ~TryHumanMove(row, col) THEN
-      TUI.PutStr(0, TUI.Rows - 1, "Illegal move (occupied / suicide / ko).   ",
+      TUI.PutStr(1, TUI.Rows - 1, "Illegal move (occupied / suicide / ko).   ",
                  TUI.Red, TUI.Black);
       TUI.Flush
     END
