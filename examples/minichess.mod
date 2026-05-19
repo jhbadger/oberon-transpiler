@@ -289,8 +289,7 @@ BEGIN
             ELSE
               board[f] := movingP; board[target] := captured;
             END;
-            IF (captured # EMPTY) OR (p = KNIGHT) OR (p = KING) OR (p = PAWN) OR
-               (p = BISHOP) THEN EXIT END;
+            IF (captured # EMPTY) OR (p = KNIGHT) OR (p = KING) OR (p = PAWN) THEN EXIT END;
           END;
         END;
       END;
@@ -340,7 +339,7 @@ BEGIN
   t := piece MOD 8;
   IF t = 0 THEN RETURN END;
 
-  IF ((piece DIV SIDE) MOD 2) = 1 THEN pfg := TUI.White
+  IF ((piece DIV SIDE) MOD 2) = 1 THEN pfg := TUI.Black
   ELSE                                  pfg := TUI.Red
   END;
 
@@ -364,7 +363,7 @@ PROCEDURE DrawBoardScreen;
 VAR r, c, sq, piece, bg, fg, sx, sy, kingPos: INTEGER; ch: CHAR; inCheck: BOOLEAN;
 BEGIN
   TUI.ClearBack(TUI.White, TUI.Black);
-  TUI.PutStr(1, 0, "Gardner's Minichess  [Tab=Move list]  [Esc=Quit]", TUI.Yellow, TUI.Black);
+  TUI.PutStr(1, 0, "Gardner's Minichess  [Tab=Move list]  [Ctrl-Q=Quit]", TUI.Yellow, TUI.Black);
 
   FOR r := 0 TO 4 DO
     ch := CHR(ORD("5") - r);
@@ -398,7 +397,7 @@ BEGIN
   END;
 
   IF gameOver THEN
-    TUI.PutStr(1, TUI.Rows-1, "Game over. Press Esc to quit.          ", TUI.Red,     TUI.Black);
+    TUI.PutStr(1, TUI.Rows-1, "Game over. Press Ctrl-Q to quit.          ", TUI.Red,     TUI.Black);
   ELSIF inCheck & (selSquare >= 0) THEN
     TUI.PutStr(1, TUI.Rows-1, "CHECK! Select destination (Enter/click).", TUI.Magenta, TUI.Black);
   ELSIF inCheck THEN
@@ -422,7 +421,7 @@ BEGIN
   IF listTop < 0     THEN listTop := 0      END;
 
   TUI.ClearBack(TUI.White, TUI.Black);
-  TUI.PutStr(1, 0, "Gardner's Minichess  [Tab=Board view]  [Esc=Quit]", TUI.Yellow, TUI.Black);
+  TUI.PutStr(1, 0, "Gardner's Minichess  [Tab=Board view]  [Ctrl-Q=Quit]", TUI.Yellow, TUI.Black);
   TUI.PutStr(1, 1, "#    Your move  Computer", TUI.Cyan, TUI.Black);
 
   i := listTop;
@@ -443,7 +442,7 @@ BEGIN
   TUI.SetCursor(6 + inputLen, promptY);
 
   IF gameOver THEN
-    TUI.PutStr(1, TUI.Rows-1, "Game over. Press Esc to quit.         ", TUI.Red, TUI.Black);
+    TUI.PutStr(1, TUI.Rows-1, "Game over. Press Ctrl-Q to quit.         ", TUI.Red, TUI.Black);
   ELSIF moveCount > maxVis THEN
     TUI.PutStr(1, TUI.Rows-1, "Up/Dn/PgUp/PgDn=scroll  End=latest   ", TUI.White, TUI.Black);
   ELSE
@@ -609,7 +608,7 @@ BEGIN
         humanSide := SIDE; compSide := 0; EXIT
       ELSIF (ev2.key = "b") OR (ev2.key = "B") THEN
         humanSide := 0; compSide := SIDE; EXIT
-      ELSIF ev2.key = TUI.KEsc THEN
+      ELSIF ev2.key = 17 THEN
         TUI.Done; HALT(0)
       END
     END
@@ -670,3 +669,5 @@ BEGIN
   knightVec[4] :=  14; knightVec[5] :=  18; knightVec[6] :=  31; knightVec[7] :=  33;
   Play
 END Minichess.
+
+

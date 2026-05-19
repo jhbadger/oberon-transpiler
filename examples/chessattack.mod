@@ -1,75 +1,76 @@
-MODULE ChessBoard;
+MODULE ChessAttack;
 
 (*
- * Graphical chess front-end with a self-contained engine.
+ * Chess Attack — a 5×6 chess variant based on Gardner's Minichess.
+ * Same piece setup but an extra blank row in the middle enables:
+ *   • 2-square initial pawn push + en passant
+ *   • Queen-side castling (king e→c, rook a→d)
+ *   • No king-side castling (king sits on e-file, only one rook)
  *
- * Tab switches between two screens:
- *   Screen 0 – Move list: two-column history + coordinate-notation input (e2e4)
- *   Screen 1 – Board:     coloured squares, 2×2 ASCII-art pieces, arrow/mouse
+ * Board layout (files a–e, ranks 1–6):
+ *   Rank 6: Rook Knight Bishop Queen King  (black)
+ *   Rank 5: Pawn ×5
+ *   Rank 4: empty
+ *   Rank 3: empty
+ *   Rank 2: Pawn ×5
+ *   Rank 1: Rook Knight Bishop Queen King  (white)
  *
- * Board controls:
- *   Arrow keys  – move cursor
- *   Enter       – pick piece / confirm destination  (re-click own piece to re-select)
- *   Mouse click – same as Enter on the clicked square
- *   Tab         – switch screen     Ctrl-Q – quit
- *
- * Piece art (2 rows × 2 cols, white=bright, black=red):
- *   Pawn   ()  Rook   []  Knight  ~~
- *   Bishop /\  Queen  **  King    ++
- *   Second row: piece letter doubled  P/p  R/r  N/n  B/b  Q/q  K/k
+ * Controls:
+ *   Tab              – switch between board and move-list screens
+ *   Arrow keys/mouse – move cursor
+ *   Enter/click      – pick piece / confirm destination
+ *   e1c1 / e6c6      – castle queen-side
+ *   Ctrl-Q           – quit
  *)
 
 IMPORT TUI;
 
-(* ── Chess engine constants ───────────────────────────────────────── *)
 CONST
-  EMPTY    = 0; PAWN  = 1; ROOK   = 2; KNIGHT = 3;
-  BISHOP   = 4; QUEEN = 5; KING   = 6; FRONTIER = 7;
-  SIDE     = 32;
+  EMPTY  = 0; PAWN   = 1; ROOK  = 2; KNIGHT = 3;
+  BISHOP = 4; QUEEN  = 5; KING  = 6; FRONTIER = 7;
+  SIDE   = 32;
 
-(* ── UI layout ────────────────────────────────────────────────────── *)
 CONST
   LIST  = 0;  BOARD = 1;
 
   BOARDX = 6;  BOARDY = 2;
   CELLW  = 4;  CELLH  = 2;
 
-  LIGHT_BG  = 3;   (* TUI.Yellow *)
-  DARK_BG   = 4;   (* TUI.Blue   *)
-  SEL_BG    = 2;   (* TUI.Green  *)
-  CURSOR_BG = 6;   (* TUI.Cyan   *)
+  LIGHT_BG  = 3;
+  DARK_BG   = 4;
+  SEL_BG    = 2;
+  CURSOR_BG = 6;
 
   MAXMOVES = 200;
 
 TYPE
   MoveStr = ARRAY 10 OF CHAR;
 
-(* ── Engine state ─────────────────────────────────────────────────── *)
 VAR
   board       : ARRAY 128 OF INTEGER;
   pieceValues : ARRAY 7  OF INTEGER;
-  epSquare    : INTEGER;
-  castleRights: INTEGER;
   maxDepth    : INTEGER;
 
   rookVec, bishopVec: ARRAY 4 OF INTEGER;
   knightVec         : ARRAY 8 OF INTEGER;
 
-(* ── UI state ─────────────────────────────────────────────────────── *)
+  epSquare     : INTEGER;   (* en-passant target square, -1 if none *)
+  castleRights : INTEGER;   (* bit 1 = white can castle, bit 2 = black can castle *)
+
 VAR
   screen              : INTEGER;
   humanSide, compSide : INTEGER;
   gameOver            : BOOLEAN;
 
-  humanMoves   : ARRAY MAXMOVES OF MoveStr;
-  compMoves    : ARRAY MAXMOVES OF MoveStr;
-  moveCount    : INTEGER;
-  listTop      : INTEGER;
+  humanMoves : ARRAY MAXMOVES OF MoveStr;
+  compMoves  : ARRAY MAXMOVES OF MoveStr;
+  moveCount  : INTEGER;
+  listTop    : INTEGER;
 
-  curCol, curRow: INTEGER;
-  selSquare     : INTEGER;
+  curCol, curRow : INTEGER;
+  selSquare      : INTEGER;
 
-  inputBuf: ARRAY 16 OF CHAR;
+  inputBuf : ARRAY 16 OF CHAR;
   inputLen : INTEGER;
 
   ev: TUI.Event;
@@ -80,18 +81,13 @@ VAR
 
 PROCEDURE IsOnBoard(pos: INTEGER): BOOLEAN;
 BEGIN
-  RETURN (pos >= 0) & (pos <= 127) & ((pos DIV 8) MOD 2 = 0) & (pos DIV 128 = 0)
+  RETURN (pos >= 0) & (pos < 96) & (pos MOD 16 < 5)
 END IsOnBoard;
-
-PROCEDURE ClearCastle(bit: INTEGER);
-BEGIN
-  IF castleRights MOD (bit * 2) >= bit THEN castleRights := castleRights - bit END
-END ClearCastle;
 
 PROCEDURE KingPos(side: INTEGER): INTEGER;
 VAR i: INTEGER;
 BEGIN
-  FOR i := 0 TO 127 DO
+  FOR i := 0 TO 95 DO
     IF IsOnBoard(i) & (board[i] MOD 8 = KING) &
        (((board[i] DIV SIDE) MOD 2) * SIDE = side) THEN RETURN i END
   END;
@@ -171,21 +167,26 @@ BEGIN
   RETURN IsAttacked(kp, SIDE - side)
 END InCheck;
 
-PROCEDURE InitBoard;
-VAR i: INTEGER; rank: ARRAY 8 OF INTEGER;
+PROCEDURE ClearCastle(bit: INTEGER);
 BEGIN
-  rank[0] := ROOK; rank[1] := KNIGHT; rank[2] := BISHOP; rank[3] := QUEEN;
-  rank[4] := KING; rank[5] := BISHOP; rank[6] := KNIGHT; rank[7] := ROOK;
+  IF castleRights MOD (bit * 2) >= bit THEN castleRights := castleRights - bit END
+END ClearCastle;
+
+PROCEDURE InitBoard;
+VAR i: INTEGER; rank: ARRAY 5 OF INTEGER;
+BEGIN
+  rank[0] := ROOK; rank[1] := KNIGHT; rank[2] := BISHOP;
+  rank[3] := QUEEN; rank[4] := KING;
   FOR i := 0 TO 127 DO
-    IF (i DIV 8) MOD 2 = 1 THEN board[i] := FRONTIER ELSE board[i] := EMPTY END
+    IF ~IsOnBoard(i) THEN board[i] := FRONTIER ELSE board[i] := EMPTY END
   END;
-  FOR i := 0 TO 7 DO
-    board[i]       := rank[i];
-    board[i + 16]  := PAWN;
-    board[i + 96]  := PAWN + SIDE;
-    board[i + 112] := rank[i] + SIDE;
+  FOR i := 0 TO 4 DO
+    board[i]      := rank[i];        (* black back rank, row 0 = rank 6 *)
+    board[i + 16] := PAWN;           (* black pawns,     row 1 = rank 5 *)
+    board[i + 64] := PAWN + SIDE;    (* white pawns,     row 4 = rank 2 *)
+    board[i + 80] := rank[i] + SIDE; (* white back rank, row 5 = rank 1 *)
   END;
-  epSquare := -1; castleRights := 15;
+  epSquare := -1; castleRights := 3;
 END InitBoard;
 
 PROCEDURE ApplyMove(from, to, side: INTEGER; VAR promoted: BOOLEAN): BOOLEAN;
@@ -203,7 +204,7 @@ BEGIN
       IF to = from - 16 THEN
         IF board[to] # EMPTY THEN RETURN FALSE END
       ELSIF to = from - 32 THEN
-        IF (from < 96) OR (from > 103) THEN RETURN FALSE END;
+        IF (from < 64) OR (from > 68) THEN RETURN FALSE END;
         IF (board[from - 16] # EMPTY) OR (board[to] # EMPTY) THEN RETURN FALSE END
       ELSIF (to = from - 17) OR (to = from - 15) THEN
         IF (board[to] = EMPTY) & (to # epSquare) THEN RETURN FALSE END
@@ -213,7 +214,7 @@ BEGIN
       IF to = from + 16 THEN
         IF board[to] # EMPTY THEN RETURN FALSE END
       ELSIF to = from + 32 THEN
-        IF (from < 16) OR (from > 23) THEN RETURN FALSE END;
+        IF (from < 16) OR (from > 20) THEN RETURN FALSE END;
         IF (board[from + 16] # EMPTY) OR (board[to] # EMPTY) THEN RETURN FALSE END
       ELSIF (to = from + 17) OR (to = from + 15) THEN
         IF (board[to] = EMPTY) & (to # epSquare) THEN RETURN FALSE END
@@ -223,9 +224,22 @@ BEGIN
   END;
 
   isEP     := (movingP MOD 8 = PAWN) & (to = epSquare);
-  isCastle := (movingP MOD 8 = KING) & ((to - from = 2) OR (to - from = -2));
-  savedTarget := board[to];
-  board[to] := movingP; board[from] := EMPTY;
+  isCastle := (movingP MOD 8 = KING) & (to - from = -2);
+
+  IF isCastle THEN
+    IF side = SIDE THEN
+      IF castleRights MOD 2 # 1 THEN RETURN FALSE END;
+    ELSE
+      IF castleRights MOD 4 < 2 THEN RETURN FALSE END;
+    END;
+    (* squares between king and rook must be empty *)
+    IF (board[from-1] # EMPTY) OR (board[from-2] # EMPTY) OR (board[from-3] # EMPTY) THEN
+      RETURN FALSE
+    END;
+    IF InCheck(side) THEN RETURN FALSE END; (* can't castle from check *)
+  END;
+
+  savedTarget := board[to]; board[to] := movingP; board[from] := EMPTY;
 
   epCapPos := -1;
   IF isEP THEN
@@ -233,52 +247,49 @@ BEGIN
     board[epCapPos] := EMPTY;
   END;
   IF isCastle THEN
-    IF to - from = 2 THEN board[to-1] := board[to+1]; board[to+1] := EMPTY;
-    ELSE                   board[to+1] := board[to-2]; board[to-2] := EMPTY;
-    END;
+    (* queen-side: rook slides from a-file (to-2) to d-file (to+1) *)
+    board[to + 1] := board[to - 2]; board[to - 2] := EMPTY;
   END;
 
   IF InCheck(side) THEN
     board[from] := movingP; board[to] := savedTarget;
     IF epCapPos >= 0 THEN board[epCapPos] := PAWN + oppSide END;
-    IF isCastle THEN
-      IF to - from = 2 THEN board[to+1] := board[to-1]; board[to-1] := EMPTY;
-      ELSE                   board[to-2] := board[to+1]; board[to+1] := EMPTY;
-      END;
-    END;
+    IF isCastle THEN board[to - 2] := board[to + 1]; board[to + 1] := EMPTY END;
+    RETURN FALSE
+  END;
+  IF isCastle & IsAttacked(to + 1, oppSide) THEN
+    (* king passed through an attacked square (d-file) *)
+    board[from] := movingP; board[to] := savedTarget;
+    board[to - 2] := board[to + 1]; board[to + 1] := EMPTY;
     RETURN FALSE
   END;
 
   IF (movingP MOD 8 = PAWN) &
-     ((side = SIDE) & (to < 8) OR (side = 0) & (to >= 112)) THEN
+     (((side = SIDE) & (to < 8)) OR ((side = 0) & (to >= 80))) THEN
     board[to] := QUEEN + side; promoted := TRUE;
   END;
 
   IF (movingP MOD 8 = PAWN) &
-     ((side = SIDE) & (to - from = -32) OR (side = 0) & (to - from = 32)) THEN
-    epSquare := (from + to) DIV 2;
+     (((side = SIDE) & (to - from = -32)) OR ((side = 0) & (to - from = 32))) THEN
+    IF side = SIDE THEN epSquare := from - 16 ELSE epSquare := from + 16 END;
   ELSE epSquare := -1;
   END;
 
   IF movingP MOD 8 = KING THEN
-    IF side = SIDE THEN ClearCastle(1); ClearCastle(2)
-    ELSE ClearCastle(4); ClearCastle(8) END
+    IF side = SIDE THEN ClearCastle(1) ELSE ClearCastle(2) END
   ELSIF side = SIDE THEN
-    IF from = 119 THEN ClearCastle(1) END;
-    IF from = 112 THEN ClearCastle(2) END;
+    IF from = 80 THEN ClearCastle(1) END
   ELSE
-    IF from = 7 THEN ClearCastle(4) END;
-    IF from = 0 THEN ClearCastle(8) END;
+    IF from = 0 THEN ClearCastle(2) END
   END;
-  IF to = 7   THEN ClearCastle(4) END;
-  IF to = 0   THEN ClearCastle(8) END;
-  IF to = 119 THEN ClearCastle(1) END;
-  IF to = 112 THEN ClearCastle(2) END;
+  IF to = 80 THEN ClearCastle(1) END;
+  IF to = 0  THEN ClearCastle(2) END;
+
   RETURN TRUE
 END ApplyMove;
 
 PROCEDURE Evaluate(turn, depth, alpha, beta: INTEGER; VAR bestF, bestT: INTEGER): INTEGER;
-VAR f, t, p, i, step, target, score, bestScore, captured, movingP: INTEGER;
+VAR f, p, i, step, target, score, bestScore, captured, movingP: INTEGER;
     dF, dT: INTEGER;
     isPawnDiag, isEP: BOOLEAN;
     epCapturePos, savedEP, epCapturedPiece, captureValue: INTEGER;
@@ -286,7 +297,7 @@ VAR f, t, p, i, step, target, score, bestScore, captured, movingP: INTEGER;
 BEGIN
   IF depth = 0 THEN RETURN 0 END;
   bestScore := alpha;
-  FOR f := 0 TO 127 DO
+  FOR f := 0 TO 95 DO
     IF IsOnBoard(f) & (board[f] # EMPTY) & (((board[f] DIV SIDE) MOD 2) * SIDE = turn) THEN
       p := board[f] MOD 8;
       FOR i := 0 TO 7 DO
@@ -298,16 +309,16 @@ BEGIN
           IF i < 4 THEN step := rookVec[i] ELSE step := bishopVec[i-4] END;
         ELSIF p = PAWN THEN
           IF turn = SIDE THEN
-            IF i = 0 THEN step := -16
+            IF    i = 0 THEN step := -16
             ELSIF i = 1 THEN
-              IF (f >= 96) & (f <= 103) & (board[f-16] = EMPTY) THEN step := -32 END
+              IF (f >= 64) & (f < 80) & (board[f-16] = EMPTY) THEN step := -32 END
             ELSIF i = 2 THEN step := -17; isPawnDiag := TRUE
             ELSIF i = 3 THEN step := -15; isPawnDiag := TRUE
             END;
           ELSE
-            IF i = 0 THEN step := 16
+            IF    i = 0 THEN step := 16
             ELSIF i = 1 THEN
-              IF (f >= 16) & (f <= 23) & (board[f+16] = EMPTY) THEN step := 32 END
+              IF (f >= 16) & (f < 32) & (board[f+16] = EMPTY) THEN step := 32 END
             ELSIF i = 2 THEN step := 17; isPawnDiag := TRUE
             ELSIF i = 3 THEN step := 15; isPawnDiag := TRUE
             END;
@@ -334,7 +345,7 @@ BEGIN
             END;
             movingP := board[f];
             board[target] := movingP; board[f] := EMPTY;
-            IF (p = PAWN) & ((target < 8) OR (target >= 112)) THEN
+            IF (p = PAWN) & ((target < 8) OR (target >= 80)) THEN
               IF turn = SIDE THEN board[target] := QUEEN + SIDE
               ELSE board[target] := QUEEN END;
             END;
@@ -346,21 +357,17 @@ BEGIN
             ELSE epSquare := -1;
             END;
             savedCastle := castleRights;
-            IF f = 116 THEN ClearCastle(1); ClearCastle(2)
-            ELSIF f = 119 THEN ClearCastle(1)
-            ELSIF f = 112 THEN ClearCastle(2)
-            ELSIF f = 4   THEN ClearCastle(4); ClearCastle(8)
-            ELSIF f = 7   THEN ClearCastle(4)
-            ELSIF f = 0   THEN ClearCastle(8)
+            IF f = 84 THEN ClearCastle(1)
+            ELSIF f = 80 THEN ClearCastle(1)
+            ELSIF f = 4  THEN ClearCastle(2)
+            ELSIF f = 0  THEN ClearCastle(2)
             END;
-            IF target = 119 THEN ClearCastle(1) END;
-            IF target = 112 THEN ClearCastle(2) END;
-            IF target = 7   THEN ClearCastle(4) END;
-            IF target = 0   THEN ClearCastle(8) END;
+            IF target = 80 THEN ClearCastle(1) END;
+            IF target = 0  THEN ClearCastle(2) END;
             IF ~InCheck(turn) THEN
               IF isEP THEN captureValue := pieceValues[epCapturedPiece MOD 8]
               ELSE captureValue := pieceValues[captured MOD 8] END;
-              IF (p = PAWN) & ((target < 8) OR (target >= 112)) THEN
+              IF (p = PAWN) & ((target < 8) OR (target >= 80)) THEN
                 captureValue := captureValue + pieceValues[QUEEN] - pieceValues[PAWN];
               END;
               score := captureValue - Evaluate(SIDE - turn, depth - 1,
@@ -384,79 +391,59 @@ BEGIN
         END;
       END;
 
+      (* castling — handled separately from the slider loop *)
       IF p = KING THEN
         IF turn = SIDE THEN
-          IF (castleRights MOD 2 = 1) & (f = 116) &
-             (board[117] = EMPTY) & (board[118] = EMPTY) THEN
-            board[118] := KING + SIDE; board[116] := EMPTY;
-            board[117] := ROOK + SIDE; board[119] := EMPTY;
-            savedEP := epSquare; epSquare := -1;
-            savedCastle := castleRights; ClearCastle(1); ClearCastle(2);
-            score := -Evaluate(SIDE - turn, depth-1, -beta, -alpha, dF, dT);
-            board[116] := KING + SIDE; board[118] := EMPTY;
-            board[119] := ROOK + SIDE; board[117] := EMPTY;
-            epSquare := savedEP; castleRights := savedCastle;
-            IF score > bestScore THEN
-              bestScore := score;
-              IF depth = maxDepth THEN bestF := 116; bestT := 118 END;
-              alpha := bestScore;
-              IF alpha >= beta THEN RETURN bestScore END;
-            END;
-          END;
-          IF (castleRights MOD 4 >= 2) & (f = 116) &
-             (board[115] = EMPTY) & (board[114] = EMPTY) & (board[113] = EMPTY) THEN
-            board[114] := KING + SIDE; board[116] := EMPTY;
-            board[115] := ROOK + SIDE; board[112] := EMPTY;
-            savedEP := epSquare; epSquare := -1;
-            savedCastle := castleRights; ClearCastle(1); ClearCastle(2);
-            score := -Evaluate(SIDE - turn, depth-1, -beta, -alpha, dF, dT);
-            board[116] := KING + SIDE; board[114] := EMPTY;
-            board[112] := ROOK + SIDE; board[115] := EMPTY;
-            epSquare := savedEP; castleRights := savedCastle;
-            IF score > bestScore THEN
-              bestScore := score;
-              IF depth = maxDepth THEN bestF := 116; bestT := 114 END;
-              alpha := bestScore;
-              IF alpha >= beta THEN RETURN bestScore END;
+          IF (castleRights MOD 2 = 1) & (f = 84) &
+             (board[83] = EMPTY) & (board[82] = EMPTY) & (board[81] = EMPTY) &
+             ~InCheck(SIDE) THEN
+            board[82] := KING + SIDE; board[84] := EMPTY;
+            board[83] := ROOK + SIDE; board[80] := EMPTY;
+            IF ~InCheck(SIDE) THEN
+              savedEP := epSquare; epSquare := -1;
+              savedCastle := castleRights; ClearCastle(1);
+              score := -Evaluate(0, depth - 1, -beta, -alpha, dF, dT);
+              board[84] := KING + SIDE; board[82] := EMPTY;
+              board[80] := ROOK + SIDE; board[83] := EMPTY;
+              epSquare := savedEP; castleRights := savedCastle;
+              IF score > bestScore THEN
+                bestScore := score;
+                IF depth = maxDepth THEN bestF := 84; bestT := 82 END;
+                alpha := bestScore;
+                IF alpha >= beta THEN RETURN bestScore END;
+              END;
+            ELSE
+              board[84] := KING + SIDE; board[82] := EMPTY;
+              board[80] := ROOK + SIDE; board[83] := EMPTY;
             END;
           END;
         ELSE
-          IF (castleRights MOD 8 >= 4) & (f = 4) &
-             (board[5] = EMPTY) & (board[6] = EMPTY) THEN
-            board[6] := KING; board[4] := EMPTY;
-            board[5] := ROOK; board[7] := EMPTY;
-            savedEP := epSquare; epSquare := -1;
-            savedCastle := castleRights; ClearCastle(4); ClearCastle(8);
-            score := -Evaluate(SIDE - turn, depth-1, -beta, -alpha, dF, dT);
-            board[4] := KING; board[6] := EMPTY;
-            board[7] := ROOK; board[5] := EMPTY;
-            epSquare := savedEP; castleRights := savedCastle;
-            IF score > bestScore THEN
-              bestScore := score;
-              IF depth = maxDepth THEN bestF := 4; bestT := 6 END;
-              alpha := bestScore;
-              IF alpha >= beta THEN RETURN bestScore END;
-            END;
-          END;
-          IF (castleRights MOD 16 >= 8) & (f = 4) &
-             (board[3] = EMPTY) & (board[2] = EMPTY) & (board[1] = EMPTY) THEN
+          IF (castleRights MOD 4 >= 2) & (f = 4) &
+             (board[3] = EMPTY) & (board[2] = EMPTY) & (board[1] = EMPTY) &
+             ~InCheck(0) THEN
             board[2] := KING; board[4] := EMPTY;
             board[3] := ROOK; board[0] := EMPTY;
-            savedEP := epSquare; epSquare := -1;
-            savedCastle := castleRights; ClearCastle(4); ClearCastle(8);
-            score := -Evaluate(SIDE - turn, depth-1, -beta, -alpha, dF, dT);
-            board[4] := KING; board[2] := EMPTY;
-            board[0] := ROOK; board[3] := EMPTY;
-            epSquare := savedEP; castleRights := savedCastle;
-            IF score > bestScore THEN
-              bestScore := score;
-              IF depth = maxDepth THEN bestF := 4; bestT := 2 END;
-              alpha := bestScore;
-              IF alpha >= beta THEN RETURN bestScore END;
+            IF ~InCheck(0) THEN
+              savedEP := epSquare; epSquare := -1;
+              savedCastle := castleRights; ClearCastle(2);
+              score := -Evaluate(SIDE, depth - 1, -beta, -alpha, dF, dT);
+              board[4] := KING; board[2] := EMPTY;
+              board[0] := ROOK; board[3] := EMPTY;
+              epSquare := savedEP; castleRights := savedCastle;
+              IF score > bestScore THEN
+                bestScore := score;
+                IF depth = maxDepth THEN bestF := 4; bestT := 2 END;
+                alpha := bestScore;
+                IF alpha >= beta THEN RETURN bestScore END;
+              END;
+            ELSE
+              board[4] := KING; board[2] := EMPTY;
+              board[0] := ROOK; board[3] := EMPTY;
             END;
           END;
         END;
       END;
+
     END;
   END;
   RETURN bestScore
@@ -476,20 +463,20 @@ END GetComputerMove;
 PROCEDURE MoveToStr(from, to: INTEGER; VAR s: MoveStr);
 BEGIN
   s[0] := CHR(ORD("a") + (from MOD 16));
-  s[1] := CHR(ORD("0") + 8 - (from DIV 16));
+  s[1] := CHR(ORD("0") + 6 - (from DIV 16));
   s[2] := CHR(ORD("a") + (to   MOD 16));
-  s[3] := CHR(ORD("0") + 8 - (to   DIV 16));
+  s[3] := CHR(ORD("0") + 6 - (to   DIV 16));
   s[4] := 0X;
 END MoveToStr;
 
 PROCEDURE ParseAlg(s: ARRAY OF CHAR; VAR from, to: INTEGER): BOOLEAN;
 BEGIN
-  IF (s[0] < "a") OR (s[0] > "h") THEN RETURN FALSE END;
-  IF (s[1] < "1") OR (s[1] > "8") THEN RETURN FALSE END;
-  IF (s[2] < "a") OR (s[2] > "h") THEN RETURN FALSE END;
-  IF (s[3] < "1") OR (s[3] > "8") THEN RETURN FALSE END;
-  from := (8 - (ORD(s[1]) - ORD("0"))) * 16 + (ORD(s[0]) - ORD("a"));
-  to   := (8 - (ORD(s[3]) - ORD("0"))) * 16 + (ORD(s[2]) - ORD("a"));
+  IF (s[0] < "a") OR (s[0] > "e") THEN RETURN FALSE END;
+  IF (s[1] < "1") OR (s[1] > "6") THEN RETURN FALSE END;
+  IF (s[2] < "a") OR (s[2] > "e") THEN RETURN FALSE END;
+  IF (s[3] < "1") OR (s[3] > "6") THEN RETURN FALSE END;
+  from := (6 - (ORD(s[1]) - ORD("0"))) * 16 + (ORD(s[0]) - ORD("a"));
+  to   := (6 - (ORD(s[3]) - ORD("0"))) * 16 + (ORD(s[2]) - ORD("a"));
   RETURN TRUE
 END ParseAlg;
 
@@ -497,15 +484,6 @@ END ParseAlg;
 (*  Drawing                                                            *)
 (* ══════════════════════════════════════════════════════════════════ *)
 
-(*
- * Each piece is drawn as 2 rows × 2 cols inside the 4×2 square cell.
- *
- *   [  ][c0][c1][  ]   ← top row: shape decorator
- *   [  ][L ][L ][  ]   ← bottom row: piece letter doubled
- *
- * White pieces: TUI.Black fg, UPPERCASE letter
- * Black pieces: TUI.Red   fg, lowercase  letter
- *)
 PROCEDURE DrawPiece(x, y, piece, bg: INTEGER);
 VAR t, pfg: INTEGER; c0, c1, letter: CHAR;
 BEGIN
@@ -536,22 +514,22 @@ PROCEDURE DrawBoardScreen;
 VAR r, c, sq, piece, bg, fg, sx, sy, kingPos: INTEGER; ch: CHAR; inCheck: BOOLEAN;
 BEGIN
   TUI.ClearBack(TUI.White, TUI.Black);
-  TUI.PutStr(1, 0, "Chess  [Tab=Move list]  [Ctrl-Q=Quit]", TUI.Yellow, TUI.Black);
+  TUI.PutStr(1, 0, "Chess Attack (5x6)  [Tab=Move list]  [Ctrl-Q=Quit]", TUI.Yellow, TUI.Black);
 
-  FOR r := 0 TO 7 DO
-    ch := CHR(ORD("8") - r);
+  FOR r := 0 TO 5 DO
+    ch := CHR(ORD("6") - r);
     TUI.PutCell(BOARDX - 2, BOARDY + r * CELLH, ch, TUI.White, TUI.Black);
   END;
-  FOR c := 0 TO 7 DO
+  FOR c := 0 TO 4 DO
     ch := CHR(ORD("a") + c);
-    TUI.PutCell(BOARDX + c * CELLW + 1, BOARDY + 8 * CELLH, ch, TUI.White, TUI.Black);
+    TUI.PutCell(BOARDX + c * CELLW + 1, BOARDY + 6 * CELLH, ch, TUI.White, TUI.Black);
   END;
 
   kingPos := KingPos(humanSide);
   inCheck := InCheck(humanSide);
 
-  FOR r := 0 TO 7 DO
-    FOR c := 0 TO 7 DO
+  FOR r := 0 TO 5 DO
+    FOR c := 0 TO 4 DO
       sq    := r * 16 + c;
       piece := board[sq];
 
@@ -570,15 +548,15 @@ BEGIN
   END;
 
   IF gameOver THEN
-    TUI.PutStr(1, TUI.Rows-1, "Game over. Press Ctrl-Q to quit.       ", TUI.Red,     TUI.Black);
+    TUI.PutStr(1, TUI.Rows-1, "Game over. Press Ctrl-Q to quit.          ", TUI.Red,     TUI.Black);
   ELSIF inCheck & (selSquare >= 0) THEN
     TUI.PutStr(1, TUI.Rows-1, "CHECK! Select destination (Enter/click).", TUI.Magenta, TUI.Black);
   ELSIF inCheck THEN
     TUI.PutStr(1, TUI.Rows-1, "CHECK! Select piece to move.  Tab=list  ", TUI.Magenta, TUI.Black);
   ELSIF selSquare >= 0 THEN
-    TUI.PutStr(1, TUI.Rows-1, "Select destination (Enter/click).   ", TUI.Cyan,     TUI.Black);
+    TUI.PutStr(1, TUI.Rows-1, "Select destination (Enter/click).       ", TUI.Cyan,    TUI.Black);
   ELSE
-    TUI.PutStr(1, TUI.Rows-1, "Select piece (Enter/click). Tab=list", TUI.White,    TUI.Black);
+    TUI.PutStr(1, TUI.Rows-1, "Select piece (Enter/click). Tab=list    ", TUI.White,   TUI.Black);
   END;
   TUI.Flush
 END DrawBoardScreen;
@@ -594,7 +572,7 @@ BEGIN
   IF listTop < 0     THEN listTop := 0      END;
 
   TUI.ClearBack(TUI.White, TUI.Black);
-  TUI.PutStr(1, 0, "Chess  [Tab=Board view]  [Ctrl-Q=Quit]", TUI.Yellow, TUI.Black);
+  TUI.PutStr(1, 0, "Chess Attack (5x6)  [Tab=Board view]  [Ctrl-Q=Quit]", TUI.Yellow, TUI.Black);
   TUI.PutStr(1, 1, "#    Your move  Computer", TUI.Cyan, TUI.Black);
 
   i := listTop;
@@ -603,23 +581,23 @@ BEGIN
     numBuf[0] := CHR(ORD("0") + (i + 1) DIV 10);
     numBuf[1] := CHR(ORD("0") + (i + 1) MOD 10);
     numBuf[2] := "."; numBuf[3] := " "; numBuf[4] := 0X;
-    TUI.PutStr(1,  row, numBuf,         TUI.White, TUI.Black);
-    TUI.PutStr(5,  row, humanMoves[i],  TUI.Green, TUI.Black);
-    TUI.PutStr(17, row, compMoves[i],   TUI.Red,   TUI.Black);
+    TUI.PutStr(1,  row, numBuf,        TUI.White, TUI.Black);
+    TUI.PutStr(5,  row, humanMoves[i], TUI.Green, TUI.Black);
+    TUI.PutStr(17, row, compMoves[i],  TUI.Red,   TUI.Black);
     INC(i)
   END;
 
   promptY := TUI.Rows - 3;
-  TUI.PutStr(1, promptY, "Move: ",   TUI.White,  TUI.Black);
-  TUI.PutStr(6, promptY, inputBuf,   TUI.Yellow, TUI.Black);
+  TUI.PutStr(1, promptY, "Move: ",  TUI.White,  TUI.Black);
+  TUI.PutStr(6, promptY, inputBuf,  TUI.Yellow, TUI.Black);
   TUI.SetCursor(6 + inputLen, promptY);
 
   IF gameOver THEN
-    TUI.PutStr(1, TUI.Rows-1, "Game over. Press Ctrl-Q to quit.      ", TUI.Red, TUI.Black);
+    TUI.PutStr(1, TUI.Rows-1, "Game over. Press Ctrl-Q to quit.         ", TUI.Red, TUI.Black);
   ELSIF moveCount > maxVis THEN
     TUI.PutStr(1, TUI.Rows-1, "Up/Dn/PgUp/PgDn=scroll  End=latest   ", TUI.White, TUI.Black);
   ELSE
-    TUI.PutStr(1, TUI.Rows-1, "Type move (e.g. e2e4) then Enter.", TUI.White, TUI.Black);
+    TUI.PutStr(1, TUI.Rows-1, "Type move (e.g. a2a3, e1c1) then Enter.", TUI.White, TUI.Black);
   END;
   TUI.Flush
 END DrawListScreen;
@@ -674,9 +652,9 @@ PROCEDURE HandleBoardKey(key: CHAR);
 VAR sq, from, to: INTEGER;
 BEGIN
   IF    key = TUI.KUp    THEN IF curRow > 0 THEN DEC(curRow) END
-  ELSIF key = TUI.KDown  THEN IF curRow < 7 THEN INC(curRow) END
+  ELSIF key = TUI.KDown  THEN IF curRow < 5 THEN INC(curRow) END
   ELSIF key = TUI.KLeft  THEN IF curCol > 0 THEN DEC(curCol) END
-  ELSIF key = TUI.KRight THEN IF curCol < 7 THEN INC(curCol) END
+  ELSIF key = TUI.KRight THEN IF curCol < 4 THEN INC(curCol) END
   ELSIF key = TUI.KEnter THEN
     sq := curRow * 16 + curCol;
     IF selSquare < 0 THEN
@@ -701,7 +679,7 @@ VAR col, row, sq, from, to: INTEGER;
 BEGIN
   col := (mx - BOARDX) DIV CELLW;
   row := (my - BOARDY) DIV CELLH;
-  IF (col < 0) OR (col > 7) OR (row < 0) OR (row > 7) THEN RETURN END;
+  IF (col < 0) OR (col > 4) OR (row < 0) OR (row > 5) THEN RETURN END;
   sq := row * 16 + col;
   curCol := col; curRow := row;
   IF mb = 0 THEN
@@ -742,13 +720,13 @@ BEGIN
         TUI.Flush
       END
     ELSE
-      TUI.PutStr(1, TUI.Rows-1, "Bad format — use e2e4.              ", TUI.Red, TUI.Black);
+      TUI.PutStr(1, TUI.Rows-1, "Bad format — use a2a3 or e1c1.      ", TUI.Red, TUI.Black);
       TUI.Flush
     END;
     inputLen := 0; inputBuf[0] := 0X;
   ELSIF key = TUI.KBackspace THEN
     IF inputLen > 0 THEN DEC(inputLen); inputBuf[inputLen] := 0X END
-  ELSIF ((key >= "a") & (key <= "h")) OR ((key >= "1") & (key <= "8")) THEN
+  ELSIF ((key >= "a") & (key <= "e")) OR ((key >= "1") & (key <= "6")) THEN
     IF inputLen < 4 THEN inputBuf[inputLen] := key; INC(inputLen) END
   END
 END HandleListKey;
@@ -761,11 +739,11 @@ PROCEDURE ChooseSide;
 VAR ev2: TUI.Event;
 BEGIN
   TUI.ClearBack(TUI.White, TUI.Black);
-  TUI.PutStr(4, 4,  "Chess — choose your side",            TUI.Yellow, TUI.Black);
-  TUI.PutStr(4, 6,  "W  Play White (you move first)",      TUI.White,  TUI.Black);
-  TUI.PutStr(4, 7,  "B  Play Black (computer moves first)",TUI.White,  TUI.Black);
-  TUI.PutStr(4, 9,  "Search depth  1=easy  3=medium  5=hard", TUI.Cyan, TUI.Black);
-  TUI.PutStr(4, 10, "Press 1, 3, or 5 then W or B:",       TUI.White,  TUI.Black);
+  TUI.PutStr(4, 4,  "Chess Attack (5x6) — choose your side",  TUI.Yellow, TUI.Black);
+  TUI.PutStr(4, 6,  "W  Play White (you move first)",         TUI.White,  TUI.Black);
+  TUI.PutStr(4, 7,  "B  Play Black (computer moves first)",   TUI.White,  TUI.Black);
+  TUI.PutStr(4, 9,  "Search depth  1=easy  3=medium  5=hard", TUI.Cyan,   TUI.Black);
+  TUI.PutStr(4, 10, "Press 1, 3, or 5 then W or B:",          TUI.White,  TUI.Black);
   TUI.Flush;
 
   maxDepth  := 3;
@@ -829,15 +807,18 @@ BEGIN
 END Play;
 
 BEGIN
-  pieceValues[0] := 0; pieceValues[1] := 10; pieceValues[2] := 50;
-  pieceValues[3] := 30; pieceValues[4] := 31; pieceValues[5] := 90;
-  pieceValues[6] := 999;
-  rookVec[0]   := -16; rookVec[1]   := 16; rookVec[2]   := -1; rookVec[3]   := 1;
+  pieceValues[EMPTY]  := 0;
+  pieceValues[PAWN]   := 10;
+  pieceValues[ROOK]   := 50;
+  pieceValues[KNIGHT] := 30;
+  pieceValues[BISHOP] := 31;
+  pieceValues[QUEEN]  := 90;
+  pieceValues[KING]   := 999;
+  rookVec[0]   := -16; rookVec[1]   := 16;  rookVec[2]   := -1; rookVec[3]   := 1;
   bishopVec[0] := -17; bishopVec[1] := -15; bishopVec[2] := 17; bishopVec[3] := 15;
   knightVec[0] := -33; knightVec[1] := -31; knightVec[2] := -18; knightVec[3] := -14;
   knightVec[4] :=  14; knightVec[5] :=  18; knightVec[6] :=  31; knightVec[7] :=  33;
   Play
-END ChessBoard.
-
+END ChessAttack.
 
 
