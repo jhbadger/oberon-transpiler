@@ -55,27 +55,33 @@ CONST
 
   ChartX0  =   2;   (* chart left edge pixel *)
   ChartX1  = 147;   (* chart right edge pixel *)
-  ChartY0  =   2;   (* chart top pixel        *)
-  ChartY1  =  97;   (* chart bottom pixel     *)
+  ChartY0  =   4;   (* chart top pixel        *)
+  ChartY1  =  95;   (* chart bottom pixel     *)
 
-  (* xterm-256 colours *)
-  ColBg       =   0;   (* transparent / black   *)
-  ColSep      = 240;   (* dark grey separator   *)
-  ColEC       =  22;   (* dark green – healthy epithelial *)
-  ColInfEC    = 196;   (* red – infected epithelial       *)
-  ColAg       = 196;   (* red – antigen                   *)
-  ColAb       =  39;   (* blue – antibody                 *)
-  ColBCell    = 226;   (* yellow – B cell                 *)
-  ColPlasma   = 208;   (* orange – plasma cell            *)
-  ColMemB     =  46;   (* bright green – memory B         *)
-  ColTHelper  =  51;   (* cyan – T helper                 *)
-  ColTCyto    = 201;   (* magenta – Tc                    *)
-  ColMac      = 130;   (* brown – macrophage               *)
+  (* Series colours for population chart *)
+  ColChAb     =  27;   (* blue       – antibody   *)
+  ColChPlasma = 208;   (* orange     – plasma     *)
+  ColChMemB   = 154;   (* yel-green  – memory B   *)
+  ColChInfEC  = 196;   (* red        – infected EC *)
+
+  (* xterm-256 colours — maximally separated hues *)
+  ColBg       =   0;   (* transparent / black              *)
+  ColSep      = 240;   (* dark grey separator              *)
+  ColEC       =  28;   (* forest green  – healthy EC       *)
+  ColInfEC    = 196;   (* pure red      – infected EC      *)  (* kept *)
+  ColAg       = 220;   (* bright yellow – antigen          *)
+  ColAb       =  27;   (* bright blue   – antibody         *)
+  ColBCell    =  87;   (* aqua/teal     – B cell           *)
+  ColPlasma   = 208;   (* orange        – plasma cell      *)
+  ColMemB     = 154;   (* yellow-green  – memory B         *)
+  ColTHelper  =  99;   (* medium purple – T helper         *)
+  ColTCyto    = 201;   (* hot pink      – Tc               *)
+  ColMac      =  11;   (* bright yellow-brown / olive – macrophage *)
   ColAxis     = 244;
   ColGrid     = 238;
   ColMarker   = 245;
-  ColChAg     = 196;
-  ColChB      = 226;
+  ColChAg     = 220;
+  ColChB      =  87;
   ColTitle    =   7;
 
 TYPE
@@ -147,7 +153,7 @@ VAR
 
   nAg, nAb, nB, nTh, nTc, nMac, nEC, nHist: INTEGER;
   currentT: INTEGER;
-  activeView: INTEGER;   (* 0 = CA grid, 1 = chart *)
+  activeView: INTEGER;   (* 0 = CA grid, 1 = Ag/B chart, 2 = population chart *)
   done: BOOLEAN;
 
 (* ================================================================= *)
@@ -762,68 +768,104 @@ BEGIN
   py := ChartY1 - (v * h) DIV vMax
 END ChartMap;
 
-PROCEDURE DrawChartView;
-  VAR i, tMax, vMax, maxAg, maxB: INTEGER;
-      px, py, ppx, ppy: INTEGER;
-      v, prevV: INTEGER;
+PROCEDURE DrawChartBackground(tMax, vMax: INTEGER);
+  VAR i, px, py, ppx, ppy: INTEGER;
 BEGIN
-  (* Compute data ranges *)
-  tMax := NSteps - 1;
-  maxAg := 1; maxB := 1;
-  FOR i := 0 TO nHist - 1 DO
-    IF history[i].antigens > maxAg THEN maxAg := history[i].antigens END;
-    IF history[i].bcells   > maxB  THEN maxB  := history[i].bcells   END
-  END;
-  vMax := Max2(maxAg, maxB);
-  vMax := ((vMax + 9) DIV 10) * 10;
-  IF vMax < 10 THEN vMax := 10 END;
-
-  (* Draw chart background *)
   FOR px := ChartX0 TO ChartX1 DO
     FOR py := ChartY0 TO ChartY1 DO
       PlotPixel(px, py, 233)
     END
   END;
-
-  (* Horizontal grid lines at 25%, 50%, 75%, 100% *)
   FOR i := 1 TO 4 DO
     ChartMap(0, (vMax * i) DIV 4, tMax, vMax, px, py);
-    IF py >= ChartY0 THEN
+    IF (py >= ChartY0) & (py <= ChartY1) THEN
       Terminal.Line(ChartX0, py, ChartX1, py, ColGrid)
     END
   END;
-
-  (* Vertical marker at challenge2 *)
   ChartMap(Challenge2, 0,    tMax, vMax, px, ppy);
   ChartMap(Challenge2, vMax, tMax, vMax, px, py);
   Terminal.Line(px, py, px, ppy, ColMarker);
-
-  (* Axes *)
   Terminal.Line(ChartX0, ChartY0, ChartX0, ChartY1, ColAxis);
-  Terminal.Line(ChartX0, ChartY1, ChartX1, ChartY1, ColAxis);
+  Terminal.Line(ChartX0, ChartY1, ChartX1, ChartY1, ColAxis)
+END DrawChartBackground;
 
+PROCEDURE DrawSeries1(field, color, tMax, vMax: INTEGER);
+  (* field: 0=antigens,1=antibodies,2=bcells,3=plasma,4=memoryB,5=infectedEC *)
+  VAR i, px, py, ppx, ppy, v: INTEGER;
+BEGIN
   IF nHist < 2 THEN RETURN END;
-
-  (* Antigen series *)
-  prevV := history[0].antigens;
-  ChartMap(history[0].t, prevV, tMax, vMax, ppx, ppy);
-  FOR i := 1 TO nHist - 1 DO
-    v := history[i].antigens;
-    ChartMap(history[i].t, v, tMax, vMax, px, py);
-    Terminal.Line(ppx, ppy, px, py, ColChAg);
-    ppx := px; ppy := py
+  CASE field OF
+    0: v := history[0].antigens
+  | 1: v := history[0].antibodies
+  | 2: v := history[0].bcells
+  | 3: v := history[0].plasma
+  | 4: v := history[0].memoryB
+  ELSE  v := history[0].infectedEC
   END;
-
-  (* B-cell series *)
-  prevV := history[0].bcells;
-  ChartMap(history[0].t, prevV, tMax, vMax, ppx, ppy);
+  ChartMap(history[0].t, v, tMax, vMax, ppx, ppy);
   FOR i := 1 TO nHist - 1 DO
-    v := history[i].bcells;
+    CASE field OF
+      0: v := history[i].antigens
+    | 1: v := history[i].antibodies
+    | 2: v := history[i].bcells
+    | 3: v := history[i].plasma
+    | 4: v := history[i].memoryB
+    ELSE  v := history[i].infectedEC
+    END;
     ChartMap(history[i].t, v, tMax, vMax, px, py);
-    Terminal.Line(ppx, ppy, px, py, ColChB);
+    Terminal.Line(ppx, ppy, px, py, color);
     ppx := px; ppy := py
   END
+END DrawSeries1;
+
+PROCEDURE CalcVMax(fields: ARRAY OF INTEGER; n: INTEGER): INTEGER;
+  VAR i, j, v, vMax: INTEGER;
+BEGIN
+  vMax := 1;
+  FOR i := 0 TO nHist - 1 DO
+    FOR j := 0 TO n - 1 DO
+      CASE fields[j] OF
+        0: v := history[i].antigens
+      | 1: v := history[i].antibodies
+      | 2: v := history[i].bcells
+      | 3: v := history[i].plasma
+      | 4: v := history[i].memoryB
+      ELSE  v := history[i].infectedEC
+      END;
+      IF v > vMax THEN vMax := v END
+    END
+  END;
+  vMax := ((vMax + 9) DIV 10) * 10;
+  IF vMax < 10 THEN vMax := 10 END;
+  RETURN vMax
+END CalcVMax;
+
+PROCEDURE DrawChartView;
+  VAR tMax, vMax: INTEGER;
+      fields: ARRAY 6 OF INTEGER;
+BEGIN
+  tMax := NSteps - 1;
+  fields[0] := 0; fields[1] := 2;  (* antigens, bcells *)
+  vMax := CalcVMax(fields, 2);
+  DrawChartBackground(tMax, vMax);
+  DrawSeries1(0, ColChAg, tMax, vMax);   (* antigens *)
+  DrawSeries1(2, ColChB,  tMax, vMax)    (* B cells  *)
 END DrawChartView;
+
+PROCEDURE DrawPopView;
+  VAR tMax, vMax: INTEGER;
+      fields: ARRAY 6 OF INTEGER;
+BEGIN
+  tMax := NSteps - 1;
+  fields[0] := 1; fields[1] := 3;
+  fields[2] := 4; fields[3] := 5;
+  vMax := CalcVMax(fields, 4);
+  DrawChartBackground(tMax, vMax);
+  DrawSeries1(1, ColChAb,    tMax, vMax);   (* antibodies  *)
+  DrawSeries1(3, ColChPlasma,tMax, vMax);   (* plasma      *)
+  DrawSeries1(4, ColChMemB,  tMax, vMax);   (* memory B    *)
+  DrawSeries1(5, ColChInfEC, tMax, vMax)    (* infected EC *)
+END DrawPopView;
 
 (* --- Separator and HUD --- *)
 
@@ -865,9 +907,19 @@ BEGIN
   (* Line 2: key guide + view label *)
   Terminal.Goto(1, 2);
   IF activeView = 0 THEN
-    Out.String("[S]=step  [Tab]=chart view  [Q]=quit  |  VIEW: CA Grid")
+    Out.String("[S]=step  [Tab]=Ag/B chart  [Q]=quit  |  VIEW: CA Grid")
+  ELSIF activeView = 1 THEN
+    Out.String("[S]=step  [Tab]=pop chart   [Q]=quit  |  VIEW: Antigen / B-cell");
+    Terminal.Goto(1, 3);
+    Terminal.Color256(ColChAg, 0); Out.String(" Antigen ");
+    Terminal.Color256(ColChB,  0); Out.String(" B cells ")
   ELSE
-    Out.String("[S]=step  [Tab]=CA view     [Q]=quit  |  VIEW: B-cell / Antigen chart")
+    Out.String("[S]=step  [Tab]=CA grid     [Q]=quit  |  VIEW: Population dynamics");
+    Terminal.Goto(1, 3);
+    Terminal.Color256(ColChAb,     0); Out.String(" Antibody ");
+    Terminal.Color256(ColChPlasma, 0); Out.String(" Plasma ");
+    Terminal.Color256(ColChMemB,   0); Out.String(" Memory B ");
+    Terminal.Color256(ColChInfEC,  0); Out.String(" Infected EC ")
   END;
 
   (* Colour key — bottom row of terminal *)
@@ -890,8 +942,10 @@ BEGIN
   Terminal.ClearBuf;
   IF activeView = 0 THEN
     DrawCAView
-  ELSE
+  ELSIF activeView = 1 THEN
     DrawChartView
+  ELSE
+    DrawPopView
   END;
   Terminal.Flush;
   WriteHUD
@@ -956,7 +1010,7 @@ BEGIN
         Redraw
       END
     ELSIF key = 09X THEN       (* Tab *)
-      activeView := 1 - activeView;
+      activeView := (activeView + 1) MOD 3;
       Redraw
     ELSIF (key = 'q') OR (key = 'Q') THEN
       done := TRUE
