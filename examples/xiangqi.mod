@@ -83,6 +83,9 @@ VAR
 
   ev : TUI.Event;
 
+  boardHistory         : ARRAY MAXMOVES OF ARRAY 160 OF INTEGER;
+  suggestFrom, suggestTo : INTEGER;
+
 (* ══════════════════════════════════════════════════════════════════ *)
 (*  Board geometry                                                     *)
 (* ══════════════════════════════════════════════════════════════════ *)
@@ -606,6 +609,22 @@ BEGIN
 END GetComputerMove;
 
 (* ══════════════════════════════════════════════════════════════════ *)
+(*  Board history (undo)                                              *)
+(* ══════════════════════════════════════════════════════════════════ *)
+
+PROCEDURE SaveBoard(idx: INTEGER);
+VAR i: INTEGER;
+BEGIN
+  FOR i := 0 TO 159 DO boardHistory[idx][i] := board[i] END
+END SaveBoard;
+
+PROCEDURE RestoreBoard(idx: INTEGER);
+VAR i: INTEGER;
+BEGIN
+  FOR i := 0 TO 159 DO board[i] := boardHistory[idx][i] END
+END RestoreBoard;
+
+(* ══════════════════════════════════════════════════════════════════ *)
 (*  Helpers                                                            *)
 (* ══════════════════════════════════════════════════════════════════ *)
 
@@ -662,7 +681,7 @@ PROCEDURE DrawBoardScreen;
 VAR r, c, sq, piece, bg, fg, sx, sy, kingPos: INTEGER; ch: CHAR; inCheck: BOOLEAN;
 BEGIN
   TUI.ClearBack(TUI.White, TUI.Black);
-  TUI.PutStr(1, 0, "Xiangqi  [Tab=Move list]  [Ctrl-Q=Quit]", TUI.Yellow, TUI.Black);
+  TUI.PutStr(1, 0, "Xiangqi  [Tab=list] [u=Undo] [s=Suggest] [Ctrl-Q=Quit]", TUI.Yellow, TUI.Black);
   TUI.PutStr(1, 1, "Red=bottom(rows 5-9)  River between rows 4/5", TUI.Cyan, TUI.Black);
 
   FOR r := 0 TO 9 DO
@@ -685,6 +704,8 @@ BEGIN
       IF (c = curCol) & (r = curRow) THEN bg := CURSOR_BG;   fg := TUI.Black
       ELSIF sq = selSquare            THEN bg := SEL_BG;      fg := TUI.Black
       ELSIF inCheck & (sq = kingPos)  THEN bg := TUI.Magenta; fg := TUI.White
+      ELSIF sq = suggestFrom           THEN bg := TUI.Green;    fg := TUI.Black
+      ELSIF sq = suggestTo             THEN bg := TUI.Orange;   fg := TUI.Black
       ELSIF r < 5                     THEN bg := BLACK_BG;    fg := TUI.White
       ELSE                                 bg := RED_BG;      fg := TUI.Black
       END;
@@ -697,7 +718,7 @@ BEGIN
   END;
 
   IF gameOver THEN
-    TUI.PutStr(1, TUI.Rows-1, "Game over. Press Ctrl-Q to quit.        ", TUI.Red,     TUI.Black)
+    TUI.PutStr(1, TUI.Rows-1, "Game over. Press u to undo or Ctrl-Q to quit.  ", TUI.Red,     TUI.Black)
   ELSIF inCheck & (selSquare >= 0) THEN
     TUI.PutStr(1, TUI.Rows-1, "CHECK! Select destination (Enter/click).", TUI.Magenta, TUI.Black)
   ELSIF inCheck THEN
@@ -720,7 +741,7 @@ BEGIN
   IF listTop < 0      THEN listTop := 0      END;
 
   TUI.ClearBack(TUI.White, TUI.Black);
-  TUI.PutStr(1, 0, "Xiangqi  [Tab=Board view]  [Ctrl-Q=Quit]", TUI.Yellow, TUI.Black);
+  TUI.PutStr(1, 0, "Xiangqi  [Tab=Board view]  [u=Undo]  [Ctrl-Q=Quit]", TUI.Yellow, TUI.Black);
   TUI.PutStr(1, 1, "#    Your move  Computer", TUI.Cyan, TUI.Black);
 
   i := listTop;
@@ -741,7 +762,7 @@ BEGIN
   TUI.SetCursor(6 + inputLen, promptY);
 
   IF gameOver THEN
-    TUI.PutStr(1, TUI.Rows-1, "Game over. Press Ctrl-Q to quit.       ", TUI.Red, TUI.Black)
+    TUI.PutStr(1, TUI.Rows-1, "Game over. Press u to undo or Ctrl-Q to quit. ", TUI.Red, TUI.Black)
   ELSIF moveCount > maxVis THEN
     TUI.PutStr(1, TUI.Rows-1, "Up/Dn/PgUp/PgDn=scroll  End=latest    ", TUI.White, TUI.Black)
   ELSE
@@ -777,6 +798,8 @@ END DoComputerMove;
 PROCEDURE TryHumanMove(from, to: INTEGER): BOOLEAN;
 VAR s: MoveStr;
 BEGIN
+  IF moveCount < MAXMOVES THEN SaveBoard(moveCount) END;
+  suggestFrom := -1; suggestTo := -1;
   IF ApplyMove(from, to, humanSide) THEN
     MoveToStr(from, to, s);
     IF moveCount < MAXMOVES THEN
@@ -795,6 +818,24 @@ END TryHumanMove;
 (*  Event handlers                                                     *)
 (* ══════════════════════════════════════════════════════════════════ *)
 
+PROCEDURE HandleUndo;
+BEGIN
+  IF moveCount > 0 THEN
+    DEC(moveCount);
+    RestoreBoard(moveCount);
+    gameOver := FALSE;
+    selSquare := -1;
+    suggestFrom := -1; suggestTo := -1
+  END
+END HandleUndo;
+
+PROCEDURE HandleSuggest;
+BEGIN
+  TUI.PutStr(1, TUI.Rows-1, "Thinking of suggestion...               ", TUI.Yellow, TUI.Black);
+  TUI.Flush;
+  GetComputerMove(humanSide, suggestFrom, suggestTo)
+END HandleSuggest;
+
 PROCEDURE HandleBoardKey(key: CHAR);
 VAR sq, from, to: INTEGER;
 BEGIN
@@ -802,6 +843,7 @@ BEGIN
   ELSIF key = TUI.KDown  THEN IF curRow < 9 THEN INC(curRow) END
   ELSIF key = TUI.KLeft  THEN IF curCol > 0 THEN DEC(curCol) END
   ELSIF key = TUI.KRight THEN IF curCol < 8 THEN INC(curCol) END
+  ELSIF key = "s" THEN HandleSuggest
   ELSIF key = TUI.KEnter THEN
     sq := curRow * 16 + curCol;
     IF selSquare < 0 THEN
@@ -921,6 +963,7 @@ BEGIN
   moveCount := 0; listTop := 0;
   curCol    := 4; curRow  := 9;
   selSquare := -1;
+  suggestFrom := -1; suggestTo := -1;
   inputLen  := 0; inputBuf[0] := 0X;
 
   IF compSide = SIDE THEN DoComputerMove END;
@@ -933,10 +976,12 @@ BEGIN
       IF ev.key = TUI.KTab THEN
         IF screen = BOARD THEN screen := LIST; listTop := MAXMOVES
         ELSE screen := BOARD END
+      ELSIF ev.key = "u" THEN
+        HandleUndo
       ELSIF ~gameOver THEN
         IF screen = BOARD THEN HandleBoardKey(ev.key) END
       END;
-      IF (screen = LIST) & (ev.key # TUI.KTab) THEN HandleListKey(ev.key) END;
+      IF (screen = LIST) & (ev.key # TUI.KTab) & (ev.key # "u") THEN HandleListKey(ev.key) END;
       DrawScreen
     ELSIF ev.kind = TUI.EvMouse THEN
       IF (screen = BOARD) & ~gameOver THEN HandleBoardMouse(ev.mx, ev.my, ev.mb) END;

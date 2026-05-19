@@ -108,6 +108,10 @@ CONST
 CONST
   Black*   = 0;  Red*     = 1;  Green*  = 2;  Yellow* = 3;
   Blue*    = 4;  Magenta* = 5;  Cyan*   = 6;  White*  = 7;
+  (* Bright variants (values 8–15): use ANSI 90–97 / 100–107 *)
+  BrightBlack*   = 8;   BrightRed*     = 9;   BrightGreen*  = 10;
+  Orange*        = 11;  BrightBlue*    = 12;  BrightMagenta* = 13;
+  BrightCyan*    = 14;  BrightWhite*   = 15;
 
 (* ── Box-drawing pseudo-characters stored in Cell.ch ───────────────────── *)
 (* Flush maps these byte values to multi-byte UTF-8 sequences.             *)
@@ -198,13 +202,13 @@ BEGIN
   END
 END EmitBoxChar;
 
-(* Emit ANSI 16-color sequence: ESC [ 3fg ; 4bg m *)
+(* Emit ANSI 16-color sequence; values 0-7 use normal codes, 8-15 use bright *)
 PROCEDURE SetColor(fg, bg: INTEGER);
 BEGIN
   Out.Char(01BX); Out.Char('[');
-  Out.Int(30 + (fg MOD 8), 0);
+  IF fg >= 8 THEN Out.Int(90 + (fg - 8), 0) ELSE Out.Int(30 + fg, 0) END;
   Out.Char(';');
-  Out.Int(40 + (bg MOD 8), 0);
+  IF bg >= 8 THEN Out.Int(100 + (bg - 8), 0) ELSE Out.Int(40 + bg, 0) END;
   Out.Char('m')
 END SetColor;
 
