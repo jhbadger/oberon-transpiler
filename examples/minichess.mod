@@ -41,6 +41,8 @@ CONST
 
   MAXMOVES = 200;
 
+  GARDNER = 0;  BABY = 1;  HP41 = 2;
+
 TYPE
   MoveStr = ARRAY 10 OF CHAR;
 
@@ -70,8 +72,9 @@ VAR
 
   ev: TUI.Event;
 
-  boardHistory         : ARRAY MAXMOVES OF ARRAY 128 OF INTEGER;
+  boardHistory           : ARRAY MAXMOVES OF ARRAY 128 OF INTEGER;
   suggestFrom, suggestTo : INTEGER;
+  variant                : INTEGER;
 
 (* ══════════════════════════════════════════════════════════════════ *)
 (*  Chess engine                                                       *)
@@ -166,19 +169,26 @@ BEGIN
 END InCheck;
 
 PROCEDURE InitBoard;
-VAR i: INTEGER; rank: ARRAY 5 OF INTEGER;
+VAR i: INTEGER; wRank, bRank: ARRAY 5 OF INTEGER;
 BEGIN
-  (* 5x5: RNBQK *)
-  rank[0] := ROOK; rank[1] := KNIGHT; rank[2] := BISHOP;
-  rank[3] := QUEEN; rank[4] := KING;
+  IF variant = BABY THEN
+    wRank[0]:=ROOK;  wRank[1]:=KNIGHT; wRank[2]:=BISHOP; wRank[3]:=QUEEN; wRank[4]:=KING;
+    bRank[0]:=KING;  bRank[1]:=QUEEN;  bRank[2]:=BISHOP; bRank[3]:=KNIGHT; bRank[4]:=ROOK;
+  ELSIF variant = HP41 THEN
+    wRank[0]:=KING;  wRank[1]:=QUEEN;  wRank[2]:=BISHOP; wRank[3]:=KNIGHT; wRank[4]:=ROOK;
+    bRank[0]:=KING;  bRank[1]:=QUEEN;  bRank[2]:=BISHOP; bRank[3]:=KNIGHT; bRank[4]:=ROOK;
+  ELSE (* Gardner *)
+    wRank[0]:=ROOK;  wRank[1]:=KNIGHT; wRank[2]:=BISHOP; wRank[3]:=QUEEN; wRank[4]:=KING;
+    bRank[0]:=ROOK;  bRank[1]:=KNIGHT; bRank[2]:=BISHOP; bRank[3]:=QUEEN; bRank[4]:=KING;
+  END;
   FOR i := 0 TO 127 DO
     IF ~IsOnBoard(i) THEN board[i] := FRONTIER ELSE board[i] := EMPTY END
   END;
   FOR i := 0 TO 4 DO
-    board[i]      := rank[i];          (* black back rank, row 0 = rank 5 *)
-    board[i + 16] := PAWN;             (* black pawns,     row 1 = rank 4 *)
-    board[i + 48] := PAWN + SIDE;      (* white pawns,     row 3 = rank 2 *)
-    board[i + 64] := rank[i] + SIDE;   (* white back rank, row 4 = rank 1 *)
+    board[i]      := bRank[i];          (* black back rank, row 0 = rank 5 *)
+    board[i + 16] := PAWN;              (* black pawns,     row 1 = rank 4 *)
+    board[i + 48] := PAWN + SIDE;       (* white pawns,     row 3 = rank 2 *)
+    board[i + 64] := wRank[i] + SIDE;   (* white back rank, row 4 = rank 1 *)
   END;
 END InitBoard;
 
@@ -384,7 +394,13 @@ PROCEDURE DrawBoardScreen;
 VAR r, c, sq, piece, bg, fg, sx, sy, kingPos: INTEGER; ch: CHAR; inCheck: BOOLEAN;
 BEGIN
   TUI.ClearBack(TUI.White, TUI.Black);
-  TUI.PutStr(1, 0, "Gardner's Minichess  [Tab=list] [u=Undo] [s=Suggest] [Ctrl-Q=Quit]", TUI.Yellow, TUI.Black);
+  IF variant = BABY THEN
+    TUI.PutStr(1, 0, "Baby Chess (5x5)     [Tab=list] [u=Undo] [s=Suggest] [Ctrl-Q=Quit]", TUI.Yellow, TUI.Black)
+  ELSIF variant = HP41 THEN
+    TUI.PutStr(1, 0, "HP-41 Minichess      [Tab=list] [u=Undo] [s=Suggest] [Ctrl-Q=Quit]", TUI.Yellow, TUI.Black)
+  ELSE
+    TUI.PutStr(1, 0, "Gardner's Minichess  [Tab=list] [u=Undo] [s=Suggest] [Ctrl-Q=Quit]", TUI.Yellow, TUI.Black)
+  END;
 
   FOR r := 0 TO 4 DO
     ch := CHR(ORD("5") - r);
@@ -444,7 +460,13 @@ BEGIN
   IF listTop < 0     THEN listTop := 0      END;
 
   TUI.ClearBack(TUI.White, TUI.Black);
-  TUI.PutStr(1, 0, "Gardner's Minichess  [Tab=Board view]  [u=Undo]  [Ctrl-Q=Quit]", TUI.Yellow, TUI.Black);
+  IF variant = BABY THEN
+    TUI.PutStr(1, 0, "Baby Chess (5x5)     [Tab=Board view]  [u=Undo]  [Ctrl-Q=Quit]", TUI.Yellow, TUI.Black)
+  ELSIF variant = HP41 THEN
+    TUI.PutStr(1, 0, "HP-41 Minichess      [Tab=Board view]  [u=Undo]  [Ctrl-Q=Quit]", TUI.Yellow, TUI.Black)
+  ELSE
+    TUI.PutStr(1, 0, "Gardner's Minichess  [Tab=Board view]  [u=Undo]  [Ctrl-Q=Quit]", TUI.Yellow, TUI.Black)
+  END;
   TUI.PutStr(1, 1, "#    Your move  Computer", TUI.Cyan, TUI.Black);
 
   i := listTop;
@@ -632,11 +654,39 @@ END HandleListKey;
 (*  Startup                                                            *)
 (* ══════════════════════════════════════════════════════════════════ *)
 
+PROCEDURE ChooseVariant;
+VAR ev2: TUI.Event;
+BEGIN
+  TUI.ClearBack(TUI.White, TUI.Black);
+  TUI.PutStr(4, 3, "5x5 Minichess — choose variant",           TUI.Yellow, TUI.Black);
+  TUI.PutStr(4, 5, "G  Gardner's Minichess  (RNBQK vs RNBQK)", TUI.White,  TUI.Black);
+  TUI.PutStr(4, 6, "B  Baby Chess           (RNBQK vs KQBNR)", TUI.White,  TUI.Black);
+  TUI.PutStr(4, 7, "H  HP-41 Minichess      (KQBNR vs KQBNR)", TUI.White,  TUI.Black);
+  TUI.Flush;
+  variant := GARDNER;
+  LOOP
+    TUI.WaitEvent(ev2);
+    IF ev2.kind = TUI.EvKey THEN
+      IF    (ev2.key = "g") OR (ev2.key = "G") THEN variant := GARDNER; EXIT
+      ELSIF (ev2.key = "b") OR (ev2.key = "B") THEN variant := BABY;    EXIT
+      ELSIF (ev2.key = "h") OR (ev2.key = "H") THEN variant := HP41;    EXIT
+      ELSIF ev2.key = 17 THEN TUI.Done; HALT(0)
+      END
+    END
+  END
+END ChooseVariant;
+
 PROCEDURE ChooseSide;
 VAR ev2: TUI.Event;
 BEGIN
   TUI.ClearBack(TUI.White, TUI.Black);
-  TUI.PutStr(4, 4,  "Gardner's Minichess (5x5) — choose your side", TUI.Yellow, TUI.Black);
+  IF variant = BABY THEN
+    TUI.PutStr(4, 4, "Baby Chess (5x5) — choose your side",      TUI.Yellow, TUI.Black)
+  ELSIF variant = HP41 THEN
+    TUI.PutStr(4, 4, "HP-41 Minichess (5x5) — choose your side", TUI.Yellow, TUI.Black)
+  ELSE
+    TUI.PutStr(4, 4, "Gardner's Minichess (5x5) — choose your side", TUI.Yellow, TUI.Black)
+  END;
   TUI.PutStr(4, 6,  "W  Play White (you move first)",        TUI.White, TUI.Black);
   TUI.PutStr(4, 7,  "B  Play Black (computer moves first)",  TUI.White, TUI.Black);
   TUI.PutStr(4, 9,  "Search depth  1=easy  3=medium  5=hard", TUI.Cyan, TUI.Black);
@@ -667,6 +717,7 @@ PROCEDURE Play;
 BEGIN
   TUI.Init;
   TUI.UpdateSize;
+  ChooseVariant;
   InitBoard;
   ChooseSide;
 
