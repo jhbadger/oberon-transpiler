@@ -401,7 +401,7 @@ BEGIN
       ELSIF sq = selSquare             THEN bg := SEL_BG;       fg := TUI.Black
       ELSIF inCheck & (sq = kingPos)   THEN bg := TUI.Magenta;  fg := TUI.White
       ELSIF sq = suggestFrom           THEN bg := TUI.Green;    fg := TUI.Black
-      ELSIF sq = suggestTo             THEN bg := TUI.Orange;   fg := TUI.Black
+      ELSIF sq = suggestTo             THEN bg := TUI.Red;     fg := TUI.White
       ELSIF (r + c) MOD 2 = 0         THEN bg := LIGHT_BG;     fg := TUI.Black
       ELSE                                  bg := DARK_BG;      fg := TUI.White
       END;

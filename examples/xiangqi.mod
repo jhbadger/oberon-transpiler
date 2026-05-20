@@ -705,7 +705,7 @@ BEGIN
       ELSIF sq = selSquare            THEN bg := SEL_BG;      fg := TUI.Black
       ELSIF inCheck & (sq = kingPos)  THEN bg := TUI.Magenta; fg := TUI.White
       ELSIF sq = suggestFrom           THEN bg := TUI.Green;    fg := TUI.Black
-      ELSIF sq = suggestTo             THEN bg := TUI.Orange;   fg := TUI.Black
+      ELSIF sq = suggestTo             THEN bg := TUI.Red;     fg := TUI.White
       ELSIF r < 5                     THEN bg := BLACK_BG;    fg := TUI.White
       ELSE                                 bg := RED_BG;      fg := TUI.Black
       END;
