@@ -53,6 +53,7 @@ VAR
   screen              : INTEGER;
   humanSide, compSide : INTEGER;
   gameOver            : BOOLEAN;
+  gameResult          : INTEGER;  (* 0=ongoing 1=comp wins 2=stalemate 3=human wins *)
 
   humanMoves : ARRAY MAXMOVES OF MoveStr;
   compMoves  : ARRAY MAXMOVES OF MoveStr;
@@ -305,6 +306,15 @@ BEGIN
   score := Evaluate(side, maxDepth, -2000, 2000, from, to);
 END GetComputerMove;
 
+PROCEDURE HasLegalMoves(side: INTEGER): BOOLEAN;
+VAR f, t, score, savedDepth: INTEGER;
+BEGIN
+  f := -1; t := -1; savedDepth := maxDepth; maxDepth := 1;
+  score := Evaluate(side, 1, -2000, 2000, f, t);
+  maxDepth := savedDepth;
+  RETURN f >= 0
+END HasLegalMoves;
+
 (* ══════════════════════════════════════════════════════════════════ *)
 (*  Board history (undo)                                              *)
 (* ══════════════════════════════════════════════════════════════════ *)
@@ -414,7 +424,15 @@ BEGIN
   END;
 
   IF gameOver THEN
-    TUI.PutStr(1, TUI.Rows-1, "Game over. Press u to undo or Ctrl-Q to quit.", TUI.Red,     TUI.Black);
+    IF gameResult = 1 THEN
+      TUI.PutStr(1, TUI.Rows-1, "Checkmate! Computer wins.  u=Undo  Ctrl-Q=Quit", TUI.Red,    TUI.Black)
+    ELSIF gameResult = 2 THEN
+      TUI.PutStr(1, TUI.Rows-1, "Stalemate! Draw.  u=Undo  Ctrl-Q=Quit         ", TUI.Yellow, TUI.Black)
+    ELSIF gameResult = 3 THEN
+      TUI.PutStr(1, TUI.Rows-1, "Checkmate! You win!  u=Undo  Ctrl-Q=Quit      ", TUI.Green,  TUI.Black)
+    ELSE
+      TUI.PutStr(1, TUI.Rows-1, "Game over.  u=Undo  Ctrl-Q=Quit               ", TUI.Red,    TUI.Black)
+    END;
   ELSIF inCheck & (selSquare >= 0) THEN
     TUI.PutStr(1, TUI.Rows-1, "CHECK! Select destination (Enter/click).", TUI.Magenta, TUI.Black);
   ELSIF inCheck THEN
@@ -459,7 +477,15 @@ BEGIN
   TUI.SetCursor(6 + inputLen, promptY);
 
   IF gameOver THEN
-    TUI.PutStr(1, TUI.Rows-1, "Game over. Press u to undo or Ctrl-Q to quit.", TUI.Red, TUI.Black);
+    IF gameResult = 1 THEN
+      TUI.PutStr(1, TUI.Rows-1, "Checkmate! Computer wins.  u=Undo  Ctrl-Q=Quit", TUI.Red,    TUI.Black)
+    ELSIF gameResult = 2 THEN
+      TUI.PutStr(1, TUI.Rows-1, "Stalemate! Draw.  u=Undo  Ctrl-Q=Quit         ", TUI.Yellow, TUI.Black)
+    ELSIF gameResult = 3 THEN
+      TUI.PutStr(1, TUI.Rows-1, "Checkmate! You win!  u=Undo  Ctrl-Q=Quit      ", TUI.Green,  TUI.Black)
+    ELSE
+      TUI.PutStr(1, TUI.Rows-1, "Game over.  u=Undo  Ctrl-Q=Quit               ", TUI.Red,    TUI.Black)
+    END;
   ELSIF moveCount > maxVis THEN
     TUI.PutStr(1, TUI.Rows-1, "Up/Dn/PgUp/PgDn=scroll  End=latest   ", TUI.White, TUI.Black);
   ELSE
@@ -483,10 +509,17 @@ BEGIN
   TUI.PutStr(1, TUI.Rows-1, "Computer is thinking...             ", TUI.Yellow, TUI.Black);
   TUI.Flush;
   GetComputerMove(compSide, bf, bt);
-  IF ~IsOnBoard(bf) OR ~IsOnBoard(bt) THEN gameOver := TRUE; RETURN END;
+  IF ~IsOnBoard(bf) OR ~IsOnBoard(bt) THEN
+    IF InCheck(compSide) THEN gameResult := 3 ELSE gameResult := 2 END;
+    gameOver := TRUE; RETURN
+  END;
   IF ApplyMove(bf, bt, compSide, promoted) THEN
     IF moveCount > 0 THEN MoveToStr(bf, bt, compMoves[moveCount - 1]) END;
-    IF ~KingFound(humanSide) THEN gameOver := TRUE END;
+    IF ~KingFound(humanSide) THEN gameResult := 1; gameOver := TRUE; RETURN END;
+    IF ~HasLegalMoves(humanSide) THEN
+      IF InCheck(humanSide) THEN gameResult := 1 ELSE gameResult := 2 END;
+      gameOver := TRUE
+    END
   ELSE
     gameOver := TRUE
   END
@@ -505,7 +538,7 @@ BEGIN
       compMoves[moveCount][0] := 0X;
       INC(moveCount);
     END;
-    IF ~KingFound(compSide) THEN gameOver := TRUE; RETURN TRUE END;
+    IF ~KingFound(compSide) THEN gameResult := 3; gameOver := TRUE; RETURN TRUE END;
     DoComputerMove;
     RETURN TRUE
   END;
@@ -522,6 +555,7 @@ BEGIN
     DEC(moveCount);
     RestoreBoard(moveCount);
     gameOver := FALSE;
+    gameResult := 0;
     selSquare := -1;
     suggestFrom := -1; suggestTo := -1
   END
@@ -660,9 +694,10 @@ BEGIN
   InitBoard;
   ChooseSide;
 
-  screen    := BOARD;
-  gameOver  := FALSE;
-  moveCount := 0; listTop := 0;
+  screen     := BOARD;
+  gameOver   := FALSE;
+  gameResult := 0;
+  moveCount  := 0; listTop := 0;
   curCol    := 0; curRow    := 0;
   selSquare := -1;
   suggestFrom := -1; suggestTo := -1;
