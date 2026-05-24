@@ -1,5 +1,5 @@
 CC       = gcc
-CFLAGS   = -Wall -O -std=c99
+CFLAGS   = -Wall -O --std=gnu99
 PREFIX   = $(HOME)
 
 OBC_SRCS = obc.c codegen.c parser.c lexer.c
