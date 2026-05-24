@@ -8,7 +8,8 @@ MODULE ChessAttack;
  *   • No king-side castling (king sits on e-file, only one rook)
  *
  * Board layout (files a–e, ranks 1–6):
- *   Rank 6: Rook Knight Bishop Queen King  (black)
+ *   Rank 6: Rook Knight Bishop Queen King  (black, standard)
+ *        or King Queen Bishop Knight Rook  (black, mirrored — press M at setup)
  *   Rank 5: Pawn ×5
  *   Rank 4: empty
  *   Rank 3: empty
@@ -50,6 +51,7 @@ VAR
   board       : ARRAY 128 OF INTEGER;
   pieceValues : ARRAY 7  OF INTEGER;
   maxDepth    : INTEGER;
+  mirrored    : BOOLEAN;
 
   rookVec, bishopVec: ARRAY 4 OF INTEGER;
   knightVec         : ARRAY 8 OF INTEGER;
@@ -187,7 +189,9 @@ BEGIN
     IF ~IsOnBoard(i) THEN board[i] := FRONTIER ELSE board[i] := EMPTY END
   END;
   FOR i := 0 TO 4 DO
-    board[i]      := rank[i];        (* black back rank, row 0 = rank 6 *)
+    IF mirrored THEN board[i] := rank[4 - i]  (* black: KQBNR *)
+    ELSE             board[i] := rank[i]       (* black: RNBQK *)
+    END;
     board[i + 16] := PAWN;           (* black pawns,     row 1 = rank 5 *)
     board[i + 64] := PAWN + SIDE;    (* white pawns,     row 4 = rank 2 *)
     board[i + 80] := rank[i] + SIDE; (* white back rank, row 5 = rank 1 *)
@@ -196,7 +200,7 @@ BEGIN
 END InitBoard;
 
 PROCEDURE ApplyMove(from, to, side: INTEGER; VAR promoted: BOOLEAN): BOOLEAN;
-VAR movingP, savedTarget, epCapPos, oppSide: INTEGER; isEP, isCastle: BOOLEAN;
+VAR movingP, savedTarget, epCapPos, oppSide, passThru: INTEGER; isEP, isCastle: BOOLEAN;
 BEGIN
   promoted := FALSE;
   IF ~IsOnBoard(from) OR ~IsOnBoard(to) THEN RETURN FALSE END;
@@ -230,7 +234,8 @@ BEGIN
   END;
 
   isEP     := (movingP MOD 8 = PAWN) & (to = epSquare);
-  isCastle := (movingP MOD 8 = KING) & (to - from = -2);
+  isCastle := (movingP MOD 8 = KING) &
+              ((to - from = -2) OR (mirrored & (side = 0) & (to - from = 2)));
 
   IF isCastle THEN
     IF side = SIDE THEN
@@ -239,8 +244,14 @@ BEGIN
       IF castleRights MOD 4 < 2 THEN RETURN FALSE END;
     END;
     (* squares between king and rook must be empty *)
-    IF (board[from-1] # EMPTY) OR (board[from-2] # EMPTY) OR (board[from-3] # EMPTY) THEN
-      RETURN FALSE
+    IF mirrored & (side = 0) THEN
+      IF (board[from+1] # EMPTY) OR (board[from+2] # EMPTY) OR (board[from+3] # EMPTY) THEN
+        RETURN FALSE
+      END
+    ELSE
+      IF (board[from-1] # EMPTY) OR (board[from-2] # EMPTY) OR (board[from-3] # EMPTY) THEN
+        RETURN FALSE
+      END
     END;
     IF InCheck(side) THEN RETURN FALSE END; (* can't castle from check *)
   END;
@@ -253,20 +264,34 @@ BEGIN
     board[epCapPos] := EMPTY;
   END;
   IF isCastle THEN
-    (* queen-side: rook slides from a-file (to-2) to d-file (to+1) *)
-    board[to + 1] := board[to - 2]; board[to - 2] := EMPTY;
+    IF mirrored & (side = 0) THEN
+      board[to + 1] := board[to + 2]; board[to + 2] := EMPTY;
+    ELSE
+      (* queen-side: rook slides from a-file (to-2) to d-file (to+1) *)
+      board[to + 1] := board[to - 2]; board[to - 2] := EMPTY;
+    END;
   END;
 
   IF InCheck(side) THEN
     board[from] := movingP; board[to] := savedTarget;
     IF epCapPos >= 0 THEN board[epCapPos] := PAWN + oppSide END;
-    IF isCastle THEN board[to - 2] := board[to + 1]; board[to + 1] := EMPTY END;
+    IF isCastle THEN
+      IF mirrored & (side = 0) THEN
+        board[to + 2] := board[to + 1]; board[to + 1] := EMPTY
+      ELSE
+        board[to - 2] := board[to + 1]; board[to + 1] := EMPTY
+      END
+    END;
     RETURN FALSE
   END;
-  IF isCastle & IsAttacked(to + 1, oppSide) THEN
-    (* king passed through an attacked square (d-file) *)
+  IF mirrored & (side = 0) THEN passThru := to - 1 ELSE passThru := to + 1 END;
+  IF isCastle & IsAttacked(passThru, oppSide) THEN
     board[from] := movingP; board[to] := savedTarget;
-    board[to - 2] := board[to + 1]; board[to + 1] := EMPTY;
+    IF mirrored & (side = 0) THEN
+      board[to + 2] := board[to + 1]; board[to + 1] := EMPTY;
+    ELSE
+      board[to - 2] := board[to + 1]; board[to + 1] := EMPTY;
+    END;
     RETURN FALSE
   END;
 
@@ -286,10 +311,12 @@ BEGIN
   ELSIF side = SIDE THEN
     IF from = 80 THEN ClearCastle(1) END
   ELSE
-    IF from = 0 THEN ClearCastle(2) END
+    IF from = 0 THEN ClearCastle(2) END;
+    IF mirrored & (from = 4) THEN ClearCastle(2) END;
   END;
   IF to = 80 THEN ClearCastle(1) END;
   IF to = 0  THEN ClearCastle(2) END;
+  IF mirrored & (to = 4) THEN ClearCastle(2) END;
 
   RETURN TRUE
 END ApplyMove;
@@ -370,6 +397,7 @@ BEGIN
             END;
             IF target = 80 THEN ClearCastle(1) END;
             IF target = 0  THEN ClearCastle(2) END;
+            IF mirrored & (target = 4) THEN ClearCastle(2) END;
             IF ~InCheck(turn) THEN
               IF isEP THEN captureValue := pieceValues[epCapturedPiece MOD 8]
               ELSE captureValue := pieceValues[captured MOD 8] END;
@@ -424,27 +452,53 @@ BEGIN
             END;
           END;
         ELSE
-          IF (castleRights MOD 4 >= 2) & (f = 4) &
-             (board[3] = EMPTY) & (board[2] = EMPTY) & (board[1] = EMPTY) &
-             ~InCheck(0) THEN
-            board[2] := KING; board[4] := EMPTY;
-            board[3] := ROOK; board[0] := EMPTY;
-            IF ~InCheck(0) THEN
-              savedEP := epSquare; epSquare := -1;
-              savedCastle := castleRights; ClearCastle(2);
-              score := -Evaluate(SIDE, depth - 1, -beta, -alpha, dF, dT);
-              board[4] := KING; board[2] := EMPTY;
-              board[0] := ROOK; board[3] := EMPTY;
-              epSquare := savedEP; castleRights := savedCastle;
-              IF score > bestScore THEN
-                bestScore := score;
-                IF depth = maxDepth THEN bestF := 4; bestT := 2 END;
-                alpha := bestScore;
-                IF alpha >= beta THEN RETURN bestScore END;
+          IF ~mirrored THEN
+            IF (castleRights MOD 4 >= 2) & (f = 4) &
+               (board[3] = EMPTY) & (board[2] = EMPTY) & (board[1] = EMPTY) &
+               ~InCheck(0) THEN
+              board[2] := KING; board[4] := EMPTY;
+              board[3] := ROOK; board[0] := EMPTY;
+              IF ~InCheck(0) THEN
+                savedEP := epSquare; epSquare := -1;
+                savedCastle := castleRights; ClearCastle(2);
+                score := -Evaluate(SIDE, depth - 1, -beta, -alpha, dF, dT);
+                board[4] := KING; board[2] := EMPTY;
+                board[0] := ROOK; board[3] := EMPTY;
+                epSquare := savedEP; castleRights := savedCastle;
+                IF score > bestScore THEN
+                  bestScore := score;
+                  IF depth = maxDepth THEN bestF := 4; bestT := 2 END;
+                  alpha := bestScore;
+                  IF alpha >= beta THEN RETURN bestScore END;
+                END;
+              ELSE
+                board[4] := KING; board[2] := EMPTY;
+                board[0] := ROOK; board[3] := EMPTY;
               END;
-            ELSE
-              board[4] := KING; board[2] := EMPTY;
-              board[0] := ROOK; board[3] := EMPTY;
+            END;
+          ELSE (* mirrored: black king at a6=0, rook at e6=4, castle right to c6=2 *)
+            IF (castleRights MOD 4 >= 2) & (f = 0) &
+               (board[1] = EMPTY) & (board[2] = EMPTY) & (board[3] = EMPTY) &
+               ~InCheck(0) THEN
+              board[2] := KING; board[0] := EMPTY;
+              board[3] := ROOK; board[4] := EMPTY;
+              IF ~InCheck(0) THEN
+                savedEP := epSquare; epSquare := -1;
+                savedCastle := castleRights; ClearCastle(2);
+                score := -Evaluate(SIDE, depth - 1, -beta, -alpha, dF, dT);
+                board[0] := KING; board[2] := EMPTY;
+                board[4] := ROOK; board[3] := EMPTY;
+                epSquare := savedEP; castleRights := savedCastle;
+                IF score > bestScore THEN
+                  bestScore := score;
+                  IF depth = maxDepth THEN bestF := 0; bestT := 2 END;
+                  alpha := bestScore;
+                  IF alpha >= beta THEN RETURN bestScore END;
+                END;
+              ELSE
+                board[0] := KING; board[2] := EMPTY;
+                board[4] := ROOK; board[3] := EMPTY;
+              END;
             END;
           END;
         END;
@@ -459,7 +513,7 @@ PROCEDURE GetComputerMove(side: INTEGER; VAR from, to: INTEGER);
 VAR score: INTEGER;
 BEGIN
   from := -1; to := -1;
-  score := Evaluate(side, maxDepth, -2000, 2000, from, to);
+  score := Evaluate(side, maxDepth, -32000, 2000, from, to);
 END GetComputerMove;
 
 (* ══════════════════════════════════════════════════════════════════ *)
@@ -820,23 +874,31 @@ END HandleListKey;
 PROCEDURE ChooseSide;
 VAR ev2: TUI.Event;
 BEGIN
-  TUI.ClearBack(TUI.White, TUI.Black);
-  TUI.PutStr(4, 4,  "Chess Attack (5x6) — choose your side",  TUI.Yellow, TUI.Black);
-  TUI.PutStr(4, 6,  "W  Play White (you move first)",         TUI.White,  TUI.Black);
-  TUI.PutStr(4, 7,  "B  Play Black (computer moves first)",   TUI.White,  TUI.Black);
-  TUI.PutStr(4, 9,  "Search depth  1=easy  3=medium  5=hard", TUI.Cyan,   TUI.Black);
-  TUI.PutStr(4, 10, "Press 1, 3, or 5 then W or B:",          TUI.White,  TUI.Black);
-  TUI.Flush;
-
   maxDepth  := 3;
   humanSide := SIDE; compSide := 0;
+  mirrored  := FALSE;
 
   LOOP
+    TUI.ClearBack(TUI.White, TUI.Black);
+    TUI.PutStr(4, 4,  "Chess Attack (5x6) — choose your side",  TUI.Yellow, TUI.Black);
+    TUI.PutStr(4, 6,  "W  Play White (you move first)",         TUI.White,  TUI.Black);
+    TUI.PutStr(4, 7,  "B  Play Black (computer moves first)",   TUI.White,  TUI.Black);
+    TUI.PutStr(4, 9,  "Search depth  1=easy  3=medium  5=hard", TUI.Cyan,   TUI.Black);
+    TUI.PutStr(4, 11, "M  Black back rank:  ",                  TUI.Cyan,   TUI.Black);
+    IF mirrored THEN
+      TUI.PutStr(25, 11, "KQBNR (mirrored)  ", TUI.Yellow, TUI.Black)
+    ELSE
+      TUI.PutStr(25, 11, "RNBQK (standard)  ", TUI.White,  TUI.Black)
+    END;
+    TUI.PutStr(4, 13, "Press 1, 3, or 5 then W or B:",          TUI.White,  TUI.Black);
+    TUI.Flush;
+
     TUI.WaitEvent(ev2);
     IF ev2.kind = TUI.EvKey THEN
       IF    ev2.key = "1" THEN maxDepth := 1
       ELSIF ev2.key = "3" THEN maxDepth := 3
       ELSIF ev2.key = "5" THEN maxDepth := 5
+      ELSIF (ev2.key = "m") OR (ev2.key = "M") THEN mirrored := ~mirrored
       ELSIF (ev2.key = "w") OR (ev2.key = "W") THEN
         humanSide := SIDE; compSide := 0; EXIT
       ELSIF (ev2.key = "b") OR (ev2.key = "B") THEN
@@ -852,8 +914,8 @@ PROCEDURE Play;
 BEGIN
   TUI.Init;
   TUI.UpdateSize;
-  InitBoard;
   ChooseSide;
+  InitBoard;
 
   screen     := BOARD;
   gameOver   := FALSE;

@@ -606,7 +606,7 @@ PROCEDURE GetComputerMove(side: INTEGER; VAR from, to: INTEGER);
 VAR score: INTEGER;
 BEGIN
   from := -1; to := -1;
-  score := Evaluate(side, maxDepth, -2000, 2000, from, to)
+  score := Evaluate(side, maxDepth, -32000, 2000, from, to)
 END GetComputerMove;
 
 PROCEDURE HasLegalMoves(side: INTEGER): BOOLEAN;
