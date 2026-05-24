@@ -206,9 +206,13 @@ END EmitBoxChar;
 PROCEDURE SetColor(fg, bg: INTEGER);
 BEGIN
   Out.Char(01BX); Out.Char('[');
-  IF fg >= 8 THEN Out.Int(90 + (fg - 8), 0) ELSE Out.Int(30 + fg, 0) END;
+  IF    fg >= 16 THEN Out.String("38;5;"); Out.Int(fg, 0)
+  ELSIF fg >= 8  THEN Out.Int(90 + (fg - 8), 0)
+  ELSE                Out.Int(30 + fg, 0) END;
   Out.Char(';');
-  IF bg >= 8 THEN Out.Int(100 + (bg - 8), 0) ELSE Out.Int(40 + bg, 0) END;
+  IF    bg >= 16 THEN Out.String("48;5;"); Out.Int(bg, 0)
+  ELSIF bg >= 8  THEN Out.Int(100 + (bg - 8), 0)
+  ELSE                Out.Int(40 + bg, 0) END;
   Out.Char('m')
 END SetColor;
 

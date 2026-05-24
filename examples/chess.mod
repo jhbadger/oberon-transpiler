@@ -34,10 +34,10 @@ CONST
   BOARDX = 6;  BOARDY = 2;
   CELLW  = 4;  CELLH  = 2;
 
-  LIGHT_BG  = 3;   (* TUI.Yellow *)
-  DARK_BG   = 4;   (* TUI.Blue   *)
-  SEL_BG    = 2;   (* TUI.Green  *)
-  CURSOR_BG = 6;   (* TUI.Cyan   *)
+  LIGHT_BG    = 3;   (* TUI.Yellow      *)
+  DARK_BG     = 4;   (* TUI.Blue        *)
+  SEL_BG      = 2;   (* TUI.Green       *)
+  CURSOR_BG   = 6;   (* TUI.Cyan        *)
 
   MAXMOVES = 200;
 
@@ -537,8 +537,8 @@ END ParseAlg;
  *   [  ][c0][c1][  ]   ← top row: shape decorator
  *   [  ][L ][L ][  ]   ← bottom row: piece letter doubled
  *
- * White pieces: TUI.Black fg, UPPERCASE letter
- * Black pieces: TUI.Red   fg, lowercase  letter
+ * White pieces: xterm-256 color 201 (#FF00FF magenta) fg, UPPERCASE letter
+ * Black pieces: TUI.Black fg, lowercase  letter
  *)
 PROCEDURE DrawPiece(x, y, piece, bg: INTEGER);
 VAR t, pfg: INTEGER; c0, c1, letter: CHAR;
@@ -546,8 +546,8 @@ BEGIN
   t := piece MOD 8;
   IF t = 0 THEN RETURN END;
 
-  IF ((piece DIV SIDE) MOD 2) = 1 THEN pfg := TUI.Black
-  ELSE                                  pfg := TUI.Red
+  IF ((piece DIV SIDE) MOD 2) = 1 THEN pfg := 201
+  ELSE                                  pfg := TUI.Black
   END;
 
   IF    t = PAWN   THEN c0 := "("; c1 := ")"; letter := "P"

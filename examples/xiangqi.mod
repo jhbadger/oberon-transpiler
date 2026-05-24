@@ -667,7 +667,7 @@ VAR t, pfg: INTEGER; c0, c1, letter: CHAR;
 BEGIN
   t := piece MOD 8;
   IF t = 0 THEN RETURN END;
-  IF ((piece DIV SIDE) MOD 2) = 1 THEN pfg := TUI.Red
+  IF ((piece DIV SIDE) MOD 2) = 1 THEN pfg := 196
   ELSE                                  pfg := TUI.Black END;
 
   IF    t = SOLDIER  THEN c0 := "("; c1 := ")"; letter := "S"

@@ -380,8 +380,8 @@ BEGIN
   t := piece MOD 8;
   IF t = 0 THEN RETURN END;
 
-  IF ((piece DIV SIDE) MOD 2) = 1 THEN pfg := TUI.Black
-  ELSE                                  pfg := TUI.Red
+  IF ((piece DIV SIDE) MOD 2) = 1 THEN pfg := 201
+  ELSE                                  pfg := TUI.Black
   END;
 
   IF    t = PAWN   THEN c0 := "("; c1 := ")"; letter := "P"
