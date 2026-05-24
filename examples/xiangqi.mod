@@ -44,7 +44,7 @@ CONST
   CELLW  = 4;  CELLH  = 2;
 
   RED_BG    = 3;
-  BLACK_BG  = 4;
+  BLACK_BG  = 39;  (* xterm-256 #00AFFF blue *)
   SEL_BG    = 2;
   CURSOR_BG = 6;
 

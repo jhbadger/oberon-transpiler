@@ -35,7 +35,7 @@ CONST
   CELLW  = 4;  CELLH  = 2;
 
   LIGHT_BG    = 3;   (* TUI.Yellow      *)
-  DARK_BG     = 4;   (* TUI.Blue        *)
+  DARK_BG     = 39;  (* xterm-256 #00AFFF blue *)
   SEL_BG      = 2;   (* TUI.Green       *)
   CURSOR_BG   = 6;   (* TUI.Cyan        *)
 

@@ -38,7 +38,7 @@ CONST
   CELLW  = 4;  CELLH  = 2;
 
   LIGHT_BG  = 3;
-  DARK_BG   = 4;
+  DARK_BG   = 39;  (* xterm-256 #00AFFF blue *)
   SEL_BG    = 2;
   CURSOR_BG = 6;
 
