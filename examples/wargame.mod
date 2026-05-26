@@ -1112,7 +1112,7 @@ BEGIN
     CASE phase OF
       PH_MOVE:
         TUI.PutStr(1, TUI.Rows - 1,
-          "Arrows=cursor  Enter=select/move  Esc=cancel  N=end move phase",
+          "Arrows=cursor  Enter=select/move  F=face(when selected)  Esc=cancel  N=end",
           TUI.White, TUI.Black)
     | PH_SHOOT:
         IF selUnit < 0 THEN
@@ -1208,6 +1208,22 @@ BEGIN
         AppendLog(logMsg);
         selUnit := -1
       END
+    END
+  ELSIF (key = ORD('f')) OR (key = ORD('F')) THEN
+    IF selUnit >= 0 THEN
+      red.units[selUnit].facing := (red.units[selUnit].facing + 1) MOD 4;
+      red.units[selUnit].moved  := TRUE;
+      COPY("Red ", logMsg);
+      AppendStr(logMsg, unitName[period - 1][red.units[selUnit].utype]);
+      AppendStr(logMsg, " faces ");
+      CASE red.units[selUnit].facing OF
+        NORTH: AppendStr(logMsg, "N")
+      | EAST:  AppendStr(logMsg, "E")
+      | SOUTH: AppendStr(logMsg, "S")
+      | WEST:  AppendStr(logMsg, "W")
+      END;
+      AppendLog(logMsg);
+      selUnit := -1
     END
   ELSIF key = TUI.KEsc THEN
     selUnit := -1
