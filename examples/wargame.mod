@@ -1702,6 +1702,13 @@ PROCEDURE SetupGame;
 VAR rollR, rollB: INTEGER;
     ev2: TUI.Event;
 BEGIN
+  (* Init terrain first so DeployArmy can avoid water cells *)
+  IF scenario = SCEN_1 THEN InitScenario1
+  ELSIF scenario = SCEN_2 THEN InitScenario2
+  ELSIF scenario = SCEN_3 THEN InitScenario3
+  ELSE InitTerrain
+  END;
+
   rollR := Random.Int(6); rollB := Random.Int(6);
   (* Re-roll if identical compositions *)
   WHILE rollR = rollB DO rollB := Random.Int(6) END;
@@ -1721,12 +1728,6 @@ BEGIN
       IF ev2.key = 17 THEN TUI.Done; HALT(0) END;
       EXIT
     END
-  END;
-
-  IF scenario = SCEN_1 THEN InitScenario1
-  ELSIF scenario = SCEN_2 THEN InitScenario2
-  ELSIF scenario = SCEN_3 THEN InitScenario3
-  ELSE InitTerrain
   END;
   ClearLog;
   turn        := 1;
