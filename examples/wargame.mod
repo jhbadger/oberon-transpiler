@@ -1616,12 +1616,11 @@ VAR i: INTEGER;
 BEGIN
   TUI.ClearBack(TUI.White, TUI.Black);
   TUI.PutStr(2, 1, "ONE HOUR WARGAMES — Choose Period", TUI.Yellow, TUI.Black);
-  TUI.PutStr(2, 2, "────────────────────────────────", TUI.White,  TUI.Black);
   FOR i := 0 TO NPER - 1 DO
-    TUI.PutCell(2, 4 + i, CHR(ORD('1') + i), TUI.Cyan, TUI.Black);
-    TUI.PutStr(4, 4 + i, periodName[i], TUI.White, TUI.Black)
+    TUI.PutCell(2, 3 + i, CHR(ORD('1') + i), TUI.Cyan, TUI.Black);
+    TUI.PutStr(4, 3 + i, periodName[i], TUI.White, TUI.Black)
   END;
-  TUI.PutStr(2, 14, "Press 1-9 to select:", TUI.White, TUI.Black);
+  TUI.PutStr(2, 13, "Press 1-9 to select:", TUI.White, TUI.Black);
   TUI.Flush;
   period := 1;
   LOOP
