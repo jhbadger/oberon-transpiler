@@ -50,6 +50,11 @@ CONST
   (* Scenario 2 objective locations *)
   CROSS_COL = 10;  CROSS_ROW = 9;
 
+  (* Info panel in the gap between map (cols 3-26) and sidebar (col 46) *)
+  PANX = 29;   (* MAPX + GRID_W*2 + 2 *)
+  PANY = 4;    (* MAPY + 1 *)
+  PANW = 16;   (* SIDEX - PANX - 1 *)
+
   NPER = 9;
   NO_FIRE = -99;  (* unit type may not fire in this period *)
   NO_H2H  = -99;  (* unit type may not enter hand-to-hand *)
@@ -1082,64 +1087,102 @@ BEGIN
   END
 END DrawLog;
 
+PROCEDURE PutPanel(row: INTEGER; s: ARRAY OF CHAR; fg: INTEGER);
+VAR buf: ARRAY 17 OF CHAR; i: INTEGER;
+BEGIN
+  i := 0;
+  WHILE (i < PANW) & (s[i] # 0X) DO buf[i] := s[i]; INC(i) END;
+  WHILE i < PANW DO buf[i] := ' '; INC(i) END;
+  buf[PANW] := 0X;
+  TUI.PutStr(PANX, row, buf, fg, TUI.Black)
+END PutPanel;
+
 PROCEDURE DrawCursorInfo;
-VAR uSide, uIdx: INTEGER;
+VAR uSide, uIdx, p, ut: INTEGER;
     a: Army;
     u: Unit;
-    s: ARRAY 48 OF CHAR;
+    s: ARRAY 20 OF CHAR;
     n: ARRAY 8 OF CHAR;
-    fg: INTEGER;
-    fch: CHAR;
+    fg, sMod, hMod: INTEGER;
 BEGIN
   UnitAt(curCol, curRow, uSide, uIdx);
 
-  (* Always show cursor coordinates *)
-  IF curCol < 10 THEN
-    s[0] := CHR(ORD('0') + curCol)
-  ELSE
-    s[0] := CHR(ORD('A') + curCol - 10)
-  END;
-  IF curRow < 10 THEN
-    s[1] := CHR(ORD('0') + curRow)
-  ELSE
-    s[1] := CHR(ORD('A') + curRow - 10)
-  END;
-  s[2] := ' '; s[3] := 0X;
-
   IF uSide < 0 THEN
-    AppendStr(s, "(empty)                        ");
-    TUI.PutStr(SIDEX, 1, s, TUI.White, TUI.Black);
+    IF curCol < 10 THEN s[0] := CHR(ORD('0') + curCol)
+    ELSE s[0] := CHR(ORD('A') + curCol - 10)
+    END;
+    IF curRow < 10 THEN s[1] := CHR(ORD('0') + curRow)
+    ELSE s[1] := CHR(ORD('A') + curRow - 10)
+    END;
+    s[2] := ' '; s[3] := 0X;
+    AppendStr(s, "(empty)");
+    PutPanel(PANY,   s, TUI.White);
+    PutPanel(PANY+1, "", TUI.White);
+    PutPanel(PANY+2, "", TUI.White);
+    PutPanel(PANY+3, "", TUI.White);
+    PutPanel(PANY+4, "", TUI.White);
+    PutPanel(PANY+5, "", TUI.White);
     RETURN
   END;
 
-  a := ArmyOf(uSide);
-  u := a.units[uIdx];
-  IF uSide = RED THEN
-    AppendStr(s, "Red  "); fg := TUI.Red
-  ELSE
-    AppendStr(s, "Blue "); fg := TUI.Cyan
-  END;
-  AppendStr(s, unitName[period - 1][u.utype]);
-  AppendStr(s, "  ");
+  p  := period - 1;
+  a  := ArmyOf(uSide);
+  u  := a.units[uIdx];
+  ut := u.utype;
+  IF uSide = RED THEN fg := TUI.Red ELSE fg := TUI.Cyan END;
+
+  (* Row 0: unit name *)
+  COPY(unitName[p][ut], s);
+  PutPanel(PANY, s, fg);
+
+  (* Row 1: side + damage taken + facing *)
+  IF uSide = RED THEN COPY("Red ", s) ELSE COPY("Blu ", s) END;
   IntStr(u.hits, n); AppendStr(s, n);
-  AppendStr(s, "/15 hits");
-
-  (* Facing *)
+  AppendStr(s, "/15dmg ");
   CASE u.facing OF
-    NORTH: fch := 'N' | EAST: fch := 'E'
-  | SOUTH: fch := 'S' | WEST: fch := 'W'
+    NORTH: AppendStr(s, "N") | EAST:  AppendStr(s, "E")
+  | SOUTH: AppendStr(s, "S") | WEST:  AppendStr(s, "W")
   END;
-  AppendStr(s, "  face:");
-  n[0] := fch; n[1] := 0X; AppendStr(s, n);
+  PutPanel(PANY+1, s, fg);
 
-  (* Special states *)
-  IF u.ammoOut  THEN AppendStr(s, " [no ammo]") END;
-  IF u.inSquare THEN AppendStr(s, " [square]")  END;
+  (* Row 2: movement allowance in cells *)
+  COPY("mv: ", s); IntStr(moveAllow[p][ut], n); AppendStr(s, n);
+  PutPanel(PANY+2, s, TUI.White);
 
-  (* Pad to overwrite stale chars *)
-  AppendStr(s, "                ");
+  (* Row 3: shoot modifier + current availability *)
+  sMod := shootMod[p][ut];
+  IF sMod = NO_FIRE THEN
+    COPY("sht: no", s)
+  ELSE
+    COPY("sht: ", s);
+    IF sMod >= 0 THEN AppendStr(s, "+") END;
+    IntStr(sMod, n); AppendStr(s, n);
+    IF u.shot THEN AppendStr(s, " done")
+    ELSIF u.moved & ~canMoveShoot[p][ut] THEN AppendStr(s, " mvd")
+    ELSE AppendStr(s, " ok")
+    END
+  END;
+  PutPanel(PANY+3, s, TUI.White);
 
-  TUI.PutStr(SIDEX, 1, s, fg, TUI.Black)
+  (* Row 4: H2H modifier *)
+  hMod := h2hMod[p][ut];
+  IF hMod = NO_H2H THEN
+    COPY("h2h: no", s)
+  ELSE
+    COPY("h2h: ", s);
+    IF hMod >= 0 THEN AppendStr(s, "+") END;
+    IntStr(hMod, n); AppendStr(s, n)
+  END;
+  PutPanel(PANY+4, s, TUI.White);
+
+  (* Row 5: special flags *)
+  s[0] := 0X;
+  IF u.ammoOut  THEN COPY("ammo!", s) END;
+  IF u.inSquare THEN
+    IF s[0] # 0X THEN AppendStr(s, " ") END;
+    AppendStr(s, "sqr")
+  END;
+  PutPanel(PANY+5, s, TUI.Yellow)
 END DrawCursorInfo;
 
 PROCEDURE DrawStatus;
