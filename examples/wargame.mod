@@ -459,14 +459,22 @@ BEGIN
   IF u.hits > MAX_HITS THEN u.hits := MAX_HITS END
 END AddHits;
 
-(* Terrain cover: returns TRUE if cell gives cover (for future terrain use) *)
-PROCEDURE HasCover(col, row: INTEGER): BOOLEAN;
+(* Shooting cover: woods and towns only (§2 rules) *)
+PROCEDURE HasShotCover(col, row: INTEGER): BOOLEAN;
+VAR t: INTEGER;
+BEGIN
+  t := terrain[row][col];
+  RETURN (t = TERR_WOOD) OR (t = TERR_TOWN)
+END HasShotCover;
+
+(* H2H terrain advantage: woods, towns, hills, river crossings (§3 rules) *)
+PROCEDURE HasH2HAdvantage(col, row: INTEGER): BOOLEAN;
 VAR t: INTEGER;
 BEGIN
   t := terrain[row][col];
   RETURN (t = TERR_WOOD) OR (t = TERR_TOWN) OR (t = TERR_HILL) OR
          (t = TERR_FORD) OR (t = TERR_BRIDGE)
-END HasCover;
+END HasH2HAdvantage;
 
 (* Pike & Shot special H2H reductions *)
 PROCEDURE PikeShotH2HReduction(attUtype, defUtype: INTEGER): BOOLEAN;
@@ -507,8 +515,8 @@ BEGIN
   hits := die + mod;
   IF hits < 0 THEN hits := 0 END;
 
-  (* Cover halves hits (rounds up in shooter's favour) *)
-  IF HasCover(def.col, def.row) THEN hits := (hits + 1) DIV 2 END;
+  (* Woods/town cover halves hits; hills give no cover from shooting *)
+  IF HasShotCover(def.col, def.row) THEN hits := (hits + 1) DIV 2 END;
 
   (* Target's armour halves hits (rounds up in shooter's favour) *)
   IF hasArmour[p][def.utype] THEN hits := (hits + 1) DIV 2 END;
@@ -551,8 +559,8 @@ BEGIN
     hits := (hits + 1) DIV 2
   END;
 
-  (* Terrain advantage halves hits *)
-  IF HasCover(def.col, def.row) THEN hits := (hits + 1) DIV 2 END;
+  (* Hills, woods, towns, river crossings all halve H2H hits *)
+  IF HasH2HAdvantage(def.col, def.row) THEN hits := (hits + 1) DIV 2 END;
 
   (* Armour halves hits *)
   IF hasArmour[p][def.utype] THEN hits := (hits + 1) DIV 2 END;
