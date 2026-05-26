@@ -43,6 +43,12 @@ CONST
   (* Scenario numbers *)
   SCEN_RANDOM = 0;   (* open ground, random army roll *)
   SCEN_1      = 1;   (* Pitched Battle — two hill groups *)
+  SCEN_2      = 2;   (* Crossroads — hill + road junction objective *)
+
+  TERR_ROAD = 8;     (* road: +1 move if entire move stays on road *)
+
+  (* Scenario 2 objective locations *)
+  CROSS_COL = 10;  CROSS_ROW = 9;
 
   NPER = 9;
   NO_FIRE = -99;  (* unit type may not fire in this period *)
@@ -609,6 +615,13 @@ BEGIN
   mv := moveAllow[p][ut];
   srcCol := u.col; srcRow := u.row;
 
+  (* Road movement bonus: +1 cell when moving along a road (same row or col) *)
+  IF (terrain[srcRow][srcCol] = TERR_ROAD) &
+     (terrain[dstRow][dstCol] = TERR_ROAD) &
+     ((srcRow = dstRow) OR (srcCol = dstCol)) THEN
+    INC(mv)
+  END;
+
   IF (dstCol < 0) OR (dstCol >= GRID_W) OR (dstRow < 0) OR (dstRow >= GRID_H) THEN
     RETURN FALSE
   END;
@@ -698,30 +711,73 @@ BEGIN
   RETURN n
 END AliveCount;
 
+PROCEDURE SideOnHill(side: INTEGER): BOOLEAN;
+VAR i: INTEGER; a: Army;
+BEGIN
+  a := ArmyOf(side);
+  FOR i := 0 TO a.count - 1 DO
+    IF a.units[i].alive & (terrain[a.units[i].row][a.units[i].col] = TERR_HILL) THEN
+      RETURN TRUE
+    END
+  END;
+  RETURN FALSE
+END SideOnHill;
+
+PROCEDURE SideAtCell(side, col, row: INTEGER): BOOLEAN;
+VAR i: INTEGER; a: Army;
+BEGIN
+  a := ArmyOf(side);
+  FOR i := 0 TO a.count - 1 DO
+    IF a.units[i].alive & (a.units[i].col = col) & (a.units[i].row = row) THEN
+      RETURN TRUE
+    END
+  END;
+  RETURN FALSE
+END SideAtCell;
+
 PROCEDURE CheckVictory;
 VAR rAlive, bAlive: INTEGER;
+    rHill, bHill, rCross, bCross: BOOLEAN;
 BEGIN
   rAlive := AliveCount(RED); bAlive := AliveCount(BLUE);
 
-  (* ELIM victory: check if one side is wiped out *)
-  IF victoryType = VIC_ELIM THEN
-    IF rAlive = 0 THEN
-      AppendLog("BLUE WINS — Red army destroyed!");
-      gameOver := TRUE
-    ELSIF bAlive = 0 THEN
-      AppendLog("RED WINS — Blue army destroyed!");
-      gameOver := TRUE
-    END
+  (* Elimination always ends the game early *)
+  IF rAlive = 0 THEN
+    AppendLog("BLUE WINS — Red army destroyed!");
+    gameOver := TRUE; RETURN
+  ELSIF bAlive = 0 THEN
+    AppendLog("RED WINS — Blue army destroyed!");
+    gameOver := TRUE; RETURN
   END;
 
-  (* End of game: most eliminations wins *)
   IF turn > TURNS THEN
-    IF rAlive > bAlive THEN
-      AppendLog("RED WINS — most units surviving!");
-    ELSIF bAlive > rAlive THEN
-      AppendLog("BLUE WINS — most units surviving!");
+    IF victoryType = VIC_HOLD THEN
+      (* Control = sole occupancy; contested = neither controls *)
+      rHill  := SideOnHill(RED)  & ~SideOnHill(BLUE);
+      bHill  := SideOnHill(BLUE) & ~SideOnHill(RED);
+      rCross := SideAtCell(RED,  CROSS_COL, CROSS_ROW) &
+               ~SideAtCell(BLUE, CROSS_COL, CROSS_ROW);
+      bCross := SideAtCell(BLUE, CROSS_COL, CROSS_ROW) &
+               ~SideAtCell(RED,  CROSS_COL, CROSS_ROW);
+      IF rHill & rCross THEN
+        AppendLog("RED WINS — hill and crossroads held!")
+      ELSIF bHill & bCross THEN
+        AppendLog("BLUE WINS — hill and crossroads held!")
+      ELSIF rAlive > bAlive THEN
+        AppendLog("RED WINS — more survivors (objectives split)")
+      ELSIF bAlive > rAlive THEN
+        AppendLog("BLUE WINS — more survivors (objectives split)")
+      ELSE
+        AppendLog("DRAW — objectives split, equal survivors")
+      END
     ELSE
-      AppendLog("DRAW — equal survivors!")
+      IF rAlive > bAlive THEN
+        AppendLog("RED WINS — most units surviving!")
+      ELSIF bAlive > rAlive THEN
+        AppendLog("BLUE WINS — most units surviving!")
+      ELSE
+        AppendLog("DRAW — equal survivors!")
+      END
     END;
     gameOver := TRUE
   END
@@ -938,7 +994,11 @@ BEGIN
     c1 := UnitGlyph(uSide, u)
   ELSE
     IF isCursor OR isValidMove THEN fg := TUI.Black ELSE fg := TUI.White END;
-    IF terrain[row][col] = TERR_HILL THEN c0 := '^' ELSE c0 := '.' END;
+    IF terrain[row][col] = TERR_HILL THEN c0 := '^'
+    ELSIF terrain[row][col] = TERR_ROAD THEN
+      IF (col = CROSS_COL) & (row = CROSS_ROW) THEN c0 := '+' ELSE c0 := '#' END
+    ELSE c0 := '.'
+    END;
     c1 := ' '
   END;
 
@@ -1403,6 +1463,19 @@ BEGIN
   END
 END InitScenario1;
 
+(* Scenario 2: Crossroads.  Hill (rows 1-3, cols 2-5) + road junction.
+   Vertical road: col 10, all rows.  Horizontal road: row 9, all cols. *)
+PROCEDURE InitScenario2;
+VAR r, c: INTEGER;
+BEGIN
+  InitTerrain;
+  FOR r := 1 TO 3 DO
+    FOR c := 2 TO 5 DO terrain[r][c] := TERR_HILL END
+  END;
+  FOR r := 0 TO GRID_H - 1 DO terrain[r][CROSS_COL] := TERR_ROAD END;
+  FOR c := 0 TO GRID_W - 1 DO terrain[CROSS_ROW][c] := TERR_ROAD END
+END InitScenario2;
+
 PROCEDURE DeployArmy(VAR a: Army; side: INTEGER; roll: INTEGER);
 VAR i, p: INTEGER;
     startRow: INTEGER;
@@ -1473,8 +1546,10 @@ BEGIN
   TUI.PutCell(2, 4, '0', TUI.Cyan, TUI.Black);
   TUI.PutStr(4, 4, "Random (open ground)", TUI.White, TUI.Black);
   TUI.PutCell(2, 5, '1', TUI.Cyan, TUI.Black);
-  TUI.PutStr(4, 5, "Scenario 1: Pitched Battle  (two hill groups, ^ = cover)", TUI.White, TUI.Black);
-  TUI.PutStr(2, 7, "Press 0-1 to select:", TUI.White, TUI.Black);
+  TUI.PutStr(4, 5, "Scenario 1: Pitched Battle  (^ hills give H2H cover)", TUI.White, TUI.Black);
+  TUI.PutCell(2, 6, '2', TUI.Cyan, TUI.Black);
+  TUI.PutStr(4, 6, "Scenario 2: Crossroads  (hold hill + crossroads on turn 15)", TUI.White, TUI.Black);
+  TUI.PutStr(2, 8, "Press 0-2 to select:", TUI.White, TUI.Black);
   TUI.Flush;
   scenario := SCEN_RANDOM;
   LOOP
@@ -1482,6 +1557,7 @@ BEGIN
     IF ev2.kind = TUI.EvKey THEN
       IF ev2.key = ORD('0') THEN scenario := SCEN_RANDOM; EXIT
       ELSIF ev2.key = ORD('1') THEN scenario := SCEN_1;      EXIT
+      ELSIF ev2.key = ORD('2') THEN scenario := SCEN_2;      EXIT
       ELSIF ev2.key = 17 THEN TUI.Done; HALT(0)
       END
     END
@@ -1537,12 +1613,17 @@ BEGIN
     END
   END;
 
-  IF scenario = SCEN_1 THEN InitScenario1 ELSE InitTerrain END;
+  IF scenario = SCEN_1 THEN InitScenario1
+  ELSIF scenario = SCEN_2 THEN InitScenario2
+  ELSE InitTerrain
+  END;
   ClearLog;
   turn        := 1;
   phase       := PH_MOVE;
   activeSide  := RED;
-  victoryType := VIC_ELIM;
+  IF scenario = SCEN_2 THEN victoryType := VIC_HOLD
+  ELSE victoryType := VIC_ELIM
+  END;
   selUnit     := -1;
   gameOver    := FALSE;
   curCol      := 0; curRow := 5;
