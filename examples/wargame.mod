@@ -3,9 +3,9 @@ MODULE Wargame;
  * One Hour Wargames — Neil Thomas (2014)
  * Human (Red, north) vs Computer (Blue, south).
  *
- * v1: Simple pitched battle on an open 12×12 grid, all 9 periods.
- *     No terrain, no reinforcements; victory = most units eliminated.
- *     Hooks for terrain, scenarios, chance cards left in data model.
+ * Setup: choose period → choose scenario → roll army composition.
+ * Scenarios: 0=random (open ground), 1=Pitched Battle (two hill groups).
+ * Victory: eliminate all enemy units within 15 turns.
  *
  * Controls:
  *   Arrow keys  – move cursor
@@ -39,6 +39,10 @@ CONST
   (* Victory condition types — v1 uses ELIM only *)
   VIC_ELIM   = 0;  VIC_HOLD  = 1;
   VIC_EXIT   = 2;  VIC_SURVIVE = 3;
+
+  (* Scenario numbers *)
+  SCEN_RANDOM = 0;   (* open ground, random army roll *)
+  SCEN_1      = 1;   (* Pitched Battle — two hill groups *)
 
   NPER = 9;
   NO_FIRE = -99;  (* unit type may not fire in this period *)
@@ -80,6 +84,7 @@ VAR
   terrain : ARRAY GRID_H OF ARRAY GRID_W OF INTEGER;
 
   victoryType : INTEGER;   (* VIC_* constant; hook for scenario variants *)
+  scenario    : INTEGER;   (* SCEN_* constant *)
 
   msgLog    : ARRAY 8 OF ARRAY 64 OF CHAR;
   logHead : INTEGER;
@@ -904,6 +909,8 @@ BEGIN
     bg := TUI.Green;   fg := TUI.Black
   ELSIF isShootable THEN
     bg := TUI.Magenta; fg := TUI.White
+  ELSIF terrain[row][col] = TERR_HILL THEN
+    bg := TUI.Yellow;  fg := TUI.Black
   ELSE
     bg := TUI.Black;   fg := TUI.White
   END;
@@ -923,7 +930,8 @@ BEGIN
     c1 := UnitGlyph(uSide, u)
   ELSE
     IF isCursor OR isValidMove THEN fg := TUI.Black ELSE fg := TUI.White END;
-    c0 := '.'; c1 := ' '
+    IF terrain[row][col] = TERR_HILL THEN c0 := '^' ELSE c0 := '.' END;
+    c1 := ' '
   END;
 
   TUI.PutCell(sx, sy, c0, fg, bg);
@@ -1358,6 +1366,19 @@ BEGIN
   END
 END InitTerrain;
 
+(* Scenario 1: Pitched Battle.  Two symmetrical hill groups, cols 5-8. *)
+PROCEDURE InitScenario1;
+VAR r, c: INTEGER;
+BEGIN
+  InitTerrain;
+  FOR r := 1 TO 3 DO
+    FOR c := 5 TO 8 DO terrain[r][c] := TERR_HILL END
+  END;
+  FOR r := 8 TO 10 DO
+    FOR c := 5 TO 8 DO terrain[r][c] := TERR_HILL END
+  END
+END InitScenario1;
+
 PROCEDURE DeployArmy(VAR a: Army; side: INTEGER; roll: INTEGER);
 VAR i, p: INTEGER;
     startRow: INTEGER;
@@ -1419,6 +1440,30 @@ BEGIN
   END
 END ChoosePeriod;
 
+PROCEDURE ChooseScenario;
+VAR ev2: TUI.Event;
+BEGIN
+  TUI.ClearBack(TUI.White, TUI.Black);
+  TUI.PutStr(2, 1, "ONE HOUR WARGAMES — Choose Scenario", TUI.Yellow, TUI.Black);
+  TUI.PutStr(2, 2, "──────────────────────────────────", TUI.White,  TUI.Black);
+  TUI.PutCell(2, 4, '0', TUI.Cyan, TUI.Black);
+  TUI.PutStr(4, 4, "Random (open ground)", TUI.White, TUI.Black);
+  TUI.PutCell(2, 5, '1', TUI.Cyan, TUI.Black);
+  TUI.PutStr(4, 5, "Scenario 1: Pitched Battle  (two hill groups, ^ = cover)", TUI.White, TUI.Black);
+  TUI.PutStr(2, 7, "Press 0-1 to select:", TUI.White, TUI.Black);
+  TUI.Flush;
+  scenario := SCEN_RANDOM;
+  LOOP
+    TUI.WaitEvent(ev2);
+    IF ev2.kind = TUI.EvKey THEN
+      IF ev2.key = ORD('0') THEN scenario := SCEN_RANDOM; EXIT
+      ELSIF ev2.key = ORD('1') THEN scenario := SCEN_1;      EXIT
+      ELSIF ev2.key = 17 THEN TUI.Done; HALT(0)
+      END
+    END
+  END
+END ChooseScenario;
+
 PROCEDURE ShowRoll(side: INTEGER; roll: INTEGER);
 VAR sx, sy, i: INTEGER;
     u: Unit;
@@ -1468,7 +1513,7 @@ BEGIN
     END
   END;
 
-  InitTerrain;
+  IF scenario = SCEN_1 THEN InitScenario1 ELSE InitTerrain END;
   ClearLog;
   turn        := 1;
   phase       := PH_MOVE;
@@ -1531,6 +1576,7 @@ BEGIN
   TUI.Init;
   TUI.UpdateSize;
   ChoosePeriod;
+  ChooseScenario;
   SetupGame;
   RunGame;
   TUI.Done
