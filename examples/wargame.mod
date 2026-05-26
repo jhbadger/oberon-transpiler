@@ -44,11 +44,20 @@ CONST
   SCEN_RANDOM = 0;   (* open ground, random army roll *)
   SCEN_1      = 1;   (* Pitched Battle — two hill groups *)
   SCEN_2      = 2;   (* Crossroads — hill + road junction objective *)
+  SCEN_3      = 3;   (* Control the River — hold both bridges at turn 15 *)
 
   TERR_ROAD = 8;     (* road: +1 move if entire move stays on road *)
 
+  (* Victory condition types for territory scenarios *)
+  VIC_BRIDGES = 2;   (* reuses VIC_EXIT slot; hold both river bridges *)
+
   (* Scenario 2 objective locations *)
   CROSS_COL = 10;  CROSS_ROW = 9;
+
+  (* Scenario 3 bridge locations (both on row 6) *)
+  BRIDGE_ROW  = 6;
+  BRIDGE1_COL = 1;
+  BRIDGE2_COL = 9;
 
   (* Info panel in the gap between map (cols 3-26) and sidebar (col 46) *)
   PANX = 29;   (* MAPX + GRID_W*2 + 2 *)
@@ -743,6 +752,7 @@ END SideAtCell;
 PROCEDURE CheckVictory;
 VAR rAlive, bAlive: INTEGER;
     rHill, bHill, rCross, bCross: BOOLEAN;
+    rB1, bB1, rB2, bB2: BOOLEAN;
 BEGIN
   rAlive := AliveCount(RED); bAlive := AliveCount(BLUE);
 
@@ -774,6 +784,26 @@ BEGIN
         AppendLog("BLUE WINS — more survivors (objectives split)")
       ELSE
         AppendLog("DRAW — objectives split, equal survivors")
+      END
+    ELSIF victoryType = VIC_BRIDGES THEN
+      rB1 := SideAtCell(RED,  BRIDGE1_COL, BRIDGE_ROW) &
+            ~SideAtCell(BLUE, BRIDGE1_COL, BRIDGE_ROW);
+      bB1 := SideAtCell(BLUE, BRIDGE1_COL, BRIDGE_ROW) &
+            ~SideAtCell(RED,  BRIDGE1_COL, BRIDGE_ROW);
+      rB2 := SideAtCell(RED,  BRIDGE2_COL, BRIDGE_ROW) &
+            ~SideAtCell(BLUE, BRIDGE2_COL, BRIDGE_ROW);
+      bB2 := SideAtCell(BLUE, BRIDGE2_COL, BRIDGE_ROW) &
+            ~SideAtCell(RED,  BRIDGE2_COL, BRIDGE_ROW);
+      IF rB1 & rB2 THEN
+        AppendLog("RED WINS — both bridges held!")
+      ELSIF bB1 & bB2 THEN
+        AppendLog("BLUE WINS — both bridges held!")
+      ELSIF rAlive > bAlive THEN
+        AppendLog("RED WINS — more survivors (bridges split)")
+      ELSIF bAlive > rAlive THEN
+        AppendLog("BLUE WINS — more survivors (bridges split)")
+      ELSE
+        AppendLog("DRAW — bridges split, equal survivors")
       END
     ELSE
       IF rAlive > bAlive THEN
@@ -980,6 +1010,9 @@ BEGIN
     bg := TUI.Magenta; fg := TUI.White
   ELSIF terrain[row][col] = TERR_HILL THEN
     bg := TUI.Yellow;  fg := TUI.Black
+  ELSIF (terrain[row][col] = TERR_RIVER) OR (terrain[row][col] = TERR_MARSH) OR
+        (terrain[row][col] = TERR_BRIDGE) THEN
+    bg := TUI.Blue;    fg := TUI.White
   ELSE
     bg := TUI.Black;   fg := TUI.White
   END;
@@ -1002,6 +1035,9 @@ BEGIN
     IF terrain[row][col] = TERR_HILL THEN c0 := '^'
     ELSIF terrain[row][col] = TERR_ROAD THEN
       IF (col = CROSS_COL) & (row = CROSS_ROW) THEN c0 := '+' ELSE c0 := '#' END
+    ELSIF terrain[row][col] = TERR_BRIDGE THEN c0 := '['
+    ELSIF (terrain[row][col] = TERR_RIVER) OR (terrain[row][col] = TERR_MARSH) THEN
+      c0 := '~'
     ELSE c0 := '.'
     END;
     c1 := ' '
@@ -1519,6 +1555,25 @@ BEGIN
   FOR c := 0 TO GRID_W - 1 DO terrain[CROSS_ROW][c] := TERR_ROAD END
 END InitScenario2;
 
+(* Scenario 3: Control the River.
+   Lake (impassable): rows 1-3, cols 8-10.
+   River (row 6) splits the board; bridges at cols 1 and 9.
+   Hills: rows 8-10, cols 1-3. *)
+PROCEDURE InitScenario3;
+VAR r, c: INTEGER;
+BEGIN
+  InitTerrain;
+  FOR r := 1 TO 3 DO
+    FOR c := 8 TO 10 DO terrain[r][c] := TERR_MARSH END
+  END;
+  FOR c := 0 TO GRID_W - 1 DO terrain[BRIDGE_ROW][c] := TERR_RIVER END;
+  terrain[BRIDGE_ROW][BRIDGE1_COL] := TERR_BRIDGE;
+  terrain[BRIDGE_ROW][BRIDGE2_COL] := TERR_BRIDGE;
+  FOR r := 8 TO 10 DO
+    FOR c := 1 TO 3 DO terrain[r][c] := TERR_HILL END
+  END
+END InitScenario3;
+
 PROCEDURE DeployArmy(VAR a: Army; side: INTEGER; roll: INTEGER);
 VAR i, p: INTEGER;
     startRow: INTEGER;
@@ -1592,7 +1647,9 @@ BEGIN
   TUI.PutStr(4, 5, "Scenario 1: Pitched Battle  (^ hills give H2H cover)", TUI.White, TUI.Black);
   TUI.PutCell(2, 6, '2', TUI.Cyan, TUI.Black);
   TUI.PutStr(4, 6, "Scenario 2: Crossroads  (hold hill + crossroads on turn 15)", TUI.White, TUI.Black);
-  TUI.PutStr(2, 8, "Press 0-2 to select:", TUI.White, TUI.Black);
+  TUI.PutCell(2, 7, '3', TUI.Cyan, TUI.Black);
+  TUI.PutStr(4, 7, "Scenario 3: Control the River  (hold both bridges on turn 15)", TUI.White, TUI.Black);
+  TUI.PutStr(2, 9, "Press 0-3 to select:", TUI.White, TUI.Black);
   TUI.Flush;
   scenario := SCEN_RANDOM;
   LOOP
@@ -1601,6 +1658,7 @@ BEGIN
       IF ev2.key = ORD('0') THEN scenario := SCEN_RANDOM; EXIT
       ELSIF ev2.key = ORD('1') THEN scenario := SCEN_1;      EXIT
       ELSIF ev2.key = ORD('2') THEN scenario := SCEN_2;      EXIT
+      ELSIF ev2.key = ORD('3') THEN scenario := SCEN_3;      EXIT
       ELSIF ev2.key = 17 THEN TUI.Done; HALT(0)
       END
     END
@@ -1658,6 +1716,7 @@ BEGIN
 
   IF scenario = SCEN_1 THEN InitScenario1
   ELSIF scenario = SCEN_2 THEN InitScenario2
+  ELSIF scenario = SCEN_3 THEN InitScenario3
   ELSE InitTerrain
   END;
   ClearLog;
@@ -1665,6 +1724,7 @@ BEGIN
   phase       := PH_MOVE;
   activeSide  := RED;
   IF scenario = SCEN_2 THEN victoryType := VIC_HOLD
+  ELSIF scenario = SCEN_3 THEN victoryType := VIC_BRIDGES
   ELSE victoryType := VIC_ELIM
   END;
   selUnit     := -1;
