@@ -1575,7 +1575,7 @@ BEGIN
 END InitScenario3;
 
 PROCEDURE DeployArmy(VAR a: Army; side: INTEGER; roll: INTEGER);
-VAR i, p: INTEGER;
+VAR i, p, col, row, t: INTEGER;
     startRow: INTEGER;
 BEGIN
   p := period - 1;
@@ -1585,12 +1585,22 @@ BEGIN
   (* Red deploys on north rows (row 0..1); Blue on south (row 10..11) *)
   IF side = RED THEN startRow := 1 ELSE startRow := GRID_H - 2 END;
 
-  (* Spread 6 units across 12 columns: positions 1,3,5,7,9,11 *)
+  (* Spread 6 units across 12 columns: positions 1,3,5,7,9,11.
+     Step away from enemy if the default cell is water. *)
   FOR i := 0 TO MAX_UNITS - 1 DO
     a.units[i].utype      := compTable[p][roll][i];
     a.units[i].hits       := 0;
-    a.units[i].col        := 1 + i * 2;
-    a.units[i].row        := startRow;
+    col := 1 + i * 2;
+    row := startRow;
+    t := terrain[row][col];
+    WHILE (t = TERR_MARSH) OR (t = TERR_RIVER) DO
+      IF side = RED THEN DEC(row) ELSE INC(row) END;
+      IF (row < 0) OR (row >= GRID_H) THEN row := startRow; t := TERR_OPEN
+      ELSE t := terrain[row][col]
+      END
+    END;
+    a.units[i].col        := col;
+    a.units[i].row        := row;
     a.units[i].alive      := TRUE;
     a.units[i].ammoOut    := FALSE;
     a.units[i].inSquare   := FALSE;
