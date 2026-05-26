@@ -116,6 +116,14 @@ VAR
   ev       : TUI.Event;
   gameOver : BOOLEAN;
 
+  (* Undo stack for movement phase — cleared when phase advances to PH_SHOOT *)
+  undoIdx    : ARRAY MAX_UNITS OF INTEGER;
+  undoCol    : ARRAY MAX_UNITS OF INTEGER;
+  undoRow    : ARRAY MAX_UNITS OF INTEGER;
+  undoFacing : ARRAY MAX_UNITS OF INTEGER;
+  undoMoved  : ARRAY MAX_UNITS OF BOOLEAN;
+  undoTop    : INTEGER;
+
   (* ─── Period lookup tables [period-1][utype] ─── *)
   (* unitName[p][t] = display name (max 14 chars) *)
   unitName  : ARRAY NPER OF ARRAY 4 OF ARRAY 16 OF CHAR;
@@ -1251,7 +1259,7 @@ BEGIN
     CASE phase OF
       PH_MOVE:
         TUI.PutStr(1, TUI.Rows - 1,
-          "Arrows=cursor  Enter=select/move  F=face(when selected)  Esc=cancel  N=end",
+          "Arrows=cursor  Enter=select/move  F=face  U=undo  Esc=cancel  N=end",
           TUI.White, TUI.Black)
     | PH_SHOOT:
         IF selUnit < 0 THEN
@@ -1334,6 +1342,15 @@ BEGIN
       (* Confirm move destination — units cannot enter enemy-occupied cells;
          moving adjacent to an enemy puts them in H2H for the combat phase *)
       IF ValidMoveTarget(RED, selUnit, curCol, curRow) THEN
+        (* Push state onto undo stack *)
+        IF undoTop < MAX_UNITS THEN
+          undoIdx[undoTop]    := selUnit;
+          undoCol[undoTop]    := red.units[selUnit].col;
+          undoRow[undoTop]    := red.units[selUnit].row;
+          undoFacing[undoTop] := red.units[selUnit].facing;
+          undoMoved[undoTop]  := red.units[selUnit].moved;
+          INC(undoTop)
+        END;
         prevCol := red.units[selUnit].col;
         prevRow := red.units[selUnit].row;
         red.units[selUnit].facing :=
@@ -1350,6 +1367,15 @@ BEGIN
     END
   ELSIF (key = ORD('f')) OR (key = ORD('F')) THEN
     IF selUnit >= 0 THEN
+      (* Push state onto undo stack *)
+      IF undoTop < MAX_UNITS THEN
+        undoIdx[undoTop]    := selUnit;
+        undoCol[undoTop]    := red.units[selUnit].col;
+        undoRow[undoTop]    := red.units[selUnit].row;
+        undoFacing[undoTop] := red.units[selUnit].facing;
+        undoMoved[undoTop]  := red.units[selUnit].moved;
+        INC(undoTop)
+      END;
       red.units[selUnit].facing := (red.units[selUnit].facing + 1) MOD 4;
       red.units[selUnit].moved  := TRUE;
       COPY("Red ", logMsg);
@@ -1361,6 +1387,22 @@ BEGIN
       | SOUTH: AppendStr(logMsg, "S")
       | WEST:  AppendStr(logMsg, "W")
       END;
+      AppendLog(logMsg);
+      selUnit := -1
+    END
+  ELSIF (key = ORD('u')) OR (key = ORD('U')) THEN
+    IF undoTop > 0 THEN
+      DEC(undoTop);
+      oIdx := undoIdx[undoTop];
+      curCol := undoCol[undoTop];
+      curRow := undoRow[undoTop];
+      red.units[oIdx].col    := undoCol[undoTop];
+      red.units[oIdx].row    := undoRow[undoTop];
+      red.units[oIdx].facing := undoFacing[undoTop];
+      red.units[oIdx].moved  := undoMoved[undoTop];
+      COPY("Red ", logMsg);
+      AppendStr(logMsg, unitName[period - 1][red.units[oIdx].utype]);
+      AppendStr(logMsg, " move undone");
       AppendLog(logMsg);
       selUnit := -1
     END
@@ -1493,6 +1535,7 @@ BEGIN
   selUnit := -1;
   CASE phase OF
     PH_MOVE:
+      undoTop := 0;   (* moves are now fixed *)
       phase := PH_SHOOT
   | PH_SHOOT:
       phase := PH_COMBAT
@@ -1738,6 +1781,7 @@ BEGIN
   ELSE victoryType := VIC_ELIM
   END;
   selUnit     := -1;
+  undoTop     := 0;
   gameOver    := FALSE;
   curCol      := 0; curRow := 5;
   AppendLog("Game started. Red goes first.")
@@ -1748,11 +1792,22 @@ END SetupGame;
 (* ═══════════════════════════════════════════════════════════════════════ *)
 
 PROCEDURE RunGame;
+VAR mc, mr: INTEGER;
 BEGIN
   DrawScreen;
   LOOP
     TUI.WaitEvent(ev);
     IF ev.kind = TUI.EvResize THEN TUI.UpdateSize
+
+    ELSIF ev.kind = TUI.EvMouse THEN
+      (* Left click or motion — move cursor to clicked map cell *)
+      IF (ev.mb = 0) OR (ev.mb = 32) THEN
+        mc := (ev.mx - MAPX) DIV 2;
+        mr := ev.my - MAPY;
+        IF (mc >= 0) & (mc < GRID_W) & (mr >= 0) & (mr < GRID_H) THEN
+          curCol := mc; curRow := mr
+        END
+      END
 
     ELSIF ev.kind = TUI.EvKey THEN
       IF (ev.key = ORD('q')) OR (ev.key = ORD('Q')) OR (ev.key = 17) THEN
