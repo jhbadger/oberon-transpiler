@@ -1115,6 +1115,19 @@ static void emit_open_array_len(CG *g, Node *arg) {
     emit(g, ")/sizeof(");     emit_as_string(g, arg); emit(g, "[0]))");
 }
 
+/* emit_var_arg: pass e as a VAR (by-reference) argument.
+   Unlike emit_addr_of, always takes &e for pointer-type locals so the
+   callee can mutate the pointer itself (e.g. New/Free on a Seq). */
+static void emit_var_arg(CG *g, Node *e) {
+    if (!e) { emit(g,"NULL"); return; }
+    if (e->kind == ND_IDENT) {
+        if (is_outer_var(g, e->str)) { emit(g,"_frame->%s", e->str); return; }
+        if (sym_is_var(e->str))      { emit(g,"%s", e->str); return; }
+        emit(g,"&%s", e->str); return;
+    }
+    emit(g,"&("); emit_expr(g,e); emit(g,")");
+}
+
 static void emit_addr_of(CG *g, Node *e) {
     if (!e) { emit(g,"NULL"); return; }
     if (e->kind == ND_IDENT) {
@@ -1362,7 +1375,7 @@ static int try_emit_import(CG *g, Node *fa, Node *args) {
             if (a!=args) emit(g,",");
             int is_var = (sig && slot < sig->nslots) ? sig->slots[slot].is_var        : 0;
             int ioa    = (sig && slot < sig->nslots) ? sig->slots[slot].is_open_array  : 0;
-            if (is_var)   emit_addr_of(g, a);
+            if (is_var)   emit_var_arg(g, a);
             else if (ioa) emit_as_string(g, a);
             else          emit_expr(g, a);
             if (ioa) { emit(g,","); emit_open_array_len(g,a); }
@@ -1536,7 +1549,7 @@ static void emit_expr(CG *g, Node *e) {
             first_arg = 0;
             int is_var = fp ? (fp->flags & FLAG_VAR_PARAM) != 0 : 0;
             int ioa    = fp ? is_open_array(fp->c1) : 0;
-            if (is_var) emit_addr_of(g, a);
+            if (is_var) emit_var_arg(g, a);
             else if (ioa) emit_as_string(g, a);
             else          emit_expr(g, a);
             if (fp && ioa) { emit(g,","); emit_open_array_len(g,a); }
@@ -1684,7 +1697,7 @@ static void emit_stmt(CG *g, Node *s) {
                 first_s = 0;
                 int is_var = fp ? (fp->flags & FLAG_VAR_PARAM) != 0 : 0;
                 int ioa    = fp ? is_open_array(fp->c1) : 0;
-                if (is_var)   emit_addr_of(g, a);
+                if (is_var)   emit_var_arg(g, a);
                 else if (ioa) emit_as_string(g, a);  /* single-char "x" must stay "x", not 'x' */
                 else          emit_expr(g, a);
                 if (fp && ioa) { emit(g,","); emit_open_array_len(g,a); }

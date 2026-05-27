@@ -16,7 +16,7 @@ CONST
 ChunkSize* = 240;
 
 TYPE
-ChunkPtr = POINTER TO Chunk;
+ChunkPtr* = POINTER TO Chunk;
 Chunk = RECORD
   data : ARRAY ChunkSize OF CHAR;
   len  : INTEGER;
@@ -25,8 +25,8 @@ END;
 
 Seq* = POINTER TO SeqRec;
 SeqRec* = RECORD
-  head*   : ChunkPtr;
-  tail*   : ChunkPtr;
+  head    : ChunkPtr;
+  tail    : ChunkPtr;
   length* : INTEGER;
   name*   : ARRAY 128 OF CHAR
 END;
