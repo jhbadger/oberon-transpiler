@@ -1341,7 +1341,7 @@ BEGIN
     ELSE
       (* Confirm move destination — units cannot enter enemy-occupied cells;
          moving adjacent to an enemy puts them in H2H for the combat phase *)
-      IF ValidMoveTarget(RED, selUnit, curCol, curRow) THEN
+      IF ~red.units[selUnit].moved & ValidMoveTarget(RED, selUnit, curCol, curRow) THEN
         (* Push state onto undo stack *)
         IF undoTop < MAX_UNITS THEN
           undoIdx[undoTop]    := selUnit;
@@ -1387,8 +1387,7 @@ BEGIN
       | SOUTH: AppendStr(logMsg, "S")
       | WEST:  AppendStr(logMsg, "W")
       END;
-      AppendLog(logMsg);
-      selUnit := -1
+      AppendLog(logMsg)
     END
   ELSIF (key = ORD('u')) OR (key = ORD('U')) THEN
     IF undoTop > 0 THEN
