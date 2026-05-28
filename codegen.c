@@ -1601,11 +1601,13 @@ static void emit_stmt(CG *g, Node *s) {
 
     case ND_ASSIGN: {
         Node *lhs = s->c0, *rhs = s->c1;
-        /* Determine if LHS is a char array type → use strcpy */
-        Node *lt = NULL;
-        if (lhs->kind==ND_IDENT)  lt = sym_type(lhs->str);
+        /* Determine if LHS is a char array type → use strcpy.
+         * expr_type handles ND_IDENT, ND_FIELD_ACCESS, ND_INDEX, etc. */
+        Node *lt = expr_type(lhs);
         /* Single-char string literals are char values; only multi-char strings
-         * need strcpy. A single-char RHS ("X") is emitted as 'X' by emit_expr. */
+         * need strcpy. A single-char RHS ("X") is emitted as 'X' by emit_expr.
+         * The lt==NULL fallback catches the rare case where type inference fails
+         * but the RHS is unambiguously a multi-char string. */
         int rhs_is_multichar_str = (rhs->kind == ND_STRING && strlen(rhs->str) > 1);
         int is_str = is_char_array(lt) ||
                      (lt == NULL && rhs_is_multichar_str);

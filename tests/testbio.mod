@@ -1,15 +1,15 @@
 MODULE TestBio;
 (*
-  Test suite for BioAlpha, BioSeq.
+  Test suite for BioAlpha, BioSeq, and BioIO.
   Each ASSERT failure will abort with a C assert message identifying the line.
   All tests passing = silent exit with code 0.
 *)
-IMPORT BioSeq, BioAlpha, Out;
+IMPORT BioSeq, BioAlpha, BioIO, Files, Strings, Out;
 
 VAR
-a    : BioAlpha.Alphabet;
-s, t : BioSeq.Seq;
-pass: INTEGER;
+  a    : BioAlpha.Alphabet;
+  s, t : BioSeq.Seq;
+  pass : INTEGER;
 
 PROCEDURE Ok(label: ARRAY OF CHAR);
 BEGIN
@@ -497,6 +497,403 @@ BEGIN
   INC(pass)
 END TestPrintSeq;
 
+(* ================================================================== *)
+(*  BioIO helpers — write raw bytes to a rider                         *)
+(* ================================================================== *)
+
+PROCEDURE WriteRaw(VAR r: Files.Rider; str: ARRAY OF CHAR);
+VAR i: INTEGER;
+BEGIN
+  i := 0;
+  WHILE (i < LEN(str)) & (str[i] # 0X) DO Files.Write(r, ORD(str[i])); INC(i) END
+END WriteRaw;
+
+PROCEDURE WriteLF(VAR r: Files.Rider);
+BEGIN Files.Write(r, 10) END WriteLF;
+
+PROCEDURE WriteTab(VAR r: Files.Rider);
+BEGIN Files.Write(r, 9) END WriteTab;
+
+PROCEDURE WriteIntRaw(VAR r: Files.Rider; n: INTEGER);
+VAR buf: ARRAY 16 OF CHAR;
+BEGIN Strings.IntToStr(n, buf); WriteRaw(r, buf) END WriteIntRaw;
+
+(* ================================================================== *)
+(*  BioIO tests                                                         *)
+(* ================================================================== *)
+
+(* ------------------------------------------------------------------ *)
+(*  B1. Open missing file                                               *)
+(* ------------------------------------------------------------------ *)
+PROCEDURE TestOpenMissing;
+VAR fr: BioIO.FastaReader; qr: BioIO.FastqReader; br: BioIO.BedReader;
+BEGIN
+  Out.String("--- Open missing file ---"); Out.Ln();
+  ASSERT(~BioIO.OpenFasta(fr, "__no_such_file__.fasta"));
+  ASSERT(fr.done);
+  Ok("OpenFasta missing -> FALSE");
+
+  ASSERT(~BioIO.OpenFastq(qr, "__no_such_file__.fastq"));
+  ASSERT(qr.done);
+  Ok("OpenFastq missing -> FALSE");
+
+  ASSERT(~BioIO.OpenBed(br, "__no_such_file__.bed"));
+  ASSERT(br.done);
+  Ok("OpenBed missing -> FALSE")
+END TestOpenMissing;
+
+(* ------------------------------------------------------------------ *)
+(*  B2. FASTA round-trip: two records, one with description            *)
+(* ------------------------------------------------------------------ *)
+PROCEDURE TestFastaRoundTrip;
+VAR
+  f   : Files.File;
+  wr  : Files.Rider;
+  rdr : BioIO.FastaReader;
+  wrec, rrec : BioIO.FastaRecord;
+  buf : ARRAY 256 OF CHAR;
+BEGIN
+  Out.String("--- FASTA round-trip ---"); Out.Ln();
+
+  (* Write two FASTA records *)
+  f := Files.New("testbio_fasta.tmp");
+  ASSERT(f # NIL);
+  Files.Set(wr, f, 0);
+
+  wrec.name := "seq1";
+  wrec.desc := "first sequence";
+  BioSeq.New(wrec.seq);
+  BioSeq.FromStr(wrec.seq, "ACGTACGT");
+  BioIO.WriteFasta(wr, wrec, 60);
+
+  wrec.name := "seq2";
+  wrec.desc := "";
+  BioSeq.FromStr(wrec.seq, "TTTTAAAA");
+  BioIO.WriteFasta(wr, wrec, 60);
+
+  Files.Register(f);
+  Files.Close(f);
+  BioSeq.Free(wrec.seq);
+
+  (* Read back *)
+  ASSERT(BioIO.OpenFasta(rdr, "testbio_fasta.tmp"));
+  Ok("OpenFasta succeeds");
+
+  rrec.seq := NIL;
+  ASSERT(BioIO.ReadFasta(rdr, rrec));
+  ASSERT(rrec.name = "seq1");
+  ASSERT(rrec.desc = "first sequence");
+  ASSERT(BioSeq.Length(rrec.seq) = 8);
+  BioSeq.ToStr(rrec.seq, buf);
+  ASSERT(buf = "ACGTACGT");
+  Ok("ReadFasta record 1 name/desc/seq");
+
+  ASSERT(BioIO.ReadFasta(rdr, rrec));
+  ASSERT(rrec.name = "seq2");
+  ASSERT(rrec.desc[0] = 0X);   (* no description *)
+  ASSERT(BioSeq.Length(rrec.seq) = 8);
+  BioSeq.ToStr(rrec.seq, buf);
+  ASSERT(buf = "TTTTAAAA");
+  Ok("ReadFasta record 2 no-desc");
+
+  ASSERT(~BioIO.ReadFasta(rdr, rrec));
+  Ok("ReadFasta EOF returns FALSE");
+
+  BioIO.CloseFasta(rdr);
+  BioSeq.Free(rrec.seq)
+END TestFastaRoundTrip;
+
+(* ------------------------------------------------------------------ *)
+(*  B3. FASTA multi-line sequence reconstruction                        *)
+(* ------------------------------------------------------------------ *)
+PROCEDURE TestFastaMultiLine;
+VAR
+  f   : Files.File;
+  wr  : Files.Rider;
+  rdr : BioIO.FastaReader;
+  wrec, rrec : BioIO.FastaRecord;
+  buf : ARRAY 32 OF CHAR;
+BEGIN
+  Out.String("--- FASTA multi-line ---"); Out.Ln();
+
+  (* Build a 90-char sequence: 30 A + 30 C + 30 G *)
+  BioSeq.New(wrec.seq);
+  BioSeq.FromStr(wrec.seq, "");
+  buf := "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";   (* 30 A *)
+  BioSeq.Append(wrec.seq, buf, 30);
+  buf := "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCC";   (* 30 C *)
+  BioSeq.Append(wrec.seq, buf, 30);
+  buf := "GGGGGGGGGGGGGGGGGGGGGGGGGGGGGG";   (* 30 G *)
+  BioSeq.Append(wrec.seq, buf, 30);
+  ASSERT(BioSeq.Length(wrec.seq) = 90);
+
+  wrec.name := "longseq";
+  wrec.desc := "";
+
+  (* Write with width=30 -> 3 lines in the file *)
+  f := Files.New("testbio_fastaml.tmp");
+  ASSERT(f # NIL);
+  Files.Set(wr, f, 0);
+  BioIO.WriteFasta(wr, wrec, 30);
+  Files.Register(f);
+  Files.Close(f);
+  BioSeq.Free(wrec.seq);
+
+  (* Read back: multi-line sequence must be reassembled *)
+  ASSERT(BioIO.OpenFasta(rdr, "testbio_fastaml.tmp"));
+  rrec.seq := NIL;
+  ASSERT(BioIO.ReadFasta(rdr, rrec));
+  ASSERT(rrec.name = "longseq");
+  ASSERT(BioSeq.Length(rrec.seq) = 90);
+  ASSERT(BioSeq.Get(rrec.seq, 0)  = 'A');
+  ASSERT(BioSeq.Get(rrec.seq, 29) = 'A');
+  ASSERT(BioSeq.Get(rrec.seq, 30) = 'C');
+  ASSERT(BioSeq.Get(rrec.seq, 59) = 'C');
+  ASSERT(BioSeq.Get(rrec.seq, 60) = 'G');
+  ASSERT(BioSeq.Get(rrec.seq, 89) = 'G');
+  Ok("multi-line FASTA length and spot chars");
+
+  ASSERT(~BioIO.ReadFasta(rdr, rrec));
+  Ok("multi-line FASTA EOF");
+
+  BioIO.CloseFasta(rdr);
+  BioSeq.Free(rrec.seq)
+END TestFastaMultiLine;
+
+(* ------------------------------------------------------------------ *)
+(*  B4. FASTQ round-trip                                                *)
+(* ------------------------------------------------------------------ *)
+PROCEDURE TestFastqRoundTrip;
+VAR
+  f   : Files.File;
+  wr  : Files.Rider;
+  rdr : BioIO.FastqReader;
+  wrec, rrec : BioIO.FastqRecord;
+  buf : ARRAY 256 OF CHAR;
+BEGIN
+  Out.String("--- FASTQ round-trip ---"); Out.Ln();
+
+  BioSeq.New(wrec.seq);
+  BioSeq.New(wrec.qual);
+
+  f := Files.New("testbio_fastq.tmp");
+  ASSERT(f # NIL);
+  Files.Set(wr, f, 0);
+
+  wrec.name := "read1";
+  BioSeq.FromStr(wrec.seq,  "ACGTACGT");
+  BioSeq.FromStr(wrec.qual, "IIIIIIII");
+  BioIO.WriteFastq(wr, wrec);
+
+  wrec.name := "read2";
+  BioSeq.FromStr(wrec.seq,  "TTTTAAAA");
+  BioSeq.FromStr(wrec.qual, "JJJJJJJJ");
+  BioIO.WriteFastq(wr, wrec);
+
+  Files.Register(f);
+  Files.Close(f);
+  BioSeq.Free(wrec.seq);
+  BioSeq.Free(wrec.qual);
+
+  (* Read back *)
+  ASSERT(BioIO.OpenFastq(rdr, "testbio_fastq.tmp"));
+  Ok("OpenFastq succeeds");
+
+  rrec.seq := NIL; rrec.qual := NIL;
+  ASSERT(BioIO.ReadFastq(rdr, rrec));
+  ASSERT(rrec.name = "read1");
+  ASSERT(BioSeq.Length(rrec.seq) = 8);
+  BioSeq.ToStr(rrec.seq, buf);  ASSERT(buf = "ACGTACGT");
+  BioSeq.ToStr(rrec.qual, buf); ASSERT(buf = "IIIIIIII");
+  Ok("ReadFastq record 1");
+
+  ASSERT(BioIO.ReadFastq(rdr, rrec));
+  ASSERT(rrec.name = "read2");
+  BioSeq.ToStr(rrec.seq, buf);  ASSERT(buf = "TTTTAAAA");
+  BioSeq.ToStr(rrec.qual, buf); ASSERT(buf = "JJJJJJJJ");
+  Ok("ReadFastq record 2");
+
+  ASSERT(~BioIO.ReadFastq(rdr, rrec));
+  Ok("ReadFastq EOF returns FALSE");
+
+  BioIO.CloseFastq(rdr);
+  BioSeq.Free(rrec.seq);
+  BioSeq.Free(rrec.qual)
+END TestFastqRoundTrip;
+
+(* ------------------------------------------------------------------ *)
+(*  B5. BED round-trip — all six fields                                 *)
+(* ------------------------------------------------------------------ *)
+PROCEDURE TestBedRoundTrip;
+VAR
+  f   : Files.File;
+  wr  : Files.Rider;
+  rdr : BioIO.BedReader;
+  wrec, rrec : BioIO.BedRecord;
+BEGIN
+  Out.String("--- BED round-trip ---"); Out.Ln();
+
+  f := Files.New("testbio_bed.tmp");
+  ASSERT(f # NIL);
+  Files.Set(wr, f, 0);
+
+  wrec.chrom  := "chr1"; wrec.start := 0;   wrec.end_ := 1000;
+  wrec.name   := "gene1"; wrec.score := 750; wrec.strand := '+';
+  BioIO.WriteBed(wr, wrec);
+
+  wrec.chrom  := "chrX"; wrec.start := 500; wrec.end_ := 600;
+  wrec.name   := "feat2"; wrec.score := 0;  wrec.strand := '-';
+  BioIO.WriteBed(wr, wrec);
+
+  wrec.chrom  := "chr2"; wrec.start := 100; wrec.end_ := 200;
+  wrec.name   := ".";    wrec.score := 0;   wrec.strand := '.';
+  BioIO.WriteBed(wr, wrec);
+
+  Files.Register(f);
+  Files.Close(f);
+
+  ASSERT(BioIO.OpenBed(rdr, "testbio_bed.tmp"));
+  Ok("OpenBed succeeds");
+
+  ASSERT(BioIO.ReadBed(rdr, rrec));
+  ASSERT(rrec.chrom = "chr1");
+  ASSERT(rrec.start = 0);
+  ASSERT(rrec.end_  = 1000);
+  ASSERT(rrec.name  = "gene1");
+  ASSERT(rrec.score = 750);
+  ASSERT(rrec.strand = '+');
+  Ok("ReadBed record 1 all fields");
+
+  ASSERT(BioIO.ReadBed(rdr, rrec));
+  ASSERT(rrec.chrom = "chrX");
+  ASSERT(rrec.start = 500);
+  ASSERT(rrec.end_  = 600);
+  ASSERT(rrec.strand = '-');
+  Ok("ReadBed record 2");
+
+  ASSERT(BioIO.ReadBed(rdr, rrec));
+  ASSERT(rrec.chrom = "chr2");
+  ASSERT(rrec.strand = '.');
+  Ok("ReadBed record 3");
+
+  ASSERT(~BioIO.ReadBed(rdr, rrec));
+  Ok("ReadBed EOF returns FALSE");
+
+  BioIO.CloseBed(rdr)
+END TestBedRoundTrip;
+
+(* ------------------------------------------------------------------ *)
+(*  B6. BED with only 3 fields — optional defaults                     *)
+(* ------------------------------------------------------------------ *)
+PROCEDURE TestBedDefaults;
+VAR
+  f   : Files.File;
+  wr  : Files.Rider;
+  rdr : BioIO.BedReader;
+  rec : BioIO.BedRecord;
+BEGIN
+  Out.String("--- BED 3-field defaults ---"); Out.Ln();
+
+  (* Write a minimal 3-field BED line: chrom TAB start TAB end LF *)
+  f := Files.New("testbio_bedmin.tmp");
+  ASSERT(f # NIL);
+  Files.Set(wr, f, 0);
+  WriteRaw(wr, "chr3");
+  WriteTab(wr); WriteIntRaw(wr, 0);
+  WriteTab(wr); WriteIntRaw(wr, 50);
+  WriteLF(wr);
+
+  (* 4-field line (no score or strand) *)
+  WriteRaw(wr, "chr4");
+  WriteTab(wr); WriteIntRaw(wr, 100);
+  WriteTab(wr); WriteIntRaw(wr, 200);
+  WriteTab(wr); WriteRaw(wr, "myFeat");
+  WriteLF(wr);
+
+  Files.Register(f);
+  Files.Close(f);
+
+  ASSERT(BioIO.OpenBed(rdr, "testbio_bedmin.tmp"));
+
+  ASSERT(BioIO.ReadBed(rdr, rec));
+  ASSERT(rec.chrom = "chr3");
+  ASSERT(rec.start = 0);
+  ASSERT(rec.end_  = 50);
+  ASSERT(rec.name[0] = '.');   (* default *)
+  ASSERT(rec.score = 0);       (* default *)
+  ASSERT(rec.strand = '.');    (* default *)
+  Ok("3-field BED: defaults for name/score/strand");
+
+  ASSERT(BioIO.ReadBed(rdr, rec));
+  ASSERT(rec.chrom = "chr4");
+  ASSERT(rec.name  = "myFeat");
+  ASSERT(rec.score = 0);    (* not present -> default *)
+  ASSERT(rec.strand = '.'); (* not present -> default *)
+  Ok("4-field BED: name present, score/strand default");
+
+  ASSERT(~BioIO.ReadBed(rdr, rec));
+  Ok("BED defaults file EOF");
+
+  BioIO.CloseBed(rdr)
+END TestBedDefaults;
+
+(* ------------------------------------------------------------------ *)
+(*  B7. BED comment and header lines are skipped                       *)
+(* ------------------------------------------------------------------ *)
+PROCEDURE TestBedComments;
+VAR
+  f   : Files.File;
+  wr  : Files.Rider;
+  rdr : BioIO.BedReader;
+  wrec, rrec : BioIO.BedRecord;
+BEGIN
+  Out.String("--- BED comments/headers ---"); Out.Ln();
+
+  f := Files.New("testbio_bedcom.tmp");
+  ASSERT(f # NIL);
+  Files.Set(wr, f, 0);
+
+  (* Comment line *)
+  WriteRaw(wr, "# genome assembly hg38"); WriteLF(wr);
+  (* track header *)
+  WriteRaw(wr, "track name=genes visibility=2"); WriteLF(wr);
+  (* browser header *)
+  WriteRaw(wr, "browser position chr1:1-1000"); WriteLF(wr);
+  (* blank line *)
+  WriteLF(wr);
+  (* real data record *)
+  wrec.chrom  := "chrY"; wrec.start := 5000; wrec.end_ := 6000;
+  wrec.name   := "orf1"; wrec.score := 1000; wrec.strand := '+';
+  BioIO.WriteBed(wr, wrec);
+  (* second data record after another comment *)
+  WriteRaw(wr, "# trailing comment"); WriteLF(wr);
+  wrec.chrom  := "chrM"; wrec.start := 0; wrec.end_ := 100;
+  wrec.name   := "mt1"; wrec.score := 0; wrec.strand := '.';
+  BioIO.WriteBed(wr, wrec);
+
+  Files.Register(f);
+  Files.Close(f);
+
+  ASSERT(BioIO.OpenBed(rdr, "testbio_bedcom.tmp"));
+
+  ASSERT(BioIO.ReadBed(rdr, rrec));
+  ASSERT(rrec.chrom  = "chrY");
+  ASSERT(rrec.start  = 5000);
+  ASSERT(rrec.end_   = 6000);
+  ASSERT(rrec.name   = "orf1");
+  ASSERT(rrec.strand = '+');
+  Ok("BED skips #/track/browser/blank, reads data");
+
+  ASSERT(BioIO.ReadBed(rdr, rrec));
+  ASSERT(rrec.chrom = "chrM");
+  Ok("BED second record after trailing comment");
+
+  ASSERT(~BioIO.ReadBed(rdr, rrec));
+  Ok("BED comments file EOF");
+
+  BioIO.CloseBed(rdr)
+END TestBedComments;
+
 (* ------------------------------------------------------------------ *)
 (*  Main                                                                *)
 (* ------------------------------------------------------------------ *)
@@ -524,7 +921,14 @@ BEGIN
   TestEqual;
   TestRevComp;
   TestPrintSeq;
+  Out.String("=== BioIO tests ==="); Out.Ln();
+  TestOpenMissing;
+  TestFastaRoundTrip;
+  TestFastaMultiLine;
+  TestFastqRoundTrip;
+  TestBedRoundTrip;
+  TestBedDefaults;
+  TestBedComments;
   Out.Ln();
   Out.String("All "); Out.Int(pass); Out.String(" tests passed."); Out.Ln()
 END TestBio.
-
