@@ -592,13 +592,34 @@ static int is_builtin_module(const char *s) {
 static char g_modsyms[MAX_MODSYMS][MAX_IDENT];
 static int  g_nmodsyms = 0;
 
+/* collect_modsyms_all: ALL procs (exported + private) + exported consts.
+ * Used for #define blocks in .c bodies so bare Oberon names work.
+ * Do NOT use for headers. */
+static void collect_modsyms_all(Node *decls) {
+    g_nmodsyms = 0;
+    for (Node *d=decls; d; d=d->next) {
+        const char *name = NULL;
+        if (d->kind==ND_CONST_DECL && (d->flags & FLAG_EXPORTED)) {
+            name = d->str;
+        } else if (d->kind==ND_VAR_DECL) {
+            for (Node *id=d->c0; id; id=id->next)
+                if ((id->flags & FLAG_EXPORTED) && g_nmodsyms < MAX_MODSYMS)
+                    strncpy(g_modsyms[g_nmodsyms++], id->str, MAX_IDENT-1);
+            continue;
+        } else if (d->kind==ND_PROC_DECL) { /* ALL procs, not just exported */
+            name = d->str;
+        }
+        if (name && g_nmodsyms < MAX_MODSYMS)
+            strncpy(g_modsyms[g_nmodsyms++], name, MAX_IDENT-1);
+    }
+}
+
 static void collect_modsyms(Node *decls) {
     g_nmodsyms = 0;
     for (Node *d=decls; d; d=d->next) {
         const char *name = NULL;
         int exported = 0;
-        if ((d->kind==ND_CONST_DECL || d->kind==ND_TYPE_DECL) &&
-            (d->flags & FLAG_EXPORTED)) {
+        if (d->kind==ND_CONST_DECL && (d->flags & FLAG_EXPORTED)) {
             name = d->str; exported = 1;
         } else if (d->kind==ND_VAR_DECL) {
             /* Each ident in the list may be individually exported */
@@ -1531,8 +1552,16 @@ static void emit_expr(CG *g, Node *e) {
         if (e->c0 && e->c0->kind==ND_IDENT && is_builtin(e->c0->str)) {
             emit_builtin(g, e->c0->str, e->c1); break;
         }
-        /* Normal call */
-        emit_expr(g,e->c0); emit(g,"(");
+         /* Normal call */
+        if (e->c0 && e->c0->kind == ND_IDENT &&
+            !is_import(e->c0->str) && !is_builtin(e->c0->str) &&
+            (is_nested_call(g, e->c0->str) ||
+             lookup_proc_params(e->c0->str) != NULL)) {
+            emit(g, "%s_%s", g->modname, e->c0->str);
+        } else {
+            emit_expr(g, e->c0);
+        }
+        emit(g,"(");
         int first_arg = 1;
         /* Nested proc call: prepend frame pointer (only when frame exists) */
         if (e->c0 && e->c0->kind==ND_IDENT && is_nested_call(g, e->c0->str) && g->n_frame > 0) {
@@ -1683,7 +1712,18 @@ static void emit_stmt(CG *g, Node *s) {
             iemit(g,""); emit_builtin(g, s->c0->str, s->c1); emit(g,";\n"); break;
         }
         /* Regular procedure call */
-        iemit(g,""); emit_expr(g,s->c0); emit(g,"(");
+        iemit(g,"");
+        if (s->c0 && s->c0->kind == ND_IDENT &&
+            !is_import(s->c0->str) && !is_builtin(s->c0->str) &&
+            (is_nested_call(g, s->c0->str) ||
+             lookup_proc_params(s->c0->str) != NULL)) {
+            /* Both regular and nested procs get the module prefix.
+             * For nested calls the frame ptr is added below. */
+            emit(g, "%s_%s", g->modname, s->c0->str);
+        } else {
+            emit_expr(g, s->c0);
+        }
+        emit(g,"(");
         {
             int first_s = 1;
             if (s->c0 && s->c0->kind==ND_IDENT && is_nested_call(g,s->c0->str) && g->n_frame > 0) {
@@ -2087,16 +2127,17 @@ static void emit_proc_proto(CG *g, Node *proc, int nested) {
         collect_nested_names(g, proc);
     }
 
-    if (!g->is_main) {
+    {
         int exp = !nested && (proc->flags & FLAG_EXPORTED);
+        /* Always emit static for non-exported procs — whether the forward
+         * decl is at file scope or block scope (inside a parent body).
+         * Block-scope static forward decls are legal in C and required to
+         * match the static file-scope definition emitted by emit_proc_def. */
         if (!exp) emit(g,"static ");
         emit_proc_ret(g, proc);
-        if (exp) emit(g," %s_%s", g->modname, proc->str);
-        else     emit(g," %s", proc->str);
-    } else {
-        emit_proc_ret(g, proc);
-        emit(g," %s", proc->str);
+        emit(g," %s_%s", g->modname, proc->str);
     }
+		
     if (nested && g->n_frame > 0) {
         char _ft[MAX_IDENT+8];
         snprintf(_ft,sizeof(_ft),"_Frame_%s",g->outer_proc_name);
@@ -2105,6 +2146,9 @@ static void emit_proc_proto(CG *g, Node *proc, int nested) {
         emit_proc_params(g, proc->c0);
     }
     emit(g,";\n");
+    /* Emit file-scope static protos for nested procs too.
+     * They are hoisted to file scope in emit_proc_def, so they need
+     * a file-scope static proto before the parent definition. */
     for (Node *d=proc->c2; d; d=d->next)
         if (d->kind==ND_PROC_DECL) emit_proc_proto(g, d, 1);
 
@@ -2139,16 +2183,11 @@ static void emit_proc_def(CG *g, Node *proc, int nested) {
         g->in_nested_proc = 1;
     }
 
-    if (!g->is_main) {
-        int exp = !nested && (proc->flags & FLAG_EXPORTED);
-        if (!exp) emit(g,"static ");
-        emit_proc_ret(g, proc);
-        if (exp) emit(g," %s_%s", g->modname, proc->str);
-        else     emit(g," %s", proc->str);
-    } else {
-        emit_proc_ret(g, proc);
-        emit(g," %s", proc->str);
-    }
+    
+		int exp = !nested && (proc->flags & FLAG_EXPORTED);
+		if (!exp) emit(g,"static ");
+		emit_proc_ret(g, proc);
+		emit(g," %s_%s", g->modname, proc->str);
 
     sym_push();
     if (nested && g->n_frame > 0) {
@@ -2169,9 +2208,8 @@ static void emit_proc_def(CG *g, Node *proc, int nested) {
     g->indent++;
     g->in_proc++;
 
-    /* Forward-declare nested procs inside this proc's body */
-    for (Node *d=proc->c2; d; d=d->next)
-        if (d->kind==ND_PROC_DECL) { iemit(g,""); emit_proc_proto(g,d,1); }
+    /* Nested proc protos are emitted at file scope by emit_proc_proto;
+     * no block-scope forward declaration needed or wanted here. */
 
     /* Local variable declarations */
     emit_local_vars(g, proc->c2);
@@ -2249,7 +2287,7 @@ void codegen(Node *module, FILE *out, int is_main, const char *srcfile) {
     }
 
     /* ── Collect module-level exported symbols (for #define aliases) ─ */
-    if (!is_main) collect_modsyms(module->c1);
+    collect_modsyms_all(module->c1);
 
     /* ── Standard includes ───────────────────────────────────────── */
 		emit(g,"#ifdef __linux__\n#define _GNU_SOURCE\n#endif\n");
@@ -3309,16 +3347,15 @@ void codegen(Node *module, FILE *out, int is_main, const char *srcfile) {
     emit(g,"    unsigned int m=0; for(int i=lo;i<=hi;i++) m|=(1u<<i); return m;\n");
     emit(g,"}\n\n");
 
-    /* ── #define aliases (lib mode only): let proc bodies reference
-     *    exported symbols by their original Oberon names, which the C
-     *    preprocessor then expands to the prefixed C names.          ── */
-    if (!g->is_main) {
-        for (int i=0; i<g_nmodsyms; i++)
-            emit(g,"#define %s %s_%s\n", g_modsyms[i], g->modname, g_modsyms[i]);
-        emit(g,"\n");
-    }
+    /* ── #define aliases: active before constants so that exported
+     * constant names resolve when used in private constant expressions,
+     * array dimensions in types, and proc-pointer assignments. ── */
+    collect_modsyms_all(module->c1);  /* refresh just before emission */
+    for (int i=0; i<g_nmodsyms; i++)
+        emit(g,"#define %s %s_%s\n", g_modsyms[i], g->modname, g_modsyms[i]);
+    emit(g,"\n");
 
-    /* ── Constant definitions (before types — may be used as array sizes) ── */
+		/* ── Constant definitions (before types — may be used as array sizes) ── */
     int has_consts = 0;
     for (Node *d=module->c1; d; d=d->next) {
         if (d->kind==ND_CONST_DECL) {
@@ -3388,6 +3425,10 @@ void codegen(Node *module, FILE *out, int is_main, const char *srcfile) {
         if (d->kind==ND_PROC_DECL) emit_proc_proto(g,d,0);
     emit(g,"\n");
 
+		for (int i=0; i<g_nmodsyms; i++)
+        emit(g,"#define %s %s_%s\n", g_modsyms[i], g->modname, g_modsyms[i]);
+    emit(g,"\n");
+		
     /* ── Procedure definitions ───────────────────────────────────── */
     for (Node *d=module->c1; d; d=d->next)
         if (d->kind==ND_PROC_DECL) emit_proc_def(g,d,0);
@@ -3530,7 +3571,17 @@ void codegen_header(Node *module, FILE *out) {
         }
     }
 
-    /* #define aliases so bare type/proc names expand to prefixed versions */
+    /* #define aliases for exported procs and consts only — type names are
+     * deliberately excluded because they appear in parameter type positions
+     * and the preprocessor would expand them inside function signatures.   */
+    collect_modsyms(module->c1);
+    if (g_nmodsyms) {
+        for (int i=0; i<g_nmodsyms; i++)
+            fprintf(out,"#define %s %s_%s\n", g_modsyms[i], module->str, g_modsyms[i]);
+        fprintf(out,"\n");
+    }
+
+    /* #define aliases for exported procs and consts only (NOT type names). */
     collect_modsyms(module->c1);
     if (g_nmodsyms) {
         for (int i=0; i<g_nmodsyms; i++)
@@ -3577,6 +3628,23 @@ void codegen_header(Node *module, FILE *out) {
         if (d->kind==ND_TYPE_DECL && (d->flags & FLAG_EXPORTED))
             emit_type_decl(g, d);
     }
+    /* Prefixed typedef aliases so cross-module code can use Mod_TypeName.
+     * e.g. typedef View TUI_View; — a real type, not a macro. */
+    for (Node *d=module->c1; d; d=d->next) {
+        if (d->kind==ND_TYPE_DECL && (d->flags & FLAG_EXPORTED))
+            fprintf(out,"typedef %s %s_%s;\n", d->str, module->str, d->str);
+    }
+    fprintf(out,"\n");
+    /* Prefixed typedef aliases: typedef View TUI_View; etc.
+     * Required so cross-module code can use the Mod_TypeName form
+     * without relying on #define macros that break in param positions. */
+    for (Node *d=module->c1; d; d=d->next) {
+        if (d->kind==ND_TYPE_DECL && (d->flags & FLAG_EXPORTED)) {
+            /* Only emit alias if bare name != prefixed name */
+            fprintf(out,"typedef %s %s_%s;\n", d->str, module->str, d->str);
+        }
+    }
+    fprintf(out,"\n");
     /* Emit prefixed _TAG_ModName_TypeName defines so that importing modules
      * can perform IS/WITH type tests on this module's exported record types. */
     for (int _ti = 0; _ti < g_n_type_tags; _ti++) {
