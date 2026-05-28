@@ -1,10 +1,10 @@
 MODULE TestBio;
 (*
-  Test suite for BioAlpha, BioSeq, and BioIO.
+  Test suite for BioAlpha, BioSeq, BioIO, and BioAlign.
   Each ASSERT failure will abort with a C assert message identifying the line.
   All tests passing = silent exit with code 0.
 *)
-IMPORT BioSeq, BioAlpha, BioIO, Files, Strings, Out;
+IMPORT BioSeq, BioAlpha, BioAlign, BioIO, Files, Strings, Out;
 
 VAR
   a    : BioAlpha.Alphabet;
@@ -894,6 +894,319 @@ BEGIN
   BioIO.CloseBed(rdr)
 END TestBedComments;
 
+(* ================================================================== *)
+(*  BioAlign tests                                                      *)
+(* ================================================================== *)
+
+(* ------------------------------------------------------------------ *)
+(*  A1. DefaultScore                                                    *)
+(* ------------------------------------------------------------------ *)
+PROCEDURE TestDefaultScore;
+VAR m: BioAlign.ScoreMatrix;
+BEGIN
+  Out.String("--- DefaultScore ---"); Out.Ln;
+  BioAlign.DefaultScore(m);
+  ASSERT(m.match_   =  1);
+  ASSERT(m.mismatch = -1);
+  ASSERT(m.gapOpen  = -5);
+  ASSERT(m.gapExt   = -1);
+  Ok("DefaultScore values")
+END TestDefaultScore;
+
+(* ------------------------------------------------------------------ *)
+(*  A2. HammingDistance                                                 *)
+(* ------------------------------------------------------------------ *)
+PROCEDURE TestHammingDistance;
+VAR q, r: BioSeq.Seq;
+BEGIN
+  Out.String("--- HammingDistance ---"); Out.Ln;
+  BioSeq.New(q);  BioSeq.New(r);
+
+  BioSeq.FromStr(q, "ACGT");
+  BioSeq.FromStr(r, "ACGT");
+  ASSERT(BioAlign.HammingDistance(q, r) = 0);
+  Ok("Hamming identical = 0");
+
+  BioSeq.FromStr(r, "ACGG");       (* last char differs *)
+  ASSERT(BioAlign.HammingDistance(q, r) = 1);
+  Ok("Hamming 1 mismatch = 1");
+
+  BioSeq.FromStr(r, "TTTT");       (* A=T C=T G=T T=T → 3 mismatches *)
+  ASSERT(BioAlign.HammingDistance(q, r) = 3);
+  Ok("Hamming 3 mismatches");
+
+  BioSeq.FromStr(r, "TGCA");       (* all differ *)
+  ASSERT(BioAlign.HammingDistance(q, r) = 4);
+  Ok("Hamming all mismatches = 4");
+
+  BioSeq.FromStr(r, "ACGTA");      (* unequal length *)
+  ASSERT(BioAlign.HammingDistance(q, r) = -1);
+  Ok("Hamming unequal length = -1");
+
+  BioSeq.Free(q);  BioSeq.Free(r)
+END TestHammingDistance;
+
+(* ------------------------------------------------------------------ *)
+(*  A3. EditDistance                                                    *)
+(* ------------------------------------------------------------------ *)
+PROCEDURE TestEditDistance;
+VAR q, r: BioSeq.Seq;
+BEGIN
+  Out.String("--- EditDistance ---"); Out.Ln;
+  BioSeq.New(q);  BioSeq.New(r);
+
+  BioSeq.FromStr(q, "ACGT");
+  BioSeq.FromStr(r, "ACGT");
+  ASSERT(BioAlign.EditDistance(q, r) = 0);
+  Ok("EditDist identical = 0");
+
+  BioSeq.FromStr(r, "ACGTT");      (* one insertion *)
+  ASSERT(BioAlign.EditDistance(q, r) = 1);
+  Ok("EditDist one insertion = 1");
+
+  BioSeq.FromStr(q, "ACGTT");      (* swap: one deletion *)
+  BioSeq.FromStr(r, "ACGT");
+  ASSERT(BioAlign.EditDistance(q, r) = 1);
+  Ok("EditDist one deletion = 1");
+
+  BioSeq.FromStr(q, "ACGT");
+  BioSeq.FromStr(r, "ACCT");       (* one substitution G→C *)
+  ASSERT(BioAlign.EditDistance(q, r) = 1);
+  Ok("EditDist one substitution = 1");
+
+  BioSeq.FromStr(q, "ACGT");
+  BioSeq.FromStr(r, "TGCA");       (* fully scrambled: 4 edits minimum *)
+  ASSERT(BioAlign.EditDistance(q, r) = 4);
+  Ok("EditDist fully scrambled = 4");
+
+  BioSeq.FromStr(q, "");
+  BioSeq.FromStr(r, "ACGT");
+  ASSERT(BioAlign.EditDistance(q, r) = 4);
+  Ok("EditDist empty vs 4-mer = 4");
+
+  BioSeq.Free(q);  BioSeq.Free(r)
+END TestEditDistance;
+
+(* ------------------------------------------------------------------ *)
+(*  A4. Global alignment — Needleman-Wunsch                            *)
+(* ------------------------------------------------------------------ *)
+PROCEDURE TestGlobal;
+VAR
+  q, r : BioSeq.Seq;
+  m    : BioAlign.ScoreMatrix;
+  aln  : BioAlign.Alignment;
+BEGIN
+  Out.String("--- Global alignment ---"); Out.Ln;
+  BioSeq.New(q);  BioSeq.New(r);
+  BioAlign.DefaultScore(m);
+
+  (* --- identical sequences --- *)
+  BioSeq.FromStr(q, "ACGT");
+  BioSeq.FromStr(r, "ACGT");
+  BioAlign.Global(q, r, m, aln);
+  ASSERT(aln.score = 4);           (* 4 matches × 1 *)
+  ASSERT(aln.qStart = 0);
+  ASSERT(aln.qEnd   = 4);
+  ASSERT(aln.rStart = 0);
+  ASSERT(aln.rEnd   = 4);
+  ASSERT(aln.nOps   = 1);
+  ASSERT(aln.cigar[0].op  = BioAlign.opMatch);
+  ASSERT(aln.cigar[0].len = 4);
+  ASSERT(aln.identity > 0.999);
+  Ok("Global identical: score/coords/cigar/identity");
+
+  (* --- one substitution --- *)
+  (* ACGT vs ACCT: 3 match + 1 subst → score = 3 - 1 = 2 *)
+  BioSeq.FromStr(q, "ACGT");
+  BioSeq.FromStr(r, "ACCT");
+  BioAlign.Global(q, r, m, aln);
+  ASSERT(aln.score = 2);
+  ASSERT(aln.nOps  = 3);           (* opMatch(2) opSubst(1) opMatch(1) *)
+  ASSERT(aln.cigar[0].op  = BioAlign.opMatch);  ASSERT(aln.cigar[0].len = 2);
+  ASSERT(aln.cigar[1].op  = BioAlign.opSubst);  ASSERT(aln.cigar[1].len = 1);
+  ASSERT(aln.cigar[2].op  = BioAlign.opMatch);  ASSERT(aln.cigar[2].len = 1);
+  ASSERT((aln.identity > 0.749) & (aln.identity < 0.751));  (* 3/4 *)
+  Ok("Global 1 substitution: score/cigar/identity");
+
+  (* --- one gap in reference (query longer by 1) ---
+     q = ACGT, r = AGT
+     Best: A-match, C-inserted (opIns), G-match, T-match
+     score = 3 matches + gapOpen = 3 - 5 = -2 *)
+  BioSeq.FromStr(q, "ACGT");
+  BioSeq.FromStr(r, "AGT");
+  BioAlign.Global(q, r, m, aln);
+  ASSERT(aln.score  = -2);
+  ASSERT(aln.qStart = 0);  ASSERT(aln.qEnd = 4);
+  ASSERT(aln.rStart = 0);  ASSERT(aln.rEnd = 3);
+  ASSERT(aln.nOps   = 3);  (* opMatch(1) opIns(1) opMatch(2) *)
+  ASSERT(aln.cigar[0].op  = BioAlign.opMatch);  ASSERT(aln.cigar[0].len = 1);
+  ASSERT(aln.cigar[1].op  = BioAlign.opIns);    ASSERT(aln.cigar[1].len = 1);
+  ASSERT(aln.cigar[2].op  = BioAlign.opMatch);  ASSERT(aln.cigar[2].len = 2);
+  Ok("Global 1-base gap in ref: score/cigar");
+
+  (* --- one gap in query (reference longer by 1) ---
+     q = ACT, r = ACGT
+     Best: A-match, C-match, G-deleted (opDel), T-match
+     score = 3 + gapOpen = -2 *)
+  BioSeq.FromStr(q, "ACT");
+  BioSeq.FromStr(r, "ACGT");
+  BioAlign.Global(q, r, m, aln);
+  ASSERT(aln.score  = -2);
+  ASSERT(aln.qEnd   = 3);
+  ASSERT(aln.rEnd   = 4);
+  ASSERT(aln.cigar[1].op  = BioAlign.opDel);  ASSERT(aln.cigar[1].len = 1);
+  Ok("Global 1-base gap in query: score/cigar");
+
+  (* --- length-2 gap: verify gapExt kicks in ---
+     q = ACGT, r = AT (2 bases shorter)
+     Best: A-match, CG-inserted (opIns×2), T-match
+     score = 2 + gapOpen + gapExt = 2 - 5 - 1 = -4 *)
+  BioSeq.FromStr(q, "ACGT");
+  BioSeq.FromStr(r, "AT");
+  BioAlign.Global(q, r, m, aln);
+  ASSERT(aln.score = -4);
+  ASSERT(aln.cigar[1].op  = BioAlign.opIns);  ASSERT(aln.cigar[1].len = 2);
+  Ok("Global length-2 gap: gapExt applied");
+
+  BioSeq.Free(q);  BioSeq.Free(r)
+END TestGlobal;
+
+(* ------------------------------------------------------------------ *)
+(*  A5. Local alignment — Smith-Waterman                               *)
+(* ------------------------------------------------------------------ *)
+PROCEDURE TestLocal;
+VAR
+  q, r : BioSeq.Seq;
+  m    : BioAlign.ScoreMatrix;
+  aln  : BioAlign.Alignment;
+BEGIN
+  Out.String("--- Local alignment ---"); Out.Ln;
+  BioSeq.New(q);  BioSeq.New(r);
+  BioAlign.DefaultScore(m);
+
+  (* --- perfect substring match ---
+     q = AAACGTAAA, r = TTACGTTT
+     ACGT appears at q[2..5] and r[2..5]
+     Local score = 4 (4 exact matches) *)
+  BioSeq.FromStr(q, "AAACGTAAA");
+  BioSeq.FromStr(r, "TTACGTTT");
+  BioAlign.Local(q, r, m, aln);
+  ASSERT(aln.score  = 4);
+  ASSERT(aln.qStart = 2);  ASSERT(aln.qEnd = 6);
+  ASSERT(aln.rStart = 2);  ASSERT(aln.rEnd = 6);
+  ASSERT(aln.nOps   = 1);
+  ASSERT(aln.cigar[0].op  = BioAlign.opMatch);
+  ASSERT(aln.cigar[0].len = 4);
+  ASSERT(aln.identity > 0.999);
+  Ok("Local substring match: score/coords/cigar/identity");
+
+  (* --- query IS the reference: entire alignment is local best ---
+     score = len × match *)
+  BioSeq.FromStr(q, "ACGT");
+  BioSeq.FromStr(r, "ACGT");
+  BioAlign.Local(q, r, m, aln);
+  ASSERT(aln.score = 4);
+  ASSERT(aln.identity > 0.999);
+  Ok("Local identical sequences: full match");
+
+  (* --- no similarity: all mismatches, score = 0 ---
+     The SW floors at 0, so best cell score should be 0 *)
+  BioSeq.FromStr(q, "AAAA");
+  BioSeq.FromStr(r, "TTTT");
+  BioAlign.Local(q, r, m, aln);
+  ASSERT(aln.score = 0);
+  ASSERT(aln.nOps  = 0);
+  Ok("Local all mismatches: score 0, no ops");
+
+  (* --- local finds internal match, ignores flanking mismatches ---
+     q = TTACGTTT, r = AAACGTAAA
+     best match is ACGT at q[2..5], r[3..6] *)
+  BioSeq.FromStr(q, "TTACGTTT");
+  BioSeq.FromStr(r, "AAACGTAAA");
+  BioAlign.Local(q, r, m, aln);
+  ASSERT(aln.score = 4);
+  ASSERT(aln.qEnd - aln.qStart = 4);  (* 4 bases aligned *)
+  ASSERT(aln.rEnd - aln.rStart = 4);
+  Ok("Local: correct window width for internal match");
+
+  BioSeq.Free(q);  BioSeq.Free(r)
+END TestLocal;
+
+(* ------------------------------------------------------------------ *)
+(*  A6. SemiGlobal alignment — free query end-gaps                     *)
+(* ------------------------------------------------------------------ *)
+PROCEDURE TestSemiGlobal;
+VAR
+  q, r : BioSeq.Seq;
+  m    : BioAlign.ScoreMatrix;
+  aln  : BioAlign.Alignment;
+BEGIN
+  Out.String("--- SemiGlobal alignment ---"); Out.Ln;
+  BioSeq.New(q);  BioSeq.New(r);
+  BioAlign.DefaultScore(m);
+
+  (* --- query embedded in reference, free prefix and suffix ---
+     q = ACGT, r = TTTTACGTTTTT
+     Perfect ACGT match at r[4..7]; flanking Ts are free
+     score = 4 *)
+  BioSeq.FromStr(q, "ACGT");
+  BioSeq.FromStr(r, "TTTTACGTTTTT");
+  BioAlign.SemiGlobal(q, r, m, aln);
+  ASSERT(aln.score  = 4);
+  ASSERT(aln.qStart = 0);  ASSERT(aln.qEnd = 4);
+  ASSERT(aln.rStart = 4);  ASSERT(aln.rEnd = 8);
+  ASSERT(aln.nOps   = 1);
+  ASSERT(aln.cigar[0].op  = BioAlign.opMatch);
+  ASSERT(aln.cigar[0].len = 4);
+  ASSERT(aln.identity > 0.999);
+  Ok("SemiGlobal: query embedded in ref, free flanks");
+
+  (* --- identical sequences: behaves like global ---
+     no free gaps needed, score = length × match *)
+  BioSeq.FromStr(q, "ACGT");
+  BioSeq.FromStr(r, "ACGT");
+  BioAlign.SemiGlobal(q, r, m, aln);
+  ASSERT(aln.score = 4);
+  ASSERT(aln.identity > 0.999);
+  Ok("SemiGlobal identical = global score");
+
+  (* --- query at start of reference, trailing ref bases are free ---
+     q = ACGT, r = ACGTTTTTTTT
+     ACGT matches at r[0..3]; trailing Ts carry no penalty
+     score = 4 *)
+  BioSeq.FromStr(q, "ACGT");
+  BioSeq.FromStr(r, "ACGTTTTTTTT");
+  BioAlign.SemiGlobal(q, r, m, aln);
+  ASSERT(aln.score  = 4);
+  ASSERT(aln.rStart = 0);
+  ASSERT(aln.rEnd   = 4);
+  Ok("SemiGlobal: query at ref start, trailing ref bases free");
+
+  BioSeq.Free(q);  BioSeq.Free(r)
+END TestSemiGlobal;
+
+(* ------------------------------------------------------------------ *)
+(*  A7. PrintAlignment — visual / no crash                             *)
+(* ------------------------------------------------------------------ *)
+PROCEDURE TestPrintAlignment;
+VAR
+  q, r : BioSeq.Seq;
+  m    : BioAlign.ScoreMatrix;
+  aln  : BioAlign.Alignment;
+BEGIN
+  Out.String("--- PrintAlignment (visual) ---"); Out.Ln;
+  BioSeq.New(q);  BioSeq.New(r);
+  BioAlign.DefaultScore(m);
+
+  BioSeq.FromStr(q, "ACGTACGT");
+  BioSeq.FromStr(r, "ACGTTACGT");
+  BioAlign.Global(q, r, m, aln);
+  BioAlign.PrintAlignment(aln, q, r);
+
+  BioSeq.Free(q);  BioSeq.Free(r);
+  Ok("PrintAlignment runs without crash")
+END TestPrintAlignment;
+
 (* ------------------------------------------------------------------ *)
 (*  Main                                                                *)
 (* ------------------------------------------------------------------ *)
@@ -929,6 +1242,14 @@ BEGIN
   TestBedRoundTrip;
   TestBedDefaults;
   TestBedComments;
+  Out.String("=== BioAlign tests ==="); Out.Ln();
+  TestDefaultScore;
+  TestHammingDistance;
+  TestEditDistance;
+  TestGlobal;
+  TestLocal;
+  TestSemiGlobal;
+  TestPrintAlignment;
   Out.Ln();
   Out.String("All "); Out.Int(pass); Out.String(" tests passed."); Out.Ln()
 END TestBio.

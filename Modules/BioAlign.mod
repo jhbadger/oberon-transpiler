@@ -36,24 +36,24 @@ CONST
 
 TYPE
   ScoreMatrix* = RECORD
-    match_   : INTEGER;
-    mismatch : INTEGER;
-    gapOpen  : INTEGER;
-    gapExt   : INTEGER
+    match_*   : INTEGER;
+    mismatch* : INTEGER;
+    gapOpen*  : INTEGER;
+    gapExt*   : INTEGER
   END;
 
   CigarEntry* = RECORD
-    op  : INTEGER;
-    len : INTEGER
+    op*  : INTEGER;
+    len* : INTEGER
   END;
 
   Alignment* = RECORD
-    score          : INTEGER;
-    qStart, qEnd   : INTEGER;
-    rStart, rEnd   : INTEGER;
-    cigar          : ARRAY MaxCigar OF CigarEntry;
-    nOps           : INTEGER;
-    identity       : REAL
+    score*          : INTEGER;
+    qStart*, qEnd*  : INTEGER;
+    rStart*, rEnd*  : INTEGER;
+    cigar*          : ARRAY MaxCigar OF CigarEntry;
+    nOps*           : INTEGER;
+    identity*       : REAL
   END;
 
 (* Module-level DP storage — shared across all alignment procedures. *)
