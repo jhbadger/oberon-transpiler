@@ -1,12 +1,6 @@
 MODULE FastaStats;
 
-IMPORT Out, Files, Args;
-
-CONST
-    LineBufferSize = 4096;
-    SeqBufSize     = 1000000;
-
-(* --- Global/Accumulator Variables --- *)
+IMPORT BioIO, BioSeq, Out, Args;
 
 VAR
     total_size:     INTEGER;
@@ -16,31 +10,6 @@ VAR
     total_gc_count: INTEGER;
     min_gc_percent: REAL;
     max_gc_percent: REAL;
-
-    (* FIX 7: moved off the stack to avoid stack overflow *)
-    current_sequence_buffer: ARRAY SeqBufSize OF CHAR;
-
-(* --- Helper Procedures --- *)
-
-PROCEDURE CalculateStats(VAR sequence_buffer: ARRAY OF CHAR;
-                         VAR current_size: INTEGER;
-                         VAR current_gc_count: INTEGER);
-    VAR i: INTEGER; c: CHAR;
-BEGIN
-    current_size     := 0;
-    current_gc_count := 0;
-    i := 0;
-    WHILE (i < LEN(sequence_buffer)) & (sequence_buffer[i] # 0X) DO
-        c := sequence_buffer[i];
-        IF (c = 'A') OR (c = 'T') OR (c = 'C') OR (c = 'G') THEN
-            INC(current_size);
-            IF (c = 'G') OR (c = 'C') THEN
-                INC(current_gc_count)
-            END
-        END;
-        INC(i)
-    END
-END CalculateStats;
 
 PROCEDURE UpdateStats(size: INTEGER; gc_count: INTEGER);
     VAR current_gc_percent: REAL;
@@ -69,39 +38,12 @@ BEGIN
     IF current_gc_percent > max_gc_percent THEN max_gc_percent := current_gc_percent END
 END UpdateStats;
 
-PROCEDURE ProcessStats(bufLen: INTEGER;
-                       VAR size: INTEGER;
-                       VAR gc: INTEGER);
-BEGIN
-    IF bufLen > 0 THEN
-        CalculateStats(current_sequence_buffer, size, gc);
-        UpdateStats(size, gc)
-    END
-END ProcessStats;
-
-PROCEDURE AppendLineToBuffer(VAR dst: ARRAY OF CHAR; offset: INTEGER;
-                             VAR src_line: ARRAY OF CHAR): INTEGER;
-    VAR i: INTEGER;
-BEGIN
-    i := 0;
-    WHILE (i < LEN(src_line)) & (src_line[i] # 0X) &
-          (offset + i < LEN(dst) - 1) DO
-        dst[offset + i] := src_line[i];
-        INC(i)   
-    END;
-    dst[offset + i] := 0X;   (* keep buffer null-terminated *)
-    RETURN offset + i
-END AppendLineToBuffer;
-
 PROCEDURE ProcessFastaFile(VAR filename: ARRAY OF CHAR);
 VAR
-    f:              Files.File;
-    r:              Files.Rider;   
-    line:           ARRAY LineBufferSize OF CHAR;
-    buf_offset:     INTEGER;
-    sequence_length: INTEGER;
-    gc_count:       INTEGER;
-    in_sequence_block: BOOLEAN;
+    rdr:      BioIO.FastaReader;
+    rec:      BioIO.FastaRecord;
+    gc_count: INTEGER;
+    size:     INTEGER;
 BEGIN
     total_size     := 0;
     num_sequences  := 0;
@@ -111,51 +53,20 @@ BEGIN
     min_gc_percent := 101.0;
     max_gc_percent := 0.0;
 
-    f := Files.Old(filename);
-    IF f = NIL THEN
+    IF ~BioIO.OpenFasta(rdr, filename) THEN
         Out.String("Error: Could not open file: "); Out.String(filename); Out.Ln;
         RETURN
     END;
 
-    current_sequence_buffer[0] := 0X;
-    buf_offset        := 0;
-    sequence_length   := 0;
-    gc_count          := 0;
-    in_sequence_block := FALSE;
-
-    Files.Set(r, f, 0);
-
-    WHILE ~r.eof DO
-        Files.ReadLine(r, line);
-
-        (* ReadLine sets r.eof when no characters were available;
-           skip processing the empty sentinel read *)
-        IF ~r.eof OR (line[0] # 0X) THEN
-
-            IF line[0] = '>' THEN
-                IF in_sequence_block THEN
-                    ProcessStats(buf_offset, sequence_length, gc_count)
-                END;
-
-                current_sequence_buffer[0] := 0X;
-                buf_offset        := 0;
-                sequence_length   := 0;
-                gc_count          := 0;
-                in_sequence_block := TRUE
-            ELSIF in_sequence_block THEN
-                buf_offset := AppendLineToBuffer(current_sequence_buffer,
-                                                 buf_offset, line);
-                sequence_length := buf_offset
-            END
-        END
+    rec.seq := NIL;
+    WHILE BioIO.ReadFasta(rdr, rec) DO
+        size     := BioSeq.Length(rec.seq);
+        gc_count := BioSeq.Count(rec.seq, 'G') + BioSeq.Count(rec.seq, 'C') +
+                    BioSeq.Count(rec.seq, 'g') + BioSeq.Count(rec.seq, 'c');
+        UpdateStats(size, gc_count)
     END;
 
-    (* Flush the final sequence *)
-    IF in_sequence_block THEN
-        ProcessStats(buf_offset, sequence_length, gc_count)
-    END;
-
-    Files.Close(f)
+    BioIO.CloseFasta(rdr)
 END ProcessFastaFile;
 
 PROCEDURE OutputResults();
@@ -200,4 +111,3 @@ BEGIN
         OutputResults()
     END
 END FastaStats.
-
