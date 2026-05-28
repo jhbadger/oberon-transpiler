@@ -2051,6 +2051,31 @@ static void emit_global_var(CG *g, Node *n) {
 /* Emit local variable declarations inside a procedure body */
 static void emit_local_vars(CG *g, Node *decls) {
     for (Node *d=decls; d; d=d->next) {
+        /* Local constant declarations */
+        if (d->kind == ND_CONST_DECL) {
+            Node *val = d->c0;
+            if (val && val->kind == ND_STRING) {
+                if (strlen(val->str) == 1) {
+                    char _c = val->str[0];
+                    const char *_clit = (_c=='\'') ? "'\\''" : (_c=='\\') ? "'\\\\'" : NULL;
+                    if (_clit) iemit(g,"const char %s = %s;\n", d->str, _clit);
+                    else       iemit(g,"const char %s = '%c';\n", d->str, _c);
+                } else {
+                    iemit(g,"const char %s[] = ", d->str);
+                    emit_string_lit(g, val->str);
+                    emit(g,";\n");
+                }
+            } else if (val && val->kind == ND_REAL) {
+                iemit(g,"const double %s = %s;\n", d->str, val->str);
+            } else {
+                /* Integer/expression: enum keeps array-size usability */
+                iemit(g,"enum { %s = ", d->str);
+                emit_expr(g, val);
+                emit(g," };\n");
+            }
+            continue;
+        }
+        /* Local variable declarations */
         if (d->kind != ND_VAR_DECL) continue;
         for (Node *id=d->c0; id; id=id->next) {
             sym_add(id->str, d->c1, 0);
