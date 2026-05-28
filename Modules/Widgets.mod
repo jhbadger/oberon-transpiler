@@ -118,7 +118,7 @@ TYPE
    ════════════════════════════════════════════════════════════════════════ *)
 
 (* InputLineAdjust — keep cursor visible inside the field. *)
-PROCEDURE InputLineAdjust(VAR il: InputLineRec);
+PROCEDURE InputLineAdjust(il: InputLine);
 BEGIN
   IF il.pos < il.scroll THEN
     il.scroll := il.pos
@@ -128,7 +128,7 @@ BEGIN
 END InputLineAdjust;
 
 (* MenuDropWidth — compute the dropdown width for menu m. *)
-PROCEDURE MenuDropWidth(VAR mb: MenuBarRec; m: INTEGER): INTEGER;
+PROCEDURE MenuDropWidth(mb: MenuBar; m: INTEGER): INTEGER;
 VAR i, w, tl: INTEGER;
 BEGIN
   w := 8;
