@@ -4,7 +4,7 @@ MODULE TestBio;
   Each ASSERT failure will abort with a C assert message identifying the line.
   All tests passing = silent exit with code 0.
 *)
-IMPORT BioSeq, BioAlpha, BioAlign, BioIO, BioPattern, BioSuffix, BioFM, Files, Strings, Out;
+IMPORT BioSeq, BioAlpha, BioAlign, BioIO, BioPattern, BioSuffix, BioFM, BioQGram, Files, Strings, Out;
 
 VAR
   a    : BioAlpha.Alphabet;
@@ -20,7 +20,9 @@ VAR
   bwtRes : BioSuffix.BWTResult;
   lcpArr : ARRAY 65536 OF INTEGER;
   (* BioFM module-level state: FMIndex (~2.3 MB) must live here. *)
-  fmIdx : BioFM.FMIndex;
+  fmIdx  : BioFM.FMIndex;
+  (* BioQGram module-level state: QGramIndex (~512 KB) must live here. *)
+  qgIdx  : BioQGram.QGramIndex;
 
 PROCEDURE Ok(label: ARRAY OF CHAR);
 BEGIN
@@ -1828,6 +1830,131 @@ BEGIN
   BioSeq.Free(seq)
 END TestFMLocate;
 
+(* ================================================================== *)
+(*  BioQGram tests                                                      *)
+(* ================================================================== *)
+
+(* ------------------------------------------------------------------ *)
+(*  Q1. Build and Query                                                 *)
+(* ------------------------------------------------------------------ *)
+PROCEDURE TestQGramQuery;
+VAR
+  seq : BioSeq.Seq;
+  pos : ARRAY 64 OF INTEGER;
+  n, i : INTEGER;
+  found0, found4 : BOOLEAN;
+BEGIN
+  Out.String("--- QGram Build / Query ---"); Out.Ln();
+  BioSeq.New(seq);
+
+  (* "ACGTACGT" q=3: "ACG" at positions 0 and 4 *)
+  BioSeq.FromStr(seq, "ACGTACGT");
+  BioQGram.Build(seq, 3, qgIdx);
+  ASSERT(qgIdx.q       = 3);
+  ASSERT(qgIdx.textLen = 8);
+  ASSERT(qgIdx.nPos    = 6);   (* 8 - 3 + 1 = 6 q-grams *)
+  Ok("Build ACGTACGT q=3");
+
+  BioQGram.Query(qgIdx, "ACG", pos, n);
+  ASSERT(n = 2);
+  found0 := FALSE; found4 := FALSE;
+  FOR i := 0 TO n - 1 DO
+    IF pos[i] = 0 THEN found0 := TRUE END;
+    IF pos[i] = 4 THEN found4 := TRUE END
+  END;
+  ASSERT(found0 & found4);
+  Ok("Query ACG -> positions {0,4}");
+
+  BioQGram.Query(qgIdx, "CGT", pos, n);
+  ASSERT(n = 2);
+  Ok("Query CGT -> 2 hits");
+
+  (* q-gram not present *)
+  BioQGram.Query(qgIdx, "NNN", pos, n);
+  ASSERT(n = 0);
+  Ok("Query NNN (absent) -> 0 hits");
+
+  (* wrong length -> no hits *)
+  BioQGram.Query(qgIdx, "AC", pos, n);
+  ASSERT(n = 0);
+  Ok("Query wrong length -> 0 hits");
+
+  (* single occurrence *)
+  BioSeq.FromStr(seq, "ACGT");
+  BioQGram.Build(seq, 4, qgIdx);
+  ASSERT(qgIdx.nPos = 1);
+  BioQGram.Query(qgIdx, "ACGT", pos, n);
+  ASSERT(n = 1);
+  ASSERT(pos[0] = 0);
+  Ok("Build + Query q=4 single q-gram");
+
+  BioSeq.Free(seq)
+END TestQGramQuery;
+
+(* ------------------------------------------------------------------ *)
+(*  Q2. ApproxSearch                                                    *)
+(* ------------------------------------------------------------------ *)
+PROCEDURE TestQGramApprox;
+VAR
+  seq : BioSeq.Seq;
+  i : INTEGER;
+  foundAt0, foundAt5 : BOOLEAN;
+BEGIN
+  Out.String("--- QGram ApproxSearch ---"); Out.Ln();
+  BioSeq.New(seq);
+
+  (* "ACGTACGT" q=2: exact pattern "ACGT" maxDist=1 -> candidates at 0 and 4 *)
+  BioSeq.FromStr(seq, "ACGTACGT");
+  BioQGram.Build(seq, 2, qgIdx);
+  BioQGram.ApproxSearch(qgIdx, "ACGT", 1, hits);
+  ASSERT(hits.count >= 2);
+  foundAt0 := FALSE; foundAt5 := FALSE;
+  FOR i := 0 TO hits.count - 1 DO
+    IF hits.hits[i].pos = 0 THEN foundAt0 := TRUE END;
+    IF hits.hits[i].pos = 4 THEN foundAt5 := TRUE END
+  END;
+  ASSERT(foundAt0 & foundAt5);
+  Ok("ApproxSearch exact ACGT in ACGTACGT -> finds both");
+
+  (* one substitution: pat "ACGG" in "ACGT" at pos 0, maxDist=1 *)
+  BioSeq.FromStr(seq, "ACGT");
+  BioQGram.Build(seq, 2, qgIdx);
+  BioQGram.ApproxSearch(qgIdx, "ACGG", 1, hits);
+  ASSERT(hits.count >= 1);
+  foundAt0 := FALSE;
+  FOR i := 0 TO hits.count - 1 DO
+    IF hits.hits[i].pos = 0 THEN foundAt0 := TRUE END
+  END;
+  ASSERT(foundAt0);
+  Ok("ApproxSearch 1-subst ACGG in ACGT -> candidate at 0");
+
+  (* maxDist=0, pattern whose q-gram is absent from index -> 0 candidates *)
+  (* "TT" not in ACGT 2-grams {AC,CG,GT}, so filter returns nothing *)
+  BioQGram.ApproxSearch(qgIdx, "TTTT", 0, hits);
+  ASSERT(hits.count = 0);
+  Ok("ApproxSearch maxDist=0 absent q-gram -> 0 candidates");
+
+  (* exact match within longer text *)
+  BioSeq.FromStr(seq, "TTTACGTAAA");
+  BioQGram.Build(seq, 2, qgIdx);
+  BioQGram.ApproxSearch(qgIdx, "ACGT", 1, hits);
+  foundAt0 := FALSE;
+  FOR i := 0 TO hits.count - 1 DO
+    IF hits.hits[i].pos = 3 THEN foundAt0 := TRUE END
+  END;
+  ASSERT(foundAt0);
+  Ok("ApproxSearch exact ACGT at pos 3 in TTTACGTAAA");
+
+  (* pattern shorter than q -> no results *)
+  BioSeq.FromStr(seq, "ACGTACGT");
+  BioQGram.Build(seq, 4, qgIdx);
+  BioQGram.ApproxSearch(qgIdx, "AC", 1, hits);
+  ASSERT(hits.count = 0);
+  Ok("ApproxSearch pattern shorter than q -> 0 results");
+
+  BioSeq.Free(seq)
+END TestQGramApprox;
+
 (* ------------------------------------------------------------------ *)
 (*  Main                                                                *)
 (* ------------------------------------------------------------------ *)
@@ -1886,6 +2013,9 @@ BEGIN
   TestFMBuild;
   TestFMSearch;
   TestFMLocate;
+  Out.String("=== BioQGram tests ==="); Out.Ln();
+  TestQGramQuery;
+  TestQGramApprox;
   Out.Ln();
   Out.String("All "); Out.Int(pass); Out.String(" tests passed."); Out.Ln()
 END TestBio.
