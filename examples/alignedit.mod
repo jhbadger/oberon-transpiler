@@ -11,21 +11,19 @@ CONST
   MaxSeqs     = 100;
   HeaderWidth = 25;
   RawMax      = BioAlign.MaxSeqLen;  (* max ungapped length for alignment *)
+  MaxBufLen   = 16384;               (* max gap-annotated buffer per sequence *)
 
 TYPE
-  SeqData = POINTER TO ARRAY OF CHAR;
-
   Sequence = RECORD
     name : ARRAY 128 OF CHAR;
     desc : ARRAY 256 OF CHAR;
-    data : SeqData            (* gap-annotated editable buffer *)
+    data : ARRAY MaxBufLen OF CHAR   (* gap-annotated editable buffer *)
   END;
 
 VAR
   seqs                      : ARRAY MaxSeqs OF Sequence;
   numSeqs, cursorX, cursorY : INTEGER;
   scrollX, scrollY          : INTEGER;
-  maxLen                    : INTEGER;
   filename                  : ARRAY 256 OF CHAR;
   cmdname                   : ARRAY 256 OF CHAR;
   showDots                  : BOOLEAN;
@@ -41,33 +39,19 @@ VAR
   rec : BioIO.FastaRecord;
   len : INTEGER;
 BEGIN
-  (* First pass: find max raw length for buffer sizing *)
-  maxLen := 100;
   IF ~BioIO.OpenFasta(rdr, name) THEN
     Out.String("Error opening: "); Out.String(name); Out.Ln;
     HALT(1)
   END;
   rec.seq := NIL;
-  WHILE BioIO.ReadFasta(rdr, rec) DO
-    len := BioSeq.Length(rec.seq);
-    IF len > maxLen THEN maxLen := len END
-  END;
-  BioIO.CloseFasta(rdr);
-  IF rec.seq # NIL THEN BioSeq.Free(rec.seq) END;
-
-  maxLen := maxLen * 3 + 100;   (* extra room for inserted gaps *)
-
-  (* Second pass: load into editable buffers *)
-  IF ~BioIO.OpenFasta(rdr, name) THEN HALT(1) END;
-  rec.seq := NIL;
   numSeqs := 0;
   WHILE BioIO.ReadFasta(rdr, rec) & (numSeqs < MaxSeqs) DO
     COPY(rec.name, seqs[numSeqs].name);
     COPY(rec.desc, seqs[numSeqs].desc);
-    NEW(seqs[numSeqs].data, maxLen);
+    seqs[numSeqs].data[0] := 0X;
     len := BioSeq.Length(rec.seq);
-    IF len >= maxLen THEN len := maxLen - 1 END;
-    BioSeq.Slice(rec.seq, 0, len, seqs[numSeqs].data^);
+    IF len >= MaxBufLen THEN len := MaxBufLen - 1 END;
+    BioSeq.Slice(rec.seq, 0, len, seqs[numSeqs].data);
     INC(numSeqs)
   END;
   BioIO.CloseFasta(rdr);
@@ -100,8 +84,8 @@ BEGIN
     END;
     Files.Write(r, 10);
     j := 0;
-    WHILE (j < LEN(seqs[i].data^)) & (seqs[i].data^[j] # 0X) DO
-      Files.Write(r, ORD(seqs[i].data^[j])); INC(j)
+    WHILE (j < MaxBufLen) & (seqs[i].data[j] # 0X) DO
+      Files.Write(r, ORD(seqs[i].data[j])); INC(j)
     END;
     Files.Write(r, 10)
   END;
@@ -175,7 +159,7 @@ BEGIN
   BioSeq.New(q);
   BioSeq.New(ref);
 
-  StripGaps(seqs[0].data^, rawR);
+  StripGaps(seqs[0].data, rawR);
   IF Strings.Length(rawR) > RawMax THEN
     statusMsg := "Seq 0 too long for alignment";
     BioSeq.Free(q);  BioSeq.Free(ref);
@@ -184,11 +168,11 @@ BEGIN
   BioSeq.FromStr(ref, rawR);
 
   FOR i := 1 TO numSeqs - 1 DO
-    StripGaps(seqs[i].data^, rawQ);
+    StripGaps(seqs[i].data, rawQ);
     IF Strings.Length(rawQ) <= RawMax THEN
       BioSeq.FromStr(q, rawQ);
       BioAlign.Global(q, ref, m, aln);
-      RebuildFromCigar(rawQ, aln, seqs[i].data^)
+      RebuildFromCigar(rawQ, aln, seqs[i].data)
     END
   END;
 
@@ -231,7 +215,7 @@ BEGIN
       Out.String(sub);
 
       Terminal.Goto(HeaderWidth + 1, i + 2);
-      Strings.Extract(seqs[screenRow].data^, scrollX, viewW, sub);
+      Strings.Extract(seqs[screenRow].data, scrollX, viewW, sub);
 
       FOR j := 0 TO Strings.Length(sub) - 1 DO
         ch       := sub[j];
@@ -239,11 +223,11 @@ BEGIN
 
         IF showDots & (numSeqs > 1) THEN
           isIdentical := TRUE;
-          IF colIndex < Strings.Length(seqs[0].data^) THEN
-            refCh := seqs[0].data^[colIndex];
+          IF colIndex < Strings.Length(seqs[0].data) THEN
+            refCh := seqs[0].data[colIndex];
             FOR k := 1 TO numSeqs - 1 DO
-              IF (colIndex >= Strings.Length(seqs[k].data^)) OR
-                 (seqs[k].data^[colIndex] # refCh) THEN
+              IF (colIndex >= Strings.Length(seqs[k].data)) OR
+                 (seqs[k].data[colIndex] # refCh) THEN
                 isIdentical := FALSE
               END
             END
@@ -350,8 +334,8 @@ BEGIN
 
     actualMax := 0;
     FOR i := 0 TO numSeqs - 1 DO
-      IF Strings.Length(seqs[i].data^) > actualMax THEN
-        actualMax := Strings.Length(seqs[i].data^)
+      IF Strings.Length(seqs[i].data) > actualMax THEN
+        actualMax := Strings.Length(seqs[i].data)
       END
     END;
     IF actualMax = 0 THEN actualMax := 1 END;
@@ -400,7 +384,7 @@ BEGIN
           WHILE (i <= actualMax - patLen) & ~found DO
             match := TRUE;  j := 0;
             WHILE (j < patLen) & match DO
-              IF seqs[cursorY].data^[i + j] # inputStr[j] THEN match := FALSE END;
+              IF seqs[cursorY].data[i + j] # inputStr[j] THEN match := FALSE END;
               INC(j)
             END;
             IF match THEN cursorX := i;  found := TRUE ELSE INC(i) END
@@ -408,12 +392,12 @@ BEGIN
         END
 
     | 'g', 'G' :
-        IF Strings.Length(seqs[cursorY].data^) < maxLen - 1 THEN
-          Strings.Insert(gapStr, cursorX, seqs[cursorY].data^)
+        IF Strings.Length(seqs[cursorY].data) < MaxBufLen - 1 THEN
+          Strings.Insert(gapStr, cursorX, seqs[cursorY].data)
         END
 
     | 84X :  (* DEL *)
-        Strings.Delete(seqs[cursorY].data^, cursorX, 1)
+        Strings.Delete(seqs[cursorY].data, cursorX, 1)
 
     | 'a', 'A' :
         statusMsg := "Aligning...";
