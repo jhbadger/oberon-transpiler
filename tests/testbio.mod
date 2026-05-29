@@ -4,7 +4,7 @@ MODULE TestBio;
   Each ASSERT failure will abort with a C assert message identifying the line.
   All tests passing = silent exit with code 0.
 *)
-IMPORT BioSeq, BioAlpha, BioAlign, BioIO, BioPattern, BioSuffix, BioFM, BioQGram, BioStats, Math, Files, Strings, Out;
+IMPORT BioSeq, BioAlpha, BioAlign, BioIO, BioPattern, BioSuffix, BioFM, BioQGram, BioStats, BioAnnot, Math, Files, Strings, Out;
 
 VAR
   a    : BioAlpha.Alphabet;
@@ -23,6 +23,8 @@ VAR
   fmIdx  : BioFM.FMIndex;
   (* BioQGram module-level state: QGramIndex (~512 KB) must live here. *)
   qgIdx  : BioQGram.QGramIndex;
+  (* BioAnnot module-level state: AnnotDB (~6.5 MB) must live here. *)
+  annotDb : BioAnnot.AnnotDB;
 
 PROCEDURE Ok(label: ARRAY OF CHAR);
 BEGIN
@@ -2161,6 +2163,144 @@ BEGIN
 END TestFisher;
 
 (* ------------------------------------------------------------------ *)
+(*  BioAnnot tests                                                      *)
+(* ------------------------------------------------------------------ *)
+
+PROCEDURE TestAnnotInit;
+BEGIN
+  Out.String("--- Init / Add ---"); Out.Ln();
+  BioAnnot.Init(annotDb);
+  ASSERT(annotDb.count = 0);
+  Ok("Init sets count to 0")
+END TestAnnotInit;
+
+PROCEDURE TestAnnotAdd;
+VAR f: BioAnnot.Feature; ok: BOOLEAN;
+BEGIN
+  BioAnnot.Init(annotDb);
+  f.chrom[0] := 'c'; f.chrom[1] := 'h'; f.chrom[2] := 'r'; f.chrom[3] := '1'; f.chrom[4] := 0X;
+  f.start := 100; f.end_ := 200;
+  f.name[0] := 'g'; f.name[1] := '1'; f.name[2] := 0X;
+  f.score   := 1.0;
+  f.strand  := '+';
+  f.attrs[0] := 0X;
+  ok := BioAnnot.Add(annotDb, f);
+  ASSERT(ok);
+  ASSERT(annotDb.count = 1);
+  ASSERT(annotDb.features[0].start = 100);
+  ASSERT(annotDb.features[0].end_  = 200);
+  Ok("Add one feature")
+END TestAnnotAdd;
+
+PROCEDURE TestAnnotLoadBed;
+VAR n: INTEGER; hits: ARRAY 16 OF INTEGER;
+BEGIN
+  Out.String("--- LoadBed ---"); Out.Ln();
+  BioAnnot.Init(annotDb);
+  n := BioAnnot.LoadBed(annotDb, "testbio_annot.bed");
+  ASSERT(n = 5);
+  ASSERT(annotDb.count = 5);
+  Ok("LoadBed returns 5 features");
+
+  (* first feature: chr1:100-200 geneA + *)
+  ASSERT(annotDb.features[0].start = 100);
+  ASSERT(annotDb.features[0].end_  = 200);
+  ASSERT(annotDb.features[0].strand = '+');
+  Ok("LoadBed feature 0 coords and strand");
+
+  (* fourth feature: chr2:50-150 geneD *)
+  ASSERT(annotDb.features[3].start = 50);
+  ASSERT(annotDb.features[3].end_  = 150);
+  Ok("LoadBed chr2 feature coords");
+
+  (* missing file *)
+  BioAnnot.Init(annotDb);
+  n := BioAnnot.LoadBed(annotDb, "nosuchfile.bed");
+  ASSERT(n = -1);
+  Ok("LoadBed missing file returns -1")
+END TestAnnotLoadBed;
+
+PROCEDURE TestAnnotLoadGFF;
+VAR n: INTEGER;
+BEGIN
+  Out.String("--- LoadGFF ---"); Out.Ln();
+  BioAnnot.Init(annotDb);
+  n := BioAnnot.LoadGFF(annotDb, "testbio_annot.gff");
+  ASSERT(n = 3);
+  ASSERT(annotDb.count = 3);
+  Ok("LoadGFF returns 3 features");
+
+  (* GFF start is 1-based: 101 -> 0-based 100 *)
+  ASSERT(annotDb.features[0].start = 100);
+  ASSERT(annotDb.features[0].end_  = 200);
+  ASSERT(annotDb.features[0].strand = '+');
+  Ok("LoadGFF feature 0: 1-based start converted");
+
+  (* exon: score 1.5 *)
+  ASSERT(annotDb.features[1].score > 1.0);
+  Ok("LoadGFF feature 1: score parsed");
+
+  (* chr2 gene on minus strand *)
+  ASSERT(annotDb.features[2].strand = '-');
+  Ok("LoadGFF feature 2: minus strand");
+
+  (* missing file *)
+  BioAnnot.Init(annotDb);
+  n := BioAnnot.LoadGFF(annotDb, "nosuchfile.gff");
+  ASSERT(n = -1);
+  Ok("LoadGFF missing file returns -1")
+END TestAnnotLoadGFF;
+
+PROCEDURE TestAnnotOverlaps;
+VAR hits: ARRAY 16 OF INTEGER; n, i: INTEGER;
+BEGIN
+  Out.String("--- Overlaps / Contains ---"); Out.Ln();
+  BioAnnot.Init(annotDb);
+  (* Load BED and check overlaps *)
+  n := BioAnnot.LoadBed(annotDb, "testbio_annot.bed");
+
+  (* Query chr1:120-160 overlaps geneA(100-200), geneC(150-250) *)
+  BioAnnot.Overlaps(annotDb, "chr1", 120, 160, hits, n);
+  ASSERT(n >= 1);
+  Ok("Overlaps chr1:120-160 finds at least 1 feature");
+
+  (* Query chr1:0-50: no features there *)
+  BioAnnot.Overlaps(annotDb, "chr1", 0, 50, hits, n);
+  ASSERT(n = 0);
+  Ok("Overlaps chr1:0-50 finds 0 features");
+
+  (* Contains chr2:100: inside geneD(50-150) *)
+  BioAnnot.Contains(annotDb, "chr2", 100, hits, n);
+  ASSERT(n >= 1);
+  Ok("Contains chr2:100 finds at least 1 feature");
+
+  (* Contains chr2:400: nothing there *)
+  BioAnnot.Contains(annotDb, "chr2", 400, hits, n);
+  ASSERT(n = 0);
+  Ok("Contains chr2:400 finds 0 features")
+END TestAnnotOverlaps;
+
+PROCEDURE TestAnnotSort;
+VAR n: INTEGER;
+BEGIN
+  Out.String("--- SortByPos ---"); Out.Ln();
+  BioAnnot.Init(annotDb);
+  n := BioAnnot.LoadBed(annotDb, "testbio_annot.bed");
+  BioAnnot.SortByPos(annotDb);
+  (* After sort: chr1 features (100-200, 150-250, 300-400) before chr2 (50-150, 200-300) *)
+  ASSERT(Strings.Compare(annotDb.features[0].chrom, "chr1") = 0);
+  ASSERT(Strings.Compare(annotDb.features[3].chrom, "chr2") = 0);
+  Ok("SortByPos: chr1 before chr2");
+  (* chr1 features in start order *)
+  ASSERT(annotDb.features[0].start <= annotDb.features[1].start);
+  ASSERT(annotDb.features[1].start <= annotDb.features[2].start);
+  Ok("SortByPos: chr1 features sorted by start");
+  (* chr2 features in start order *)
+  ASSERT(annotDb.features[3].start <= annotDb.features[4].start);
+  Ok("SortByPos: chr2 features sorted by start")
+END TestAnnotSort;
+
+(* ------------------------------------------------------------------ *)
 (*  Main                                                                *)
 (* ------------------------------------------------------------------ *)
 BEGIN
@@ -2227,6 +2367,13 @@ BEGIN
   TestCombinatorics;
   TestDistributions;
   TestFisher;
+  Out.String("=== BioAnnot tests ==="); Out.Ln();
+  TestAnnotInit;
+  TestAnnotAdd;
+  TestAnnotLoadBed;
+  TestAnnotLoadGFF;
+  TestAnnotOverlaps;
+  TestAnnotSort;
   Out.Ln();
   Out.String("All "); Out.Int(pass); Out.String(" tests passed."); Out.Ln()
 END TestBio.

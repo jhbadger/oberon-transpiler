@@ -1,0 +1,5 @@
+##gff-version 3
+# comment
+chr1	HAVANA	gene	101	200	.	+	.	ID=gene1;Name=BRCA1
+chr1	HAVANA	exon	101	150	1.5	+	0	ID=exon1;Parent=gene1
+chr2	RefSeq	gene	51	300	.	-	.	ID=gene2;Name=TP53
