@@ -74,6 +74,8 @@ static const FfiMod *ffi_lookup(const char *modname) {
 }
 
 static int is_open_array(Node *t);   /* forward */
+static int is_dyn_array_ptr(Node *t);  /* forward */
+static void emit_dynlen_ref(CG *g, Node *e);  /* forward */
 
 static void emit(CG *g, const char *fmt, ...) {
     va_list ap; va_start(ap, fmt); vfprintf(g->out, fmt, ap); va_end(ap);
@@ -716,6 +718,13 @@ static Node *expr_type(Node *e) {
         if (bt && bt->kind == ND_TARRAY) return bt->c1;
         return NULL;
     }
+    if (e->kind == ND_DEREF) {
+        Node *pt = expr_type(e->c0);
+        if (!pt) return NULL;
+        if (pt->kind == ND_TNAME) { Node *td = find_type_decl(pt->str); if (td) pt = td->c0; }
+        if (pt && pt->kind == ND_TPOINTER) return pt->c0;
+        return NULL;
+    }
     if (e->kind == ND_CALL) {
         /* Only works for local procs registered in g_procsigs */
         Node *proc = e->c0;
@@ -1008,8 +1017,16 @@ static void emit_builtin(CG *g, const char *name, Node *args) {
     } else if (!strcasecmp(name,"EXCL")) {
         if(a0) emit_expr(g,a0); emit(g," &= ~(1u << ("); if(a1) emit_expr(g,a1); emit(g,"))");
     } else if (!strcasecmp(name,"LEN")) {
+        /* ptr^ → use _dynlen companion */
+        if (a0 && a0->kind==ND_DEREF) {
+            Node *pt = expr_type(a0->c0);
+            if (pt && is_dyn_array_ptr(pt)) { emit_dynlen_ref(g, a0->c0); }
+            else {
+                emit(g,"(int)(sizeof("); emit_expr(g,a0);
+                emit(g,")/sizeof("); emit_expr(g,a0); emit(g,"[0]))");
+            }
         /* Open array param → use hidden _len; fixed array → sizeof trick */
-        if (a0 && a0->kind==ND_IDENT && is_open_array(sym_type(a0->str))) {
+        } else if (a0 && a0->kind==ND_IDENT && is_open_array(sym_type(a0->str))) {
             emit(g,"%s_len", a0->str);
         } else {
             emit(g,"(int)(sizeof("); if(a0) emit_expr(g,a0);
@@ -1072,6 +1089,37 @@ static void emit_builtin(CG *g, const char *name, Node *args) {
 /* Is this type node an open array (ARRAY OF T with no bound)? */
 static int is_open_array(Node *t) { return t && t->kind==ND_TARRAY && !t->c0; }
 
+/* Is t a POINTER TO open ARRAY OF T (dynamic array allocated with NEW(p,n))? */
+static int is_dyn_array_ptr(Node *t) {
+    if (!t) return 0;
+    if (t->kind == ND_TNAME) { Node *td = find_type_decl(t->str); if (td) t = td->c0; }
+    if (!t || t->kind != ND_TPOINTER) return 0;
+    Node *inner = t->c0;
+    if (!inner) return 0;
+    if (inner->kind == ND_TNAME) { Node *td = find_type_decl(inner->str); if (td) inner = td->c0; }
+    return inner && inner->kind == ND_TARRAY && !inner->c0;
+}
+
+/* Emit the _dynlen companion reference for expression e (a dyn-array-ptr). */
+static void emit_dynlen_ref(CG *g, Node *e) {
+    if (!e) { emit(g,"0"); return; }
+    if (e->kind == ND_IDENT) { emit(g,"%s_dynlen", e->str); return; }
+    if (e->kind == ND_FIELD_ACCESS) {
+        if (e->c0 && e->c0->kind==ND_IDENT && is_import(e->c0->str)) {
+            const char *real = import_realname(e->c0->str);
+            if (!is_builtin_module(real)) { emit(g,"%s_%s_dynlen", real, e->str); return; }
+        }
+        emit_expr(g, e->c0);
+        { Node *bt = expr_type(e->c0);
+          int use_arrow = (bt && bt->kind==ND_TPOINTER) ||
+                          (bt && bt->kind==ND_TNAME && is_ptr_type(bt->str));
+          if (use_arrow) emit(g,"->%s_dynlen", e->str);
+          else           emit(g,".%s_dynlen",  e->str); }
+        return;
+    }
+    emit(g,"0");  /* fallback: unknown expression shape */
+}
+
 /* Emit the runtime length of an array argument being passed to an open array
  * formal parameter.  If the argument is itself an open array param, forward
  * its hidden _len; otherwise compute from sizeof at compile time. */
@@ -1107,30 +1155,35 @@ static void emit_string_capacity(CG *g, Node *arg) {
             }
         }
     }
-    /* For a deref of a non-ident (e.g. seqs[i].data^), try expr_type on inner */
+    /* For a deref of a non-ident (e.g. seqs[i].data^), use _dynlen companion */
     if (arg && arg->kind == ND_DEREF) {
         Node *pt = expr_type(inner);
+        if (pt && is_dyn_array_ptr(pt)) { emit_dynlen_ref(g, inner); return; }
         if (pt && pt->kind == ND_TPOINTER && pt->c0 && pt->c0->kind == ND_TARRAY) {
             Node *bound = pt->c0->c0;
             if (bound) { emit_expr(g, bound); return; }
         }
-        /* expr_type failed but we know it's a dynamic array pointer —
-         * emit maxLen directly as the capacity variable name is not available,
-         * so fall back to the allocation argument if we can find it.
-         * Best we can do without type info: use a large safe constant. */
-        emit(g, "maxLen"); /* module-level variable holding the allocation size */
+        /* fallback: fixed-size POINTER TO ARRAY won't reach here; dynamic without
+         * type info should not occur after the _dynlen changes above */
+        emit(g, "0");
         return;
     }
     emit(g, "sizeof("); emit_expr(g, arg); emit(g, ")");
 }
 
 static void emit_open_array_len(CG *g, Node *arg) {
+    /* ptr^ passed to an open-array param: length is the _dynlen companion */
+    if (arg && arg->kind == ND_DEREF) {
+        Node *pt = expr_type(arg->c0);
+        if (pt && is_dyn_array_ptr(pt)) { emit_dynlen_ref(g, arg->c0); return; }
+    }
     if (arg && arg->kind == ND_IDENT) {
         Node *t = sym_type(arg->str);
         if (is_open_array(t)) {
             emit(g, "%s_len", arg->str);
             return;
         }
+        if (is_dyn_array_ptr(t)) { emit(g, "%s_dynlen", arg->str); return; }
     }
     emit(g, "(int)(sizeof("); emit_as_string(g, arg);
     emit(g, ")/sizeof(");     emit_as_string(g, arg); emit(g, "[0]))");
@@ -1141,6 +1194,11 @@ static void emit_open_array_len(CG *g, Node *arg) {
    callee can mutate the pointer itself (e.g. New/Free on a Seq). */
 static void emit_var_arg(CG *g, Node *e) {
     if (!e) { emit(g,"NULL"); return; }
+    /* ptr^ as VAR arg: &(*ptr) == ptr — pass the pointer itself directly.
+     * Without this, emit_expr(ND_DEREF) emits the inner expression unchanged
+     * (ND_DEREF → just e->c0 in C), so wrapping with &(...) produces
+     * &(seqs[i].data) = char** instead of the required char*. */
+    if (e->kind == ND_DEREF) { emit_expr(g, e->c0); return; }
     if (e->kind == ND_IDENT) {
         if (is_outer_var(g, e->str)) { emit(g,"_frame->%s", e->str); return; }
         if (sym_is_var(e->str))      { emit(g,"%s", e->str); return; }
@@ -1708,6 +1766,20 @@ static void emit_stmt(CG *g, Node *s) {
             break;
         }
         /* Built-in procedure call */
+        /* NEW(p, n): after allocation record the size in p_dynlen */
+        if (s->c0 && s->c0->kind==ND_IDENT && !strcasecmp(s->c0->str,"NEW")) {
+            iemit(g,""); emit_builtin(g, "NEW", s->c1); emit(g,";\n");
+            { Node *a0=s->c1, *a1=a0?a0->next:NULL;
+              if (a0 && a1) {
+                  Node *pt = (a0->kind==ND_IDENT) ? sym_type(a0->str) : expr_type(a0);
+                  if (pt && is_dyn_array_ptr(pt)) {
+                      iemit(g,""); emit_dynlen_ref(g, a0);
+                      emit(g," = (int)("); emit_expr(g,a1); emit(g,");\n");
+                  }
+              }
+            }
+            break;
+        }
         if (s->c0 && s->c0->kind==ND_IDENT && is_builtin(s->c0->str)) {
             iemit(g,""); emit_builtin(g, s->c0->str, s->c1); emit(g,";\n"); break;
         }
@@ -1963,6 +2035,8 @@ static void emit_record_fields_flat(CG *g, Node *rec) {
             emit(g,"    ");
             emit_var_decl_raw(g, id->str, fl->c1, 0);
             emit(g,";\n");
+            if (is_dyn_array_ptr(fl->c1))
+                emit(g,"    int %s_dynlen;\n", id->str);
         }
 }
 
@@ -2045,6 +2119,16 @@ static void emit_global_var(CG *g, Node *n) {
         else if (n->c1 && n->c1->kind==ND_TNAME && is_known_record_type(n->c1->str))
             emit(g," = { ._tag = _TAG_%s }", n->c1->str);
         emit(g,";\n");
+        /* Companion _dynlen variable for POINTER TO ARRAY OF T (dynamic arrays) */
+        if (is_dyn_array_ptr(n->c1)) {
+            if (!g->is_main) {
+                int exp = (id->flags & FLAG_EXPORTED);
+                if (!exp) emit(g,"static int %s_dynlen = 0;\n", id->str);
+                else      emit(g,"int %s_%s_dynlen = 0;\n", g->modname, id->str);
+            } else {
+                emit(g,"int %s_dynlen = 0;\n", id->str);
+            }
+        }
     }
 }
 
@@ -2088,6 +2172,9 @@ static void emit_local_vars(CG *g, Node *decls) {
             /* Initialise _tag for stack-allocated records */
             if (d->c1 && d->c1->kind==ND_TNAME && is_known_record_type(d->c1->str))
                 iemit(g,"%s._tag = _TAG_%s;\n", id->str, d->c1->str);
+            /* _dynlen companion for POINTER TO ARRAY OF T */
+            if (is_dyn_array_ptr(d->c1))
+                iemit(g,"int %s_dynlen = 0;\n", id->str);
         }
     }
 }
