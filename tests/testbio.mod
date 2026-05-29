@@ -2675,6 +2675,65 @@ BEGIN
   BioSeq.Free(seq)
 END TestFindAll;
 
+PROCEDURE TestMitoCode;
+VAR
+  q, aa : BioSeq.Seq;
+BEGIN
+  Out.String("--- Mito genetic code ---"); Out.Ln;
+
+  (* -- codon-table spot checks -- *)
+  BioORF.UseMitoCode;
+  (* TGA: standard stop → Trp in mito *)
+  ASSERT(BioORF.CodonToAA("TGA") = 'W');
+  Ok("UseMitoCode: TGA = Trp");
+  (* ATA: standard Ile → Met in mito *)
+  ASSERT(BioORF.CodonToAA("ATA") = 'M');
+  Ok("UseMitoCode: ATA = Met");
+  (* AGA / AGG: standard Arg → Stop in mito *)
+  ASSERT(BioORF.CodonToAA("AGA") = '*');
+  ASSERT(BioORF.CodonToAA("AGG") = '*');
+  Ok("UseMitoCode: AGA/AGG = Stop");
+  (* ATG still Met, TAA/TAG still Stop *)
+  ASSERT(BioORF.CodonToAA("ATG") = 'M');
+  ASSERT(BioORF.CodonToAA("TAA") = '*');
+  ASSERT(BioORF.CodonToAA("TAG") = '*');
+  Ok("UseMitoCode: ATG/TAA/TAG unchanged");
+
+  (* -- UseStdCode restores standard table -- *)
+  BioORF.UseStdCode;
+  ASSERT(BioORF.CodonToAA("TGA") = '*');
+  ASSERT(BioORF.CodonToAA("ATA") = 'I');
+  ASSERT(BioORF.CodonToAA("AGA") = 'R');
+  ASSERT(BioORF.CodonToAA("AGG") = 'R');
+  Ok("UseStdCode restores standard table");
+
+  (* -- Translate through TGA uses mito Trp, not Stop -- *)
+  BioORF.UseMitoCode;
+  BioSeq.New(q);  BioSeq.New(aa);
+  (* ATG + TGA + TAA : with mito, TGA=W → "MW*" (TAA is still stop) *)
+  BioSeq.FromStr(q, "ATGTGATAA");
+  BioORF.Translate(q, 0, aa);
+  ASSERT(BioSeq.Length(aa) = 3);
+  ASSERT(BioSeq.Get(aa, 0) = 'M');
+  ASSERT(BioSeq.Get(aa, 1) = 'W');
+  ASSERT(BioSeq.Get(aa, 2) = '*');
+  Ok("Translate (mito): TGA reads as Trp, not Stop");
+
+  (* -- FindForward finds ORF crossing TGA in mito mode -- *)
+  (* ATGTGATAA: start at 0, TGA at 3 is Trp (not stop), TAA at 6 is stop *)
+  BioSeq.Free(q);  BioSeq.New(q);
+  BioSeq.FromStr(q, "ATGTGATAA");
+  BioORF.FindForward(q, 1, orfList);
+  ASSERT(orfList.count = 1);
+  ASSERT(orfList.orfs[0].start = 0);
+  ASSERT(orfList.orfs[0].end_  = 9);
+  ASSERT(BioSeq.Length(orfList.orfs[0].aa) = 2);   (* M, W — stop excluded *)
+  Ok("FindForward (mito): ORF spans TGA codon");
+
+  BioSeq.Free(q);  BioSeq.Free(aa);
+  BioORF.UseStdCode   (* restore for any tests that follow *)
+END TestMitoCode;
+
 (* ------------------------------------------------------------------ *)
 (*  Main                                                                *)
 (* ------------------------------------------------------------------ *)
@@ -2761,6 +2820,7 @@ BEGIN
   TestTranslate;
   TestFindForward;
   TestFindAll;
+  TestMitoCode;
   Out.Ln();
   Out.String("All "); Out.Int(pass); Out.String(" tests passed."); Out.Ln()
 END TestBio.

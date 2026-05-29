@@ -10,18 +10,22 @@ MODULE BioORF;
   Translate:    Translates a whole frame, inserting '*' for stop codons.
   PrintORFs:    Summary table to stdout.
 
-  Standard (NCBI) genetic code used throughout; stop codons → '*'.
+  Genetic codes (module-global, switched with UseStdCode / UseMitoCode):
+    Standard (NCBI table 1):  default on module initialisation.
+    Vertebrate mito (NCBI table 2): TGA → Trp, ATA → Met, AGA/AGG → Stop.
   Handles RNA (U treated identically to T).
 
   NOTE: ORFList (~96 KB) should be declared at module level, not locally.
   NOTE: module-level rcSeq scratch is not re-entrant across concurrent calls.
+  NOTE: UseStdCode / UseMitoCode affect all subsequent calls in the same thread.
 *)
 
 IMPORT BioSeq, BioAlpha, Out;
 
 CONST
-  MaxORFs* = 4096;
-  CodonStr = "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG";
+  MaxORFs*     = 4096;
+  CodonStr     = "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG";
+  MitoCodonStr = "FFLLSSSSYY**CCWWLLLLPPPPHHQQRRRRIIMMTTTTNNKKSS**VVVVAAAADDEEGGGG";
 
 TYPE
   ORF* = RECORD
@@ -41,6 +45,29 @@ VAR
   codonTable : ARRAY 65  OF CHAR;   (* indexed by T/C/A/G → 0/1/2/3 *)
   rcSeq      : BioSeq.Seq;          (* module-level RevComp scratch   *)
   dnaAlpha   : BioAlpha.Alphabet;   (* DNA alphabet for RevComp       *)
+
+(* ------------------------------------------------------------------ *)
+(*  Genetic code selection                                              *)
+(* ------------------------------------------------------------------ *)
+
+PROCEDURE UseStdCode*;
+(* Switch to the standard genetic code (NCBI table 1). Default. *)
+BEGIN
+  COPY(CodonStr, codonTable)
+END UseStdCode;
+
+PROCEDURE UseMitoCode*;
+(*
+  Switch to the vertebrate mitochondrial genetic code (NCBI table 2).
+  Differences from standard:
+    TGA (pos 14) : Stop → Trp
+    ATA (pos 34) : Ile  → Met
+    AGA (pos 46) : Arg  → Stop
+    AGG (pos 47) : Arg  → Stop
+*)
+BEGIN
+  COPY(MitoCodonStr, codonTable)
+END UseMitoCode;
 
 (* ------------------------------------------------------------------ *)
 (*  CodonToAA                                                           *)
