@@ -4,7 +4,7 @@ MODULE TestBio;
   Each ASSERT failure will abort with a C assert message identifying the line.
   All tests passing = silent exit with code 0.
 *)
-IMPORT BioSeq, BioAlpha, BioAlign, BioIO, BioPattern, BioSuffix, Files, Strings, Out;
+IMPORT BioSeq, BioAlpha, BioAlign, BioIO, BioPattern, BioSuffix, BioFM, Files, Strings, Out;
 
 VAR
   a    : BioAlpha.Alphabet;
@@ -19,6 +19,8 @@ VAR
   sfx    : BioSuffix.SuffixArray;
   bwtRes : BioSuffix.BWTResult;
   lcpArr : ARRAY 65536 OF INTEGER;
+  (* BioFM module-level state: FMIndex (~2.3 MB) must live here. *)
+  fmIdx : BioFM.FMIndex;
 
 PROCEDURE Ok(label: ARRAY OF CHAR);
 BEGIN
@@ -1690,6 +1692,142 @@ BEGIN
   BioSeq.Free(seq)
 END TestSearch;
 
+(* ================================================================== *)
+(*  BioFM tests                                                         *)
+(* ================================================================== *)
+
+(* ------------------------------------------------------------------ *)
+(*  F1. Build and Count                                                 *)
+(* ------------------------------------------------------------------ *)
+PROCEDURE TestFMBuild;
+VAR seq: BioSeq.Seq;
+BEGIN
+  Out.String("--- FM Build / Count ---"); Out.Ln();
+  BioSeq.New(seq);
+  BioAlpha.Protein(a);   (* alphabet not used in computation; any valid one works *)
+
+  BioSeq.FromStr(seq, "BANANA");
+  BioFM.Build(seq, a, fmIdx);
+  ASSERT(fmIdx.n = 7);
+  ASSERT(BioFM.Count(fmIdx, "AN")     = 2);
+  ASSERT(BioFM.Count(fmIdx, "NA")     = 2);
+  ASSERT(BioFM.Count(fmIdx, "BANANA") = 1);
+  ASSERT(BioFM.Count(fmIdx, "A")      = 3);
+  ASSERT(BioFM.Count(fmIdx, "Z")      = 0);
+  ASSERT(BioFM.Count(fmIdx, "BAN")    = 1);
+  Ok("FM Count on BANANA");
+
+  BioAlpha.DNA(a);
+  BioSeq.FromStr(seq, "ACGT");
+  BioFM.Build(seq, a, fmIdx);
+  ASSERT(BioFM.Count(fmIdx, "ACGT") = 1);
+  ASSERT(BioFM.Count(fmIdx, "A")    = 1);
+  ASSERT(BioFM.Count(fmIdx, "CGT")  = 1);
+  ASSERT(BioFM.Count(fmIdx, "TT")   = 0);
+  Ok("FM Count on ACGT");
+
+  BioSeq.Free(seq)
+END TestFMBuild;
+
+(* ------------------------------------------------------------------ *)
+(*  F2. BackwardSearch — interval boundaries                           *)
+(* ------------------------------------------------------------------ *)
+PROCEDURE TestFMSearch;
+VAR seq: BioSeq.Seq; lo, hi: INTEGER;
+BEGIN
+  Out.String("--- FM BackwardSearch ---"); Out.Ln();
+  BioSeq.New(seq);
+  BioAlpha.Protein(a);
+
+  BioSeq.FromStr(seq, "BANANA");
+  BioFM.Build(seq, a, fmIdx);
+
+  (* "AN" -> SA interval [2, 4): ANA$ at sa[2]=3, ANANA$ at sa[3]=1 *)
+  ASSERT(BioFM.BackwardSearch(fmIdx, "AN", lo, hi));
+  ASSERT(lo = 2);
+  ASSERT(hi = 4);
+  Ok("BackwardSearch AN -> [2,4)");
+
+  (* "NA" -> SA interval [5, 7): NA$ at sa[5]=4, NANA$ at sa[6]=2 *)
+  ASSERT(BioFM.BackwardSearch(fmIdx, "NA", lo, hi));
+  ASSERT(lo = 5);
+  ASSERT(hi = 7);
+  Ok("BackwardSearch NA -> [5,7)");
+
+  (* "BANANA" -> SA interval [4, 5) *)
+  ASSERT(BioFM.BackwardSearch(fmIdx, "BANANA", lo, hi));
+  ASSERT(lo = 4);
+  ASSERT(hi = 5);
+  Ok("BackwardSearch BANANA -> [4,5)");
+
+  (* "Z" -> not found *)
+  ASSERT(~BioFM.BackwardSearch(fmIdx, "Z", lo, hi));
+  Ok("BackwardSearch Z not found");
+
+  (* "ANA" -> [2, 4) same as "AN" since both ANA$ and ANANA$ start with ANA *)
+  ASSERT(BioFM.BackwardSearch(fmIdx, "ANA", lo, hi));
+  ASSERT(lo = 2);
+  ASSERT(hi = 4);
+  Ok("BackwardSearch ANA -> [2,4)");
+
+  (* "ANANA" -> [3, 4) only ANANA$ *)
+  ASSERT(BioFM.BackwardSearch(fmIdx, "ANANA", lo, hi));
+  ASSERT(lo = 3);
+  ASSERT(hi = 4);
+  Ok("BackwardSearch ANANA -> [3,4)");
+
+  BioSeq.Free(seq)
+END TestFMSearch;
+
+(* ------------------------------------------------------------------ *)
+(*  F3. Locate — SA interval to text positions                         *)
+(* ------------------------------------------------------------------ *)
+PROCEDURE TestFMLocate;
+VAR seq: BioSeq.Seq; lo, hi, nPos, i: INTEGER;
+    pos : ARRAY 16 OF INTEGER;
+    found0, found1 : BOOLEAN;
+BEGIN
+  Out.String("--- FM Locate ---"); Out.Ln();
+  BioSeq.New(seq);
+  BioAlpha.Protein(a);
+
+  BioSeq.FromStr(seq, "BANANA");
+  BioFM.Build(seq, a, fmIdx);
+
+  (* "AN" at text positions 1 and 3 (in SA order: 3 then 1) *)
+  ASSERT(BioFM.BackwardSearch(fmIdx, "AN", lo, hi));
+  BioFM.Locate(fmIdx, lo, hi, pos, nPos);
+  ASSERT(nPos = 2);
+  found0 := FALSE; found1 := FALSE;
+  FOR i := 0 TO nPos - 1 DO
+    IF pos[i] = 1 THEN found0 := TRUE END;
+    IF pos[i] = 3 THEN found1 := TRUE END
+  END;
+  ASSERT(found0 & found1);
+  Ok("Locate AN gives positions {1,3}");
+
+  (* "BANANA" at text position 0 only *)
+  ASSERT(BioFM.BackwardSearch(fmIdx, "BANANA", lo, hi));
+  BioFM.Locate(fmIdx, lo, hi, pos, nPos);
+  ASSERT(nPos = 1);
+  ASSERT(pos[0] = 0);
+  Ok("Locate BANANA gives position {0}");
+
+  (* "NA" at text positions 2 and 4 *)
+  ASSERT(BioFM.BackwardSearch(fmIdx, "NA", lo, hi));
+  BioFM.Locate(fmIdx, lo, hi, pos, nPos);
+  ASSERT(nPos = 2);
+  found0 := FALSE; found1 := FALSE;
+  FOR i := 0 TO nPos - 1 DO
+    IF pos[i] = 2 THEN found0 := TRUE END;
+    IF pos[i] = 4 THEN found1 := TRUE END
+  END;
+  ASSERT(found0 & found1);
+  Ok("Locate NA gives positions {2,4}");
+
+  BioSeq.Free(seq)
+END TestFMLocate;
+
 (* ------------------------------------------------------------------ *)
 (*  Main                                                                *)
 (* ------------------------------------------------------------------ *)
@@ -1744,6 +1882,10 @@ BEGIN
   TestInverseBWT;
   TestLCP;
   TestSearch;
+  Out.String("=== BioFM tests ==="); Out.Ln();
+  TestFMBuild;
+  TestFMSearch;
+  TestFMLocate;
   Out.Ln();
   Out.String("All "); Out.Int(pass); Out.String(" tests passed."); Out.Ln()
 END TestBio.
