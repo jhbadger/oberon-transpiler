@@ -625,6 +625,35 @@ BEGIN
   RETURN TRUE
 END CanCharge;
 
+(* Returns TRUE if the move from src to dst crosses a river row that has no
+   reachable bridge/ford within the unit's movement allowance mv. *)
+PROCEDURE RiverBlocked(srcCol, srcRow, dstCol, dstRow, mv: INTEGER): BOOLEAN;
+VAR r, c, rMin, rMax, t, crossCost: INTEGER;
+    hasRiver, canCross: BOOLEAN;
+BEGIN
+  IF srcRow < dstRow THEN rMin := srcRow + 1; rMax := dstRow - 1
+  ELSE rMin := dstRow + 1; rMax := srcRow - 1
+  END;
+  FOR r := rMin TO rMax DO
+    hasRiver := FALSE;
+    FOR c := 0 TO GRID_W - 1 DO
+      IF terrain[r][c] = TERR_RIVER THEN hasRiver := TRUE END
+    END;
+    IF hasRiver THEN
+      canCross := FALSE;
+      FOR c := 0 TO GRID_W - 1 DO
+        t := terrain[r][c];
+        IF (t = TERR_BRIDGE) OR (t = TERR_FORD) THEN
+          crossCost := CDist(srcCol, srcRow, c, r) + CDist(c, r, dstCol, dstRow);
+          IF crossCost <= mv THEN canCross := TRUE END
+        END
+      END;
+      IF ~canCross THEN RETURN TRUE END
+    END
+  END;
+  RETURN FALSE
+END RiverBlocked;
+
 PROCEDURE ValidMoveTarget(side, idx, dstCol, dstRow: INTEGER): BOOLEAN;
 VAR p, ut, mv, srcCol, srcRow, oSide, oIdx: INTEGER;
     u: Unit;
@@ -666,8 +695,9 @@ BEGIN
   (* Terrain restriction: marsh/lake impassable *)
   IF terrain[dstRow][dstCol] = TERR_MARSH THEN RETURN FALSE END;
 
-  (* River: only via ford/bridge — hook for future *)
+  (* River: entering a river cell is blocked; crossing requires bridge/ford waypoint *)
   IF terrain[dstRow][dstCol] = TERR_RIVER THEN RETURN FALSE END;
+  IF RiverBlocked(srcCol, srcRow, dstCol, dstRow, mv) THEN RETURN FALSE END;
 
   RETURN TRUE
 END ValidMoveTarget;
