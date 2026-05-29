@@ -4,7 +4,7 @@ MODULE TestBio;
   Each ASSERT failure will abort with a C assert message identifying the line.
   All tests passing = silent exit with code 0.
 *)
-IMPORT BioSeq, BioAlpha, BioAlign, BioIO, BioPattern, BioSuffix, BioFM, BioQGram, BioStats, BioAnnot, Math, Files, Strings, Out;
+IMPORT BioSeq, BioAlpha, BioAlign, BioIO, BioPattern, BioSuffix, BioFM, BioQGram, BioStats, BioAnnot, BioORF, Math, Files, Strings, Out;
 
 VAR
   a    : BioAlpha.Alphabet;
@@ -25,6 +25,8 @@ VAR
   qgIdx  : BioQGram.QGramIndex;
   (* BioAnnot module-level state: AnnotDB (~6.5 MB) must live here. *)
   annotDb : BioAnnot.AnnotDB;
+  (* BioORF module-level state: ORFList (~96 KB) must live here. *)
+  orfList : BioORF.ORFList;
 
 PROCEDURE Ok(label: ARRAY OF CHAR);
 BEGIN
@@ -2301,6 +2303,169 @@ BEGIN
 END TestAnnotSort;
 
 (* ------------------------------------------------------------------ *)
+(*  BioORF tests                                                        *)
+(* ------------------------------------------------------------------ *)
+
+PROCEDURE SeqStr(s: BioSeq.Seq; VAR buf: ARRAY OF CHAR);
+(* Copy BioSeq s into buf as a null-terminated string (truncates). *)
+VAR i, n: INTEGER;
+BEGIN
+  n := BioSeq.Length(s);
+  IF n >= LEN(buf) THEN n := LEN(buf) - 1 END;
+  FOR i := 0 TO n - 1 DO buf[i] := BioSeq.Get(s, i) END;
+  buf[n] := 0X
+END SeqStr;
+
+PROCEDURE TestCodonToAA;
+BEGIN
+  Out.String("--- CodonToAA ---"); Out.Ln();
+  ASSERT(BioORF.CodonToAA("ATG") = 'M');
+  Ok("ATG = M (start)");
+  ASSERT(BioORF.CodonToAA("TAA") = '*');
+  Ok("TAA = * (stop)");
+  ASSERT(BioORF.CodonToAA("TAG") = '*');
+  Ok("TAG = * (stop)");
+  ASSERT(BioORF.CodonToAA("TGA") = '*');
+  Ok("TGA = * (stop)");
+  ASSERT(BioORF.CodonToAA("TTT") = 'F');
+  Ok("TTT = F");
+  ASSERT(BioORF.CodonToAA("GGG") = 'G');
+  Ok("GGG = G");
+  ASSERT(BioORF.CodonToAA("AAA") = 'K');
+  Ok("AAA = K");
+  ASSERT(BioORF.CodonToAA("AUG") = 'M');
+  Ok("AUG (RNA) = M")
+END TestCodonToAA;
+
+PROCEDURE TestTranslate;
+VAR seq, aa: BioSeq.Seq; buf: ARRAY 64 OF CHAR;
+BEGIN
+  Out.String("--- Translate ---"); Out.Ln();
+  BioSeq.New(seq); BioSeq.New(aa);
+
+  (* "ATGTTTTAA" -> M F * in frame 0 *)
+  BioSeq.FromStr(seq, "ATGTTTTAA");
+  BioORF.Translate(seq, 0, aa);
+  SeqStr(aa, buf);
+  ASSERT(Strings.Compare(buf, "MF*") = 0);
+  Ok("Translate frame 0: ATGTTTTAA -> MF*");
+
+  (* frame 1: skip A, then TGT TTT -> C F *)
+  BioSeq.FromStr(seq, "ATGTTTTAA");
+  BioORF.Translate(seq, 1, aa);
+  SeqStr(aa, buf);
+  ASSERT(Strings.Compare(buf, "CF") = 0);
+  Ok("Translate frame 1: skip 1 base -> CF");
+
+  (* reverse frame -1: RevComp(ATGTTTTAA) = TTAAACCAT
+     TTaaaccat frame 0: TTA=L AAC=N CA... -> LC... *)
+  BioSeq.FromStr(seq, "ATGTTTTAA");
+  BioORF.Translate(seq, -1, aa);
+  SeqStr(aa, buf);
+  ASSERT(buf[0] = 'L');   (* TTA = Leu *)
+  Ok("Translate frame -1 starts with L (TTA on RevComp)");
+
+  BioSeq.Free(seq); BioSeq.Free(aa)
+END TestTranslate;
+
+PROCEDURE TestFindForward;
+VAR seq: BioSeq.Seq; buf: ARRAY 64 OF CHAR;
+BEGIN
+  Out.String("--- FindForward ---"); Out.Ln();
+  BioSeq.New(seq);
+
+  (* simple ORF: ATG TTT TAA (9 nt, 3 aa) *)
+  BioSeq.FromStr(seq, "ATGTTTTAA");
+  BioORF.FindForward(seq, 9, orfList);
+  ASSERT(orfList.count = 1);
+  Ok("FindForward finds 1 ORF in ATGTTTTAA");
+  ASSERT(orfList.orfs[0].start = 0);
+  ASSERT(orfList.orfs[0].end_  = 9);
+  ASSERT(orfList.orfs[0].len   = 9);
+  ASSERT(orfList.orfs[0].frame = 0);
+  Ok("FindForward ORF coords and frame correct");
+  SeqStr(orfList.orfs[0].aa, buf);
+  ASSERT(Strings.Compare(buf, "MF") = 0);
+  Ok("FindForward ORF aa sequence: MF");
+
+  (* minLen larger than ORF -> 0 results *)
+  BioORF.FindForward(seq, 12, orfList);
+  ASSERT(orfList.count = 0);
+  Ok("FindForward minLen > ORF len -> 0 results");
+
+  (* two ORFs in frame 0: ATGTGTTAGATGAAATAA
+     pos 0: ATG TGT TAG = M C stop
+     pos 9: ATG AAA TAA = M K stop *)
+  BioSeq.FromStr(seq, "ATGTGTTAGATGAAATAA");
+  BioORF.FindForward(seq, 9, orfList);
+  ASSERT(orfList.count = 2);
+  Ok("FindForward finds 2 non-overlapping ORFs");
+  ASSERT(orfList.orfs[0].start = 0);
+  ASSERT(orfList.orfs[1].start = 9);
+  Ok("FindForward ORF start positions: 0 and 9");
+
+  (* no start codon -> 0 ORFs *)
+  BioSeq.FromStr(seq, "TTTCCCGGG");
+  BioORF.FindForward(seq, 3, orfList);
+  ASSERT(orfList.count = 0);
+  Ok("FindForward no ATG -> 0 ORFs");
+
+  (* no stop codon -> 0 ORFs *)
+  BioSeq.FromStr(seq, "ATGCCCGGG");
+  BioORF.FindForward(seq, 3, orfList);
+  ASSERT(orfList.count = 0);
+  Ok("FindForward no stop codon -> 0 ORFs");
+
+  BioSeq.Free(seq)
+END TestFindForward;
+
+PROCEDURE TestFindAll;
+VAR seq: BioSeq.Seq; i, fwd, rev: INTEGER;
+BEGIN
+  Out.String("--- FindAll ---"); Out.Ln();
+  BioSeq.New(seq);
+
+  (* ATGTTTTAA on forward; RevComp = TTAAACCAT
+     On RevComp frame 0: TTA AAC CAT -> no ATG
+     On RevComp frame 1: TAA ACC AT -> no ATG
+     On RevComp frame 2: AAA CCA T -> no ATG
+     So only 1 ORF (forward) *)
+  BioSeq.FromStr(seq, "ATGTTTTAA");
+  BioORF.FindAll(seq, 9, orfList);
+  ASSERT(orfList.count = 1);
+  ASSERT(orfList.orfs[0].frame = 0);
+  Ok("FindAll on forward-only ORF: 1 ORF, frame 0");
+
+  (* Reverse-strand ORF: design a sequence where RevComp has ATG...stop.
+     RevComp of "TTATGCATCCAT" is "ATGGATGCATAA"
+     Frame 0 of RevComp: ATG GAT GCA TAA -> MDAX* -> wait let me check:
+     RevComp of TTATGCATCCAT:
+     original: T T A T G C A T C C A T
+     comp:     A A T A C G T A G G T A
+     reverse:  A T G G A T G C A T A A  -> wait that's 12 chars
+     ATG GAT GCA TAA = M D A *  -> ORF of 12 nt at pos 0 of RevComp
+     Coordinates in original: start = 12 - 12 = 0, end_ = 12 - 0 = 12
+  *)
+  BioSeq.FromStr(seq, "TTATGCATCCAT");
+  BioORF.FindAll(seq, 12, orfList);
+  fwd := 0; rev := 0;
+  FOR i := 0 TO orfList.count - 1 DO
+    IF orfList.orfs[i].frame >= 0 THEN INC(fwd) ELSE INC(rev) END
+  END;
+  ASSERT(rev >= 1);
+  Ok("FindAll finds reverse-strand ORF (frame < 0)");
+  (* All reverse ORFs should have frame in {-1,-2,-3} *)
+  FOR i := 0 TO orfList.count - 1 DO
+    IF orfList.orfs[i].frame < 0 THEN
+      ASSERT(orfList.orfs[i].frame >= -3)
+    END
+  END;
+  Ok("FindAll reverse ORF frames in {-1,-2,-3}");
+
+  BioSeq.Free(seq)
+END TestFindAll;
+
+(* ------------------------------------------------------------------ *)
 (*  Main                                                                *)
 (* ------------------------------------------------------------------ *)
 BEGIN
@@ -2374,6 +2539,11 @@ BEGIN
   TestAnnotLoadGFF;
   TestAnnotOverlaps;
   TestAnnotSort;
+  Out.String("=== BioORF tests ==="); Out.Ln();
+  TestCodonToAA;
+  TestTranslate;
+  TestFindForward;
+  TestFindAll;
   Out.Ln();
   Out.String("All "); Out.Int(pass); Out.String(" tests passed."); Out.Ln()
 END TestBio.
