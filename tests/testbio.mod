@@ -1224,6 +1224,61 @@ BEGIN
   Ok("PrintAlignment runs without crash")
 END TestPrintAlignment;
 
+(* ------------------------------------------------------------------ *)
+(*  A8. BLOSUM62 substitution matrix                                   *)
+(* ------------------------------------------------------------------ *)
+PROCEDURE TestBLOSUM62;
+VAR m: BioAlign.ScoreMatrix;
+BEGIN
+  Out.String("--- BLOSUM62 ---"); Out.Ln;
+  BioAlign.BLOSUM62(m);
+  ASSERT(m.useTable);
+  ASSERT(m.gapOpen = -11);
+  ASSERT(m.gapExt  = -1);
+  (* diagonal self-scores *)
+  ASSERT(BioAlign.PairScore(m, 'A', 'A') = 4);
+  ASSERT(BioAlign.PairScore(m, 'C', 'C') = 9);
+  ASSERT(BioAlign.PairScore(m, 'W', 'W') = 11);
+  (* symmetric off-diagonal *)
+  ASSERT(BioAlign.PairScore(m, 'A', 'R') = BioAlign.PairScore(m, 'R', 'A'));
+  ASSERT(BioAlign.PairScore(m, 'D', 'E') = BioAlign.PairScore(m, 'E', 'D'));
+  (* known off-diagonal values *)
+  ASSERT(BioAlign.PairScore(m, 'A', 'R') = -1);
+  ASSERT(BioAlign.PairScore(m, 'D', 'E') = 2);
+  (* lowercase = uppercase *)
+  ASSERT(BioAlign.PairScore(m, 'a', 'a') = BioAlign.PairScore(m, 'A', 'A'));
+  ASSERT(BioAlign.PairScore(m, 'w', 'l') = BioAlign.PairScore(m, 'W', 'L'));
+  Ok("BLOSUM62 init and gapOpen/gapExt");
+  Ok("BLOSUM62 diagonal scores");
+  Ok("BLOSUM62 symmetry");
+  Ok("BLOSUM62 off-diagonal values");
+  Ok("BLOSUM62 lowercase handling")
+END TestBLOSUM62;
+
+(* ------------------------------------------------------------------ *)
+(*  A9. PAM250 substitution matrix                                     *)
+(* ------------------------------------------------------------------ *)
+PROCEDURE TestPAM250;
+VAR m: BioAlign.ScoreMatrix;
+BEGIN
+  Out.String("--- PAM250 ---"); Out.Ln;
+  BioAlign.PAM250(m);
+  ASSERT(m.useTable);
+  ASSERT(m.gapOpen = -12);
+  ASSERT(m.gapExt  = -2);
+  (* diagonal self-scores *)
+  ASSERT(BioAlign.PairScore(m, 'A', 'A') = 2);
+  ASSERT(BioAlign.PairScore(m, 'W', 'W') = 17);
+  (* symmetric *)
+  ASSERT(BioAlign.PairScore(m, 'A', 'R') = BioAlign.PairScore(m, 'R', 'A'));
+  (* known off-diagonal *)
+  ASSERT(BioAlign.PairScore(m, 'D', 'E') = 3);
+  ASSERT(BioAlign.PairScore(m, 'A', 'R') = -2);
+  Ok("PAM250 init and gapOpen/gapExt");
+  Ok("PAM250 diagonal scores");
+  Ok("PAM250 symmetry and off-diagonal values")
+END TestPAM250;
+
 (* ================================================================== *)
 (*  BioPattern tests                                                   *)
 (* ================================================================== *)
@@ -2508,6 +2563,8 @@ BEGIN
   TestLocal;
   TestSemiGlobal;
   TestPrintAlignment;
+  TestBLOSUM62;
+  TestPAM250;
   Out.String("=== BioPattern tests ==="); Out.Ln();
   TestBMSearch;
   TestKMPSearch;

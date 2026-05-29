@@ -8,6 +8,13 @@ MODULE BioAlign;
   All three DP-based aligners use affine gap penalties (gapOpen + gapExt) and
   three score layers (M = aligned pair, X = gap in reference, Y = gap in query).
 
+  Score matrices:
+    DefaultScore — simple +1/-1 for DNA/RNA; gapOpen=-5, gapExt=-1.
+    BLOSUM62     — standard protein matrix; gapOpen=-11, gapExt=-1.
+    PAM250       — Dayhoff protein matrix;  gapOpen=-12, gapExt=-2.
+  When useTable=TRUE, PairScore looks up table[ORD(a)-ORD('A')][ORD(b)-ORD('A')]
+  for uppercase letters; falls back to match_/mismatch for anything else.
+
   DP matrices are module-level to avoid stack overflow; only one alignment may
   run at a time.  MaxSeqLen caps both query and reference length.
 *)
@@ -39,7 +46,9 @@ TYPE
     match_*   : INTEGER;
     mismatch* : INTEGER;
     gapOpen*  : INTEGER;
-    gapExt*   : INTEGER
+    gapExt*   : INTEGER;
+    useTable* : BOOLEAN;
+    table*    : ARRAY 26 OF ARRAY 26 OF INTEGER  (* indexed by ORD(c)-ORD('A') *)
   END;
 
   CigarEntry* = RECORD
@@ -72,15 +81,292 @@ BEGIN
   m.match_   :=  1;
   m.mismatch := -1;
   m.gapOpen  := -5;
-  m.gapExt   := -1
+  m.gapExt   := -1;
+  m.useTable := FALSE
 END DefaultScore;
+
+(* ------------------------------------------------------------------ *)
+(*  Substitution matrices — BLOSUM62 and PAM250                        *)
+(* ------------------------------------------------------------------ *)
+
+PROCEDURE Set2(VAR m: ScoreMatrix; a, b, s: INTEGER);
+BEGIN m.table[a][b] := s; m.table[b][a] := s END Set2;
+
+PROCEDURE FillTable(VAR m: ScoreMatrix);
+(*
+  Initialise all 26×26 cells to mismatch, then fill in BLOSUM62 or PAM250.
+  Called at the start of each matrix initialiser.
+*)
+VAR i, j: INTEGER;
+BEGIN
+  FOR i := 0 TO 25 DO
+    FOR j := 0 TO 25 DO m.table[i][j] := m.mismatch END
+  END
+END FillTable;
+
+PROCEDURE BLOSUM62*(VAR m: ScoreMatrix);
+(*
+  Initialise m with the BLOSUM62 substitution matrix.
+  Indices: A=0 C=2 D=3 E=4 F=5 G=6 H=7 I=8 K=10 L=11
+           M=12 N=13 P=15 Q=16 R=17 S=18 T=19 V=21 W=22 Y=24
+*)
+BEGIN
+  m.match_   :=  1;
+  m.mismatch := -4;
+  m.gapOpen  := -11;
+  m.gapExt   := -1;
+  m.useTable := TRUE;
+  FillTable(m);
+  (* Diagonal (self-match scores) *)
+  m.table[ 0][ 0] :=  4;  (* A *)
+  m.table[ 2][ 2] :=  9;  (* C *)
+  m.table[ 3][ 3] :=  6;  (* D *)
+  m.table[ 4][ 4] :=  5;  (* E *)
+  m.table[ 5][ 5] :=  6;  (* F *)
+  m.table[ 6][ 6] :=  6;  (* G *)
+  m.table[ 7][ 7] :=  8;  (* H *)
+  m.table[ 8][ 8] :=  4;  (* I *)
+  m.table[10][10] :=  5;  (* K *)
+  m.table[11][11] :=  4;  (* L *)
+  m.table[12][12] :=  5;  (* M *)
+  m.table[13][13] :=  6;  (* N *)
+  m.table[15][15] :=  7;  (* P *)
+  m.table[16][16] :=  5;  (* Q *)
+  m.table[17][17] :=  5;  (* R *)
+  m.table[18][18] :=  4;  (* S *)
+  m.table[19][19] :=  5;  (* T *)
+  m.table[21][21] :=  4;  (* V *)
+  m.table[22][22] := 11;  (* W *)
+  m.table[24][24] :=  7;  (* Y *)
+  (* Off-diagonal pairs — A row *)
+  Set2(m,  0,  2,  0);  Set2(m,  0,  3, -2);  Set2(m,  0,  4, -1);
+  Set2(m,  0,  5, -2);  Set2(m,  0,  6,  0);  Set2(m,  0,  7, -2);
+  Set2(m,  0,  8, -1);  Set2(m,  0, 10, -1);  Set2(m,  0, 11, -1);
+  Set2(m,  0, 12, -1);  Set2(m,  0, 13, -2);  Set2(m,  0, 15, -1);
+  Set2(m,  0, 16, -1);  Set2(m,  0, 17, -1);  Set2(m,  0, 18,  1);
+  Set2(m,  0, 19,  0);  Set2(m,  0, 21,  0);  Set2(m,  0, 22, -3);
+  Set2(m,  0, 24, -2);
+  (* C row *)
+  Set2(m,  2,  3, -3);  Set2(m,  2,  4, -4);  Set2(m,  2,  5, -2);
+  Set2(m,  2,  6, -3);  Set2(m,  2,  7, -3);  Set2(m,  2,  8, -1);
+  Set2(m,  2, 10, -3);  Set2(m,  2, 11, -1);  Set2(m,  2, 12, -1);
+  Set2(m,  2, 13, -3);  Set2(m,  2, 15, -3);  Set2(m,  2, 16, -3);
+  Set2(m,  2, 17, -3);  Set2(m,  2, 18, -1);  Set2(m,  2, 19, -1);
+  Set2(m,  2, 21, -1);  Set2(m,  2, 22, -2);  Set2(m,  2, 24, -2);
+  (* D row *)
+  Set2(m,  3,  4,  2);  Set2(m,  3,  5, -3);  Set2(m,  3,  6, -1);
+  Set2(m,  3,  7, -1);  Set2(m,  3,  8, -3);  Set2(m,  3, 10, -1);
+  Set2(m,  3, 11, -4);  Set2(m,  3, 12, -3);  Set2(m,  3, 13,  1);
+  Set2(m,  3, 15, -1);  Set2(m,  3, 16,  0);  Set2(m,  3, 17, -2);
+  Set2(m,  3, 18,  0);  Set2(m,  3, 19, -1);  Set2(m,  3, 21, -3);
+  Set2(m,  3, 22, -4);  Set2(m,  3, 24, -3);
+  (* E row *)
+  Set2(m,  4,  5, -3);  Set2(m,  4,  6, -2);  Set2(m,  4,  7,  0);
+  Set2(m,  4,  8, -3);  Set2(m,  4, 10,  1);  Set2(m,  4, 11, -3);
+  Set2(m,  4, 12, -2);  Set2(m,  4, 13,  0);  Set2(m,  4, 15, -1);
+  Set2(m,  4, 16,  2);  Set2(m,  4, 17,  0);  Set2(m,  4, 18,  0);
+  Set2(m,  4, 19, -1);  Set2(m,  4, 21, -2);  Set2(m,  4, 22, -3);
+  Set2(m,  4, 24, -2);
+  (* F row *)
+  Set2(m,  5,  6, -3);  Set2(m,  5,  7, -1);  Set2(m,  5,  8,  0);
+  Set2(m,  5, 10, -3);  Set2(m,  5, 11,  0);  Set2(m,  5, 12,  0);
+  Set2(m,  5, 13, -3);  Set2(m,  5, 15, -4);  Set2(m,  5, 16, -3);
+  Set2(m,  5, 17, -3);  Set2(m,  5, 18, -2);  Set2(m,  5, 19, -2);
+  Set2(m,  5, 21, -1);  Set2(m,  5, 22,  1);  Set2(m,  5, 24,  3);
+  (* G row *)
+  Set2(m,  6,  7, -2);  Set2(m,  6,  8, -4);  Set2(m,  6, 10, -2);
+  Set2(m,  6, 11, -4);  Set2(m,  6, 12, -3);  Set2(m,  6, 13,  0);
+  Set2(m,  6, 15, -2);  Set2(m,  6, 16, -2);  Set2(m,  6, 17, -2);
+  Set2(m,  6, 18,  0);  Set2(m,  6, 19, -2);  Set2(m,  6, 21, -3);
+  Set2(m,  6, 22, -2);  Set2(m,  6, 24, -3);
+  (* H row *)
+  Set2(m,  7,  8, -3);  Set2(m,  7, 10, -1);  Set2(m,  7, 11, -3);
+  Set2(m,  7, 12, -2);  Set2(m,  7, 13,  1);  Set2(m,  7, 15, -2);
+  Set2(m,  7, 16,  0);  Set2(m,  7, 17,  0);  Set2(m,  7, 18, -1);
+  Set2(m,  7, 19, -2);  Set2(m,  7, 21, -3);  Set2(m,  7, 22, -2);
+  Set2(m,  7, 24,  2);
+  (* I row *)
+  Set2(m,  8, 10, -3);  Set2(m,  8, 11,  2);  Set2(m,  8, 12,  1);
+  Set2(m,  8, 13, -3);  Set2(m,  8, 15, -3);  Set2(m,  8, 16, -3);
+  Set2(m,  8, 17, -3);  Set2(m,  8, 18, -2);  Set2(m,  8, 19, -1);
+  Set2(m,  8, 21,  3);  Set2(m,  8, 22, -3);  Set2(m,  8, 24, -1);
+  (* K row *)
+  Set2(m, 10, 11, -2);  Set2(m, 10, 12, -1);  Set2(m, 10, 13,  0);
+  Set2(m, 10, 15, -1);  Set2(m, 10, 16,  1);  Set2(m, 10, 17,  2);
+  Set2(m, 10, 18,  0);  Set2(m, 10, 19, -1);  Set2(m, 10, 21, -2);
+  Set2(m, 10, 22, -3);  Set2(m, 10, 24, -2);
+  (* L row *)
+  Set2(m, 11, 12,  2);  Set2(m, 11, 13, -3);  Set2(m, 11, 15, -3);
+  Set2(m, 11, 16, -2);  Set2(m, 11, 17, -2);  Set2(m, 11, 18, -2);
+  Set2(m, 11, 19, -1);  Set2(m, 11, 21,  1);  Set2(m, 11, 22, -2);
+  Set2(m, 11, 24, -1);
+  (* M row *)
+  Set2(m, 12, 13, -2);  Set2(m, 12, 15, -2);  Set2(m, 12, 16,  0);
+  Set2(m, 12, 17, -1);  Set2(m, 12, 18, -1);  Set2(m, 12, 19, -1);
+  Set2(m, 12, 21,  1);  Set2(m, 12, 22, -1);  Set2(m, 12, 24, -1);
+  (* N row *)
+  Set2(m, 13, 15, -2);  Set2(m, 13, 16,  0);  Set2(m, 13, 17,  0);
+  Set2(m, 13, 18,  1);  Set2(m, 13, 19,  0);  Set2(m, 13, 21, -3);
+  Set2(m, 13, 22, -4);  Set2(m, 13, 24, -2);
+  (* P row *)
+  Set2(m, 15, 16, -1);  Set2(m, 15, 17, -2);  Set2(m, 15, 18, -1);
+  Set2(m, 15, 19, -1);  Set2(m, 15, 21, -2);  Set2(m, 15, 22, -4);
+  Set2(m, 15, 24, -3);
+  (* Q row *)
+  Set2(m, 16, 17,  1);  Set2(m, 16, 18,  0);  Set2(m, 16, 19, -1);
+  Set2(m, 16, 21, -2);  Set2(m, 16, 22, -2);  Set2(m, 16, 24, -1);
+  (* R row *)
+  Set2(m, 17, 18, -1);  Set2(m, 17, 19, -1);  Set2(m, 17, 21, -3);
+  Set2(m, 17, 22, -3);  Set2(m, 17, 24, -2);
+  (* S row *)
+  Set2(m, 18, 19,  1);  Set2(m, 18, 21, -2);  Set2(m, 18, 22, -3);
+  Set2(m, 18, 24, -2);
+  (* T row *)
+  Set2(m, 19, 21,  0);  Set2(m, 19, 22, -2);  Set2(m, 19, 24, -2);
+  (* V, W rows *)
+  Set2(m, 21, 22, -3);  Set2(m, 21, 24, -1);
+  Set2(m, 22, 24,  2)
+END BLOSUM62;
+
+PROCEDURE PAM250*(VAR m: ScoreMatrix);
+(*
+  Initialise m with the PAM250 (Dayhoff) substitution matrix.
+  Same index scheme as BLOSUM62.
+*)
+BEGIN
+  m.match_   :=  1;
+  m.mismatch := -8;
+  m.gapOpen  := -12;
+  m.gapExt   := -2;
+  m.useTable := TRUE;
+  FillTable(m);
+  (* Diagonal *)
+  m.table[ 0][ 0] :=  2;  (* A *)
+  m.table[ 2][ 2] := 12;  (* C *)
+  m.table[ 3][ 3] :=  4;  (* D *)
+  m.table[ 4][ 4] :=  4;  (* E *)
+  m.table[ 5][ 5] :=  9;  (* F *)
+  m.table[ 6][ 6] :=  5;  (* G *)
+  m.table[ 7][ 7] :=  6;  (* H *)
+  m.table[ 8][ 8] :=  5;  (* I *)
+  m.table[10][10] :=  5;  (* K *)
+  m.table[11][11] :=  6;  (* L *)
+  m.table[12][12] :=  6;  (* M *)
+  m.table[13][13] :=  2;  (* N *)
+  m.table[15][15] :=  6;  (* P *)
+  m.table[16][16] :=  4;  (* Q *)
+  m.table[17][17] :=  6;  (* R *)
+  m.table[18][18] :=  2;  (* S *)
+  m.table[19][19] :=  3;  (* T *)
+  m.table[21][21] :=  4;  (* V *)
+  m.table[22][22] := 17;  (* W *)
+  m.table[24][24] := 10;  (* Y *)
+  (* Off-diagonal pairs — A row *)
+  Set2(m,  0,  2, -2);  Set2(m,  0,  3,  0);  Set2(m,  0,  4,  0);
+  Set2(m,  0,  5, -3);  Set2(m,  0,  6,  1);  Set2(m,  0,  7, -1);
+  Set2(m,  0,  8, -1);  Set2(m,  0, 10, -1);  Set2(m,  0, 11, -2);
+  Set2(m,  0, 12, -1);  Set2(m,  0, 13,  0);  Set2(m,  0, 15,  1);
+  Set2(m,  0, 16,  0);  Set2(m,  0, 17, -2);  Set2(m,  0, 18,  1);
+  Set2(m,  0, 19,  1);  Set2(m,  0, 21,  0);  Set2(m,  0, 22, -6);
+  Set2(m,  0, 24, -3);
+  (* C row *)
+  Set2(m,  2,  3, -5);  Set2(m,  2,  4, -5);  Set2(m,  2,  5, -4);
+  Set2(m,  2,  6, -3);  Set2(m,  2,  7, -3);  Set2(m,  2,  8, -2);
+  Set2(m,  2, 10, -5);  Set2(m,  2, 11, -6);  Set2(m,  2, 12, -5);
+  Set2(m,  2, 13, -4);  Set2(m,  2, 15, -3);  Set2(m,  2, 16, -5);
+  Set2(m,  2, 17, -4);  Set2(m,  2, 18,  0);  Set2(m,  2, 19, -2);
+  Set2(m,  2, 21, -2);  Set2(m,  2, 22, -8);  Set2(m,  2, 24,  0);
+  (* D row *)
+  Set2(m,  3,  4,  3);  Set2(m,  3,  5, -6);  Set2(m,  3,  6,  1);
+  Set2(m,  3,  7,  1);  Set2(m,  3,  8, -2);  Set2(m,  3, 10,  0);
+  Set2(m,  3, 11, -4);  Set2(m,  3, 12, -3);  Set2(m,  3, 13,  2);
+  Set2(m,  3, 15, -1);  Set2(m,  3, 16,  2);  Set2(m,  3, 17, -1);
+  Set2(m,  3, 18,  0);  Set2(m,  3, 19,  0);  Set2(m,  3, 21, -2);
+  Set2(m,  3, 22, -7);  Set2(m,  3, 24, -4);
+  (* E row *)
+  Set2(m,  4,  5, -5);  Set2(m,  4,  6,  0);  Set2(m,  4,  7,  1);
+  Set2(m,  4,  8, -2);  Set2(m,  4, 10,  0);  Set2(m,  4, 11, -3);
+  Set2(m,  4, 12, -2);  Set2(m,  4, 13,  1);  Set2(m,  4, 15, -1);
+  Set2(m,  4, 16,  2);  Set2(m,  4, 17, -1);  Set2(m,  4, 18,  0);
+  Set2(m,  4, 19,  0);  Set2(m,  4, 21, -2);  Set2(m,  4, 22, -7);
+  Set2(m,  4, 24, -4);
+  (* F row *)
+  Set2(m,  5,  6, -5);  Set2(m,  5,  7, -2);  Set2(m,  5,  8,  1);
+  Set2(m,  5, 10, -5);  Set2(m,  5, 11,  2);  Set2(m,  5, 12,  0);
+  Set2(m,  5, 13, -3);  Set2(m,  5, 15, -5);  Set2(m,  5, 16, -5);
+  Set2(m,  5, 17, -4);  Set2(m,  5, 18, -3);  Set2(m,  5, 19, -3);
+  Set2(m,  5, 21, -1);  Set2(m,  5, 22,  0);  Set2(m,  5, 24,  7);
+  (* G row *)
+  Set2(m,  6,  7, -2);  Set2(m,  6,  8, -3);  Set2(m,  6, 10, -2);
+  Set2(m,  6, 11, -4);  Set2(m,  6, 12, -3);  Set2(m,  6, 13,  0);
+  Set2(m,  6, 15, -1);  Set2(m,  6, 16, -1);  Set2(m,  6, 17, -3);
+  Set2(m,  6, 18,  1);  Set2(m,  6, 19,  0);  Set2(m,  6, 21, -1);
+  Set2(m,  6, 22, -7);  Set2(m,  6, 24, -5);
+  (* H row *)
+  Set2(m,  7,  8, -2);  Set2(m,  7, 10,  0);  Set2(m,  7, 11, -2);
+  Set2(m,  7, 12, -2);  Set2(m,  7, 13,  2);  Set2(m,  7, 15,  0);
+  Set2(m,  7, 16,  3);  Set2(m,  7, 17,  2);  Set2(m,  7, 18, -1);
+  Set2(m,  7, 19, -1);  Set2(m,  7, 21, -2);  Set2(m,  7, 22, -3);
+  Set2(m,  7, 24,  0);
+  (* I row *)
+  Set2(m,  8, 10, -2);  Set2(m,  8, 11,  2);  Set2(m,  8, 12,  2);
+  Set2(m,  8, 13, -2);  Set2(m,  8, 15, -2);  Set2(m,  8, 16, -2);
+  Set2(m,  8, 17, -2);  Set2(m,  8, 18, -1);  Set2(m,  8, 19,  0);
+  Set2(m,  8, 21,  4);  Set2(m,  8, 22, -5);  Set2(m,  8, 24, -1);
+  (* K row *)
+  Set2(m, 10, 11, -3);  Set2(m, 10, 12,  0);  Set2(m, 10, 13,  1);
+  Set2(m, 10, 15, -1);  Set2(m, 10, 16,  1);  Set2(m, 10, 17,  3);
+  Set2(m, 10, 18,  0);  Set2(m, 10, 19,  0);  Set2(m, 10, 21, -2);
+  Set2(m, 10, 22, -3);  Set2(m, 10, 24, -4);
+  (* L row *)
+  Set2(m, 11, 12,  4);  Set2(m, 11, 13, -3);  Set2(m, 11, 15, -3);
+  Set2(m, 11, 16, -2);  Set2(m, 11, 17, -3);  Set2(m, 11, 18, -3);
+  Set2(m, 11, 19, -2);  Set2(m, 11, 21,  2);  Set2(m, 11, 22, -2);
+  Set2(m, 11, 24, -1);
+  (* M row *)
+  Set2(m, 12, 13, -2);  Set2(m, 12, 15, -2);  Set2(m, 12, 16, -1);
+  Set2(m, 12, 17, -1);  Set2(m, 12, 18, -2);  Set2(m, 12, 19, -1);
+  Set2(m, 12, 21,  2);  Set2(m, 12, 22, -4);  Set2(m, 12, 24, -2);
+  (* N row *)
+  Set2(m, 13, 15,  0);  Set2(m, 13, 16,  1);  Set2(m, 13, 17,  0);
+  Set2(m, 13, 18,  1);  Set2(m, 13, 19,  0);  Set2(m, 13, 21, -2);
+  Set2(m, 13, 22, -4);  Set2(m, 13, 24, -2);
+  (* P row *)
+  Set2(m, 15, 16,  0);  Set2(m, 15, 17,  0);  Set2(m, 15, 18,  1);
+  Set2(m, 15, 19,  0);  Set2(m, 15, 21, -1);  Set2(m, 15, 22, -6);
+  Set2(m, 15, 24, -5);
+  (* Q row *)
+  Set2(m, 16, 17,  1);  Set2(m, 16, 18, -1);  Set2(m, 16, 19, -1);
+  Set2(m, 16, 21, -2);  Set2(m, 16, 22, -5);  Set2(m, 16, 24, -4);
+  (* R row *)
+  Set2(m, 17, 18,  0);  Set2(m, 17, 19, -1);  Set2(m, 17, 21, -2);
+  Set2(m, 17, 22,  2);  Set2(m, 17, 24, -4);
+  (* S row *)
+  Set2(m, 18, 19,  1);  Set2(m, 18, 21, -1);  Set2(m, 18, 22, -2);
+  Set2(m, 18, 24, -3);
+  (* T row *)
+  Set2(m, 19, 21,  0);  Set2(m, 19, 22, -5);  Set2(m, 19, 24, -3);
+  (* V, W rows *)
+  Set2(m, 21, 22, -6);  Set2(m, 21, 24, -2);
+  Set2(m, 22, 24,  0)
+END PAM250;
 
 (* ------------------------------------------------------------------ *)
 (*  Internal helpers                                                    *)
 (* ------------------------------------------------------------------ *)
 
-PROCEDURE PairScore(VAR m: ScoreMatrix; a, b: CHAR): INTEGER;
+PROCEDURE PairScore*(VAR m: ScoreMatrix; a, b: CHAR): INTEGER;
+VAR ia, ib: INTEGER;
 BEGIN
+  IF m.useTable THEN
+    IF (a >= 'a') & (a <= 'z') THEN a := CHR(ORD(a) - 32) END;
+    IF (b >= 'a') & (b <= 'z') THEN b := CHR(ORD(b) - 32) END;
+    ia := ORD(a) - ORD('A');
+    ib := ORD(b) - ORD('A');
+    IF (ia >= 0) & (ia <= 25) & (ib >= 0) & (ib <= 25) THEN
+      RETURN m.table[ia][ib]
+    END
+  END;
   IF a = b THEN RETURN m.match_ ELSE RETURN m.mismatch END
 END PairScore;
 
