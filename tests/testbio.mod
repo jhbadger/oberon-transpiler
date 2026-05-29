@@ -4,7 +4,7 @@ MODULE TestBio;
   Each ASSERT failure will abort with a C assert message identifying the line.
   All tests passing = silent exit with code 0.
 *)
-IMPORT BioSeq, BioAlpha, BioAlign, BioIO, BioPattern, BioSuffix, BioFM, BioQGram, BioStats, BioAnnot, BioORF, Math, Files, Strings, Out;
+IMPORT BioSeq, BioAlpha, BioAlign, BioIO, BioPattern, BioSuffix, BioFM, BioQGram, BioStats, BioAnnot, BioORF, BioVCF, Math, Files, Strings, Out;
 
 VAR
   a    : BioAlpha.Alphabet;
@@ -2219,6 +2219,72 @@ BEGIN
   Ok("FisherExact(8,2,1,9) < 0.05")
 END TestFisher;
 
+PROCEDURE TestMultipleTesting;
+VAR
+  pv  : ARRAY 5 OF REAL;
+  eps : REAL;
+BEGIN
+  eps := 1.0E-9;
+  Out.String("--- BonferroniAdj ---"); Out.Ln;
+  pv[0] := 0.01; pv[1] := 0.04; pv[2] := 0.10;
+  pv[3] := 0.30; pv[4] := 0.50;
+  BioStats.BonferroniAdj(pv, 5);
+  (* 0.01*5=0.05, 0.04*5=0.20, 0.10*5=0.50, 0.30*5=1.0 (clamped), 0.50*5=1.0 *)
+  ASSERT(ABS(pv[0] - 0.05) < eps);
+  ASSERT(ABS(pv[1] - 0.20) < eps);
+  ASSERT(ABS(pv[2] - 0.50) < eps);
+  ASSERT(pv[3] = 1.0);
+  ASSERT(pv[4] = 1.0);
+  Ok("BonferroniAdj: values and clamping");
+
+  (* single p-value *)
+  pv[0] := 0.03;
+  BioStats.BonferroniAdj(pv, 1);
+  ASSERT(ABS(pv[0] - 0.03) < eps);
+  Ok("BonferroniAdj n=1: unchanged");
+
+  Out.String("--- BHAdj ---"); Out.Ln;
+  (* sorted: 0.01, 0.04, 0.10, 0.30, 0.50
+     rank    1     2     3     4     5
+     raw adj: 0.01*5/1=0.05, 0.04*5/2=0.10, 0.10*5/3=0.167, 0.30*5/4=0.375, 0.50*5/5=0.50
+     step-down: adj[4]=0.50, adj[3]=min(0.375,0.50)=0.375, adj[2]=min(0.167,0.375)=0.167,
+                adj[1]=min(0.10,0.167)=0.10, adj[0]=min(0.05,0.10)=0.05 *)
+  pv[0] := 0.01; pv[1] := 0.04; pv[2] := 0.10;
+  pv[3] := 0.30; pv[4] := 0.50;
+  BioStats.BHAdj(pv, 5);
+  ASSERT(ABS(pv[0] - 0.05)  < 0.001);
+  ASSERT(ABS(pv[1] - 0.10)  < 0.001);
+  ASSERT(ABS(pv[2] - 0.1667) < 0.001);
+  ASSERT(ABS(pv[3] - 0.375) < 0.001);
+  ASSERT(ABS(pv[4] - 0.50)  < 0.001);
+  Ok("BHAdj: step-down values");
+
+  (* BH preserves order mapping: feed in reverse order *)
+  pv[0] := 0.50; pv[1] := 0.30; pv[2] := 0.10;
+  pv[3] := 0.04; pv[4] := 0.01;
+  BioStats.BHAdj(pv, 5);
+  ASSERT(ABS(pv[4] - 0.05)  < 0.001);
+  ASSERT(ABS(pv[3] - 0.10)  < 0.001);
+  ASSERT(ABS(pv[2] - 0.1667) < 0.001);
+  ASSERT(ABS(pv[1] - 0.375) < 0.001);
+  ASSERT(ABS(pv[0] - 0.50)  < 0.001);
+  Ok("BHAdj: position mapping preserved for reverse-sorted input");
+
+  (* all identical p-values *)
+  pv[0] := 0.10; pv[1] := 0.10; pv[2] := 0.10;
+  BioStats.BHAdj(pv, 3);
+  (* adj all = min(0.10*3/k, ...) = 0.30/3=0.10, then 0.30/2=0.15, then 0.30/1=0.30 *)
+  (* step-down: adj[2]=0.30, adj[1]=min(0.15,0.30)=0.15, adj[0]=min(0.10,0.15)=0.10 *)
+  ASSERT(ABS(pv[0] - 0.10) < 0.001);
+  Ok("BHAdj: identical p-values");
+
+  (* n=1 *)
+  pv[0] := 0.04;
+  BioStats.BHAdj(pv, 1);
+  ASSERT(ABS(pv[0] - 0.04) < eps);
+  Ok("BHAdj n=1: unchanged")
+END TestMultipleTesting;
+
 (* ------------------------------------------------------------------ *)
 (*  BioAnnot tests                                                      *)
 (* ------------------------------------------------------------------ *)
@@ -2356,6 +2422,95 @@ BEGIN
   ASSERT(annotDb.features[3].start <= annotDb.features[4].start);
   Ok("SortByPos: chr2 features sorted by start")
 END TestAnnotSort;
+
+PROCEDURE TestAnnotCoverage;
+VAR depths : ARRAY 500 OF INTEGER;
+    i      : INTEGER;
+BEGIN
+  Out.String("--- Coverage ---"); Out.Ln;
+  (* annotDb is already loaded and sorted from TestAnnotSort *)
+  FOR i := 0 TO 499 DO depths[i] := 0 END;
+  BioAnnot.Coverage(annotDb, "chr1", depths, 500);
+  ASSERT(depths[50]  = 0);   (* before any feature *)
+  ASSERT(depths[125] = 1);   (* geneA only *)
+  ASSERT(depths[175] = 2);   (* geneA + geneC overlap *)
+  ASSERT(depths[225] = 1);   (* geneC only *)
+  ASSERT(depths[275] = 0);   (* gap *)
+  ASSERT(depths[350] = 1);   (* geneB only *)
+  Ok("Coverage: chr1 depth at sampled positions");
+
+  FOR i := 0 TO 499 DO depths[i] := 0 END;
+  BioAnnot.Coverage(annotDb, "chr2", depths, 500);
+  ASSERT(depths[100] = 1);   (* geneD *)
+  ASSERT(depths[250] = 1);   (* geneE *)
+  ASSERT(depths[175] = 0);   (* gap between chr2 features *)
+  Ok("Coverage: chr2 depth at sampled positions");
+
+  (* unknown chromosome: depths unchanged *)
+  FOR i := 0 TO 499 DO depths[i] := 0 END;
+  BioAnnot.Coverage(annotDb, "chrZ", depths, 500);
+  ASSERT(depths[100] = 0);
+  Ok("Coverage: unknown chrom leaves depths zero")
+END TestAnnotCoverage;
+
+(* ------------------------------------------------------------------ *)
+(*  BioVCF tests                                                        *)
+(* ------------------------------------------------------------------ *)
+PROCEDURE TestVCFOpenMissing;
+VAR r: BioVCF.VCFReader;
+BEGIN
+  Out.String("--- VCF open missing file ---"); Out.Ln;
+  ASSERT(~BioVCF.OpenVCF(r, "no_such_file.vcf"));
+  Ok("OpenVCF missing -> FALSE")
+END TestVCFOpenMissing;
+
+PROCEDURE TestVCFRead;
+VAR
+  r   : BioVCF.VCFReader;
+  rec : BioVCF.VCFRecord;
+BEGIN
+  Out.String("--- VCF round-trip ---"); Out.Ln;
+  ASSERT(BioVCF.OpenVCF(r, "testbio_vcf.vcf"));
+  ASSERT(r.nSamples = 2);
+  ASSERT(Strings.Compare(r.samples[0], "SAMPLE1") = 0);
+  ASSERT(Strings.Compare(r.samples[1], "SAMPLE2") = 0);
+  Ok("OpenVCF: 2 samples");
+
+  (* record 1: chr1 pos 100 (0-based = 99) *)
+  ASSERT(BioVCF.ReadVCF(r, rec));
+  ASSERT(Strings.Compare(rec.chrom, "chr1") = 0);
+  ASSERT(rec.pos = 99);
+  ASSERT(Strings.Compare(rec.id, "rs1") = 0);
+  ASSERT(Strings.Compare(rec.ref, "A") = 0);
+  ASSERT(Strings.Compare(rec.alt, "T") = 0);
+  ASSERT(rec.nAlts = 1);
+  ASSERT(rec.qual = 50.0);
+  ASSERT(Strings.Compare(rec.filter, "PASS") = 0);
+  ASSERT(rec.nGTs = 2);
+  ASSERT(Strings.Compare(rec.gts[0], "0/1") = 0);
+  Ok("ReadVCF record 1: coords, alleles, qual, filter, GTs");
+
+  (* record 2: multi-allelic *)
+  ASSERT(BioVCF.ReadVCF(r, rec));
+  ASSERT(rec.pos = 199);
+  ASSERT(rec.nAlts = 2);
+  ASSERT(Strings.Compare(rec.alts[0], "C") = 0);
+  ASSERT(Strings.Compare(rec.alts[1], "T") = 0);
+  ASSERT(Strings.Compare(rec.alt, "C") = 0);
+  Ok("ReadVCF record 2: multi-allelic ALT");
+
+  (* record 3: chrX, missing QUAL, LowQual filter *)
+  ASSERT(BioVCF.ReadVCF(r, rec));
+  ASSERT(Strings.Compare(rec.chrom, "chrX") = 0);
+  ASSERT(rec.pos = 299);
+  ASSERT(Strings.Compare(rec.filter, "LowQual") = 0);
+  ASSERT(rec.qual = 0.0);
+  Ok("ReadVCF record 3: chrX, missing QUAL, LowQual");
+
+  ASSERT(~BioVCF.ReadVCF(r, rec));
+  Ok("ReadVCF EOF returns FALSE");
+  BioVCF.CloseVCF(r)
+END TestVCFRead;
 
 (* ------------------------------------------------------------------ *)
 (*  BioORF tests                                                        *)
@@ -2589,6 +2744,7 @@ BEGIN
   TestCombinatorics;
   TestDistributions;
   TestFisher;
+  TestMultipleTesting;
   Out.String("=== BioAnnot tests ==="); Out.Ln();
   TestAnnotInit;
   TestAnnotAdd;
@@ -2596,6 +2752,10 @@ BEGIN
   TestAnnotLoadGFF;
   TestAnnotOverlaps;
   TestAnnotSort;
+  TestAnnotCoverage;
+  Out.String("=== BioVCF tests ==="); Out.Ln();
+  TestVCFOpenMissing;
+  TestVCFRead;
   Out.String("=== BioORF tests ==="); Out.Ln();
   TestCodonToAA;
   TestTranslate;

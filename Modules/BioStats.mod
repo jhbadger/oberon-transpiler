@@ -10,12 +10,23 @@ MODULE BioStats;
 
   FisherExact returns a two-tailed hypergeometric p-value.
   NormalCDF uses the A&S 7.1.26 rational approximation (max error ~1.5e-7).
+
+  BonferroniAdj: multiply each p-value by n (Bonferroni correction), clamped to 1.
+  BHAdj: Benjamini-Hochberg FDR step-down adjustment (Benjamini & Hochberg 1995).
+    Sorts a copy of the p-values, computes adj[i] = min(p[i]*n/(i+1), adj[i+1])
+    from largest to smallest, then writes back to original positions.
+    Not reentrant (uses module-level scratch buffers of size MaxPVals).
 *)
 
 IMPORT Math;
 
+CONST
+  MaxPVals* = 65536;
+
 VAR
   LogZero* : REAL;   (* log-probability representing probability 0; initialised to -1.0E308 *)
+  bhBuf    : ARRAY MaxPVals OF REAL;
+  bhIdx    : ARRAY MaxPVals OF INTEGER;
 
 (* ------------------------------------------------------------------ *)
 (*  Phred quality scores                                                *)
@@ -208,6 +219,79 @@ BEGIN
   IF pTotal > 1.0 THEN pTotal := 1.0 END;
   RETURN pTotal
 END FisherExact;
+
+(* ------------------------------------------------------------------ *)
+(*  Multiple testing correction                                         *)
+(* ------------------------------------------------------------------ *)
+
+PROCEDURE BonferroniAdj*(VAR pvals: ARRAY OF REAL; n: INTEGER);
+(*
+  Bonferroni correction: multiply each p-value by n, clamp to 1.0.
+*)
+VAR i: INTEGER; p: REAL;
+BEGIN
+  FOR i := 0 TO n - 1 DO
+    p := pvals[i] * FLT(n);
+    IF p > 1.0 THEN p := 1.0 END;
+    pvals[i] := p
+  END
+END BonferroniAdj;
+
+PROCEDURE BHAdj*(VAR pvals: ARRAY OF REAL; n: INTEGER);
+(*
+  Benjamini-Hochberg FDR step-down adjustment.
+  Sorts a scratch copy ascending by p-value, computes
+  adj[i] = min(p[i]*n/(i+1), adj[i+1]) from largest to smallest rank,
+  then writes adjusted values back to original positions.
+  Not reentrant (uses module-level bhBuf/bhIdx scratch buffers).
+*)
+VAR
+  i, j, gap : INTEGER;
+  tmpP      : REAL;
+  tmpI      : INTEGER;
+  prev      : REAL;
+BEGIN
+  IF n <= 0 THEN RETURN END;
+  IF n > MaxPVals THEN n := MaxPVals END;
+
+  FOR i := 0 TO n - 1 DO
+    bhBuf[i] := pvals[i]; bhIdx[i] := i
+  END;
+
+  (* shell sort ascending *)
+  gap := n DIV 2;
+  WHILE gap > 0 DO
+    i := gap;
+    WHILE i < n DO
+      tmpP := bhBuf[i]; tmpI := bhIdx[i];
+      j := i;
+      WHILE (j >= gap) & (bhBuf[j - gap] > tmpP) DO
+        bhBuf[j] := bhBuf[j - gap];
+        bhIdx[j] := bhIdx[j - gap];
+        j := j - gap
+      END;
+      bhBuf[j] := tmpP; bhIdx[j] := tmpI;
+      INC(i)
+    END;
+    gap := gap DIV 2
+  END;
+
+  (* step-down from rank n down to rank 1 *)
+  prev := 1.0;
+  i := n - 1;
+  WHILE i >= 0 DO
+    tmpP := bhBuf[i] * FLT(n) / FLT(i + 1);
+    IF tmpP > 1.0 THEN tmpP := 1.0 END;
+    IF tmpP > prev THEN tmpP := prev END;
+    prev := tmpP;
+    bhBuf[i] := tmpP;
+    DEC(i)
+  END;
+
+  FOR i := 0 TO n - 1 DO
+    pvals[bhIdx[i]] := bhBuf[i]
+  END
+END BHAdj;
 
 BEGIN
   LogZero := -1.0E308

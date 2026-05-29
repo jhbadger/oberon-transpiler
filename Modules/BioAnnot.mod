@@ -101,7 +101,8 @@ PROCEDURE IndexRange(VAR db: AnnotDB; chrom: ARRAY OF CHAR;
   return TRUE.  Return FALSE if the index is absent or chrom is unknown.
 *)
 VAR
-  val, spart, cpart : ARRAY 32 OF CHAR;
+  val               : ARRAY 256 OF CHAR;   (* Dict.Get writes up to 256 bytes *)
+  spart, cpart      : ARRAY 32  OF CHAR;
   cp, cnt           : INTEGER;
   ok                : BOOLEAN;
 BEGIN
@@ -367,5 +368,38 @@ BEGIN
   END;
   Dict.Put(db.index, "~SORTED", "1")
 END SortByPos;
+
+(* ------------------------------------------------------------------ *)
+(*  Coverage                                                            *)
+(* ------------------------------------------------------------------ *)
+
+PROCEDURE Coverage*(VAR db: AnnotDB; chrom: ARRAY OF CHAR;
+                    VAR depths: ARRAY OF INTEGER; n: INTEGER);
+(*
+  Compute per-base coverage depth for positions [0, n) on chrom.
+  depths[p] is incremented by 1 for each feature whose [start, end_) covers p.
+  The caller must zero-initialise depths before calling.
+  Uses the Dict index when available (after SortByPos); otherwise linear scan.
+*)
+VAR
+  i, lo, lim : INTEGER;
+  lo2, hi    : INTEGER;
+BEGIN
+  IF IndexRange(db, chrom, lo, lim) THEN
+  ELSE
+    lo := 0; lim := db.count
+  END;
+  FOR i := lo TO lim - 1 DO
+    IF Strings.Compare(db.features[i].chrom, chrom) = 0 THEN
+      lo2 := db.features[i].start;
+      hi  := db.features[i].end_;
+      IF lo2 < 0    THEN lo2 := 0    END;
+      IF hi  > n    THEN hi  := n    END;
+      WHILE lo2 < hi DO
+        INC(depths[lo2]); INC(lo2)
+      END
+    END
+  END
+END Coverage;
 
 END BioAnnot.
