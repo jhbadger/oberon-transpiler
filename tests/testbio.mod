@@ -4,7 +4,7 @@ MODULE TestBio;
   Each ASSERT failure will abort with a C assert message identifying the line.
   All tests passing = silent exit with code 0.
 *)
-IMPORT BioSeq, BioAlpha, BioAlign, BioIO, BioPattern, Files, Strings, Out;
+IMPORT BioSeq, BioAlpha, BioAlign, BioIO, BioPattern, BioSuffix, Files, Strings, Out;
 
 VAR
   a    : BioAlpha.Alphabet;
@@ -14,6 +14,11 @@ VAR
      are too large for the stack and must live here. *)
   hits : BioPattern.HitList;
   acSt : BioPattern.ACState;
+  (* BioSuffix module-level state: SuffixArray (~256 KB), BWTResult (~64 KB),
+     and LCP array (~256 KB) are too large for the stack and must live here. *)
+  sfx    : BioSuffix.SuffixArray;
+  bwtRes : BioSuffix.BWTResult;
+  lcpArr : ARRAY 65536 OF INTEGER;
 
 PROCEDURE Ok(label: ARRAY OF CHAR);
 BEGIN
@@ -1507,6 +1512,184 @@ BEGIN
   BioSeq.Free(seq)
 END TestUkkonen;
 
+(* ================================================================== *)
+(*  BioSuffix tests                                                     *)
+(* ================================================================== *)
+
+(* ------------------------------------------------------------------ *)
+(*  S1. Build — classic BANANA example                                  *)
+(* ------------------------------------------------------------------ *)
+PROCEDURE TestBuild;
+VAR seq: BioSeq.Seq;
+BEGIN
+  Out.String("--- SA Build ---"); Out.Ln();
+  BioSeq.New(seq);
+
+  (* BANANA$ sorted suffixes: $=6 A$=5 ANA$=3 ANANA$=1 BANANA$=0 NA$=4 NANA$=2 *)
+  BioSeq.FromStr(seq, "BANANA");
+  BioSuffix.Build(seq, sfx);
+  ASSERT(sfx.n    = 7);
+  ASSERT(sfx.sa[0] = 6);
+  ASSERT(sfx.sa[1] = 5);
+  ASSERT(sfx.sa[2] = 3);
+  ASSERT(sfx.sa[3] = 1);
+  ASSERT(sfx.sa[4] = 0);
+  ASSERT(sfx.sa[5] = 4);
+  ASSERT(sfx.sa[6] = 2);
+  Ok("Build BANANA suffix array");
+
+  (* ACGT$: $=4 ACGT$=0 CGT$=1 GT$=2 T$=3 *)
+  BioSeq.FromStr(seq, "ACGT");
+  BioSuffix.Build(seq, sfx);
+  ASSERT(sfx.n    = 5);
+  ASSERT(sfx.sa[0] = 4);
+  ASSERT(sfx.sa[1] = 0);
+  ASSERT(sfx.sa[2] = 1);
+  ASSERT(sfx.sa[3] = 2);
+  ASSERT(sfx.sa[4] = 3);
+  Ok("Build ACGT suffix array");
+
+  BioSeq.Free(seq)
+END TestBuild;
+
+(* ------------------------------------------------------------------ *)
+(*  S2. BWT                                                             *)
+(* ------------------------------------------------------------------ *)
+PROCEDURE TestBWT;
+VAR seq: BioSeq.Seq;
+BEGIN
+  Out.String("--- BWT ---"); Out.Ln();
+  BioSeq.New(seq);
+
+  (* BWT("BANANA") = "ANN$BAA" with eof at position 4 (where sa=0) *)
+  BioSeq.FromStr(seq, "BANANA");
+  BioSuffix.Build(seq, sfx);
+  BioSuffix.BWT(seq, sfx, bwtRes);
+  ASSERT(bwtRes.n      = 7);
+  ASSERT(bwtRes.eof    = 4);
+  ASSERT(bwtRes.bwt[0] = 'A');
+  ASSERT(bwtRes.bwt[1] = 'N');
+  ASSERT(bwtRes.bwt[2] = 'N');
+  ASSERT(bwtRes.bwt[3] = 'B');
+  ASSERT(bwtRes.bwt[4] = 0X);
+  ASSERT(bwtRes.bwt[5] = 'A');
+  ASSERT(bwtRes.bwt[6] = 'A');
+  Ok("BWT of BANANA");
+
+  BioSeq.Free(seq)
+END TestBWT;
+
+(* ------------------------------------------------------------------ *)
+(*  S3. InverseBWT                                                      *)
+(* ------------------------------------------------------------------ *)
+PROCEDURE TestInverseBWT;
+VAR seq, out: BioSeq.Seq; buf: ARRAY 32 OF CHAR;
+BEGIN
+  Out.String("--- InverseBWT ---"); Out.Ln();
+  BioSeq.New(seq);
+  out := NIL;
+
+  BioSeq.FromStr(seq, "BANANA");
+  BioSuffix.Build(seq, sfx);
+  BioSuffix.BWT(seq, sfx, bwtRes);
+  BioSuffix.InverseBWT(bwtRes, out);
+  ASSERT(out # NIL);
+  ASSERT(BioSeq.Length(out) = 6);
+  BioSeq.ToStr(out, buf);
+  ASSERT(buf = "BANANA");
+  Ok("InverseBWT round-trip BANANA");
+
+  BioSeq.FromStr(seq, "ACGT");
+  BioSuffix.Build(seq, sfx);
+  BioSuffix.BWT(seq, sfx, bwtRes);
+  BioSuffix.InverseBWT(bwtRes, out);
+  BioSeq.ToStr(out, buf);
+  ASSERT(buf = "ACGT");
+  Ok("InverseBWT round-trip ACGT");
+
+  BioSeq.Free(seq);
+  BioSeq.Free(out)
+END TestInverseBWT;
+
+(* ------------------------------------------------------------------ *)
+(*  S4. LCP array (Kasai)                                               *)
+(* ------------------------------------------------------------------ *)
+PROCEDURE TestLCP;
+VAR seq: BioSeq.Seq;
+BEGIN
+  Out.String("--- LCP ---"); Out.Ln();
+  BioSeq.New(seq);
+
+  (* LCP for BANANA at SA=[6,5,3,1,0,4,2]: [0,0,1,3,0,0,2] *)
+  BioSeq.FromStr(seq, "BANANA");
+  BioSuffix.Build(seq, sfx);
+  BioSuffix.LCP(seq, sfx, lcpArr);
+  ASSERT(lcpArr[0] = 0);
+  ASSERT(lcpArr[1] = 0);
+  ASSERT(lcpArr[2] = 1);
+  ASSERT(lcpArr[3] = 3);
+  ASSERT(lcpArr[4] = 0);
+  ASSERT(lcpArr[5] = 0);
+  ASSERT(lcpArr[6] = 2);
+  Ok("LCP of BANANA");
+
+  (* ACGT: all suffixes share no prefix, LCP all 0 *)
+  BioSeq.FromStr(seq, "ACGT");
+  BioSuffix.Build(seq, sfx);
+  BioSuffix.LCP(seq, sfx, lcpArr);
+  ASSERT(lcpArr[0] = 0);
+  ASSERT(lcpArr[1] = 0);
+  ASSERT(lcpArr[2] = 0);
+  ASSERT(lcpArr[3] = 0);
+  ASSERT(lcpArr[4] = 0);
+  Ok("LCP of ACGT all zeros");
+
+  BioSeq.Free(seq)
+END TestLCP;
+
+(* ------------------------------------------------------------------ *)
+(*  S5. Search                                                          *)
+(* ------------------------------------------------------------------ *)
+PROCEDURE TestSearch;
+VAR seq: BioSeq.Seq; lo, hi: INTEGER;
+BEGIN
+  Out.String("--- SA Search ---"); Out.Ln();
+  BioSeq.New(seq);
+  BioSeq.FromStr(seq, "BANANA");
+  BioSuffix.Build(seq, sfx);
+
+  (* "AN" at SA indices 2,3 (ANA$ and ANANA$) -> [2,4) *)
+  ASSERT(BioSuffix.Search(seq, sfx, "AN", lo, hi));
+  ASSERT(lo = 2);
+  ASSERT(hi = 4);
+  Ok("Search AN in BANANA -> [2,4)");
+
+  (* "NA" at SA indices 5,6 (NA$ and NANA$) -> [5,7) *)
+  ASSERT(BioSuffix.Search(seq, sfx, "NA", lo, hi));
+  ASSERT(lo = 5);
+  ASSERT(hi = 7);
+  Ok("Search NA in BANANA -> [5,7)");
+
+  (* "BANANA" at SA index 4 only -> [4,5) *)
+  ASSERT(BioSuffix.Search(seq, sfx, "BANANA", lo, hi));
+  ASSERT(lo = 4);
+  ASSERT(hi = 5);
+  Ok("Search BANANA (full text) -> [4,5)");
+
+  (* "A" matches three suffixes -> [1,4) *)
+  ASSERT(BioSuffix.Search(seq, sfx, "A", lo, hi));
+  ASSERT(lo = 1);
+  ASSERT(hi = 4);
+  Ok("Search A in BANANA -> [1,4) (3 occurrences)");
+
+  (* "Z" absent: all suffixes precede Z lexicographically *)
+  ASSERT(~BioSuffix.Search(seq, sfx, "Z", lo, hi));
+  ASSERT(lo = hi);
+  Ok("Search Z not found");
+
+  BioSeq.Free(seq)
+END TestSearch;
+
 (* ------------------------------------------------------------------ *)
 (*  Main                                                                *)
 (* ------------------------------------------------------------------ *)
@@ -1555,6 +1738,12 @@ BEGIN
   TestKMPSearch;
   TestACSearch;
   TestUkkonen;
+  Out.String("=== BioSuffix tests ==="); Out.Ln();
+  TestBuild;
+  TestBWT;
+  TestInverseBWT;
+  TestLCP;
+  TestSearch;
   Out.Ln();
   Out.String("All "); Out.Int(pass); Out.String(" tests passed."); Out.Ln()
 END TestBio.
