@@ -4,7 +4,7 @@ MODULE TestBio;
   Each ASSERT failure will abort with a C assert message identifying the line.
   All tests passing = silent exit with code 0.
 *)
-IMPORT BioSeq, BioAlpha, BioAlign, BioIO, BioPattern, BioSuffix, BioFM, BioQGram, Files, Strings, Out;
+IMPORT BioSeq, BioAlpha, BioAlign, BioIO, BioPattern, BioSuffix, BioFM, BioQGram, BioStats, Math, Files, Strings, Out;
 
 VAR
   a    : BioAlpha.Alphabet;
@@ -1956,6 +1956,211 @@ BEGIN
 END TestQGramApprox;
 
 (* ------------------------------------------------------------------ *)
+(*  BioStats tests                                                      *)
+(* ------------------------------------------------------------------ *)
+
+PROCEDURE Near(x, y, eps: REAL): BOOLEAN;
+(* TRUE iff |x-y| < eps *)
+VAR d: REAL;
+BEGIN
+  d := x - y;
+  IF d < 0.0 THEN d := -d END;
+  RETURN d < eps
+END Near;
+
+PROCEDURE TestPhred;
+VAR p: REAL; q: INTEGER;
+BEGIN
+  Out.String("--- Phred ---"); Out.Ln();
+  p := BioStats.PhredToProb(0);
+  ASSERT(Near(p, 1.0, 1.0E-9));
+  Ok("PhredToProb(0) = 1.0");
+
+  p := BioStats.PhredToProb(10);
+  ASSERT(Near(p, 0.1, 1.0E-9));
+  Ok("PhredToProb(10) = 0.1");
+
+  p := BioStats.PhredToProb(30);
+  ASSERT(Near(p, 0.001, 1.0E-12));
+  Ok("PhredToProb(30) = 0.001");
+
+  q := BioStats.ProbToPhred(1.0);
+  ASSERT(q = 0);
+  Ok("ProbToPhred(1.0) = 0");
+
+  q := BioStats.ProbToPhred(0.1);
+  ASSERT(q = 10);
+  Ok("ProbToPhred(0.1) = 10");
+
+  q := BioStats.ProbToPhred(0.001);
+  ASSERT(q = 30);
+  Ok("ProbToPhred(0.001) = 30");
+
+  q := BioStats.ProbToPhred(0.0);
+  ASSERT(q = 93);
+  Ok("ProbToPhred(0.0) = 93 (clamped)")
+END TestPhred;
+
+PROCEDURE TestLogArith;
+VAR arr: ARRAY 4 OF REAL; r: REAL;
+BEGIN
+  Out.String("--- LogAdd / LogSum ---"); Out.Ln();
+
+  r := BioStats.LogAdd(BioStats.LogZero, 0.0);
+  ASSERT(Near(r, 0.0, 1.0E-12));
+  Ok("LogAdd(LogZero, 0) = 0");
+
+  r := BioStats.LogAdd(0.0, BioStats.LogZero);
+  ASSERT(Near(r, 0.0, 1.0E-12));
+  Ok("LogAdd(0, LogZero) = 0");
+
+  (* log(0.5) + log(0.5) = log(1.0) = 0 *)
+  r := BioStats.LogAdd(Math.ln(0.5), Math.ln(0.5));
+  ASSERT(Near(r, 0.0, 1.0E-12));
+  Ok("LogAdd(ln 0.5, ln 0.5) = 0");
+
+  (* log(0.25)*4 elements sum to log(1.0) = 0 *)
+  arr[0] := Math.ln(0.25);
+  arr[1] := Math.ln(0.25);
+  arr[2] := Math.ln(0.25);
+  arr[3] := Math.ln(0.25);
+  r := BioStats.LogSum(arr, 4);
+  ASSERT(Near(r, 0.0, 1.0E-12));
+  Ok("LogSum 4x ln(0.25) = 0");
+
+  r := BioStats.LogSum(arr, 0);
+  ASSERT(r <= BioStats.LogZero + 1.0);
+  Ok("LogSum n=0 returns LogZero")
+END TestLogArith;
+
+PROCEDURE TestCombinatorics;
+VAR r: REAL;
+BEGIN
+  Out.String("--- Factorial / Binomial ---"); Out.Ln();
+
+  r := BioStats.LogFactorial(0);
+  ASSERT(Near(r, 0.0, 1.0E-12));
+  Ok("LogFactorial(0) = 0");
+
+  r := BioStats.LogFactorial(1);
+  ASSERT(Near(r, 0.0, 1.0E-12));
+  Ok("LogFactorial(1) = 0");
+
+  r := BioStats.Factorial(5);
+  ASSERT(Near(r, 120.0, 1.0E-9));
+  Ok("Factorial(5) = 120");
+
+  r := BioStats.Factorial(10);
+  ASSERT(Near(r, 3628800.0, 1.0));
+  Ok("Factorial(10) = 3628800");
+
+  r := BioStats.LogBinomial(10, 0);
+  ASSERT(Near(r, 0.0, 1.0E-12));
+  Ok("LogBinomial(10,0) = 0");
+
+  r := BioStats.Binomial(10, 5);
+  ASSERT(Near(r, 252.0, 0.001));
+  Ok("Binomial(10,5) = 252");
+
+  r := BioStats.Binomial(10, 11);
+  ASSERT(Near(r, 0.0, 1.0E-12));
+  Ok("Binomial(10,11) = 0 (impossible)");
+
+  (* P(X=5 | Binomial(10,0.5)) = 252/1024 *)
+  r := BioStats.BinomialProb(10, 5, 0.5);
+  ASSERT(Near(r, 252.0 / 1024.0, 1.0E-9));
+  Ok("BinomialProb(10,5,0.5) = 252/1024");
+
+  r := BioStats.BinomialProb(10, 0, 0.0);
+  ASSERT(Near(r, 1.0, 1.0E-12));
+  Ok("BinomialProb(10,0,0.0) = 1");
+
+  r := BioStats.BinomialProb(10, 10, 1.0);
+  ASSERT(Near(r, 1.0, 1.0E-12));
+  Ok("BinomialProb(10,10,1.0) = 1");
+
+  (* P(X=0 | Poisson(1)) = e^-1 *)
+  r := BioStats.PoissonProb(1.0, 0);
+  ASSERT(Near(r, Math.exp(-1.0), 1.0E-9));
+  Ok("PoissonProb(1,0) = e^-1");
+
+  (* P(X=2 | Poisson(2)) = 2*e^-2 *)
+  r := BioStats.PoissonProb(2.0, 2);
+  ASSERT(Near(r, 2.0 * Math.exp(-2.0), 1.0E-9));
+  Ok("PoissonProb(2,2) = 2*e^-2");
+
+  r := BioStats.PoissonProb(0.0, 0);
+  ASSERT(Near(r, 1.0, 1.0E-12));
+  Ok("PoissonProb(0,0) = 1");
+
+  r := BioStats.PoissonProb(0.0, 1);
+  ASSERT(Near(r, 0.0, 1.0E-12));
+  Ok("PoissonProb(0,1) = 0")
+END TestCombinatorics;
+
+PROCEDURE TestDistributions;
+VAR r: REAL;
+BEGIN
+  Out.String("--- NormalPDF / NormalCDF ---"); Out.Ln();
+
+  (* PDF at mean = 1/(sigma*sqrt(2*pi)) *)
+  r := BioStats.NormalPDF(0.0, 0.0, 1.0);
+  ASSERT(Near(r, 1.0 / Math.sqrt(2.0 * Math.pi), 1.0E-9));
+  Ok("NormalPDF(0; 0,1) = 1/sqrt(2*pi)");
+
+  (* CDF at mean = 0.5 *)
+  r := BioStats.NormalCDF(0.0, 0.0, 1.0);
+  ASSERT(Near(r, 0.5, 1.0E-7));
+  Ok("NormalCDF(0; 0,1) = 0.5");
+
+  (* CDF at +1 sigma ~= 0.8413 *)
+  r := BioStats.NormalCDF(1.0, 0.0, 1.0);
+  ASSERT(Near(r, 0.8413, 2.0E-4));
+  Ok("NormalCDF(1; 0,1) ~= 0.8413");
+
+  (* CDF at -1 sigma ~= 0.1587 (symmetry) *)
+  r := BioStats.NormalCDF(-1.0, 0.0, 1.0);
+  ASSERT(Near(r, 0.1587, 2.0E-4));
+  Ok("NormalCDF(-1; 0,1) ~= 0.1587");
+
+  (* CDF at +1.96 sigma ~= 0.975 (95% CI boundary) *)
+  r := BioStats.NormalCDF(1.96, 0.0, 1.0);
+  ASSERT(Near(r, 0.975, 1.0E-4));
+  Ok("NormalCDF(1.96; 0,1) ~= 0.975")
+END TestDistributions;
+
+PROCEDURE TestFisher;
+VAR p: REAL;
+BEGIN
+  Out.String("--- FisherExact ---"); Out.Ln();
+
+  (* All-zero table -> p=1 *)
+  p := BioStats.FisherExact(0, 0, 0, 0);
+  ASSERT(Near(p, 1.0, 1.0E-12));
+  Ok("FisherExact(0,0,0,0) = 1.0");
+
+  (* Perfectly balanced -> p=1.0 *)
+  p := BioStats.FisherExact(5, 5, 5, 5);
+  ASSERT(Near(p, 1.0, 1.0E-9));
+  Ok("FisherExact(5,5,5,5) balanced -> 1.0");
+
+  (* Extreme table 4x4: p = 2/C(8,4) = 2/70 *)
+  p := BioStats.FisherExact(4, 0, 0, 4);
+  ASSERT(Near(p, 2.0 / 70.0, 1.0E-9));
+  Ok("FisherExact(4,0,0,4) extreme -> 2/70");
+
+  (* Same extreme, other orientation *)
+  p := BioStats.FisherExact(0, 4, 4, 0);
+  ASSERT(Near(p, 2.0 / 70.0, 1.0E-9));
+  Ok("FisherExact(0,4,4,0) extreme -> 2/70");
+
+  (* Significant association: a=8,b=2,c=1,d=9 *)
+  p := BioStats.FisherExact(8, 2, 1, 9);
+  ASSERT(p < 0.05);
+  Ok("FisherExact(8,2,1,9) < 0.05")
+END TestFisher;
+
+(* ------------------------------------------------------------------ *)
 (*  Main                                                                *)
 (* ------------------------------------------------------------------ *)
 BEGIN
@@ -2016,6 +2221,12 @@ BEGIN
   Out.String("=== BioQGram tests ==="); Out.Ln();
   TestQGramQuery;
   TestQGramApprox;
+  Out.String("=== BioStats tests ==="); Out.Ln();
+  TestPhred;
+  TestLogArith;
+  TestCombinatorics;
+  TestDistributions;
+  TestFisher;
   Out.Ln();
   Out.String("All "); Out.Int(pass); Out.String(" tests passed."); Out.Ln()
 END TestBio.
