@@ -2,19 +2,26 @@ MODULE BioAnnot;
 (*
   BioAnnot — Genomic interval annotation (BED / GFF3).
 
-  Features are stored in a flat array; Overlaps and Contains scan linearly.
-  SortByPos orders the array by (chrom, start) using shell sort so that
-  callers can iterate over a chromosome in coordinate order.
+  Features are stored in a flat array sorted by (chrom, start) after
+  SortByPos.  The Dict index maps each chromosome to "start,count"
+  (its contiguous slice in the sorted array), enabling O(1) chromosome
+  lookup in Overlaps and Contains.
 
-  NOTE: AnnotDB holds ARRAY 16384 OF Feature (~6.5 MB); declare it at
+  Index lifecycle:
+    Init        — empty dict, no index
+    LoadBed/Add — index invalidated (sentinel "~SORTED" removed)
+    SortByPos   — sorts then rebuilds the full index
+    Overlaps/Contains — use index if valid; fall back to linear scan
+
+  NOTE: AnnotDB (~6.5 MB for the feature array) should be declared at
   module level, not as a local variable.
 
-  BED loading:  chrom/start/end are mandatory; name/score/strand optional.
-  GFF3 loading: seqname→chrom, feature-type→name, start is converted from
+  BED loading:  chrom/start/end mandatory; name/score/strand optional.
+  GFF3 loading: seqname→chrom, feature-type→name, start converted from
                 1-based to 0-based; raw attributes string stored in attrs.
 *)
 
-IMPORT Files, Strings;
+IMPORT Files, Strings, Dict;
 
 CONST
   MaxFeatures* = 16384;
@@ -32,7 +39,8 @@ TYPE
 
   AnnotDB* = RECORD
     features* : ARRAY MaxFeatures OF Feature;
-    count*    : INTEGER
+    count*    : INTEGER;
+    index*    : Dict.Table        (* chrom -> "start,count" after SortByPos *)
   END;
 
 (* ------------------------------------------------------------------ *)
@@ -41,7 +49,6 @@ TYPE
 
 PROCEDURE GetField(line: ARRAY OF CHAR; VAR pos: INTEGER;
                    VAR field: ARRAY OF CHAR; maxLen: INTEGER);
-(* Copy one tab-delimited token from line[pos..] into field; advance pos. *)
 VAR i: INTEGER;
 BEGIN
   i := 0;
@@ -70,7 +77,6 @@ BEGIN
 END AtoR;
 
 PROCEDURE IsSkip(line: ARRAY OF CHAR): BOOLEAN;
-(* TRUE for blank lines, # comments, and BED track/browser headers. *)
 BEGIN
   IF line[0] = 0X  THEN RETURN TRUE END;
   IF line[0] = '#' THEN RETURN TRUE END;
@@ -88,23 +94,50 @@ BEGIN
   IF (n > 0) & (line[n - 1] = 0DX) THEN line[n - 1] := 0X END
 END StripCR;
 
+PROCEDURE IndexRange(VAR db: AnnotDB; chrom: ARRAY OF CHAR;
+                     VAR lo, lim: INTEGER): BOOLEAN;
+(*
+  If the index is valid, set lo/lim to the slice [lo,lim) for chrom and
+  return TRUE.  Return FALSE if the index is absent or chrom is unknown.
+*)
+VAR
+  val, spart, cpart : ARRAY 32 OF CHAR;
+  cp, cnt           : INTEGER;
+  ok                : BOOLEAN;
+BEGIN
+  IF ~Dict.Has(db.index, "~SORTED") THEN RETURN FALSE END;
+  IF ~Dict.Get(db.index, chrom, val)  THEN RETURN FALSE END;
+  cp := Strings.Pos(",", val);
+  IF cp < 0 THEN RETURN FALSE END;
+  Strings.Extract(val, 0, cp, spart);
+  Strings.Extract(val, cp + 1, Strings.Length(val) - cp - 1, cpart);
+  ok := Strings.StrToInt(spart, lo);
+  IF ok THEN ok := Strings.StrToInt(cpart, cnt) END;
+  IF ok THEN lim := lo + cnt END;
+  RETURN ok
+END IndexRange;
+
 (* ------------------------------------------------------------------ *)
 (*  Init / Add                                                          *)
 (* ------------------------------------------------------------------ *)
 
 PROCEDURE Init*(VAR db: AnnotDB);
 BEGIN
-  db.count := 0
+  db.count := 0;
+  Dict.Init(db.index)
 END Init;
 
 PROCEDURE Add*(VAR db: AnnotDB; VAR f: Feature): BOOLEAN;
 (*
-  Append f to db.  Returns FALSE (and does nothing) if the database is full.
+  Append f to db.  Returns FALSE if the database is full.
+  Invalidates the chromosome index so queries fall back to linear scan
+  until SortByPos is called again.
 *)
 BEGIN
   IF db.count >= MaxFeatures THEN RETURN FALSE END;
   db.features[db.count] := f;
   INC(db.count);
+  Dict.Remove(db.index, "~SORTED");
   RETURN TRUE
 END Add;
 
@@ -116,8 +149,6 @@ PROCEDURE LoadBed*(VAR db: AnnotDB; path: ARRAY OF CHAR): INTEGER;
 (*
   Parse a BED file and add features to db.
   Returns the number of features added, or -1 if the file cannot be opened.
-  Mandatory columns: chrom, start, end.
-  Optional: name, score (integer), strand.
 *)
 VAR
   f           : Files.File;
@@ -174,11 +205,7 @@ PROCEDURE LoadGFF*(VAR db: AnnotDB; path: ARRAY OF CHAR): INTEGER;
 (*
   Parse a GFF3 file and add features to db.
   Returns count added, or -1 if the file cannot be opened.
-  Columns: seqname, source, feature, start(1-based), end(1-based incl.),
-           score, strand, frame, attributes.
-  Conversion: our start = gff_start - 1; our end = gff_end (0-based excl.).
-  The feature type (column 3) is stored in name.
-  The raw attributes string (column 9) is stored in attrs.
+  GFF3 start (1-based) → 0-based; end (1-based inclusive) → 0-based exclusive.
 *)
 VAR
   f           : Files.File;
@@ -203,12 +230,12 @@ BEGIN
       ELSIF ~IsSkip(line) THEN
         StripCR(line);
         pos := 0;
-        GetField(line, pos, feat.chrom, 64);   (* col 1: seqname *)
-        GetField(line, pos, tmp,        64);   (* col 2: source — discard *)
-        GetField(line, pos, feat.name,  64);   (* col 3: feature type *)
+        GetField(line, pos, feat.chrom, 64);
+        GetField(line, pos, tmp,        64);   (* source — discard *)
+        GetField(line, pos, feat.name,  64);   (* feature type *)
         GetField(line, pos, tmp,        64); feat.start := AtoI(tmp) - 1;
         GetField(line, pos, tmp,        64); feat.end_  := AtoI(tmp);
-        GetField(line, pos, tmp,        64);   (* col 6: score *)
+        GetField(line, pos, tmp,        64);
         IF tmp[0] = '.' THEN feat.score := 0.0
         ELSE feat.score := AtoR(tmp)
         END;
@@ -217,7 +244,7 @@ BEGIN
           GetField(line, pos, tmp, 64);
           IF (tmp[0] = '+') OR (tmp[0] = '-') THEN feat.strand := tmp[0] END
         END;
-        GetField(line, pos, tmp, 64);          (* col 8: frame — discard *)
+        GetField(line, pos, tmp, 64);          (* frame — discard *)
         feat.attrs[0] := 0X;
         IF (pos < LEN(line)) & (line[pos] # 0X) THEN
           GetField(line, pos, feat.attrs, 256)
@@ -238,13 +265,17 @@ PROCEDURE Overlaps*(VAR db: AnnotDB; chrom: ARRAY OF CHAR;
                     VAR hits: ARRAY OF INTEGER; VAR n: INTEGER);
 (*
   Return indices of all features on chrom that overlap [start, end_).
-  Two half-open intervals overlap iff start < f.end_ AND f.start < end_.
-  n is set to the count written into hits (capped at LEN(hits)).
+  Uses the Dict index when available (after SortByPos); otherwise linear scan.
 *)
-VAR i: INTEGER;
+VAR i, lo, lim : INTEGER;
 BEGIN
   n := 0;
-  FOR i := 0 TO db.count - 1 DO
+  IF IndexRange(db, chrom, lo, lim) THEN
+    (* chrom absent from a valid index → nothing to report *)
+  ELSE
+    lo := 0; lim := db.count
+  END;
+  FOR i := lo TO lim - 1 DO
     IF (n < LEN(hits)) &
        (Strings.Compare(db.features[i].chrom, chrom) = 0) &
        (db.features[i].start < end_) &
@@ -257,13 +288,17 @@ END Overlaps;
 PROCEDURE Contains*(VAR db: AnnotDB; chrom: ARRAY OF CHAR; pos: INTEGER;
                     VAR hits: ARRAY OF INTEGER; VAR n: INTEGER);
 (*
-  Return indices of all features on chrom that contain position pos
-  (i.e. f.start <= pos < f.end_).
+  Return indices of all features on chrom where f.start <= pos < f.end_.
+  Uses the Dict index when available; otherwise linear scan.
 *)
-VAR i: INTEGER;
+VAR i, lo, lim : INTEGER;
 BEGIN
   n := 0;
-  FOR i := 0 TO db.count - 1 DO
+  IF IndexRange(db, chrom, lo, lim) THEN
+  ELSE
+    lo := 0; lim := db.count
+  END;
+  FOR i := lo TO lim - 1 DO
     IF (n < LEN(hits)) &
        (Strings.Compare(db.features[i].chrom, chrom) = 0) &
        (db.features[i].start <= pos) &
@@ -279,14 +314,18 @@ END Contains;
 
 PROCEDURE SortByPos*(VAR db: AnnotDB);
 (*
-  Sort db.features[0..count-1] by (chrom, start) using shell sort.
-  After sorting, features on the same chromosome are in coordinate order.
+  Sort db.features[0..count-1] by (chrom, start) using shell sort, then
+  rebuild the Dict index so that each chromosome maps to "start,count".
 *)
 VAR
-  gap, i, j, cmp : INTEGER;
-  tmp             : Feature;
-  done            : BOOLEAN;
+  gap, i, j, cmp     : INTEGER;
+  tmp                 : Feature;
+  done                : BOOLEAN;
+  curChrom            : ARRAY 64 OF CHAR;
+  val, numStr         : ARRAY 32 OF CHAR;
+  chromStart, chromCount : INTEGER;
 BEGIN
+  (* Shell sort by (chrom, start) *)
   gap := db.count DIV 2;
   WHILE gap > 0 DO
     i := gap;
@@ -307,7 +346,26 @@ BEGIN
       INC(i)
     END;
     gap := gap DIV 2
-  END
+  END;
+
+  (* Rebuild chromosome index *)
+  Dict.Clear(db.index);
+  i := 0;
+  WHILE i < db.count DO
+    COPY(db.features[i].chrom, curChrom);
+    chromStart := i;
+    WHILE (i < db.count) &
+          (Strings.Compare(db.features[i].chrom, curChrom) = 0) DO
+      INC(i)
+    END;
+    chromCount := i - chromStart;
+    Strings.IntToStr(chromStart, val);
+    Strings.Append(",", val);
+    Strings.IntToStr(chromCount, numStr);
+    Strings.Append(numStr, val);
+    Dict.Put(db.index, curChrom, val)
+  END;
+  Dict.Put(db.index, "~SORTED", "1")
 END SortByPos;
 
 END BioAnnot.
