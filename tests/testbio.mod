@@ -4,12 +4,16 @@ MODULE TestBio;
   Each ASSERT failure will abort with a C assert message identifying the line.
   All tests passing = silent exit with code 0.
 *)
-IMPORT BioSeq, BioAlpha, BioAlign, BioIO, Files, Strings, Out;
+IMPORT BioSeq, BioAlpha, BioAlign, BioIO, BioPattern, Files, Strings, Out;
 
 VAR
   a    : BioAlpha.Alphabet;
   s, t : BioSeq.Seq;
   pass : INTEGER;
+  (* BioPattern module-level state: ACState (~2 MB) and HitList (~768 KB)
+     are too large for the stack and must live here. *)
+  hits : BioPattern.HitList;
+  acSt : BioPattern.ACState;
 
 PROCEDURE Ok(label: ARRAY OF CHAR);
 BEGIN
@@ -1207,6 +1211,302 @@ BEGIN
   Ok("PrintAlignment runs without crash")
 END TestPrintAlignment;
 
+(* ================================================================== *)
+(*  BioPattern tests                                                   *)
+(* ================================================================== *)
+
+(* ------------------------------------------------------------------ *)
+(*  P1. Boyer-Moore                                                     *)
+(* ------------------------------------------------------------------ *)
+PROCEDURE TestBMSearch;
+VAR st: BioPattern.BMState; seq: BioSeq.Seq;
+BEGIN
+  Out.String("--- Boyer-Moore ---"); Out.Ln();
+  BioSeq.New(seq);
+
+  (* single exact match in the middle *)
+  BioPattern.BMBuild(st, "ACGT");
+  BioSeq.FromStr(seq, "TTTACGTAAA");
+  BioPattern.BMSearch(st, seq, hits);
+  ASSERT(hits.count = 1);
+  ASSERT(hits.hits[0].pos = 3);
+  ASSERT(hits.hits[0].len = 4);
+  ASSERT(hits.hits[0].dist = 0);
+  Ok("BM single match in middle");
+
+  (* match at position 0 *)
+  BioSeq.FromStr(seq, "ACGTAAA");
+  BioPattern.BMSearch(st, seq, hits);
+  ASSERT(hits.count = 1);
+  ASSERT(hits.hits[0].pos = 0);
+  Ok("BM match at start");
+
+  (* match at very end *)
+  BioPattern.BMBuild(st, "GT");
+  BioSeq.FromStr(seq, "ACGT");
+  BioPattern.BMSearch(st, seq, hits);
+  ASSERT(hits.count = 1);
+  ASSERT(hits.hits[0].pos = 2);
+  Ok("BM match at end");
+
+  (* no match *)
+  BioPattern.BMBuild(st, "GGGG");
+  BioSeq.FromStr(seq, "ACGTACGT");
+  BioPattern.BMSearch(st, seq, hits);
+  ASSERT(hits.count = 0);
+  Ok("BM no match");
+
+  (* three non-overlapping matches *)
+  BioPattern.BMBuild(st, "AC");
+  BioSeq.FromStr(seq, "ACACAC");
+  BioPattern.BMSearch(st, seq, hits);
+  ASSERT(hits.count = 3);
+  ASSERT(hits.hits[0].pos = 0);
+  ASSERT(hits.hits[1].pos = 2);
+  ASSERT(hits.hits[2].pos = 4);
+  Ok("BM three non-overlapping matches");
+
+  (* overlapping: AA in AAAAA -> 4 hits *)
+  BioPattern.BMBuild(st, "AA");
+  BioSeq.FromStr(seq, "AAAAA");
+  BioPattern.BMSearch(st, seq, hits);
+  ASSERT(hits.count = 4);
+  ASSERT(hits.hits[0].pos = 0);
+  ASSERT(hits.hits[1].pos = 1);
+  ASSERT(hits.hits[2].pos = 2);
+  ASSERT(hits.hits[3].pos = 3);
+  Ok("BM overlapping matches");
+
+  (* pattern longer than text -> no hits *)
+  BioPattern.BMBuild(st, "ACGTACGT");
+  BioSeq.FromStr(seq, "ACG");
+  BioPattern.BMSearch(st, seq, hits);
+  ASSERT(hits.count = 0);
+  Ok("BM pattern longer than text");
+
+  (* pattern equals text exactly *)
+  BioPattern.BMBuild(st, "ACGT");
+  BioSeq.FromStr(seq, "ACGT");
+  BioPattern.BMSearch(st, seq, hits);
+  ASSERT(hits.count = 1);
+  ASSERT(hits.hits[0].pos = 0);
+  Ok("BM pattern equals text");
+
+  BioSeq.Free(seq)
+END TestBMSearch;
+
+(* ------------------------------------------------------------------ *)
+(*  P2. KMP                                                             *)
+(* ------------------------------------------------------------------ *)
+PROCEDURE TestKMPSearch;
+VAR st: BioPattern.KMPState; seq: BioSeq.Seq;
+BEGIN
+  Out.String("--- KMP ---"); Out.Ln();
+  BioSeq.New(seq);
+
+  (* single exact match *)
+  BioPattern.KMPBuild(st, "ACGT");
+  BioSeq.FromStr(seq, "TTTACGTAAA");
+  BioPattern.KMPSearch(st, seq, hits);
+  ASSERT(hits.count = 1);
+  ASSERT(hits.hits[0].pos = 3);
+  ASSERT(hits.hits[0].len = 4);
+  ASSERT(hits.hits[0].dist = 0);
+  Ok("KMP single match");
+
+  (* no match *)
+  BioPattern.KMPBuild(st, "GGGG");
+  BioSeq.FromStr(seq, "ACGTACGT");
+  BioPattern.KMPSearch(st, seq, hits);
+  ASSERT(hits.count = 0);
+  Ok("KMP no match");
+
+  (* three non-overlapping matches *)
+  BioPattern.KMPBuild(st, "AC");
+  BioSeq.FromStr(seq, "ACACAC");
+  BioPattern.KMPSearch(st, seq, hits);
+  ASSERT(hits.count = 3);
+  ASSERT(hits.hits[0].pos = 0);
+  ASSERT(hits.hits[1].pos = 2);
+  ASSERT(hits.hits[2].pos = 4);
+  Ok("KMP three non-overlapping matches");
+
+  (* overlapping via failure function: ABA in ABABABA -> 3 hits at 0,2,4 *)
+  BioPattern.KMPBuild(st, "ABA");
+  BioSeq.FromStr(seq, "ABABABA");
+  BioPattern.KMPSearch(st, seq, hits);
+  ASSERT(hits.count = 3);
+  ASSERT(hits.hits[0].pos = 0);
+  ASSERT(hits.hits[1].pos = 2);
+  ASSERT(hits.hits[2].pos = 4);
+  Ok("KMP overlapping via failure function");
+
+  (* repeating pattern: AAAA in AAAAAAAA -> 5 hits at 0..4 *)
+  BioPattern.KMPBuild(st, "AAAA");
+  BioSeq.FromStr(seq, "AAAAAAAA");
+  BioPattern.KMPSearch(st, seq, hits);
+  ASSERT(hits.count = 5);
+  ASSERT(hits.hits[0].pos = 0);
+  ASSERT(hits.hits[4].pos = 4);
+  Ok("KMP repeating pattern overlapping");
+
+  (* pattern longer than text -> no hits *)
+  BioPattern.KMPBuild(st, "ACGTACGT");
+  BioSeq.FromStr(seq, "ACG");
+  BioPattern.KMPSearch(st, seq, hits);
+  ASSERT(hits.count = 0);
+  Ok("KMP pattern longer than text");
+
+  BioSeq.Free(seq)
+END TestKMPSearch;
+
+(* ------------------------------------------------------------------ *)
+(*  P3. Aho-Corasick                                                    *)
+(* ------------------------------------------------------------------ *)
+PROCEDURE TestACSearch;
+VAR seq: BioSeq.Seq;
+BEGIN
+  Out.String("--- Aho-Corasick ---"); Out.Ln();
+  BioSeq.New(seq);
+
+  (* single pattern — same result as exact search *)
+  BioPattern.ACBuild(acSt);
+  BioPattern.ACAdd(acSt, "ACGT");
+  BioPattern.ACFinalize(acSt);
+  BioSeq.FromStr(seq, "TTTACGTAAA");
+  BioPattern.ACSearch(acSt, seq, hits);
+  ASSERT(hits.count = 1);
+  ASSERT(hits.hits[0].pos = 3);
+  ASSERT(hits.hits[0].len = 4);
+  ASSERT(hits.hits[0].dist = 0);
+  Ok("AC single pattern match");
+
+  (* single pattern not in text -> 0 hits *)
+  BioPattern.ACBuild(acSt);
+  BioPattern.ACAdd(acSt, "NNNN");
+  BioPattern.ACFinalize(acSt);
+  BioSeq.FromStr(seq, "ACGTACGT");
+  BioPattern.ACSearch(acSt, seq, hits);
+  ASSERT(hits.count = 0);
+  Ok("AC no match");
+
+  (* two overlapping patterns: ACG at 0, CGT at 1 in ACGT *)
+  BioPattern.ACBuild(acSt);
+  BioPattern.ACAdd(acSt, "ACG");
+  BioPattern.ACAdd(acSt, "CGT");
+  BioPattern.ACFinalize(acSt);
+  BioSeq.FromStr(seq, "ACGT");
+  BioPattern.ACSearch(acSt, seq, hits);
+  ASSERT(hits.count = 2);
+  (* hits are reported in text order; ACG ends at i=2, CGT ends at i=3 *)
+  ASSERT(hits.hits[0].pos = 0);  ASSERT(hits.hits[0].len = 3);
+  ASSERT(hits.hits[1].pos = 1);  ASSERT(hits.hits[1].len = 3);
+  Ok("AC two overlapping patterns");
+
+  (* two non-overlapping patterns: AA at 0,4 and BB at 2 in AABBAA *)
+  BioPattern.ACBuild(acSt);
+  BioPattern.ACAdd(acSt, "AA");
+  BioPattern.ACAdd(acSt, "BB");
+  BioPattern.ACFinalize(acSt);
+  BioSeq.FromStr(seq, "AABBAA");
+  BioPattern.ACSearch(acSt, seq, hits);
+  ASSERT(hits.count = 3);
+  ASSERT(hits.hits[0].pos = 0);  (* AA *)
+  ASSERT(hits.hits[1].pos = 2);  (* BB *)
+  ASSERT(hits.hits[2].pos = 4);  (* AA *)
+  Ok("AC two patterns: AA and BB");
+
+  (* mix present and absent patterns *)
+  BioPattern.ACBuild(acSt);
+  BioPattern.ACAdd(acSt, "ACGT");
+  BioPattern.ACAdd(acSt, "NNNN");  (* not in text *)
+  BioPattern.ACAdd(acSt, "CGT");
+  BioPattern.ACFinalize(acSt);
+  BioSeq.FromStr(seq, "ACGT");
+  BioPattern.ACSearch(acSt, seq, hits);
+  ASSERT(hits.count = 2);  (* ACGT at 0 and CGT at 1 *)
+  Ok("AC present and absent patterns mixed");
+
+  BioSeq.Free(seq)
+END TestACSearch;
+
+(* ------------------------------------------------------------------ *)
+(*  P4. Ukkonen approximate matching                                    *)
+(* ------------------------------------------------------------------ *)
+PROCEDURE TestUkkonen;
+VAR seq: BioSeq.Seq;
+BEGIN
+  Out.String("--- Ukkonen ---"); Out.Ln();
+  BioSeq.New(seq);
+
+  (* exact match, maxDist=0 *)
+  BioSeq.FromStr(seq, "XACGTX");
+  BioPattern.Ukkonen("ACGT", seq, 0, hits);
+  ASSERT(hits.count = 1);
+  ASSERT(hits.hits[0].pos = 1);
+  ASSERT(hits.hits[0].len = 4);
+  ASSERT(hits.hits[0].dist = 0);
+  Ok("Ukkonen exact match maxDist=0");
+
+  (* one substitution: ACGT vs ACCT, maxDist=1 -> 1 hit *)
+  BioSeq.FromStr(seq, "XACCTX");
+  BioPattern.Ukkonen("ACGT", seq, 1, hits);
+  ASSERT(hits.count = 1);
+  ASSERT(hits.hits[0].pos = 1);
+  ASSERT(hits.hits[0].dist = 1);
+  Ok("Ukkonen 1 substitution maxDist=1");
+
+  (* one substitution but maxDist=0 -> no hit *)
+  BioSeq.FromStr(seq, "XACCTX");
+  BioPattern.Ukkonen("ACGT", seq, 0, hits);
+  ASSERT(hits.count = 0);
+  Ok("Ukkonen 1-subst pattern excluded at maxDist=0");
+
+  (* exact match also reported at maxDist=1 with dist=0;
+     use text="ACGT" so no dist=1 partial match precedes the exact hit *)
+  BioSeq.FromStr(seq, "ACGT");
+  BioPattern.Ukkonen("ACGT", seq, 1, hits);
+  ASSERT(hits.count = 1);
+  ASSERT(hits.hits[0].pos  = 0);
+  ASSERT(hits.hits[0].dist = 0);
+  Ok("Ukkonen exact match has dist=0 at maxDist=1");
+
+  (* no match at all: TTTT vs ACGT, maxDist=0 *)
+  BioSeq.FromStr(seq, "TTTTTTTT");
+  BioPattern.Ukkonen("ACGT", seq, 0, hits);
+  ASSERT(hits.count = 0);
+  Ok("Ukkonen no match");
+
+  (* empty pattern -> 0 hits *)
+  BioSeq.FromStr(seq, "ACGT");
+  BioPattern.Ukkonen("", seq, 1, hits);
+  ASSERT(hits.count = 0);
+  Ok("Ukkonen empty pattern");
+
+  (* negative maxDist -> 0 hits *)
+  BioPattern.Ukkonen("ACGT", seq, -1, hits);
+  ASSERT(hits.count = 0);
+  Ok("Ukkonen negative maxDist");
+
+  (* pattern = full text exact *)
+  BioSeq.FromStr(seq, "ACGT");
+  BioPattern.Ukkonen("ACGT", seq, 0, hits);
+  ASSERT(hits.count = 1);
+  ASSERT(hits.hits[0].pos = 0);
+  ASSERT(hits.hits[0].dist = 0);
+  Ok("Ukkonen pattern equals text");
+
+  (* two exact occurrences: ACGT appears at 0 and 5 in ACGTXACGT *)
+  BioSeq.FromStr(seq, "ACGTXACGT");
+  BioPattern.Ukkonen("ACGT", seq, 0, hits);
+  ASSERT(hits.count = 2);
+  ASSERT(hits.hits[0].pos = 0);
+  ASSERT(hits.hits[1].pos = 5);
+  Ok("Ukkonen two exact occurrences");
+
+  BioSeq.Free(seq)
+END TestUkkonen;
+
 (* ------------------------------------------------------------------ *)
 (*  Main                                                                *)
 (* ------------------------------------------------------------------ *)
@@ -1250,6 +1550,11 @@ BEGIN
   TestLocal;
   TestSemiGlobal;
   TestPrintAlignment;
+  Out.String("=== BioPattern tests ==="); Out.Ln();
+  TestBMSearch;
+  TestKMPSearch;
+  TestACSearch;
+  TestUkkonen;
   Out.Ln();
   Out.String("All "); Out.Int(pass); Out.String(" tests passed."); Out.Ln()
 END TestBio.
