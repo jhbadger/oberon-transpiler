@@ -4,7 +4,7 @@ MODULE Wargame;
  * Human (Red, north) vs Computer (Blue, south).
  *
  * Setup: choose period → choose scenario → roll army composition.
- * Scenarios: 0=random (open ground), 1=Pitched Battle (two hill groups).
+ * Scenarios: 0=random terrain, 1=Pitched Battle (two hill groups).
  * Victory: eliminate all enemy units within 15 turns.
  *
  * Controls:
@@ -1048,8 +1048,10 @@ BEGIN
     bg := TUI.Magenta; fg := TUI.White
   ELSIF terrain[row][col] = TERR_HILL THEN
     bg := TUI.Yellow;  fg := TUI.Black
+  ELSIF terrain[row][col] = TERR_WOOD THEN
+    bg := TUI.Green;   fg := TUI.Black
   ELSIF (terrain[row][col] = TERR_RIVER) OR (terrain[row][col] = TERR_MARSH) OR
-        (terrain[row][col] = TERR_BRIDGE) THEN
+        (terrain[row][col] = TERR_BRIDGE) OR (terrain[row][col] = TERR_FORD) THEN
     bg := TUI.Blue;    fg := TUI.White
   ELSE
     bg := TUI.Black;   fg := TUI.White
@@ -1071,9 +1073,11 @@ BEGIN
   ELSE
     IF isCursor OR isValidMove THEN fg := TUI.Black ELSE fg := TUI.White END;
     IF terrain[row][col] = TERR_HILL THEN c0 := '^'
+    ELSIF terrain[row][col] = TERR_WOOD THEN c0 := 'T'
     ELSIF terrain[row][col] = TERR_ROAD THEN
       IF (col = CROSS_COL) & (row = CROSS_ROW) THEN c0 := '+' ELSE c0 := '#' END
     ELSIF terrain[row][col] = TERR_BRIDGE THEN c0 := '['
+    ELSIF terrain[row][col] = TERR_FORD THEN c0 := '='
     ELSIF (terrain[row][col] = TERR_RIVER) OR (terrain[row][col] = TERR_MARSH) THEN
       c0 := '~'
     ELSE c0 := '.'
@@ -1646,6 +1650,83 @@ BEGIN
   END
 END InitScenario3;
 
+(* Scenario 0: Random terrain.
+   Hills and woods grow in clusters; an optional road wanders top-to-bottom;
+   an optional river crosses the mid-board with two crossing points.
+   Rows 0-1 (Red deploy) and 10-11 (Blue deploy) are kept clear. *)
+PROCEDURE InitScenarioRandom;
+VAR r, c, i, n, cr, cc, size, dist: INTEGER;
+    riverRow: INTEGER;
+    hasRiver, hasRoad: BOOLEAN;
+BEGIN
+  InitTerrain;
+
+  (* ── Hills: 1..3 clusters ── *)
+  n := 1 + Random.Int(3);
+  FOR i := 0 TO n - 1 DO
+    cr   := 2 + Random.Int(8);    (* rows 2..9 — away from deployment zones *)
+    cc   := Random.Int(GRID_W);
+    size := 1 + Random.Int(3);    (* Manhattan radius 1..3 *)
+    FOR r := cr - size TO cr + size DO
+      FOR c := cc - size TO cc + size DO
+        IF (r >= 2) & (r <= GRID_H - 3) & (c >= 0) & (c < GRID_W) THEN
+          dist := Abs(r - cr) + Abs(c - cc);
+          IF (dist <= size) & (Random.Int(4) # 0) THEN  (* 75% fill *)
+            terrain[r][c] := TERR_HILL
+          END
+        END
+      END
+    END
+  END;
+
+  (* ── Woods: 0..2 clusters (may overlap hills; woods win) ── *)
+  n := Random.Int(3);
+  FOR i := 0 TO n - 1 DO
+    cr   := 2 + Random.Int(8);
+    cc   := Random.Int(GRID_W);
+    size := 1 + Random.Int(2);    (* radius 1..2 *)
+    FOR r := cr - size TO cr + size DO
+      FOR c := cc - size TO cc + size DO
+        IF (r >= 2) & (r <= GRID_H - 3) & (c >= 0) & (c < GRID_W) THEN
+          dist := Abs(r - cr) + Abs(c - cc);
+          IF (dist <= size) & (Random.Int(3) # 0) THEN  (* 67% fill *)
+            terrain[r][c] := TERR_WOOD
+          END
+        END
+      END
+    END
+  END;
+
+  (* ── River: 33% chance — full row, two crossing points ── *)
+  hasRiver := Random.Int(3) = 0;
+  riverRow := 4 + Random.Int(3);  (* row 4, 5, or 6 *)
+  IF hasRiver THEN
+    FOR c := 0 TO GRID_W - 1 DO terrain[riverRow][c] := TERR_RIVER END;
+    c := 1 + Random.Int(4);       (* bridge in cols 1..4 *)
+    terrain[riverRow][c] := TERR_BRIDGE;
+    c := 7 + Random.Int(3);       (* ford in cols 7..9 *)
+    terrain[riverRow][c] := TERR_FORD
+  END;
+
+  (* ── Road: 50% chance — wanders top to bottom, bridges any river ── *)
+  hasRoad := Random.Int(2) = 0;
+  IF hasRoad THEN
+    c := 1 + Random.Int(GRID_W - 2);   (* start away from edges *)
+    FOR r := 0 TO GRID_H - 1 DO
+      IF terrain[r][c] = TERR_RIVER THEN
+        terrain[r][c] := TERR_BRIDGE   (* road creates bridge where it crosses *)
+      ELSE
+        terrain[r][c] := TERR_ROAD
+      END;
+      IF (r > 0) & (r < GRID_H - 2) & (Random.Int(3) = 0) THEN
+        IF (Random.Int(2) = 0) & (c > 1) THEN DEC(c)
+        ELSIF c < GRID_W - 2 THEN INC(c)
+        END
+      END
+    END
+  END
+END InitScenarioRandom;
+
 PROCEDURE DeployArmy(VAR a: Army; side: INTEGER; roll: INTEGER);
 VAR i, p, col, row, t: INTEGER;
     startRow: INTEGER;
@@ -1723,7 +1804,7 @@ BEGIN
   TUI.PutStr(2, 1, "ONE HOUR WARGAMES — Choose Scenario", TUI.Yellow, TUI.Black);
   TUI.PutStr(2, 2, "──────────────────────────────────", TUI.White,  TUI.Black);
   TUI.PutCell(2, 4, '0', TUI.Cyan, TUI.Black);
-  TUI.PutStr(4, 4, "Random (open ground)", TUI.White, TUI.Black);
+  TUI.PutStr(4, 4, "Random terrain  (hills, woods, optional road/river)", TUI.White, TUI.Black);
   TUI.PutCell(2, 5, '1', TUI.Cyan, TUI.Black);
   TUI.PutStr(4, 5, "Scenario 1: Pitched Battle  (^ hills give H2H cover)", TUI.White, TUI.Black);
   TUI.PutCell(2, 6, '2', TUI.Cyan, TUI.Black);
@@ -1778,7 +1859,7 @@ BEGIN
   IF scenario = SCEN_1 THEN InitScenario1
   ELSIF scenario = SCEN_2 THEN InitScenario2
   ELSIF scenario = SCEN_3 THEN InitScenario3
-  ELSE InitTerrain
+  ELSE InitScenarioRandom
   END;
 
   rollR := Random.Int(6); rollB := Random.Int(6);
