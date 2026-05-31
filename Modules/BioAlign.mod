@@ -15,16 +15,15 @@ MODULE BioAlign;
   When useTable=TRUE, PairScore looks up table[ORD(a)-ORD('A')][ORD(b)-ORD('A')]
   for uppercase letters; falls back to match_/mismatch for anything else.
 
-  DP matrices are module-level to avoid stack overflow; only one alignment may
-  run at a time.  MaxSeqLen caps both query and reference length.
+  DP matrices are heap-allocated on first use and grown as needed; only one
+  alignment may run at a time.  MaxSeqLen caps both query and reference length.
 *)
 
 IMPORT BioSeq, Math, Out;
 
 CONST
-  MaxSeqLen* = 1024;
+  MaxSeqLen* = 10000;
   MaxCigar*  = 8192;
-  Stride     = MaxSeqLen + 1;
   MaxAligned  = 2 * MaxSeqLen + 2;
   PrintWidth  = 60;
 
@@ -65,12 +64,37 @@ TYPE
     identity*       : REAL
   END;
 
-(* Module-level DP storage — shared across all alignment procedures. *)
+  DPFlat = POINTER TO ARRAY OF INTEGER;
+
+(* Heap-allocated DP storage — shared across all alignment procedures.
+   Grown on demand; dpStride = rLen+1 for the current call. *)
 VAR
-  dpM, dpX, dpY  : ARRAY Stride, Stride OF INTEGER;
-  tbM, tbX, tbY  : ARRAY Stride, Stride OF INTEGER;
-  edPrev, edCurr : ARRAY Stride OF INTEGER;
+  dpM, dpX, dpY  : DPFlat;
+  tbM, tbX, tbY  : DPFlat;
+  dpStride       : INTEGER;
+  dpAlloc        : INTEGER;
+  edPrev, edCurr : ARRAY MaxSeqLen + 1 OF INTEGER;
   pqAln, prAln, pbar : ARRAY MaxAligned OF CHAR;   (* PrintAlignment buffers *)
+
+(* ------------------------------------------------------------------ *)
+(*  Internal: ensure DP matrices are large enough for qLen x rLen     *)
+(* ------------------------------------------------------------------ *)
+
+PROCEDURE EnsureDP(qLen, rLen: INTEGER);
+VAR needed: INTEGER;
+BEGIN
+  dpStride := rLen + 1;
+  needed   := (qLen + 1) * (rLen + 1);
+  IF needed > dpAlloc THEN
+    IF dpM # NIL THEN
+      FREE(dpM); FREE(dpX); FREE(dpY);
+      FREE(tbM); FREE(tbX); FREE(tbY)
+    END;
+    NEW(dpM, needed); NEW(dpX, needed); NEW(dpY, needed);
+    NEW(tbM, needed); NEW(tbX, needed); NEW(tbY, needed);
+    dpAlloc := needed
+  END
+END EnsureDP;
 
 (* ------------------------------------------------------------------ *)
 (*  Public: scoring setup                                               *)
@@ -427,61 +451,66 @@ PROCEDURE Global*(q, r: BioSeq.Seq; VAR m: ScoreMatrix; VAR aln: Alignment);
 VAR
   qLen, rLen     : INTEGER;
   i, j, best, s  : INTEGER;
-  layer           : INTEGER;
+  layer, r0, r1  : INTEGER;
 BEGIN
   qLen := BioSeq.Length(q);
   rLen := BioSeq.Length(r);
   ASSERT(qLen <= MaxSeqLen);
   ASSERT(rLen <= MaxSeqLen);
+  EnsureDP(qLen, rLen);
 
   (* --- Initialisation --- *)
-  dpM[0, 0] := 0;  dpX[0, 0] := NEG_INF;  dpY[0, 0] := NEG_INF;
+  dpM^[0] := 0;  dpX^[0] := NEG_INF;  dpY^[0] := NEG_INF;
 
   FOR i := 1 TO qLen DO
-    dpM[i, 0] := NEG_INF;
-    dpX[i, 0] := m.gapOpen + i * m.gapExt;
-    dpY[i, 0] := NEG_INF;
-    tbX[i, 0] := tbFromX
+    r1 := i * dpStride;
+    dpM^[r1] := NEG_INF;
+    dpX^[r1] := m.gapOpen + i * m.gapExt;
+    dpY^[r1] := NEG_INF;
+    tbX^[r1] := tbFromX
   END;
 
   FOR j := 1 TO rLen DO
-    dpM[0, j] := NEG_INF;
-    dpX[0, j] := NEG_INF;
-    dpY[0, j] := m.gapOpen + j * m.gapExt;
-    tbY[0, j] := tbFromY
+    dpM^[j] := NEG_INF;
+    dpX^[j] := NEG_INF;
+    dpY^[j] := m.gapOpen + j * m.gapExt;
+    tbY^[j] := tbFromY
   END;
 
   (* --- Fill --- *)
   FOR i := 1 TO qLen DO
+    r0 := (i - 1) * dpStride;
+    r1 := i * dpStride;
     FOR j := 1 TO rLen DO
       s := PairScore(m, BioSeq.Get(q, i - 1), BioSeq.Get(r, j - 1));
 
       (* M layer: align q[i-1] with r[j-1] *)
-      best := dpM[i - 1, j - 1];  tbM[i, j] := tbFromM;
-      IF dpX[i - 1, j - 1] > best THEN best := dpX[i - 1, j - 1];  tbM[i, j] := tbFromX END;
-      IF dpY[i - 1, j - 1] > best THEN best := dpY[i - 1, j - 1];  tbM[i, j] := tbFromY END;
-      dpM[i, j] := best + s;
+      best := dpM^[r0 + j - 1];  tbM^[r1 + j] := tbFromM;
+      IF dpX^[r0 + j - 1] > best THEN best := dpX^[r0 + j - 1];  tbM^[r1 + j] := tbFromX END;
+      IF dpY^[r0 + j - 1] > best THEN best := dpY^[r0 + j - 1];  tbM^[r1 + j] := tbFromY END;
+      dpM^[r1 + j] := best + s;
 
       (* X layer: gap in reference (insert into query) *)
-      IF dpM[i - 1, j] + m.gapOpen >= dpX[i - 1, j] + m.gapExt THEN
-        dpX[i, j] := dpM[i - 1, j] + m.gapOpen;  tbX[i, j] := tbFromM
+      IF dpM^[r0 + j] + m.gapOpen >= dpX^[r0 + j] + m.gapExt THEN
+        dpX^[r1 + j] := dpM^[r0 + j] + m.gapOpen;  tbX^[r1 + j] := tbFromM
       ELSE
-        dpX[i, j] := dpX[i - 1, j] + m.gapExt;   tbX[i, j] := tbFromX
+        dpX^[r1 + j] := dpX^[r0 + j] + m.gapExt;   tbX^[r1 + j] := tbFromX
       END;
 
       (* Y layer: gap in query (delete from query) *)
-      IF dpM[i, j - 1] + m.gapOpen >= dpY[i, j - 1] + m.gapExt THEN
-        dpY[i, j] := dpM[i, j - 1] + m.gapOpen;  tbY[i, j] := tbFromM
+      IF dpM^[r1 + j - 1] + m.gapOpen >= dpY^[r1 + j - 1] + m.gapExt THEN
+        dpY^[r1 + j] := dpM^[r1 + j - 1] + m.gapOpen;  tbY^[r1 + j] := tbFromM
       ELSE
-        dpY[i, j] := dpY[i, j - 1] + m.gapExt;   tbY[i, j] := tbFromY
+        dpY^[r1 + j] := dpY^[r1 + j - 1] + m.gapExt;   tbY^[r1 + j] := tbFromY
       END
     END
   END;
 
   (* --- Pick best terminal layer --- *)
-  aln.score := dpM[qLen, rLen];  layer := tbFromM;
-  IF dpX[qLen, rLen] > aln.score THEN aln.score := dpX[qLen, rLen];  layer := tbFromX END;
-  IF dpY[qLen, rLen] > aln.score THEN aln.score := dpY[qLen, rLen];  layer := tbFromY END;
+  r0 := qLen * dpStride;
+  aln.score := dpM^[r0 + rLen];  layer := tbFromM;
+  IF dpX^[r0 + rLen] > aln.score THEN aln.score := dpX^[r0 + rLen];  layer := tbFromX END;
+  IF dpY^[r0 + rLen] > aln.score THEN aln.score := dpY^[r0 + rLen];  layer := tbFromY END;
 
   aln.qEnd   := qLen;  aln.rEnd   := rLen;
   aln.qStart := 0;     aln.rStart := 0;
@@ -496,13 +525,13 @@ BEGIN
       ELSE
         AppendCigar(aln, opSubst)
       END;
-      layer := tbM[i, j];  DEC(i);  DEC(j)
+      layer := tbM^[i * dpStride + j];  DEC(i);  DEC(j)
     ELSIF layer = tbFromX THEN
       AppendCigar(aln, opIns);
-      layer := tbX[i, j];  DEC(i)
+      layer := tbX^[i * dpStride + j];  DEC(i)
     ELSE
       AppendCigar(aln, opDel);
-      layer := tbY[i, j];  DEC(j)
+      layer := tbY^[i * dpStride + j];  DEC(j)
     END
   END;
 
@@ -519,61 +548,65 @@ VAR
   qLen, rLen       : INTEGER;
   i, j, best, s    : INTEGER;
   bestI, bestJ      : INTEGER;
-  layer             : INTEGER;
+  layer, r0, r1     : INTEGER;
 BEGIN
   qLen := BioSeq.Length(q);
   rLen := BioSeq.Length(r);
   ASSERT(qLen <= MaxSeqLen);
   ASSERT(rLen <= MaxSeqLen);
+  EnsureDP(qLen, rLen);
 
   (* --- Initialisation: zeros allow local alignment to start anywhere --- *)
   FOR i := 0 TO qLen DO
-    dpM[i, 0] := 0;  dpX[i, 0] := 0;  dpY[i, 0] := 0
+    r0 := i * dpStride;
+    dpM^[r0] := 0;  dpX^[r0] := 0;  dpY^[r0] := 0
   END;
   FOR j := 0 TO rLen DO
-    dpM[0, j] := 0;  dpX[0, j] := 0;  dpY[0, j] := 0
+    dpM^[j] := 0;  dpX^[j] := 0;  dpY^[j] := 0
   END;
 
   aln.score := 0;  bestI := 0;  bestJ := 0;
 
   (* --- Fill --- *)
   FOR i := 1 TO qLen DO
+    r0 := (i - 1) * dpStride;
+    r1 := i * dpStride;
     FOR j := 1 TO rLen DO
       s := PairScore(m, BioSeq.Get(q, i - 1), BioSeq.Get(r, j - 1));
 
       (* M layer *)
-      best := dpM[i - 1, j - 1];  tbM[i, j] := tbFromM;
-      IF dpX[i - 1, j - 1] > best THEN best := dpX[i - 1, j - 1];  tbM[i, j] := tbFromX END;
-      IF dpY[i - 1, j - 1] > best THEN best := dpY[i - 1, j - 1];  tbM[i, j] := tbFromY END;
+      best := dpM^[r0 + j - 1];  tbM^[r1 + j] := tbFromM;
+      IF dpX^[r0 + j - 1] > best THEN best := dpX^[r0 + j - 1];  tbM^[r1 + j] := tbFromX END;
+      IF dpY^[r0 + j - 1] > best THEN best := dpY^[r0 + j - 1];  tbM^[r1 + j] := tbFromY END;
       best := best + s;
       IF best <= 0 THEN
-        dpM[i, j] := 0;  tbM[i, j] := tbStart
+        dpM^[r1 + j] := 0;  tbM^[r1 + j] := tbStart
       ELSE
-        dpM[i, j] := best
+        dpM^[r1 + j] := best
       END;
 
       (* X layer: gap in reference *)
-      best := dpM[i - 1, j] + m.gapOpen;
-      IF dpX[i - 1, j] + m.gapExt > best THEN
-        best := dpX[i - 1, j] + m.gapExt;  tbX[i, j] := tbFromX
+      best := dpM^[r0 + j] + m.gapOpen;
+      IF dpX^[r0 + j] + m.gapExt > best THEN
+        best := dpX^[r0 + j] + m.gapExt;  tbX^[r1 + j] := tbFromX
       ELSE
-        tbX[i, j] := tbFromM
+        tbX^[r1 + j] := tbFromM
       END;
       IF best < 0 THEN best := 0 END;
-      dpX[i, j] := best;
+      dpX^[r1 + j] := best;
 
       (* Y layer: gap in query *)
-      best := dpM[i, j - 1] + m.gapOpen;
-      IF dpY[i, j - 1] + m.gapExt > best THEN
-        best := dpY[i, j - 1] + m.gapExt;  tbY[i, j] := tbFromY
+      best := dpM^[r1 + j - 1] + m.gapOpen;
+      IF dpY^[r1 + j - 1] + m.gapExt > best THEN
+        best := dpY^[r1 + j - 1] + m.gapExt;  tbY^[r1 + j] := tbFromY
       ELSE
-        tbY[i, j] := tbFromM
+        tbY^[r1 + j] := tbFromM
       END;
       IF best < 0 THEN best := 0 END;
-      dpY[i, j] := best;
+      dpY^[r1 + j] := best;
 
-      IF dpM[i, j] > aln.score THEN
-        aln.score := dpM[i, j];  bestI := i;  bestJ := j
+      IF dpM^[r1 + j] > aln.score THEN
+        aln.score := dpM^[r1 + j];  bestI := i;  bestJ := j
       END
     END
   END;
@@ -583,9 +616,9 @@ BEGIN
 
   (* --- Traceback from best cell, stop at zero --- *)
   i := bestI;  j := bestJ;
-  WHILE (i > 0) & (j > 0) & (dpM[i, j] > 0) DO
+  WHILE (i > 0) & (j > 0) & (dpM^[i * dpStride + j] > 0) DO
     IF layer = tbFromM THEN
-      IF tbM[i, j] = tbStart THEN
+      IF tbM^[i * dpStride + j] = tbStart THEN
         (* reached local start: consume this aligned pair then stop *)
         IF BioSeq.Get(q, i - 1) = BioSeq.Get(r, j - 1) THEN
           AppendCigar(aln, opMatch)
@@ -601,14 +634,14 @@ BEGIN
         ELSE
           AppendCigar(aln, opSubst)
         END;
-        layer := tbM[i, j];  DEC(i);  DEC(j)
+        layer := tbM^[i * dpStride + j];  DEC(i);  DEC(j)
       END
     ELSIF layer = tbFromX THEN
       AppendCigar(aln, opIns);
-      layer := tbX[i, j];  DEC(i)
+      layer := tbX^[i * dpStride + j];  DEC(i)
     ELSE
       AppendCigar(aln, opDel);
-      layer := tbY[i, j];  DEC(j)
+      layer := tbY^[i * dpStride + j];  DEC(j)
     END
   END;
 
@@ -624,67 +657,73 @@ END Local;
 
 PROCEDURE SemiGlobal*(q, r: BioSeq.Seq; VAR m: ScoreMatrix; VAR aln: Alignment);
 VAR
-  qLen, rLen     : INTEGER;
-  i, j, best, s  : INTEGER;
-  bestJ, layer    : INTEGER;
+  qLen, rLen      : INTEGER;
+  i, j, best, s   : INTEGER;
+  bestJ, layer     : INTEGER;
+  r0, r1           : INTEGER;
 BEGIN
   qLen := BioSeq.Length(q);
   rLen := BioSeq.Length(r);
   ASSERT(qLen <= MaxSeqLen);
   ASSERT(rLen <= MaxSeqLen);
+  EnsureDP(qLen, rLen);
 
   (* --- Initialisation --- *)
-  dpM[0, 0] := 0;  dpX[0, 0] := NEG_INF;  dpY[0, 0] := NEG_INF;
+  dpM^[0] := 0;  dpX^[0] := NEG_INF;  dpY^[0] := NEG_INF;
 
   FOR i := 1 TO qLen DO
-    dpM[i, 0] := NEG_INF;
-    dpX[i, 0] := m.gapOpen + i * m.gapExt;
-    dpY[i, 0] := NEG_INF;
-    tbX[i, 0] := tbFromX
+    r1 := i * dpStride;
+    dpM^[r1] := NEG_INF;
+    dpX^[r1] := m.gapOpen + i * m.gapExt;
+    dpY^[r1] := NEG_INF;
+    tbX^[r1] := tbFromX
   END;
 
   (* First row free: no penalty for reference advancing before query starts *)
   FOR j := 1 TO rLen DO
-    dpM[0, j] := NEG_INF;
-    dpX[0, j] := NEG_INF;
-    dpY[0, j] := 0;
-    tbY[0, j] := tbFromY
+    dpM^[j] := NEG_INF;
+    dpX^[j] := NEG_INF;
+    dpY^[j] := 0;
+    tbY^[j] := tbFromY
   END;
 
   (* --- Fill: identical recurrence to Global --- *)
   FOR i := 1 TO qLen DO
+    r0 := (i - 1) * dpStride;
+    r1 := i * dpStride;
     FOR j := 1 TO rLen DO
       s := PairScore(m, BioSeq.Get(q, i - 1), BioSeq.Get(r, j - 1));
 
-      best := dpM[i - 1, j - 1];  tbM[i, j] := tbFromM;
-      IF dpX[i - 1, j - 1] > best THEN best := dpX[i - 1, j - 1];  tbM[i, j] := tbFromX END;
-      IF dpY[i - 1, j - 1] > best THEN best := dpY[i - 1, j - 1];  tbM[i, j] := tbFromY END;
-      dpM[i, j] := best + s;
+      best := dpM^[r0 + j - 1];  tbM^[r1 + j] := tbFromM;
+      IF dpX^[r0 + j - 1] > best THEN best := dpX^[r0 + j - 1];  tbM^[r1 + j] := tbFromX END;
+      IF dpY^[r0 + j - 1] > best THEN best := dpY^[r0 + j - 1];  tbM^[r1 + j] := tbFromY END;
+      dpM^[r1 + j] := best + s;
 
-      IF dpM[i - 1, j] + m.gapOpen >= dpX[i - 1, j] + m.gapExt THEN
-        dpX[i, j] := dpM[i - 1, j] + m.gapOpen;  tbX[i, j] := tbFromM
+      IF dpM^[r0 + j] + m.gapOpen >= dpX^[r0 + j] + m.gapExt THEN
+        dpX^[r1 + j] := dpM^[r0 + j] + m.gapOpen;  tbX^[r1 + j] := tbFromM
       ELSE
-        dpX[i, j] := dpX[i - 1, j] + m.gapExt;   tbX[i, j] := tbFromX
+        dpX^[r1 + j] := dpX^[r0 + j] + m.gapExt;   tbX^[r1 + j] := tbFromX
       END;
 
-      IF dpM[i, j - 1] + m.gapOpen >= dpY[i, j - 1] + m.gapExt THEN
-        dpY[i, j] := dpM[i, j - 1] + m.gapOpen;  tbY[i, j] := tbFromM
+      IF dpM^[r1 + j - 1] + m.gapOpen >= dpY^[r1 + j - 1] + m.gapExt THEN
+        dpY^[r1 + j] := dpM^[r1 + j - 1] + m.gapOpen;  tbY^[r1 + j] := tbFromM
       ELSE
-        dpY[i, j] := dpY[i, j - 1] + m.gapExt;   tbY[i, j] := tbFromY
+        dpY^[r1 + j] := dpY^[r1 + j - 1] + m.gapExt;   tbY^[r1 + j] := tbFromY
       END
     END
   END;
 
   (* --- Best score in last row: free trailing gap in reference --- *)
-  aln.score := dpM[qLen, 1];  bestJ := 1;  layer := tbFromM;
+  r0 := qLen * dpStride;
+  aln.score := dpM^[r0 + 1];  bestJ := 1;  layer := tbFromM;
   FOR j := 2 TO rLen DO
-    IF dpM[qLen, j] > aln.score THEN
-      aln.score := dpM[qLen, j];  bestJ := j;  layer := tbFromM
+    IF dpM^[r0 + j] > aln.score THEN
+      aln.score := dpM^[r0 + j];  bestJ := j;  layer := tbFromM
     END
   END;
   FOR j := 1 TO rLen DO
-    IF dpX[qLen, j] > aln.score THEN
-      aln.score := dpX[qLen, j];  bestJ := j;  layer := tbFromX
+    IF dpX^[r0 + j] > aln.score THEN
+      aln.score := dpX^[r0 + j];  bestJ := j;  layer := tbFromX
     END
   END;
 
@@ -705,13 +744,13 @@ BEGIN
       ELSE
         AppendCigar(aln, opSubst)
       END;
-      layer := tbM[i, j];  DEC(i);  DEC(j)
+      layer := tbM^[i * dpStride + j];  DEC(i);  DEC(j)
     ELSIF layer = tbFromX THEN
       AppendCigar(aln, opIns);
-      layer := tbX[i, j];  DEC(i)
+      layer := tbX^[i * dpStride + j];  DEC(i)
     ELSE
       AppendCigar(aln, opDel);
-      layer := tbY[i, j];  DEC(j)
+      layer := tbY^[i * dpStride + j];  DEC(j)
     END
   END;
 
@@ -728,7 +767,6 @@ VAR
   qLen, rLen     : INTEGER;
   i, j           : INTEGER;
   diag, del, ins : INTEGER;
-  tmp            : ARRAY Stride OF INTEGER;
 BEGIN
   qLen := BioSeq.Length(q);
   rLen := BioSeq.Length(r);
@@ -841,4 +879,8 @@ BEGIN
   END
 END PrintAlignment;
 
+BEGIN
+  dpM := NIL;  dpX := NIL;  dpY := NIL;
+  tbM := NIL;  tbX := NIL;  tbY := NIL;
+  dpStride := 0;  dpAlloc := 0
 END BioAlign.

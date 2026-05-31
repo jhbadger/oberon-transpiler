@@ -17,7 +17,7 @@ MODULE OrthoAlign;
     4. Append each organism's block to its per-organism accumulation buffer.
     5. Write the concatenated alignment as FASTA to stdout.
 
-  Sequences longer than 1024 residues (BioAlign.SeqLenCap) are truncated.
+  Sequences longer than SeqLenCap residues are truncated before alignment.
   Groups where any organism's sequence is absent in its FASTA file are skipped.
 *)
 
@@ -28,9 +28,9 @@ CONST
   MaxProts   = 4096;
   MaxNameLen = 128;
   HashTabSz  = 8192;   (* open-addressing hash, >= 2*MaxProts *)
-  SeqLenCap  = 1024;   (* = BioAlign.SeqLenCap *)
-  MaxAln     = 2050;   (* = 2*SeqLenCap + 2: max columns in pairwise alignment *)
-  MaxGapPos  = 1025;   (* = SeqLenCap + 1: positions 0..len0 inclusive *)
+  SeqLenCap  = 10000;  (* must be <= BioAlign.MaxSeqLen *)
+  MaxAln     = 20002;  (* = 2*SeqLenCap + 2: max columns in pairwise alignment *)
+  MaxGapPos  = 10001;  (* = SeqLenCap + 1: positions 0..len0 inclusive *)
   OutWidth   = 60;
 
 VAR
