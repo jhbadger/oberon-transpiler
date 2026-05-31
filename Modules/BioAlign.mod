@@ -64,13 +64,15 @@ TYPE
     identity*       : REAL
   END;
 
-  DPFlat = POINTER TO ARRAY OF INTEGER;
-
 (* Heap-allocated DP storage — shared across all alignment procedures.
    Grown on demand; dpStride = rLen+1 for the current call. *)
 VAR
-  dpM, dpX, dpY  : DPFlat;
-  tbM, tbX, tbY  : DPFlat;
+  dpM : POINTER TO ARRAY OF INTEGER;
+  dpX : POINTER TO ARRAY OF INTEGER;
+  dpY : POINTER TO ARRAY OF INTEGER;
+  tbM : POINTER TO ARRAY OF INTEGER;
+  tbX : POINTER TO ARRAY OF INTEGER;
+  tbY : POINTER TO ARRAY OF INTEGER;
   dpStride       : INTEGER;
   dpAlloc        : INTEGER;
   edPrev, edCurr : ARRAY MaxSeqLen + 1 OF INTEGER;
