@@ -102,15 +102,6 @@ BEGIN
   END
 END ResIdx;
 
-PROCEDURE DetectAlph(): INTEGER;
-VAR s: INTEGER;
-BEGIN
-  FOR s := 0 TO seqCount - 1 DO
-    IF ~BioSeq.IsNucleotide(seqs[s]) THEN RETURN 20 END
-  END;
-  RETURN 4
-END DetectAlph;
-
 PROCEDURE SetBgFreqs;
 VAR i: INTEGER;
 BEGIN
@@ -435,7 +426,9 @@ BEGIN
   END;
 
   BaseName(msaPath, hmmName);
-  hmmAlph := DetectAlph();
+  IF (seqCount > 0) & ~BioSeq.IsNucleotide(seqs[0]) THEN hmmAlph := 20
+  ELSE hmmAlph := 4
+  END;
   SetBgFreqs;
   BuildHMM(alnLen);
 
