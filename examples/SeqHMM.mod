@@ -13,7 +13,7 @@ MODULE SeqHMM;
   Emit mode:    SeqHMM emit   <model.hmm> [-n <count>] [-c]
     -c: emit the consensus (argmax residue at each match state).
     Default: stochastically sample sequences by walking the HMM state machine
-    (match → emit from profile; insert → emit from background; delete → skip).
+    (match -> emit from profile; insert -> emit from background; delete -> skip).
     Insert loops are capped at 100 per position to bound output length.
 
   Search mode:  SeqHMM search <model.hmm> <db.fa> [-t <minBits>]
@@ -22,7 +22,14 @@ MODULE SeqHMM;
     Local entry into any match state k costs logEntry = ln(1/L).
     Bit score = (best_viterbi - null_score) / ln(2).
     Outputs TSV of hits above threshold (default 10 bits):
-      seq_name  model_name  bits  seq_len
+      seq_name  model_name  bits  evalue  seq_len
+
+  Align mode:   SeqHMM align  <model.hmm> <seqs.fa> [-t <minBits>] [-o <out.afa>]
+    Aligns each sequence to the profile using Viterbi traceback.
+    Outputs a gapped FASTA (MSA) where all rows share the same column layout:
+      Match column k  -> upper-case residue or '-' if deleted
+      Insert gap k    -> lower-case residues or '-' padding
+    Sequences below the bit threshold are skipped with a comment line.
 
   Binary .hmm format:
     WriteInt  hmmLen
@@ -43,7 +50,27 @@ CONST
   Pseudo  = 1.0;
   TMM = 0; TMI = 1; TMD = 2; TIM = 3; TII = 4; TDM = 5; TDD = 6;
 
+  (* State codes used in path and traceback arrays. *)
+  StateM   = 0;
+  StateI   = 1;
+  StateD   = 2;
+  SrcEntry = 3;  (* local alignment entry, stored in traceback source field *)
+
+  (* Maximum residues per sequence processed by Viterbi (scoring). *)
+  MaxSeqLen = 100000;
+
+  (* Maximum residues per sequence for traceback (align mode).
+     Kept small to avoid multi-GB static arrays; sequences longer than
+     this are truncated for alignment purposes only, not for scoring. *)
+  MaxTraceLen = 1000;
+
+  (* Maximum steps in a single aligned path (match+insert+delete). *)
+  MaxPathLen = MaxLen * 2 + 2;
+
 VAR
+  NegInf       : REAL;   (* initialised to -1.0E30 in BEGIN *)
+  NegInfThresh : REAL;   (* initialised to -5.0E29 in BEGIN *)
+
   hmmLen  : INTEGER;
   hmmAlph : INTEGER;
   hmmName : ARRAY 256 OF CHAR;
@@ -53,15 +80,34 @@ VAR
   logTrans : ARRAY MaxLen OF ARRAY 7 OF REAL;
   logBg    : ARRAY MaxAlph OF REAL;
 
+  (* Viterbi DP tables: current and previous residue rows. *)
   vM, vMprev : ARRAY MaxLen + 2 OF REAL;
   vI, vIprev : ARRAY MaxLen + 2 OF REAL;
   vD         : ARRAY MaxLen + 2 OF REAL;
 
-  NegInf   : REAL;
+  (* Traceback tables for ViterbiTrace (indexed [j][k]). *)
+  (* Each cell packs: src*4 + arrivingState, all as plain INTEGER. *)
+  tbM : ARRAY MaxTraceLen OF ARRAY MaxLen + 2 OF INTEGER;
+  tbI : ARRAY MaxTraceLen OF ARRAY MaxLen + 2 OF INTEGER;
+  tbD : ARRAY MaxTraceLen OF ARRAY MaxLen + 2 OF INTEGER;
 
-  seqBuf   : ARRAY 100001 OF CHAR;
+  seqBuf   : ARRAY MaxSeqLen + 1 OF CHAR;
+
   seqs     : ARRAY MaxSeqs OF BioSeq.Seq;
   seqCount : INTEGER;
+
+(* ------------------------------------------------------------------ *)
+(*  Sentinel helpers                                                    *)
+(* ------------------------------------------------------------------ *)
+
+PROCEDURE IsNegInf(x: REAL): BOOLEAN;
+BEGIN RETURN x < NegInfThresh END IsNegInf;
+
+PROCEDURE SafeAdd(a, b: REAL): REAL;
+BEGIN
+  IF IsNegInf(a) OR IsNegInf(b) THEN RETURN NegInf END;
+  RETURN a + b
+END SafeAdd;
 
 (* ------------------------------------------------------------------ *)
 (*  Alphabet                                                            *)
@@ -108,13 +154,26 @@ BEGIN
   END
 END ResIdx;
 
+(* ------------------------------------------------------------------ *)
+(*  Alphabet detection                                                  *)
+(* ------------------------------------------------------------------ *)
+
+PROCEDURE DetectAlphabet(): INTEGER;
+(* Survey all sequences; amino acid if any sequence is non-nucleotide. *)
+VAR s: INTEGER;
+BEGIN
+  FOR s := 0 TO seqCount - 1 DO
+    IF ~BioSeq.IsNucleotide(seqs[s]) THEN RETURN 20 END
+  END;
+  RETURN 4
+END DetectAlphabet;
+
 PROCEDURE SetBgFreqs;
 VAR i: INTEGER;
 BEGIN
   IF hmmAlph = 4 THEN
     FOR i := 0 TO 3 DO logBg[i] := Math.ln(0.25) END
   ELSE
-    (* SwissProt amino acid background frequencies *)
     logBg[0]  := Math.ln(0.073); logBg[1]  := Math.ln(0.018);
     logBg[2]  := Math.ln(0.053); logBg[3]  := Math.ln(0.063);
     logBg[4]  := Math.ln(0.040); logBg[5]  := Math.ln(0.069);
@@ -130,53 +189,67 @@ BEGIN
 END SetBgFreqs;
 
 (* ------------------------------------------------------------------ *)
+(*  Sequence buffer helper                                              *)
+(* ------------------------------------------------------------------ *)
+
+PROCEDURE LoadSeq(seq: BioSeq.Seq): INTEGER;
+(* Slices seq into seqBuf, caps at MaxSeqLen, returns actual length used. *)
+VAR T: INTEGER;
+BEGIN
+  T := BioSeq.Length(seq);
+  IF T > MaxSeqLen THEN T := MaxSeqLen END;
+  BioSeq.Slice(seq, 0, T, seqBuf);
+  seqBuf[T] := 0X;
+  RETURN T
+END LoadSeq;
+
+(* ------------------------------------------------------------------ *)
 (*  Build                                                               *)
 (* ------------------------------------------------------------------ *)
 
 PROCEDURE BuildHMM(alnLen: INTEGER);
 VAR
-  k, s, r, last : INTEGER;
-  cnt            : ARRAY MaxAlph OF REAL;
+  k, s, r   : INTEGER;
+  cnt        : ARRAY MaxAlph OF REAL;
   total, nMM, nMD, nDM, nDD, p, q : REAL;
-  c              : CHAR;
-  curGap         : BOOLEAN;
-  prevGap        : ARRAY MaxSeqs OF BOOLEAN;
+  c          : CHAR;
+  curGap     : ARRAY MaxSeqs OF BOOLEAN;
+  prevGap    : ARRAY MaxSeqs OF BOOLEAN;
 BEGIN
   hmmLen := alnLen;
+
+  FOR k := 0 TO alnLen - 1 DO
+    FOR r := 0 TO 6 DO logTrans[k][r] := NegInf END
+  END;
+
   FOR s := 0 TO seqCount - 1 DO prevGap[s] := TRUE END;
 
   FOR k := 0 TO alnLen - 1 DO
     FOR r := 0 TO hmmAlph - 1 DO cnt[r] := Pseudo END;
     total := FLT(hmmAlph) * Pseudo;
-    nMM := Pseudo; nMD := Pseudo; nDM := Pseudo; nDD := Pseudo;
-
     FOR s := 0 TO seqCount - 1 DO
       c := BioSeq.Get(seqs[s], k);
-      curGap := IsGap(c);
-
-      IF ~curGap THEN
+      curGap[s] := IsGap(c);
+      IF ~curGap[s] THEN
         r := ResIdx(c);
         IF r >= 0 THEN cnt[r] := cnt[r] + 1.0; total := total + 1.0 END
-      END;
-
-      IF k > 0 THEN
-        IF ~prevGap[s] & ~curGap THEN      nMM := nMM + 1.0
-        ELSIF ~prevGap[s] & curGap THEN    nMD := nMD + 1.0
-        ELSIF prevGap[s] & ~curGap THEN    nDM := nDM + 1.0
-        ELSE                               nDD := nDD + 1.0
-        END
-      END;
-      prevGap[s] := curGap
+      END
     END;
-
     FOR r := 0 TO hmmAlph - 1 DO
       logEmitM[k][r] := Math.ln(cnt[r] / total) - logBg[r]
     END;
 
     IF k > 0 THEN
+      nMM := Pseudo; nMD := Pseudo; nDM := Pseudo; nDD := Pseudo;
+      FOR s := 0 TO seqCount - 1 DO
+        IF ~prevGap[s] & ~curGap[s] THEN      nMM := nMM + 1.0
+        ELSIF ~prevGap[s] & curGap[s] THEN    nMD := nMD + 1.0
+        ELSIF prevGap[s] & ~curGap[s] THEN    nDM := nDM + 1.0
+        ELSE                                   nDD := nDD + 1.0
+        END
+      END;
       p := nMM + nMD;
       q := nDM + nDD;
-      (* 99% budget for MM and MD; 1% reserved for insert *)
       logTrans[k-1][TMM] := Math.ln(nMM / p * 0.99);
       logTrans[k-1][TMD] := Math.ln(nMD / p * 0.99);
       logTrans[k-1][TMI] := Math.ln(0.01);
@@ -184,20 +257,18 @@ BEGIN
       logTrans[k-1][TII] := Math.ln(0.10);
       logTrans[k-1][TDM] := Math.ln(nDM / q);
       logTrans[k-1][TDD] := Math.ln(nDD / q)
-    END
+    END;
+
+    FOR s := 0 TO seqCount - 1 DO prevGap[s] := curGap[s] END
   END;
 
-  (* Default transitions at last position (no successor match state) *)
-  IF alnLen > 0 THEN
-    last := alnLen - 1;
-    logTrans[last][TMM] := Math.ln(0.99);
-    logTrans[last][TMI] := Math.ln(0.01);
-    logTrans[last][TMD] := NegInf;
-    logTrans[last][TIM] := Math.ln(0.90);
-    logTrans[last][TII] := Math.ln(0.10);
-    logTrans[last][TDM] := Math.ln(1.0);
-    logTrans[last][TDD] := NegInf
-  END
+  logTrans[alnLen-1][TMM] := Math.ln(0.99);
+  logTrans[alnLen-1][TMI] := Math.ln(0.01);
+  logTrans[alnLen-1][TMD] := NegInf;
+  logTrans[alnLen-1][TIM] := Math.ln(0.90);
+  logTrans[alnLen-1][TII] := Math.ln(0.10);
+  logTrans[alnLen-1][TDM] := Math.ln(1.0);
+  logTrans[alnLen-1][TDD] := NegInf
 END BuildHMM;
 
 (* ------------------------------------------------------------------ *)
@@ -251,29 +322,18 @@ BEGIN
 END ReadHMM;
 
 (* ------------------------------------------------------------------ *)
-(*  Viterbi local alignment                                             *)
+(*  Viterbi (scoring only)                                             *)
 (* ------------------------------------------------------------------ *)
 
-PROCEDURE Viterbi(seq: BioSeq.Seq): REAL;
-(*
-  Local Viterbi in log space.
-  States at profile position k (0-indexed): M_k (match), I_k (insert), D_k (delete).
-  logTrans[k][t] = transition log-prob FROM position k.
-  Delete states are computed left-to-right within each residue step (no emission).
-  logEntry = ln(1/L): cost to start a local alignment at any match state.
-  Returns the bit score relative to the null (background frequency) model,
-  or NegInf if no valid alignment was found.
-*)
+PROCEDURE Viterbi(seq: BioSeq.Seq; dbTotalRes: INTEGER): REAL;
 VAR
   T, k, j, ri : INTEGER;
   best, logEntry, score : REAL;
   c : CHAR;
+  mVal, iVal, dVal : REAL;
 BEGIN
-  T := BioSeq.Length(seq);
+  T := LoadSeq(seq);
   IF (T = 0) OR (hmmLen = 0) THEN RETURN NegInf END;
-  IF T > 100000 THEN T := 100000 END;
-  BioSeq.Slice(seq, 0, T, seqBuf);
-  seqBuf[T] := 0X;
 
   logEntry := Math.ln(1.0 / FLT(hmmLen));
 
@@ -285,45 +345,34 @@ BEGIN
   FOR j := 0 TO T - 1 DO
     c  := seqBuf[j];
     ri := ResIdx(c);
-
+    FOR k := 0 TO hmmLen - 1 DO vM[k] := NegInf; vI[k] := NegInf END;
     vD[0] := NegInf;
 
     FOR k := 0 TO hmmLen - 1 DO
-
-      (* Delete state D_k: no emission; chained left-to-right within this j step.
-         Transitions FROM k-1: logTrans[k-1][TMD] and logTrans[k-1][TDD]. *)
-      IF k = 0 THEN
-        vD[k] := NegInf
+      IF k = 0 THEN vD[0] := NegInf
       ELSE
-        vD[k] := Math.max(vMprev[k-1] + logTrans[k-1][TMD],
-                           vD[k-1]     + logTrans[k-1][TDD])
+        dVal := Math.max(SafeAdd(vM[k-1], logTrans[k-1][TMD]),
+                         SafeAdd(vD[k-1], logTrans[k-1][TDD]));
+        vD[k] := dVal
       END;
 
-      (* Match state M_k: emits seqBuf[j].
-         Predecessor states at profile position k-1 (previous j row),
-         or fresh local entry at any (j,k). *)
-      IF k = 0 THEN
-        best := logEntry
+      IF k = 0 THEN best := logEntry
       ELSE
-        best := Math.max(vMprev[k-1] + logTrans[k-1][TMM],
-                Math.max(vIprev[k-1] + logTrans[k-1][TIM],
-                         vD[k-1]     + logTrans[k-1][TDM]));
+        best := Math.max(SafeAdd(vMprev[k-1], logTrans[k-1][TMM]),
+                Math.max(SafeAdd(vIprev[k-1], logTrans[k-1][TIM]),
+                         SafeAdd(vD[k-1],     logTrans[k-1][TDM])));
         best := Math.max(best, logEntry)
       END;
-      IF ri >= 0 THEN vM[k] := logEmitM[k][ri] + best
-      ELSE vM[k] := NegInf
-      END;
+      IF ri >= 0 THEN mVal := logEmitM[k][ri] + best ELSE mVal := NegInf END;
+      vM[k] := mVal;
 
-      (* Insert state I_k: emits seqBuf[j] with background probability.
-         Predecessor M_k or I_k at same profile position, previous j row. *)
       IF ri >= 0 THEN
-        vI[k] := logEmitI[ri] + Math.max(vMprev[k] + logTrans[k][TMI],
-                                           vIprev[k] + logTrans[k][TII])
-      ELSE
-        vI[k] := NegInf
+        iVal := logEmitI[ri] + Math.max(SafeAdd(vMprev[k], logTrans[k][TMI]),
+                                         SafeAdd(vIprev[k], logTrans[k][TII]))
+      ELSE iVal := NegInf
       END;
+      vI[k] := iVal;
 
-      (* Local exit: any M_k can end the alignment; track running best. *)
       IF vM[k] > score THEN score := vM[k] END
     END;
 
@@ -332,14 +381,448 @@ BEGIN
     END
   END;
 
-  (* Emissions are already log-odds vs background, so the per-residue null
-     cancels algebraically for unaligned flanking regions.  Just scale to bits. *)
-  IF score > NegInf / 2.0 THEN
-    RETURN score / Math.ln(2.0)
-  ELSE
-    RETURN NegInf
+  IF ~IsNegInf(score) THEN RETURN score / Math.ln(2.0)
+  ELSE RETURN NegInf
   END
 END Viterbi;
+
+(* ------------------------------------------------------------------ *)
+(*  Viterbi with traceback                                             *)
+(* ------------------------------------------------------------------ *)
+
+PROCEDURE ViterbiTrace(seq: BioSeq.Seq;
+                        VAR T: INTEGER;
+                        VAR bestJ, bestK: INTEGER): REAL;
+(*
+  Same DP as Viterbi but records per-cell traceback for M, I, and D states.
+  Each cell stores src*4 + arrivingState.
+  Returns bit score; sets T to the capped sequence length used,
+  and bestJ/bestK to the best local-exit cell.
+*)
+VAR
+  k, j, ri : INTEGER;
+  best, logEntry, score : REAL;
+  c : CHAR;
+  mVal, iVal, dVal : REAL;
+  src : INTEGER;
+  fromMscore, fromDscore : REAL;
+BEGIN
+  T := LoadSeq(seq);
+  IF T > MaxTraceLen THEN T := MaxTraceLen END;
+  IF (T = 0) OR (hmmLen = 0) THEN
+    bestJ := -1; bestK := -1; RETURN NegInf
+  END;
+
+  logEntry := Math.ln(1.0 / FLT(hmmLen));
+
+  FOR k := 0 TO hmmLen + 1 DO
+    vMprev[k] := NegInf; vIprev[k] := NegInf; vD[k] := NegInf
+  END;
+  score := NegInf; bestJ := -1; bestK := -1;
+
+  FOR j := 0 TO T - 1 DO
+    c  := seqBuf[j];
+    ri := ResIdx(c);
+    FOR k := 0 TO hmmLen - 1 DO vM[k] := NegInf; vI[k] := NegInf END;
+    vD[0] := NegInf;
+
+    FOR k := 0 TO hmmLen - 1 DO
+
+      (* Delete D_k: predecessors from current step (no residue consumed). *)
+      IF k = 0 THEN
+        vD[0] := NegInf; tbD[j][0] := -1
+      ELSE
+        fromMscore := SafeAdd(vM[k-1], logTrans[k-1][TMD]);
+        fromDscore := SafeAdd(vD[k-1], logTrans[k-1][TDD]);
+        IF fromMscore >= fromDscore THEN
+          vD[k] := fromMscore; tbD[j][k] := StateM * 4 + StateD
+        ELSE
+          vD[k] := fromDscore; tbD[j][k] := StateD * 4 + StateD
+        END
+      END;
+
+      (* Match M_k. *)
+      IF k = 0 THEN
+        best := logEntry; src := SrcEntry
+      ELSE
+        best := logEntry; src := SrcEntry;
+        IF SafeAdd(vMprev[k-1], logTrans[k-1][TMM]) > best THEN
+          best := SafeAdd(vMprev[k-1], logTrans[k-1][TMM]); src := StateM
+        END;
+        IF SafeAdd(vIprev[k-1], logTrans[k-1][TIM]) > best THEN
+          best := SafeAdd(vIprev[k-1], logTrans[k-1][TIM]); src := StateI
+        END;
+        IF SafeAdd(vD[k-1], logTrans[k-1][TDM]) > best THEN
+          best := SafeAdd(vD[k-1], logTrans[k-1][TDM]); src := StateD
+        END
+      END;
+      IF ri >= 0 THEN mVal := logEmitM[k][ri] + best ELSE mVal := NegInf END;
+      vM[k] := mVal;
+      tbM[j][k] := src * 4 + StateM;
+
+      (* Insert I_k. *)
+      IF ri >= 0 THEN
+        IF SafeAdd(vMprev[k], logTrans[k][TMI]) >=
+           SafeAdd(vIprev[k], logTrans[k][TII]) THEN
+          iVal := logEmitI[ri] + SafeAdd(vMprev[k], logTrans[k][TMI]);
+          tbI[j][k] := StateM * 4 + StateI
+        ELSE
+          iVal := logEmitI[ri] + SafeAdd(vIprev[k], logTrans[k][TII]);
+          tbI[j][k] := StateI * 4 + StateI
+        END
+      ELSE
+        iVal := NegInf; tbI[j][k] := 0
+      END;
+      vI[k] := iVal;
+
+      IF vM[k] > score THEN
+        score := vM[k]; bestJ := j; bestK := k
+      END
+    END;
+
+    FOR k := 0 TO hmmLen - 1 DO
+      vMprev[k] := vM[k]; vIprev[k] := vI[k]
+    END
+  END;
+
+  IF ~IsNegInf(score) THEN RETURN score / Math.ln(2.0)
+  ELSE bestJ := -1; bestK := -1; RETURN NegInf
+  END
+END ViterbiTrace;
+
+(* ------------------------------------------------------------------ *)
+(*  Path storage for align two-pass                                    *)
+(* ------------------------------------------------------------------ *)
+
+(*
+  A path is a sequence of (state, profileK, seqJ) triples recording the
+  Viterbi alignment of one sequence.  Stored compactly as three parallel
+  arrays per sequence.  MaxPathLen covers all match+insert+delete steps.
+*)
+TYPE
+  PathRec = RECORD
+    state : ARRAY MaxPathLen OF INTEGER;  (* StateM / StateI / StateD *)
+    profK : ARRAY MaxPathLen OF INTEGER;  (* profile position *)
+    seqJ  : ARRAY MaxPathLen OF INTEGER;  (* sequence residue index, -1 for D *)
+    len   : INTEGER;
+    startK: INTEGER;  (* first profile column in local alignment *)
+    endK  : INTEGER;  (* last profile column in local alignment *)
+    bits  : REAL;
+    seqT  : INTEGER;  (* capped sequence length used *)
+    name  : ARRAY 256 OF CHAR;
+  END;
+
+VAR
+  paths    : ARRAY MaxSeqs OF PathRec;
+  nPaths   : INTEGER;
+  maxIns   : ARRAY MaxLen + 1 OF INTEGER;  (* max insert count after column k *)
+
+PROCEDURE WalkTraceback(bestJ, bestK, seqT: INTEGER; VAR pr: PathRec);
+(*
+  Reconstructs the path by walking tbM/tbI/tbD backwards from (bestJ,bestK),
+  then reverses it in place.
+*)
+VAR
+  pLen, p, j, k, state, src, tb, tmp : INTEGER;
+BEGIN
+  pLen := 0;
+  j := bestJ; k := bestK; state := StateM;
+
+  LOOP
+    pr.state[pLen] := state;
+    pr.profK[pLen] := k;
+    IF state = StateD THEN pr.seqJ[pLen] := -1
+    ELSE pr.seqJ[pLen] := j
+    END;
+    INC(pLen);
+    IF pLen >= MaxPathLen THEN EXIT END;
+
+    IF state = StateM THEN
+      tb  := tbM[j][k];
+      src := tb DIV 4;
+      IF (src = SrcEntry) OR (k = 0) THEN EXIT END;
+      IF src = StateM THEN DEC(j); DEC(k); state := StateM
+      ELSIF src = StateI THEN DEC(j); DEC(k); state := StateI
+      ELSE (* src = StateD *) DEC(k); state := StateD
+      END
+    ELSIF state = StateI THEN
+      tb  := tbI[j][k];
+      src := tb DIV 4;
+      DEC(j);
+      IF src = StateM THEN state := StateM
+      ELSE state := StateI
+      END
+      (* k stays the same: insert is at same profile position *)
+    ELSE (* StateD *)
+      tb  := tbD[j][k];
+      src := tb DIV 4;
+      IF (tb < 0) OR (k = 0) THEN EXIT END;
+      DEC(k);
+      IF src = StateM THEN state := StateM
+      ELSE state := StateD
+      END
+      (* j stays same: delete consumes no residue *)
+    END
+  END;
+
+  (* Reverse path in place. *)
+  FOR p := 0 TO pLen DIV 2 - 1 DO
+    tmp := pr.state[p]; pr.state[p] := pr.state[pLen-1-p]; pr.state[pLen-1-p] := tmp;
+    tmp := pr.profK[p]; pr.profK[p] := pr.profK[pLen-1-p]; pr.profK[pLen-1-p] := tmp;
+    tmp := pr.seqJ[p];  pr.seqJ[p]  := pr.seqJ[pLen-1-p];  pr.seqJ[pLen-1-p]  := tmp
+  END;
+
+  pr.len := pLen;
+  IF pLen > 0 THEN
+    pr.startK := pr.profK[0];
+    pr.endK   := pr.profK[pLen-1]
+  ELSE
+    pr.startK := 0; pr.endK := 0
+  END
+END WalkTraceback;
+
+PROCEDURE CountPathInserts(VAR pr: PathRec; VAR ins: ARRAY OF INTEGER);
+(*
+  Counts the number of insert steps after each profile column k in this path.
+  ins[k] is incremented for each StateI step at profile position k.
+  ins has size hmmLen+1 (inserts after the last match state use ins[hmmLen]).
+*)
+VAR p, k: INTEGER;
+BEGIN
+  FOR p := 0 TO pr.len - 1 DO
+    IF pr.state[p] = StateI THEN
+      k := pr.profK[p];
+      IF k < hmmLen THEN ins[k] := ins[k] + 1 END
+    END
+  END
+END CountPathInserts;
+
+(* ------------------------------------------------------------------ *)
+(*  Aligned row rendering                                              *)
+(* ------------------------------------------------------------------ *)
+
+PROCEDURE WriteAlignedRow(VAR pr: PathRec;
+                           VAR ins: ARRAY OF INTEGER;
+                           wr: Files.Rider; toFile: BOOLEAN);
+(*
+  Renders one aligned sequence row to either a Files.Rider or stdout.
+  Column layout:
+    For each profile column k (0..hmmLen-1):
+      1. One match/delete character (upper-case residue or '-')
+      2. ins[k] insert characters (lower-case residue or '-' padding)
+*)
+VAR
+  p, k, col, insHere, insMax : INTEGER;
+  bitsInt, bitsFrac : INTEGER;
+  tmp : ARRAY 16 OF CHAR;
+  c : CHAR;
+
+  PROCEDURE Emit(ch: CHAR);
+  BEGIN
+    IF toFile THEN Files.Write(wr, ch)
+    ELSE Out.Char(ch)
+    END
+  END Emit;
+
+  PROCEDURE EmitLn;
+  BEGIN
+    IF toFile THEN Files.Write(wr, 0AX)
+    ELSE Out.Ln
+    END
+  END EmitLn;
+
+  PROCEDURE EmitStr(s: ARRAY OF CHAR);
+  VAR i: INTEGER;
+  BEGIN i := 0; WHILE s[i] # 0X DO Emit(s[i]); INC(i) END
+  END EmitStr;
+
+BEGIN
+  (* Header *)
+  Emit('>'); EmitStr(pr.name); EmitStr(" bits=");
+  bitsInt  := FLOOR(pr.bits);
+  bitsFrac := FLOOR((pr.bits - FLT(bitsInt)) * 100.0 + 0.5);
+  IF bitsFrac >= 100 THEN INC(bitsInt); bitsFrac := 0 END;
+  Strings.IntToStr(bitsInt, tmp);  EmitStr(tmp);
+  Emit('.');
+  IF bitsFrac < 10 THEN Emit('0') END;
+  Strings.IntToStr(bitsFrac, tmp); EmitStr(tmp);
+  EmitLn;
+
+  col := 0; p := 0;
+
+  (* Left-flank gap padding for profile columns before alignment starts. *)
+  FOR k := 0 TO pr.startK - 1 DO
+    Emit('-'); INC(col); IF col = 60 THEN EmitLn; col := 0 END;
+    insMax := ins[k];
+    WHILE insMax > 0 DO
+      Emit('-'); INC(col); IF col = 60 THEN EmitLn; col := 0 END;
+      DEC(insMax)
+    END
+  END;
+
+  k := pr.startK;
+  WHILE k <= pr.endK DO
+    (* Match or delete character for column k. *)
+    IF (p < pr.len) & (pr.profK[p] = k) & (pr.state[p] = StateM) THEN
+      c := CAP(seqBuf[pr.seqJ[p]]);
+      Emit(c); INC(p)
+    ELSIF (p < pr.len) & (pr.profK[p] = k) & (pr.state[p] = StateD) THEN
+      Emit('-'); INC(p)
+    ELSE
+      Emit('-')  (* column not reached by local alignment *)
+    END;
+    INC(col); IF col = 60 THEN EmitLn; col := 0 END;
+
+    (* Insert characters after column k, padded to ins[k] width. *)
+    insHere := 0;
+    WHILE (p < pr.len) & (pr.profK[p] = k) & (pr.state[p] = StateI) DO
+      c := seqBuf[pr.seqJ[p]];
+      (* Lower-case: add 32 to upper-case ASCII if in A-Z range. *)
+      IF (c >= 'A') & (c <= 'Z') THEN c := CHR(ORD(c) + 32) END;
+      Emit(c); INC(col); IF col = 60 THEN EmitLn; col := 0 END;
+      INC(insHere); INC(p)
+    END;
+    insMax := ins[k] - insHere;
+    WHILE insMax > 0 DO
+      Emit('-'); INC(col); IF col = 60 THEN EmitLn; col := 0 END;
+      DEC(insMax)
+    END;
+
+    INC(k)
+  END;
+
+  (* Right-flank gap padding. *)
+  FOR k := pr.endK + 1 TO hmmLen - 1 DO
+    Emit('-'); INC(col); IF col = 60 THEN EmitLn; col := 0 END;
+    insMax := ins[k];
+    WHILE insMax > 0 DO
+      Emit('-'); INC(col); IF col = 60 THEN EmitLn; col := 0 END;
+      DEC(insMax)
+    END
+  END;
+
+  IF col > 0 THEN EmitLn END
+END WriteAlignedRow;
+
+(* ------------------------------------------------------------------ *)
+(*  Align mode                                                         *)
+(* ------------------------------------------------------------------ *)
+
+PROCEDURE DoAlign(hmmPath, faPath: ARRAY OF CHAR;
+                  minBits: REAL; outPath: ARRAY OF CHAR);
+(*
+  Two-pass alignment:
+    Pass 1: Run ViterbiTrace on every sequence, store paths in memory,
+            accumulate maximum insert widths per gap position.
+    Pass 2: Render all stored paths using the global insert widths,
+            producing rows with identical column counts (valid MSA).
+
+*)
+VAR
+  rdr         : BioIO.FastaReader;
+  rec         : BioIO.FastaRecord;
+  bits        : REAL;
+  bestJ, bestK, seqT, i, k : INTEGER;
+  outFile     : Files.File;
+  wr          : Files.Rider;
+  toFile      : BOOLEAN;
+  localIns    : ARRAY MaxLen + 1 OF INTEGER;
+  warned      : BOOLEAN;
+
+  PROCEDURE EmitHeader(s: ARRAY OF CHAR);
+  BEGIN
+    IF toFile THEN
+      WHILE s[0] # 0X DO Files.Write(wr, s[0]); s[0] := s[1] END;
+      Files.Write(wr, 0AX)
+    ELSE
+      Out.String(s); Out.Ln
+    END
+  END EmitHeader;
+
+BEGIN
+  IF ~ReadHMM(hmmPath) THEN
+    Out.String("Error: cannot read profile from "); Out.String(hmmPath); Out.Ln;
+    RETURN
+  END;
+  IF ~BioIO.OpenFasta(rdr, faPath) THEN
+    Out.String("Error: cannot open "); Out.String(faPath); Out.Ln;
+    RETURN
+  END;
+
+  (* Determine output destination. *)
+  toFile := (outPath[0] # 0X);
+  IF toFile THEN
+    outFile := Files.New(outPath);
+    IF outFile = NIL THEN
+      Out.String("Error: cannot create "); Out.String(outPath); Out.Ln;
+      BioIO.CloseFasta(rdr); RETURN
+    END;
+    Files.Set(wr, outFile, 0)
+  END;
+
+  (* Initialise global max-insert counts. *)
+  FOR k := 0 TO hmmLen DO maxIns[k] := 0 END;
+
+  (* Pass 1: score, traceback, and accumulate insert widths. *)
+  nPaths := 0; warned := FALSE;
+  rec.seq := NIL;
+  WHILE BioIO.ReadFasta(rdr, rec) DO
+    bits := ViterbiTrace(rec.seq, seqT, bestJ, bestK);
+    IF bits < minBits THEN
+      Out.String("# skipping "); Out.String(rec.name);
+      Out.String(" ("); Out.Fixed(bits, 0, 2);
+      Out.String(" bits < threshold)"); Out.Ln
+    ELSIF nPaths >= MaxSeqs THEN
+      IF ~warned THEN
+        Out.String("# Warning: more than "); Out.Int(MaxSeqs, 0);
+        Out.String(" sequences; extras skipped."); Out.Ln;
+        warned := TRUE
+      END
+    ELSE
+      WalkTraceback(bestJ, bestK, seqT, paths[nPaths]);
+
+      (* Save seqBuf contents for this sequence into path record's seqJ
+         references -- seqBuf is reused each call so we must re-slice later.
+         We store seqT so Pass 2 can reload the sequence. *)
+      paths[nPaths].bits := bits;
+      paths[nPaths].seqT := seqT;
+      Strings.Copy(rec.name, paths[nPaths].name);
+
+      FOR k := 0 TO hmmLen DO localIns[k] := 0 END;
+      CountPathInserts(paths[nPaths], localIns);
+      FOR k := 0 TO hmmLen - 1 DO
+        IF localIns[k] > maxIns[k] THEN maxIns[k] := localIns[k] END
+      END;
+      INC(nPaths)
+    END
+  END;
+  BioIO.CloseFasta(rdr);
+
+  (*
+    Pass 2: re-open the FASTA to reload sequences (seqBuf was overwritten),
+    render each stored path with global insert widths.
+    We match sequences to stored paths by order of appearance.
+  *)
+  IF ~BioIO.OpenFasta(rdr, faPath) THEN
+    Out.String("Error: cannot reopen "); Out.String(faPath); Out.Ln;
+    IF toFile THEN Files.Close(outFile) END;
+    RETURN
+  END;
+
+  i := 0; rec.seq := NIL;
+  WHILE BioIO.ReadFasta(rdr, rec) & (i < nPaths) DO
+    (* Skip sequences that were rejected in pass 1. *)
+    IF Strings.Compare(rec.name, paths[i].name) = 0 THEN
+      (* Reload this sequence's residues into seqBuf. *)
+      seqT := LoadSeq(rec.seq);
+      WriteAlignedRow(paths[i], maxIns, wr, toFile);
+      INC(i)
+    END
+  END;
+  BioIO.CloseFasta(rdr);
+
+  IF toFile THEN Files.Close(outFile) END
+END DoAlign;
 
 (* ------------------------------------------------------------------ *)
 (*  Helpers                                                             *)
@@ -365,17 +848,16 @@ BEGIN
   IF lastDot > 0 THEN name[lastDot] := 0X END
 END BaseName;
 
-PROCEDURE CalcEvalue(seqLen: INTEGER; bits: REAL): REAL;
-(* E = hmmLen * seqLen * 2^(-bits), computed in log space to avoid underflow. *)
+PROCEDURE CalcEvalue(dbTotalRes: INTEGER; bits: REAL): REAL;
 VAR logE: REAL;
 BEGIN
-  logE := Math.ln(FLT(hmmLen)) + Math.ln(FLT(seqLen)) - bits * Math.ln(2.0);
+  logE := Math.ln(FLT(hmmLen)) + Math.ln(FLT(dbTotalRes))
+          - bits * Math.ln(2.0);
   IF logE < -700.0 THEN RETURN 0.0 END;
   RETURN Math.exp(logE)
 END CalcEvalue;
 
 PROCEDURE PrintEvalue(e: REAL);
-(* Scientific notation for small values; fixed 3 d.p. otherwise. *)
 VAR log10e: REAL; exp: INTEGER; m: REAL;
 BEGIN
   IF e <= 0.0 THEN
@@ -423,6 +905,7 @@ BEGIN
     probs[r] := Math.exp(logEmitM[k][r] + logBg[r]);
     sum := sum + probs[r]
   END;
+  IF sum <= 0.0 THEN RETURN 0 END;
   u := Random.Real() * sum; r := 0;
   WHILE (r < hmmAlph - 1) & (u > probs[r]) DO u := u - probs[r]; INC(r) END;
   RETURN r
@@ -435,21 +918,21 @@ BEGIN
   FOR r := 0 TO hmmAlph - 1 DO
     probs[r] := Math.exp(logBg[r]); sum := sum + probs[r]
   END;
+  IF sum <= 0.0 THEN RETURN 0 END;
   u := Random.Real() * sum; r := 0;
   WHILE (r < hmmAlph - 1) & (u > probs[r]) DO u := u - probs[r]; INC(r) END;
   RETURN r
 END SampleBgEmit;
 
 PROCEDURE SampleTrans(l0, l1, l2: REAL): INTEGER;
-(* Sample from up to 3 transitions; pass NegInf for unused slots. *)
 VAR p0, p1, p2, sum, u: REAL;
 BEGIN
   p0 := 0.0; p1 := 0.0; p2 := 0.0;
-  IF l0 > NegInf / 2.0 THEN p0 := Math.exp(l0) END;
-  IF l1 > NegInf / 2.0 THEN p1 := Math.exp(l1) END;
-  IF l2 > NegInf / 2.0 THEN p2 := Math.exp(l2) END;
+  IF ~IsNegInf(l0) THEN p0 := Math.exp(l0) END;
+  IF ~IsNegInf(l1) THEN p1 := Math.exp(l1) END;
+  IF ~IsNegInf(l2) THEN p2 := Math.exp(l2) END;
   sum := p0 + p1 + p2;
-  IF sum <= 0.0 THEN RETURN 0 END;
+  IF sum <= 0.0 THEN RETURN -1 END;
   u := Random.Real() * sum;
   IF u < p0 THEN RETURN 0 END; u := u - p0;
   IF u < p1 THEN RETURN 1 END;
@@ -457,7 +940,6 @@ BEGIN
 END SampleTrans;
 
 PROCEDURE EmitConsensus;
-(* Most probable residue at each match state, no insert/delete sampling. *)
 VAR k, r, best, col: INTEGER; maxLP, lp: REAL;
 BEGIN
   Out.Char('>'); Out.String(hmmName); Out.String("-consensus"); Out.Ln;
@@ -479,32 +961,41 @@ CONST BufLen = 8001;
 VAR
   buf      : ARRAY BufLen OF CHAR;
   blen, k, t, r, col, insCount : INTEGER;
-  state    : INTEGER; (* 0=M  1=I  2=D *)
+  state    : INTEGER;
+  truncated : BOOLEAN;
 BEGIN
-  blen := 0; k := 0; state := 0;
+  blen := 0; k := 0; state := 0; truncated := FALSE;
   WHILE k < hmmLen DO
-    IF state = 0 THEN  (* Match M_k: emit, then transition *)
+    IF state = 0 THEN
       r := SampleMatchEmit(k);
-      IF blen < BufLen - 1 THEN buf[blen] := IdxToRes(r); INC(blen) END;
+      IF blen < BufLen - 1 THEN buf[blen] := IdxToRes(r); INC(blen)
+      ELSE truncated := TRUE
+      END;
       t := SampleTrans(logTrans[k][TMM], logTrans[k][TMI], logTrans[k][TMD]);
+      IF t < 0 THEN t := 0 END;
       IF    t = 0 THEN INC(k)
       ELSIF t = 1 THEN state := 1; insCount := 0
       ELSE               INC(k); state := 2
       END
-    ELSIF state = 1 THEN  (* Insert I_k: emit background, then transition *)
+    ELSIF state = 1 THEN
       r := SampleBgEmit();
-      IF blen < BufLen - 1 THEN buf[blen] := IdxToRes(r); INC(blen) END;
+      IF blen < BufLen - 1 THEN buf[blen] := IdxToRes(r); INC(blen)
+      ELSE truncated := TRUE
+      END;
       INC(insCount);
       t := SampleTrans(logTrans[k][TIM], logTrans[k][TII], NegInf);
-      IF (t = 0) OR (insCount >= 100) THEN INC(k); state := 0 END
-    ELSE  (* Delete D_k: no emit, advance *)
+      IF (t <= 0) OR (insCount >= 100) THEN INC(k); state := 0 END
+    ELSE
       t := SampleTrans(logTrans[k][TDM], logTrans[k][TDD], NegInf);
+      IF t < 0 THEN t := 0 END;
       INC(k);
       IF t = 1 THEN state := 2 ELSE state := 0 END
     END
   END;
   buf[blen] := 0X;
-  Out.Char('>'); Out.String(hmmName); Out.Char('-'); Out.Int(seqNum, 0); Out.Ln;
+  Out.Char('>'); Out.String(hmmName); Out.Char('-'); Out.Int(seqNum, 0);
+  IF truncated THEN Out.String(" [truncated]") END;
+  Out.Ln;
   k := 0; col := 0;
   WHILE buf[k] # 0X DO
     Out.Char(buf[k]); INC(k); INC(col);
@@ -534,16 +1025,23 @@ VAR
   rdr    : BioIO.FastaReader;
   rec    : BioIO.FastaRecord;
   alnLen : INTEGER;
+  warned : BOOLEAN;
 BEGIN
   IF ~BioIO.OpenFasta(rdr, msaPath) THEN
     Out.String("Error: cannot open "); Out.String(msaPath); Out.Ln;
     RETURN
   END;
 
-  seqCount := 0; alnLen := 0;
+  seqCount := 0; alnLen := 0; warned := FALSE;
   rec.seq := NIL;
   WHILE BioIO.ReadFasta(rdr, rec) DO
-    IF seqCount < MaxSeqs THEN
+    IF seqCount >= MaxSeqs THEN
+      IF ~warned THEN
+        Out.String("Warning: more than "); Out.Int(MaxSeqs, 0);
+        Out.String(" sequences; extras ignored."); Out.Ln;
+        warned := TRUE
+      END
+    ELSE
       seqs[seqCount] := rec.seq;
       rec.seq := NIL;
       IF seqCount = 0 THEN
@@ -567,9 +1065,7 @@ BEGIN
   END;
 
   BaseName(msaPath, hmmName);
-  IF (seqCount > 0) & ~BioSeq.IsNucleotide(seqs[0]) THEN hmmAlph := 20
-  ELSE hmmAlph := 4
-  END;
+  hmmAlph := DetectAlphabet();
   SetBgFreqs;
   BuildHMM(alnLen);
 
@@ -587,17 +1083,37 @@ END DoBuild;
 (*  Search mode                                                         *)
 (* ------------------------------------------------------------------ *)
 
+PROCEDURE CountDbResidues(dbPath: ARRAY OF CHAR): INTEGER;
+VAR rdr: BioIO.FastaReader; rec: BioIO.FastaRecord; total: INTEGER;
+BEGIN
+  total := 0;
+  IF ~BioIO.OpenFasta(rdr, dbPath) THEN RETURN 0 END;
+  rec.seq := NIL;
+  WHILE BioIO.ReadFasta(rdr, rec) DO
+    total := total + BioSeq.Length(rec.seq)
+  END;
+  BioIO.CloseFasta(rdr);
+  RETURN total
+END CountDbResidues;
+
 PROCEDURE DoSearch(hmmPath, dbPath: ARRAY OF CHAR; minBits: REAL);
 VAR
-  rdr    : BioIO.FastaReader;
-  rec    : BioIO.FastaRecord;
-  bits   : REAL;
-  evalue : REAL;
-  seqLen : INTEGER;
-  hits   : INTEGER;
+  rdr        : BioIO.FastaReader;
+  rec        : BioIO.FastaRecord;
+  bits       : REAL;
+  evalue     : REAL;
+  seqLen     : INTEGER;
+  hits       : INTEGER;
+  dbTotalRes : INTEGER;
 BEGIN
   IF ~ReadHMM(hmmPath) THEN
     Out.String("Error: cannot read profile from "); Out.String(hmmPath); Out.Ln;
+    RETURN
+  END;
+
+  dbTotalRes := CountDbResidues(dbPath);
+  IF dbTotalRes = 0 THEN
+    Out.String("Error: cannot open or empty database "); Out.String(dbPath); Out.Ln;
     RETURN
   END;
 
@@ -614,10 +1130,10 @@ BEGIN
 
   hits := 0; rec.seq := NIL;
   WHILE BioIO.ReadFasta(rdr, rec) DO
-    bits := Viterbi(rec.seq);
+    bits := Viterbi(rec.seq, dbTotalRes);
     IF bits >= minBits THEN
       seqLen := BioSeq.Length(rec.seq);
-      evalue := CalcEvalue(seqLen, bits);
+      evalue := CalcEvalue(dbTotalRes, bits);
       Out.String(rec.name); Out.Char(9X);
       Out.String(hmmName);  Out.Char(9X);
       Out.Fixed(bits, 0, 2); Out.Char(9X);
@@ -637,24 +1153,27 @@ END DoSearch;
 (* ------------------------------------------------------------------ *)
 
 VAR
-  mode, arg1, arg2, opt, sval : ARRAY 1024 OF CHAR;
-  minBits : REAL;
-  nSeqs   : INTEGER;
+  mode, arg1, arg2, opt, sval, outPath : ARRAY 1024 OF CHAR;
+  minBits  : REAL;
+  nSeqs    : INTEGER;
   consensus : BOOLEAN;
   i : INTEGER;
 
 BEGIN
-  NegInf := -1.0E30;
+  NegInf       := -1.0E30;
+  NegInfThresh := -5.0E29;
 
   IF Args.Count() < 2 THEN
     Out.String("Usage:"); Out.Ln;
     Out.String("  SeqHMM build  <msa.afa> <model.hmm>"); Out.Ln;
+    Out.String("  SeqHMM align  <model.hmm> <seqs.fa> [-t <minBits>] [-o <out.afa>]"); Out.Ln;
     Out.String("  SeqHMM search <model.hmm> <db.fa> [-t <minBits>]"); Out.Ln;
     Out.String("  SeqHMM emit   <model.hmm> [-n <count>] [-c]"); Out.Ln;
     Out.String("Options:"); Out.Ln;
-    Out.String("  -t <real>  bit-score threshold for search (default 10.0)"); Out.Ln;
+    Out.String("  -t <real>  bit-score threshold for search/align (default 10.0)"); Out.Ln;
     Out.String("  -n <int>   number of sequences to emit (default 1)"); Out.Ln;
     Out.String("  -c         emit consensus (most probable) sequence"); Out.Ln;
+    Out.String("  -o <file>  output file for align (default: stdout)"); Out.Ln;
     RETURN
   END;
 
@@ -664,6 +1183,25 @@ BEGIN
 
   IF Strings.Compare(mode, "build") = 0 THEN
     DoBuild(arg1, arg2)
+
+  ELSIF Strings.Compare(mode, "align") = 0 THEN
+    minBits := 10.0; outPath[0] := 0X;
+    i := 4;
+    WHILE i <= Args.Count() DO
+      Args.Get(i, opt);
+      IF Strings.Compare(opt, "-t") = 0 THEN
+        INC(i);
+        IF i <= Args.Count() THEN
+          Args.Get(i, sval);
+          IF ~Strings.StrToReal(sval, minBits) THEN minBits := 10.0 END
+        END
+      ELSIF Strings.Compare(opt, "-o") = 0 THEN
+        INC(i);
+        IF i <= Args.Count() THEN Args.Get(i, outPath) END
+      END;
+      INC(i)
+    END;
+    DoAlign(arg1, arg2, minBits, outPath)
 
   ELSIF Strings.Compare(mode, "search") = 0 THEN
     minBits := 10.0;
@@ -701,6 +1239,6 @@ BEGIN
 
   ELSE
     Out.String("Unknown mode: "); Out.String(mode); Out.Ln;
-    Out.String("Use 'build', 'search', or 'emit'."); Out.Ln
+    Out.String("Use 'build', 'align', 'search', or 'emit'."); Out.Ln
   END
 END SeqHMM.
