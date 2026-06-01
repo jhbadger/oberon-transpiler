@@ -1441,6 +1441,8 @@ BEGIN
     END
   ELSIF key = TUI.KEsc THEN
     selUnit := -1
+  ELSIF (key = ORD('n')) OR (key = ORD('N')) THEN
+    selUnit := -1   (* deselect so next N press ends the phase *)
   END
 END HandleMovePhase;
 
@@ -1928,7 +1930,7 @@ BEGIN
       IF activeSide = RED THEN
         CASE phase OF
           PH_MOVE:
-            IF (ev.key = ORD('n')) OR (ev.key = ORD('N')) THEN
+            IF ((ev.key = ORD('n')) OR (ev.key = ORD('N'))) & (selUnit < 0) THEN
               AdvancePhase
             ELSE
               HandleMovePhase(ev.key)
