@@ -39,6 +39,11 @@ CONST
   HH = 5;   (* Heavy Horse — fully armoured knights *)
   NTYPES = 6;
 
+  (* Fantasy supplement types *)
+  FT_HERO   = 0;  FT_SHERO  = 1;  FT_WIZARD = 2;  FT_WRAITH = 3;
+  FT_OGRE   = 4;  FT_BALROG = 5;  FT_GIANT  = 6;  FT_DRAGON = 7;
+  NFTYPES   = 8;
+
   FIGS_START = 10;  (* figures per fresh unit *)
 
   (* Terrain *)
@@ -69,6 +74,9 @@ TYPE
     shot          : BOOLEAN;
     charged       : BOOLEAN;  (* cavalry: moved this turn — impetus in melee *)
     moraleChecked : BOOLEAN;  (* TRUE once first threshold check done *)
+    fantasy       : BOOLEAN;  (* TRUE if this is a fantasy creature *)
+    ftype         : INTEGER;  (* FT_HERO..FT_DRAGON when fantasy=TRUE *)
+    frozen        : BOOLEAN;  (* paralyzed by Wraith — cannot move next turn *)
   END;
 
   Army = RECORD
@@ -127,9 +135,117 @@ VAR
   unitName  : ARRAY NTYPES OF ARRAY 14 OF CHAR;
   unitGlyph : ARRAY NTYPES OF CHAR;
 
+  fantasyMode  : BOOLEAN;  (* game-wide: fantasy supplement enabled *)
+
+  ftName       : ARRAY NFTYPES OF ARRAY 12 OF CHAR;
+  ftGlyph      : ARRAY NFTYPES OF CHAR;
+  ftFigsStart  : ARRAY NFTYPES OF INTEGER;
+  ftMoveAllow  : ARRAY NFTYPES OF INTEGER;
+  ftCanFly     : ARRAY NFTYPES OF BOOLEAN;
+  ftAttMult    : ARRAY NFTYPES OF INTEGER;
+  ftAttType    : ARRAY NFTYPES OF INTEGER;
+  ftDefType    : ARRAY NFTYPES OF INTEGER;
+  ftHasShoot   : ARRAY NFTYPES OF BOOLEAN;
+  ftShootRange : ARRAY NFTYPES OF INTEGER;
+  ftShootDice  : ARRAY NFTYPES OF INTEGER;
+  ftShootMin   : ARRAY NFTYPES OF INTEGER;
+  ftNoMorale   : ARRAY NFTYPES OF BOOLEAN;
+  fct          : ARRAY NFTYPES OF ARRAY NFTYPES OF INTEGER;
+
 (* ═══════════════════════════════════════════════════════════════════════ *)
 (*  Table Initialisation                                                    *)
 (* ═══════════════════════════════════════════════════════════════════════ *)
+
+PROCEDURE SetFCT(a, h, sh, wz, wr, og, ba, gi, dr: INTEGER);
+BEGIN
+  fct[a][FT_HERO]   := h;  fct[a][FT_SHERO]  := sh; fct[a][FT_WIZARD] := wz;
+  fct[a][FT_WRAITH] := wr; fct[a][FT_OGRE]   := og; fct[a][FT_BALROG] := ba;
+  fct[a][FT_GIANT]  := gi; fct[a][FT_DRAGON] := dr
+END SetFCT;
+
+PROCEDURE InitFantasyTables;
+BEGIN
+  COPY("Hero",     ftName[FT_HERO]);   ftGlyph[FT_HERO]   := '@';
+  COPY("SuperHero",ftName[FT_SHERO]);  ftGlyph[FT_SHERO]  := 'S';
+  COPY("Wizard",   ftName[FT_WIZARD]); ftGlyph[FT_WIZARD] := 'W';
+  COPY("Wraith",   ftName[FT_WRAITH]); ftGlyph[FT_WRAITH] := 'G';
+  COPY("Ogre",     ftName[FT_OGRE]);   ftGlyph[FT_OGRE]   := 'O';
+  COPY("Balrog",   ftName[FT_BALROG]); ftGlyph[FT_BALROG] := '!';
+  COPY("Giant",    ftName[FT_GIANT]);  ftGlyph[FT_GIANT]  := 'J';
+  COPY("Dragon",   ftName[FT_DRAGON]); ftGlyph[FT_DRAGON] := 'D';
+
+  ftFigsStart[FT_HERO]  := 4;   ftMoveAllow[FT_HERO]  := 4;
+  ftFigsStart[FT_SHERO] := 8;   ftMoveAllow[FT_SHERO] := 4;
+  ftFigsStart[FT_WIZARD]:= 3;   ftMoveAllow[FT_WIZARD]:= 4;
+  ftFigsStart[FT_WRAITH]:= 3;   ftMoveAllow[FT_WRAITH]:= 6;
+  ftFigsStart[FT_OGRE]  := 6;   ftMoveAllow[FT_OGRE]  := 3;
+  ftFigsStart[FT_BALROG]:= 10;  ftMoveAllow[FT_BALROG]:= 5;
+  ftFigsStart[FT_GIANT] := 12;  ftMoveAllow[FT_GIANT] := 4;
+  ftFigsStart[FT_DRAGON]:= 8;   ftMoveAllow[FT_DRAGON]:= 8;
+
+  ftCanFly[FT_HERO]  := FALSE; ftCanFly[FT_SHERO] := FALSE;
+  ftCanFly[FT_WIZARD]:= FALSE; ftCanFly[FT_WRAITH]:= TRUE;
+  ftCanFly[FT_OGRE]  := FALSE; ftCanFly[FT_BALROG]:= TRUE;
+  ftCanFly[FT_GIANT] := FALSE; ftCanFly[FT_DRAGON]:= TRUE;
+
+  (* Effective attack class/multiplier for fantasy vs normal troops *)
+  ftAttType[FT_HERO]  := HF;  ftAttMult[FT_HERO]  := 4;
+  ftAttType[FT_SHERO] := HF;  ftAttMult[FT_SHERO] := 8;
+  ftAttType[FT_WIZARD]:= AF;  ftAttMult[FT_WIZARD]:= 2;
+  ftAttType[FT_WRAITH]:= MH;  ftAttMult[FT_WRAITH]:= 2;
+  ftAttType[FT_OGRE]  := HF;  ftAttMult[FT_OGRE]  := 6;
+  ftAttType[FT_BALROG]:= HH;  ftAttMult[FT_BALROG]:= 2;
+  ftAttType[FT_GIANT] := HF;  ftAttMult[FT_GIANT] := 12;
+  ftAttType[FT_DRAGON]:= HH;  ftAttMult[FT_DRAGON]:= 4;
+
+  (* Effective defence class for normal troops attacking fantasy *)
+  ftDefType[FT_HERO]  := HF;  ftDefType[FT_SHERO] := HH;
+  ftDefType[FT_WIZARD]:= AF;  ftDefType[FT_WRAITH]:= HH;
+  ftDefType[FT_OGRE]  := HF;  ftDefType[FT_BALROG]:= HH;
+  ftDefType[FT_GIANT] := HF;  ftDefType[FT_DRAGON]:= HH;
+
+  (* Ranged special abilities *)
+  ftHasShoot[FT_HERO]  := FALSE; ftShootRange[FT_HERO]  := 0;
+  ftHasShoot[FT_SHERO] := FALSE; ftShootRange[FT_SHERO] := 0;
+  ftHasShoot[FT_WIZARD]:= TRUE;  ftShootRange[FT_WIZARD]:= 6;
+  ftHasShoot[FT_WRAITH]:= FALSE; ftShootRange[FT_WRAITH]:= 0;
+  ftHasShoot[FT_OGRE]  := FALSE; ftShootRange[FT_OGRE]  := 0;
+  ftHasShoot[FT_BALROG]:= TRUE;  ftShootRange[FT_BALROG]:= 3;
+  ftHasShoot[FT_GIANT] := TRUE;  ftShootRange[FT_GIANT] := 5;
+  ftHasShoot[FT_DRAGON]:= TRUE;  ftShootRange[FT_DRAGON]:= 4;
+
+  ftShootDice[FT_HERO]  := 0; ftShootMin[FT_HERO]  := 6;
+  ftShootDice[FT_SHERO] := 0; ftShootMin[FT_SHERO] := 6;
+  ftShootDice[FT_WIZARD]:= 4; ftShootMin[FT_WIZARD]:= 4;
+  ftShootDice[FT_WRAITH]:= 0; ftShootMin[FT_WRAITH]:= 6;
+  ftShootDice[FT_OGRE]  := 0; ftShootMin[FT_OGRE]  := 6;
+  ftShootDice[FT_BALROG]:= 2; ftShootMin[FT_BALROG]:= 4;
+  ftShootDice[FT_GIANT] := 3; ftShootMin[FT_GIANT] := 4;
+  ftShootDice[FT_DRAGON]:= 3; ftShootMin[FT_DRAGON]:= 3;
+
+  (* Morale immunity *)
+  ftNoMorale[FT_HERO]  := TRUE;  ftNoMorale[FT_SHERO] := TRUE;
+  ftNoMorale[FT_WIZARD]:= FALSE; ftNoMorale[FT_WRAITH]:= TRUE;
+  ftNoMorale[FT_OGRE]  := FALSE; ftNoMorale[FT_BALROG]:= TRUE;
+  ftNoMorale[FT_GIANT] := TRUE;  ftNoMorale[FT_DRAGON]:= FALSE;
+
+  (*
+   * Fantasy Combat Table [attacker][defender]: roll 2d6.
+   * OVER = defender killed; EQUAL = defender falls back; UNDER = no effect.
+   * Rows/cols: FT_HERO, FT_SHERO, FT_WIZARD, FT_WRAITH, FT_OGRE,
+   *            FT_BALROG, FT_GIANT, FT_DRAGON.
+   * Extracted from Appendix E (Chainmail 3rd ed.) columns for those 8 types.
+   *)
+  (*                 HERO  SHERO  WIZ  WRAITH  OGRE BALROG GIANT DRAGON *)
+  SetFCT(FT_HERO,    7,    10,   11,   11,    9,   11,   11,   12);
+  SetFCT(FT_SHERO,   5,     8,    9,    8,    5,    9,    9,   10);
+  SetFCT(FT_WIZARD,  8,    10,   10,    5,    8,    7,   11,    9);
+  SetFCT(FT_WRAITH,  8,    10,   12,    7,    9,   10,   12,   12);
+  SetFCT(FT_OGRE,    8,    11,   11,   12,    7,   10,    9,   12);
+  SetFCT(FT_BALROG,  4,     7,    8,   11,    6,    7,    8,   11);
+  SetFCT(FT_GIANT,   6,     9,   10,   10,    6,    9,    9,    9);
+  SetFCT(FT_DRAGON,  5,     8,   10,    7,    5,    6,    9,    8)
+END InitFantasyTables;
 
 PROCEDURE SetMelee(at, de, num, den, min: INTEGER);
 BEGIN
@@ -148,6 +264,7 @@ END SetComp;
 PROCEDURE InitTables;
 (*
  * Melee table from Appendix A: SetMelee(attacker, defender, diceNum, diceDen, minScore)
+ * Also calls InitFantasyTables.
  *   diceNum/diceDen = dice per attacking figure
  *   minScore = d6 score that kills one defender figure
  *
@@ -241,7 +358,8 @@ BEGIN
   SetComp(2, LF, HF, HF, AF, MH, MH);    (* archer + heavy foot + armored + 2 medium horse *)
   SetComp(3, LF, HF, AF, AF, LHT, MH);   (* archer + heavy + 2 armored + horse *)
   SetComp(4, LF, HF, HF, LHT, MH, HH);  (* archer + foot + light + medium + heavy horse *)
-  SetComp(5, HF, HF, AF, AF, MH, HH)    (* no archers: all heavy troops *)
+  SetComp(5, HF, HF, AF, AF, MH, HH);   (* no archers: all heavy troops *)
+  InitFantasyTables
 END InitTables;
 
 (* ═══════════════════════════════════════════════════════════════════════ *)
@@ -428,13 +546,20 @@ END RiverBlocked;
 
 PROCEDURE ValidMoveTarget(side, idx, dstCol, dstRow: INTEGER): BOOLEAN;
 VAR ut, mv, srcCol, srcRow, oSide, oIdx: INTEGER;
-    u: Unit; a: Army;
+    u: Unit; a: Army; canFly: BOOLEAN;
 BEGIN
   a := ArmyOf(side); u := a.units[idx];
-  ut := u.utype; mv := moveAllow[ut];
+  IF u.frozen THEN RETURN FALSE END;
+  ut := u.utype;
+  IF u.fantasy THEN
+    mv := ftMoveAllow[u.ftype]; canFly := ftCanFly[u.ftype]
+  ELSE
+    mv := moveAllow[ut]; canFly := FALSE
+  END;
   srcCol := u.col; srcRow := u.row;
 
-  IF (terrain[srcRow][srcCol] = TERR_ROAD) &
+  IF ~u.fantasy &
+     (terrain[srcRow][srcCol] = TERR_ROAD) &
      (terrain[dstRow][dstCol] = TERR_ROAD) &
      ((srcRow = dstRow) OR (srcCol = dstCol)) THEN INC(mv) END;
 
@@ -447,12 +572,12 @@ BEGIN
   UnitAt(dstCol, dstRow, oSide, oIdx);
   IF oSide >= 0 THEN RETURN FALSE END;
 
-  IF terrain[dstRow][dstCol] = TERR_MARSH THEN RETURN FALSE END;
-  IF terrain[dstRow][dstCol] = TERR_RIVER THEN RETURN FALSE END;
-  IF RiverBlocked(srcCol, srcRow, dstCol, dstRow, mv) THEN RETURN FALSE END;
-
-  (* Cavalry cannot enter woods *)
-  IF (terrain[dstRow][dstCol] = TERR_WOOD) & (ut >= LHT) THEN RETURN FALSE END;
+  IF ~canFly THEN
+    IF terrain[dstRow][dstCol] = TERR_MARSH THEN RETURN FALSE END;
+    IF terrain[dstRow][dstCol] = TERR_RIVER THEN RETURN FALSE END;
+    IF RiverBlocked(srcCol, srcRow, dstCol, dstRow, mv) THEN RETURN FALSE END;
+    IF (terrain[dstRow][dstCol] = TERR_WOOD) & (ut >= LHT) THEN RETURN FALSE END
+  END;
 
   RETURN TRUE
 END ValidMoveTarget;
@@ -465,9 +590,15 @@ PROCEDURE CanShootTarget(side, idx, tCol, tRow: INTEGER): BOOLEAN;
 VAR u: Unit; a: Army;
 BEGIN
   a := ArmyOf(side); u := a.units[idx];
+  IF u.fantasy THEN
+    IF ~ftHasShoot[u.ftype] THEN RETURN FALSE END;
+    IF u.shot THEN RETURN FALSE END;
+    IF CDist(u.col, u.row, tCol, tRow) > ftShootRange[u.ftype] THEN RETURN FALSE END;
+    RETURN TRUE
+  END;
   IF u.utype # LF THEN RETURN FALSE END;
   IF u.shot THEN RETURN FALSE END;
-  IF u.moved THEN RETURN FALSE END;  (* archers may not move and shoot *)
+  IF u.moved THEN RETURN FALSE END;
   IF CDist(u.col, u.row, tCol, tRow) > 5 THEN RETURN FALSE END;
   IF ~InFrontArc(u.col, u.row, tCol, tRow, u.facing) THEN RETURN FALSE END;
   RETURN TRUE
@@ -492,28 +623,58 @@ PROCEDURE ResolveShot(attSide, attIdx, defSide, defIdx: INTEGER;
                       VAR msg: ARRAY OF CHAR);
 VAR att, def: Unit;
     aArmy, dArmy: Army;
-    nd, i, d, kills: INTEGER;
+    nd, i, d, kills, roll, minScore, denType: INTEGER;
     numStr: ARRAY 8 OF CHAR;
 BEGIN
   aArmy := ArmyOf(attSide); att := aArmy.units[attIdx];
   dArmy := ArmyOf(defSide); def := dArmy.units[defIdx];
 
-  nd := att.figures DIV shotDen[def.utype];
-  IF nd < 1 THEN nd := 1 END;
+  IF att.fantasy & def.fantasy THEN
+    (* FCT ranged: attacker rolls once, no reply *)
+    roll := D6D6();
+    IF roll > fct[att.ftype][def.ftype] THEN
+      ReduceFigures(defSide, defIdx, 999);
+      COPY("FCT shot: KILL", msg)
+    ELSIF roll = fct[att.ftype][def.ftype] THEN
+      RetreatUnit(defSide, defIdx, 1);
+      COPY("FCT shot: fall back", msg)
+    ELSE
+      COPY("FCT shot: no effect", msg)
+    END;
+    RETURN
+  END;
 
-  (* Cover: halve dice in woods or town *)
+  IF att.fantasy THEN
+    (* Fantasy creature fires at normal troops *)
+    nd := ftShootDice[att.ftype];
+    kills := 0;
+    FOR i := 1 TO nd DO
+      d := D6(); IF d >= ftShootMin[att.ftype] THEN INC(kills) END
+    END;
+    ReduceFigures(defSide, defIdx, kills);
+    COPY(ftName[att.ftype], msg); AppendStr(msg, ": ");
+    IntStr(nd, numStr); AppendStr(msg, numStr);
+    AppendStr(msg, "d6->"); IntStr(kills, numStr); AppendStr(msg, numStr);
+    AppendStr(msg, " kill(s)");
+    RETURN
+  END;
+
+  (* Normal archer fires *)
+  IF def.fantasy THEN denType := ftDefType[def.ftype]
+  ELSE denType := def.utype
+  END;
+  nd := att.figures DIV shotDen[denType];
+  IF nd < 1 THEN nd := 1 END;
   IF (terrain[def.row][def.col] = TERR_WOOD) OR
      (terrain[def.row][def.col] = TERR_TOWN) THEN
-    nd := nd DIV 2;
-    IF nd < 1 THEN nd := 1 END
+    nd := nd DIV 2; IF nd < 1 THEN nd := 1 END
   END;
+  minScore := shotMin[denType];
 
   kills := 0;
   FOR i := 1 TO nd DO
-    d := D6();
-    IF d >= shotMin[def.utype] THEN INC(kills) END
+    d := D6(); IF d >= minScore THEN INC(kills) END
   END;
-
   ReduceFigures(defSide, defIdx, kills);
 
   COPY("Shot: ", msg); IntStr(nd, numStr); AppendStr(msg, numStr);
@@ -522,62 +683,133 @@ BEGIN
 END ResolveShot;
 
 (*
- * ResolveMelee: both sides exchange casualties simultaneously (Chainmail §Melees).
- * Attacker rolls meleeNum[effAtype][defType] * attFigures / meleeDen dice;
- * defender counter-attacks unless rear-attacked.
- * Flank/rear: treat attacker as next higher class.
- * Cavalry charged this turn: +1 die (impetus bonus).
+ * ResolveMelee: simultaneous casualties (Chainmail §Melees).
+ * Fantasy vs fantasy: Fantasy Combat Table (2d6, over=kill, equal=fall back).
+ * Fantasy vs normal: effective class/multiplier from ft* tables.
+ * Flank/rear, cavalry impetus, hill defence apply to normal-unit sides only.
  *)
 PROCEDURE ResolveMelee(attSide, attIdx, defSide, defIdx: INTEGER;
                        noCounter: BOOLEAN; VAR msg: ARRAY OF CHAR);
 VAR att, def: Unit;
     aArmy, dArmy: Army;
-    effAtype, effDtype: INTEGER;
-    nd, i, d, kills1, kills2: INTEGER;
-    flanked, rearAtt: BOOLEAN;
+    effAtype, effDtype, attFigs: INTEGER;
+    nd, i, d, kills1, kills2, roll1, roll2: INTEGER;
+    flanked, rearAtt, fb1, fb2: BOOLEAN;
     numStr: ARRAY 8 OF CHAR;
 BEGIN
   aArmy := ArmyOf(attSide); att := aArmy.units[attIdx];
   dArmy := ArmyOf(defSide); def := dArmy.units[defIdx];
 
-  rearAtt := IsRearAttack(att.col, att.row, def);
-  flanked := ~rearAtt & IsFlankOrRear(att.col, att.row, def);
+  rearAtt := FALSE; flanked := FALSE;
+  fb1 := FALSE; fb2 := FALSE;
 
-  effAtype := att.utype;
-  IF (flanked OR rearAtt) & (effAtype < HH) THEN INC(effAtype) END;
+  (* ── Fantasy vs Fantasy: use FCT ── *)
+  IF att.fantasy & def.fantasy THEN
+    kills1 := 0; kills2 := 0;
+    roll1 := D6D6();
+    IF    roll1 > fct[att.ftype][def.ftype] THEN kills1 := 999
+    ELSIF roll1 = fct[att.ftype][def.ftype] THEN fb1 := TRUE
+    END;
+    roll2 := 0;
+    IF ~noCounter THEN
+      roll2 := D6D6();
+      IF    roll2 > fct[def.ftype][att.ftype] THEN kills2 := 999
+      ELSIF roll2 = fct[def.ftype][att.ftype] THEN fb2 := TRUE
+      END
+    END;
+    IF kills1 > 0 THEN ReduceFigures(defSide, defIdx, kills1) END;
+    IF kills2 > 0 THEN ReduceFigures(attSide, attIdx, kills2) END;
+    aArmy := ArmyOf(attSide); dArmy := ArmyOf(defSide);
+    IF fb1 & dArmy.units[defIdx].alive THEN RetreatUnit(defSide, defIdx, 1) END;
+    IF fb2 & aArmy.units[attIdx].alive THEN RetreatUnit(attSide, attIdx, 1) END;
+    COPY("FCT ", msg);
+    IntStr(roll1, numStr); AppendStr(msg, numStr);
+    AppendStr(msg, "/"); IntStr(roll2, numStr); AppendStr(msg, numStr);
+    IF    kills1 > 0 THEN AppendStr(msg, " DEF KILLED")
+    ELSIF fb1        THEN AppendStr(msg, " def back")
+    END;
+    RETURN
+  END;
 
-  effDtype := def.utype;
+  (* ── Determine effective attacker type and figure count ── *)
+  IF att.fantasy THEN
+    effAtype := ftAttType[att.ftype];
+    attFigs  := ftAttMult[att.ftype]
+  ELSE
+    rearAtt := IsRearAttack(att.col, att.row, def);
+    flanked := ~rearAtt & IsFlankOrRear(att.col, att.row, def);
+    effAtype := att.utype;
+    IF (flanked OR rearAtt) & (effAtype < HH) THEN INC(effAtype) END;
+    attFigs := att.figures
+  END;
 
-  (* Attacker's dice *)
-  nd := meleeNum[effAtype][effDtype] * att.figures DIV meleeDen[effAtype][effDtype];
+  (* ── Determine effective defender type ── *)
+  IF def.fantasy THEN effDtype := ftDefType[def.ftype]
+  ELSE effDtype := def.utype
+  END;
+
+  (* ── Attacker rolls ── *)
+  nd := meleeNum[effAtype][effDtype] * attFigs DIV meleeDen[effAtype][effDtype];
   IF nd < 1 THEN nd := 1 END;
-  IF att.charged & (att.utype >= LHT) THEN INC(nd) END;   (* impetus *)
-  (* Hill defence: halve attacker dice when defender on hill *)
-  IF terrain[def.row][def.col] = TERR_HILL THEN nd := nd DIV 2; IF nd < 1 THEN nd := 1 END END;
-
+  IF ~att.fantasy & att.charged & (att.utype >= LHT) THEN INC(nd) END;
+  IF ~att.fantasy & ~def.fantasy & (terrain[def.row][def.col] = TERR_HILL) THEN
+    nd := nd DIV 2; IF nd < 1 THEN nd := 1 END
+  END;
   kills1 := 0;
   FOR i := 1 TO nd DO
     d := D6(); IF d >= meleeMin[effAtype][effDtype] THEN INC(kills1) END
   END;
 
-  (* Defender counter-attacks unless rear attack or noCounter flag set *)
+  (* ── Defender counter-attacks ── *)
   kills2 := 0;
   IF ~rearAtt & ~noCounter THEN
-    nd := meleeNum[effDtype][effAtype] * def.figures DIV meleeDen[effDtype][effAtype];
-    IF nd < 1 THEN nd := 1 END;
-    FOR i := 1 TO nd DO
-      d := D6(); IF d >= meleeMin[effDtype][effAtype] THEN INC(kills2) END
+    IF def.fantasy & ~att.fantasy THEN
+      (* Fantasy creature counter-attacks a normal attacker *)
+      nd := meleeNum[ftAttType[def.ftype]][effAtype] * ftAttMult[def.ftype]
+            DIV meleeDen[ftAttType[def.ftype]][effAtype];
+      IF nd < 1 THEN nd := 1 END;
+      FOR i := 1 TO nd DO
+        d := D6();
+        IF d >= meleeMin[ftAttType[def.ftype]][effAtype] THEN INC(kills2) END
+      END
+    ELSIF ~def.fantasy & att.fantasy THEN
+      (* Normal unit counter-attacks a fantasy attacker, using ftDefType *)
+      nd := meleeNum[def.utype][ftDefType[att.ftype]] * def.figures
+            DIV meleeDen[def.utype][ftDefType[att.ftype]];
+      IF nd < 1 THEN nd := 1 END;
+      FOR i := 1 TO nd DO
+        d := D6();
+        IF d >= meleeMin[def.utype][ftDefType[att.ftype]] THEN INC(kills2) END
+      END
+    ELSE
+      (* Both normal *)
+      nd := meleeNum[effDtype][effAtype] * def.figures DIV meleeDen[effDtype][effAtype];
+      IF nd < 1 THEN nd := 1 END;
+      FOR i := 1 TO nd DO
+        d := D6(); IF d >= meleeMin[effDtype][effAtype] THEN INC(kills2) END
+      END
     END
   END;
 
   ReduceFigures(defSide, defIdx, kills1);
   ReduceFigures(attSide, attIdx, kills2);
 
+  (* WRAITH: paralyze the normal enemy it touches *)
+  IF att.fantasy & (att.ftype = FT_WRAITH) & ~def.fantasy THEN
+    IF defSide = RED THEN red.units[defIdx].frozen := TRUE
+    ELSE blue.units[defIdx].frozen := TRUE
+    END;
+    AppendStr(msg, "")  (* placeholder so compiler doesn't optimise away *)
+  END;
+
   COPY("Melee: ", msg);
   IntStr(kills1, numStr); AppendStr(msg, numStr); AppendStr(msg, "k/");
   IntStr(kills2, numStr); AppendStr(msg, numStr); AppendStr(msg, "k");
   IF rearAtt THEN AppendStr(msg, " REAR!")
   ELSIF flanked THEN AppendStr(msg, " flank")
+  END;
+  IF att.fantasy & (att.ftype = FT_WRAITH) & ~def.fantasy THEN
+    AppendStr(msg, " PARALYZE")
   END
 END ResolveMelee;
 
@@ -624,25 +856,45 @@ VAR a: Army; u: Unit; roll: INTEGER;
     numStr: ARRAY 8 OF CHAR;
 BEGIN
   a := ArmyOf(side); u := a.units[idx];
+  IF u.fantasy & ftNoMorale[u.ftype] THEN RETURN TRUE END;
   IF u.moraleChecked THEN RETURN TRUE END;
-  IF u.figures > moraleThresh[u.utype] THEN RETURN TRUE END;
+  IF u.fantasy THEN
+    IF u.figures > ftFigsStart[u.ftype] DIV 2 THEN RETURN TRUE END
+  ELSE
+    IF u.figures > moraleThresh[u.utype] THEN RETURN TRUE END
+  END;
 
   (* Mark as checked so we only roll once per threshold crossing *)
   a.units[idx].moraleChecked := TRUE;
   SetArmy(side, a);
 
   roll := D6D6();
-  IF roll >= moraleScore[u.utype] THEN
-    COPY(unitName[u.utype], msg);
-    AppendStr(msg, " stands (morale ");
-    IntStr(roll, numStr); AppendStr(msg, numStr); AppendStr(msg, ")");
-    RETURN TRUE
+  IF u.fantasy THEN
+    IF roll >= 7 THEN  (* fantasy creatures need 7+ to stand *)
+      COPY(ftName[u.ftype], msg);
+      AppendStr(msg, " stands (morale ");
+      IntStr(roll, numStr); AppendStr(msg, numStr); AppendStr(msg, ")");
+      RETURN TRUE
+    ELSE
+      COPY(ftName[u.ftype], msg);
+      AppendStr(msg, " retreats! (");
+      IntStr(roll, numStr); AppendStr(msg, numStr); AppendStr(msg, ")");
+      RetreatUnit(side, idx, 2);
+      RETURN FALSE
+    END
   ELSE
-    COPY(unitName[u.utype], msg);
-    AppendStr(msg, " retreats! (morale ");
-    IntStr(roll, numStr); AppendStr(msg, numStr); AppendStr(msg, ")");
-    RetreatUnit(side, idx, 2);
-    RETURN FALSE
+    IF roll >= moraleScore[u.utype] THEN
+      COPY(unitName[u.utype], msg);
+      AppendStr(msg, " stands (morale ");
+      IntStr(roll, numStr); AppendStr(msg, numStr); AppendStr(msg, ")");
+      RETURN TRUE
+    ELSE
+      COPY(unitName[u.utype], msg);
+      AppendStr(msg, " retreats! (morale ");
+      IntStr(roll, numStr); AppendStr(msg, numStr); AppendStr(msg, ")");
+      RetreatUnit(side, idx, 2);
+      RETURN FALSE
+    END
   END
 END CheckUnitMorale;
 
@@ -899,23 +1151,37 @@ PROCEDURE DoAITurn;
 VAR i, tSide, tIdx: INTEGER;
     msg: ARRAY 64 OF CHAR;
     moraleMsg: ARRAY 64 OF CHAR;
-    noCounter: BOOLEAN;
+    noCounter, canShoot: BOOLEAN;
 BEGIN
-  (* Move *)
+  (* Move — frozen units skip movement (ValidMoveTarget returns FALSE for frozen) *)
   FOR i := 0 TO blue.count - 1 DO
     IF blue.units[i].alive & ~blue.units[i].moved THEN AIMoveUnit(i) END
   END;
 
-  (* Shoot (only LF archers) *)
+  (* Shoot: LF archers and fantasy creatures with ranged ability *)
   FOR i := 0 TO blue.count - 1 DO
-    IF blue.units[i].alive & (blue.units[i].utype = LF) THEN
-      AIFindShotTarget(i, tSide, tIdx);
-      IF tIdx >= 0 THEN
-        ResolveShot(BLUE, i, tSide, tIdx, msg);
-        AppendLog(msg);
-        blue.units[i].shot := TRUE;
-        IF red.units[tIdx].alive THEN
-          IF ~CheckUnitMorale(RED, tIdx, moraleMsg) THEN AppendLog(moraleMsg) END
+    IF blue.units[i].alive & ~blue.units[i].shot THEN
+      IF blue.units[i].fantasy THEN
+        canShoot := ftHasShoot[blue.units[i].ftype]
+      ELSE
+        canShoot := (blue.units[i].utype = LF) & ~blue.units[i].moved
+      END;
+      IF canShoot THEN
+        AIFindShotTarget(i, tSide, tIdx);
+        IF tIdx >= 0 THEN
+          ResolveShot(BLUE, i, tSide, tIdx, msg);
+          AppendLog(msg);
+          blue.units[i].shot := TRUE;
+          (* Morale check for target *)
+          IF tSide = RED THEN
+            IF red.units[tIdx].alive THEN
+              IF ~CheckUnitMorale(RED, tIdx, moraleMsg) THEN AppendLog(moraleMsg) END
+            END
+          ELSE
+            IF blue.units[tIdx].alive THEN
+              IF ~CheckUnitMorale(BLUE, tIdx, moraleMsg) THEN AppendLog(moraleMsg) END
+            END
+          END
         END
       END
     END
@@ -975,9 +1241,13 @@ BEGIN
   END;
 
   isShootable := FALSE;
-  IF (selUnit < 0) & (phase = PH_SHOOT) & (uSide = RED) THEN
-    isShootable := (uIdx >= 0) & (red.units[uIdx].utype = LF) &
-                   ~red.units[uIdx].shot & ~red.units[uIdx].moved
+  IF (selUnit < 0) & (phase = PH_SHOOT) & (uSide = RED) & (uIdx >= 0) THEN
+    IF red.units[uIdx].fantasy THEN
+      isShootable := ftHasShoot[red.units[uIdx].ftype] & ~red.units[uIdx].shot
+    ELSE
+      isShootable := (red.units[uIdx].utype = LF) &
+                     ~red.units[uIdx].shot & ~red.units[uIdx].moved
+    END
   END;
 
   isTargetable := FALSE;
@@ -1006,7 +1276,7 @@ BEGIN
       IF ~isCursor & ~isTargetable THEN fg := TUI.Cyan ELSE fg := TUI.Black END;
       c0 := 'B'
     END;
-    c1 := unitGlyph[u.utype]
+    IF u.fantasy THEN c1 := ftGlyph[u.ftype] ELSE c1 := unitGlyph[u.utype] END
   ELSE
     IF isCursor OR isValidMove THEN fg := TUI.Black ELSE fg := TUI.White END;
     IF terrain[row][col] = TERR_HILL THEN c0 := '^'
@@ -1053,7 +1323,9 @@ BEGIN
   FOR i := 0 TO red.count - 1 DO
     u := red.units[i];
     fg := TUI.White;
-    TUI.PutStr(sx,      sy, unitName[u.utype], fg, TUI.Black);
+    IF u.fantasy THEN TUI.PutStr(sx, sy, ftName[u.ftype],   fg, TUI.Black)
+    ELSE              TUI.PutStr(sx, sy, unitName[u.utype], fg, TUI.Black)
+    END;
     IntStr(u.figures, num);
     TUI.PutStr(sx + 14, sy, num, fg, TUI.Black);
     IF ~u.alive THEN TUI.PutStr(sx + 17, sy, "X", TUI.Red, TUI.Black) END;
@@ -1064,7 +1336,9 @@ BEGIN
   FOR i := 0 TO blue.count - 1 DO
     u := blue.units[i];
     fg := TUI.White;
-    TUI.PutStr(sx,      sy, unitName[u.utype], fg, TUI.Black);
+    IF u.fantasy THEN TUI.PutStr(sx, sy, ftName[u.ftype],   fg, TUI.Black)
+    ELSE              TUI.PutStr(sx, sy, unitName[u.utype], fg, TUI.Black)
+    END;
     IntStr(u.figures, num);
     TUI.PutStr(sx + 14, sy, num, fg, TUI.Black);
     IF ~u.alive THEN TUI.PutStr(sx + 17, sy, "X", TUI.Cyan, TUI.Black) END;
@@ -1113,30 +1387,48 @@ BEGIN
   a := ArmyOf(uSide); u := a.units[uIdx];
   IF uSide = RED THEN fg := TUI.Red ELSE fg := TUI.Cyan END;
 
-  COPY(unitName[u.utype], s); PutPanel(PANY, s, fg);
+  IF u.fantasy THEN COPY(ftName[u.ftype], s) ELSE COPY(unitName[u.utype], s) END;
+  PutPanel(PANY, s, fg);
 
   IF uSide = RED THEN COPY("Red ", s) ELSE COPY("Blu ", s) END;
-  IntStr(u.figures, n); AppendStr(s, n); AppendStr(s, "/10 figs  ");
+  IntStr(u.figures, n); AppendStr(s, n); AppendStr(s, " hp  ");
   CASE u.facing OF NORTH: AppendStr(s, "N") | EAST: AppendStr(s, "E")
                  | SOUTH: AppendStr(s, "S") | WEST: AppendStr(s, "W") END;
   PutPanel(PANY+1, s, fg);
 
-  COPY("mv:", s); IntStr(moveAllow[u.utype], n); AppendStr(s, n);
+  IF u.fantasy THEN
+    COPY("mv:", s); IntStr(ftMoveAllow[u.ftype], n); AppendStr(s, n);
+    IF ftCanFly[u.ftype] THEN AppendStr(s, " fly") END
+  ELSE
+    COPY("mv:", s); IntStr(moveAllow[u.utype], n); AppendStr(s, n)
+  END;
   PutPanel(PANY+2, s, TUI.White);
 
-  IF u.utype = LF THEN COPY("sht:rng5", s)
-  ELSE COPY("sht:none", s)
+  IF u.fantasy THEN
+    IF ftHasShoot[u.ftype] THEN
+      COPY("sht:rng", s); IntStr(ftShootRange[u.ftype], n); AppendStr(s, n)
+    ELSE COPY("sht:none", s)
+    END
+  ELSE
+    IF u.utype = LF THEN COPY("sht:rng5", s) ELSE COPY("sht:none", s) END
   END;
   PutPanel(PANY+3, s, TUI.White);
 
-  COPY("m:", s); IntStr(meleeNum[u.utype][u.utype], n); AppendStr(s, n);
-  AppendStr(s, "/"); IntStr(meleeMin[u.utype][u.utype], n); AppendStr(s, n);
+  IF u.fantasy THEN
+    COPY("FCT:", s); IntStr(fct[u.ftype][u.ftype], n); AppendStr(s, n)
+  ELSE
+    COPY("m:", s); IntStr(meleeNum[u.utype][u.utype], n); AppendStr(s, n);
+    AppendStr(s, "/"); IntStr(meleeMin[u.utype][u.utype], n); AppendStr(s, n)
+  END;
   PutPanel(PANY+4, s, TUI.White);
 
   s[0] := 0X;
-  IF u.charged THEN COPY("chg!", s) END;
-  IF u.moraleChecked THEN
-    IF s[0] # 0X THEN AppendStr(s, " ") END; AppendStr(s, "shaken")
+  IF u.frozen THEN COPY("FROZEN", s)
+  ELSE
+    IF u.charged THEN COPY("chg!", s) END;
+    IF u.moraleChecked THEN
+      IF s[0] # 0X THEN AppendStr(s, " ") END; AppendStr(s, "shaken")
+    END
   END;
   PutPanel(PANY+5, s, TUI.Yellow)
 END DrawCursorInfo;
@@ -1144,7 +1436,11 @@ END DrawCursorInfo;
 PROCEDURE DrawStatus;
 VAR s: ARRAY 64 OF CHAR; n: ARRAY 8 OF CHAR;
 BEGIN
-  TUI.PutStr(1, 1, "CHAINMAIL — Medieval Miniatures (Gygax & Perren 1971)", TUI.Yellow, TUI.Black);
+  IF fantasyMode THEN
+    TUI.PutStr(1, 1, "CHAINMAIL — Medieval + Fantasy (Gygax & Perren 1971) ", TUI.Yellow, TUI.Black)
+  ELSE
+    TUI.PutStr(1, 1, "CHAINMAIL — Medieval Miniatures (Gygax & Perren 1971)", TUI.Yellow, TUI.Black)
+  END;
   IF activeSide = RED THEN COPY("[RED]  ", s) ELSE COPY("[BLUE] ", s) END;
   AppendStr(s, "Turn "); IntStr(turn, n); AppendStr(s, n);
   AppendStr(s, "/"); IntStr(TURNS, n); AppendStr(s, n); AppendStr(s, "  ");
@@ -1228,7 +1524,9 @@ BEGIN
   ELSIF key = TUI.KEnter THEN
     IF selUnit < 0 THEN
       UnitAt(curCol, curRow, oSide, oIdx);
-      IF (oSide = RED) & ~red.units[oIdx].moved THEN selUnit := oIdx END
+      IF (oSide = RED) & ~red.units[oIdx].moved & ~red.units[oIdx].frozen THEN
+        selUnit := oIdx
+      END
     ELSE
       IF ~red.units[selUnit].moved & ValidMoveTarget(RED, selUnit, curCol, curRow) THEN
         IF undoTop < MAX_UNITS THEN
@@ -1300,7 +1598,16 @@ BEGIN
     IF selUnit < 0 THEN
       UnitAt(curCol, curRow, oSide, oIdx);
       IF oSide = RED THEN
-        IF red.units[oIdx].utype # LF THEN AppendLog("Only Light Foot can shoot.")
+        IF red.units[oIdx].fantasy THEN
+          IF ~ftHasShoot[red.units[oIdx].ftype] THEN
+            AppendLog("This creature cannot shoot.")
+          ELSIF red.units[oIdx].shot THEN
+            AppendLog("Already shot this turn.")
+          ELSE
+            selUnit := oIdx;
+            IF ~HasShootTargets(RED, oIdx) THEN AppendLog("No targets in range.") END
+          END
+        ELSIF red.units[oIdx].utype # LF THEN AppendLog("Only Light Foot can shoot.")
         ELSIF red.units[oIdx].shot   THEN AppendLog("Already shot this turn.")
         ELSIF red.units[oIdx].moved  THEN AppendLog("Moved this turn - no shooting.")
         ELSE
@@ -1342,7 +1649,8 @@ BEGIN
   FOR i := 0 TO a.count - 1 DO
     a.units[i].moved   := FALSE;
     a.units[i].shot    := FALSE;
-    a.units[i].charged := FALSE
+    a.units[i].charged := FALSE;
+    a.units[i].frozen  := FALSE
   END;
   SetArmy(side, a)
 END ClearTurnFlags;
@@ -1469,13 +1777,16 @@ BEGIN
 END InitScenarioRandom;
 
 PROCEDURE DeployArmy(VAR a: Army; side: INTEGER; roll: INTEGER);
-VAR i, col, row, t: INTEGER; startRow: INTEGER;
+VAR i, col, row, t, last, ft: INTEGER; startRow: INTEGER;
 BEGIN
   a.side  := side; a.count := MAX_UNITS;
   IF side = RED THEN startRow := 1 ELSE startRow := GRID_H - 2 END;
   FOR i := 0 TO MAX_UNITS - 1 DO
     a.units[i].utype         := compTable[roll][i];
     a.units[i].figures       := FIGS_START;
+    a.units[i].fantasy       := FALSE;
+    a.units[i].ftype         := 0;
+    a.units[i].frozen        := FALSE;
     col := 1 + i * 2; row := startRow;
     t := terrain[row][col];
     WHILE (t = TERR_MARSH) OR (t = TERR_RIVER) DO
@@ -1484,16 +1795,26 @@ BEGIN
       ELSE t := terrain[row][col]
       END
     END;
-    a.units[i].col          := col;
-    a.units[i].row          := row;
-    a.units[i].alive        := TRUE;
-    a.units[i].moved        := FALSE;
-    a.units[i].shot         := FALSE;
-    a.units[i].charged      := FALSE;
+    a.units[i].col           := col;
+    a.units[i].row           := row;
+    a.units[i].alive         := TRUE;
+    a.units[i].moved         := FALSE;
+    a.units[i].shot          := FALSE;
+    a.units[i].charged       := FALSE;
     a.units[i].moraleChecked := FALSE;
     IF side = RED THEN a.units[i].facing := SOUTH
     ELSE               a.units[i].facing := NORTH
     END
+  END;
+  IF fantasyMode THEN
+    (* Replace last unit with a random fantasy creature *)
+    last := MAX_UNITS - 1;
+    ft   := Random.Int(NFTYPES);
+    a.units[last].utype         := 0;
+    a.units[last].fantasy       := TRUE;
+    a.units[last].ftype         := ft;
+    a.units[last].figures       := ftFigsStart[ft];
+    a.units[last].moraleChecked := FALSE
   END
 END DeployArmy;
 
@@ -1531,11 +1852,31 @@ BEGIN
       ELSIF ev2.key = 17       THEN TUI.Done; HALT(0)
       END
     END
+  END;
+
+  (* Fantasy supplement option *)
+  TUI.PutStr(2, 11, "─────────────────────────────────────────────────────", TUI.White, TUI.Black);
+  TUI.PutStr(2, 12, "Fantasy Supplement (Appendix D/E)?", TUI.Magenta, TUI.Black);
+  TUI.PutStr(2, 13, "Each army gains 1 fantasy creature:", TUI.White, TUI.Black);
+  TUI.PutStr(4, 14, "Hero @ / SuperHero S / Wizard W / Wraith G",        TUI.White, TUI.Black);
+  TUI.PutStr(4, 15, "Ogre O / Balrog ! / Giant J / Dragon D",             TUI.White, TUI.Black);
+  TUI.PutStr(2, 16, "FCT combat, fly, breath weapons, paralyze.", TUI.White, TUI.Black);
+  TUI.PutStr(2, 17, "Press Y / N:", TUI.White, TUI.Black);
+  TUI.Flush;
+  fantasyMode := FALSE;
+  LOOP
+    TUI.WaitEvent(ev2);
+    IF ev2.kind = TUI.EvKey THEN
+      IF    (ev2.key = ORD('y')) OR (ev2.key = ORD('Y')) THEN fantasyMode := TRUE;  EXIT
+      ELSIF (ev2.key = ORD('n')) OR (ev2.key = ORD('N')) THEN fantasyMode := FALSE; EXIT
+      ELSIF ev2.key = 17                                  THEN TUI.Done; HALT(0)
+      END
+    END
   END
 END ChooseScenario;
 
 PROCEDURE ShowRoll(side: INTEGER; roll: INTEGER);
-VAR sx, sy, i: INTEGER; fg: INTEGER; a: Army; n: ARRAY 4 OF CHAR;
+VAR sx, sy, i: INTEGER; fg: INTEGER; a: Army; u: Unit; n: ARRAY 4 OF CHAR;
 BEGIN
   sy := 0; sx := 2;
   IF side = BLUE THEN sy := 9 END;
@@ -1547,7 +1888,10 @@ BEGIN
   TUI.PutStr(sx + 17, sy, ")", TUI.White, TUI.Black);
   a := ArmyOf(side);
   FOR i := 0 TO MAX_UNITS - 1 DO
-    TUI.PutStr(sx + 2, sy + 1 + i, unitName[a.units[i].utype], TUI.White, TUI.Black)
+    u := a.units[i];
+    IF u.fantasy THEN TUI.PutStr(sx + 2, sy + 1 + i, ftName[u.ftype],   TUI.Magenta, TUI.Black)
+    ELSE              TUI.PutStr(sx + 2, sy + 1 + i, unitName[u.utype], TUI.White,   TUI.Black)
+    END
   END
 END ShowRoll;
 
