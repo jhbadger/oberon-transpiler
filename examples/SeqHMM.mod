@@ -22,7 +22,7 @@ MODULE SeqHMM;
     Local entry into any match state k costs logEntry = ln(1/L).
     Bit score = (best_viterbi - null_score) / ln(2).
     Outputs TSV of hits above threshold (default 10 bits):
-      seq_name  model_name  bits  evalue  seq_len
+      seq_name  model_name  bits  evalue  hit_start  hit_end  seq_len
 
   Align mode:   SeqHMM align  <model.hmm> <seqs.fa> [-t <minBits>] [-o <out.afa>]
     Aligns each sequence to the profile using Viterbi traceback.
@@ -385,6 +385,105 @@ BEGIN
   ELSE RETURN NegInf
   END
 END Viterbi;
+
+(* ------------------------------------------------------------------ *)
+(*  Viterbi with hit-position tracking (no traceback tables needed)   *)
+(* ------------------------------------------------------------------ *)
+
+PROCEDURE ViterbiHitPos(seq: BioSeq.Seq; dbTotalRes: INTEGER;
+                         VAR hitStart, hitEnd: INTEGER): REAL;
+(*
+  Same DP as Viterbi but also tracks the first and last sequence positions
+  consumed by the best local alignment.  Returns bit score; sets hitStart
+  and hitEnd to 0-based inclusive positions.
+*)
+VAR
+  T, k, j, ri   : INTEGER;
+  best, logEntry, score, v : REAL;
+  c              : CHAR;
+  mVal, iVal, dVal : REAL;
+  sM, sI         : INTEGER;
+  startM, startMprev : ARRAY MaxLen + 2 OF INTEGER;
+  startI, startIprev : ARRAY MaxLen + 2 OF INTEGER;
+  startD         : ARRAY MaxLen + 2 OF INTEGER;
+BEGIN
+  T := LoadSeq(seq);
+  IF (T = 0) OR (hmmLen = 0) THEN
+    hitStart := 0; hitEnd := 0; RETURN NegInf
+  END;
+
+  logEntry := Math.ln(1.0 / FLT(hmmLen));
+
+  FOR k := 0 TO hmmLen + 1 DO
+    vMprev[k] := NegInf; vIprev[k] := NegInf; vD[k] := NegInf;
+    startMprev[k] := 0; startIprev[k] := 0; startD[k] := 0
+  END;
+  score := NegInf; hitStart := 0; hitEnd := 0;
+
+  FOR j := 0 TO T - 1 DO
+    c  := seqBuf[j];
+    ri := ResIdx(c);
+    FOR k := 0 TO hmmLen - 1 DO vM[k] := NegInf; vI[k] := NegInf END;
+    vD[0] := NegInf; startD[0] := j;
+
+    FOR k := 0 TO hmmLen - 1 DO
+      (* Delete D_k: predecessors are M_{k-1} and D_{k-1} at current j *)
+      IF k > 0 THEN
+        IF SafeAdd(vM[k-1], logTrans[k-1][TMD]) >=
+           SafeAdd(vD[k-1], logTrans[k-1][TDD]) THEN
+          dVal    := SafeAdd(vM[k-1], logTrans[k-1][TMD]);
+          startD[k] := startM[k-1]
+        ELSE
+          dVal    := SafeAdd(vD[k-1], logTrans[k-1][TDD]);
+          startD[k] := startD[k-1]
+        END;
+        vD[k] := dVal
+      END;
+
+      (* Match M_k: best among {M_{k-1}, I_{k-1}, D_{k-1}} from prev row + logEntry *)
+      IF k = 0 THEN
+        best := logEntry; sM := j
+      ELSE
+        best := logEntry; sM := j;
+        v := SafeAdd(vMprev[k-1], logTrans[k-1][TMM]);
+        IF v > best THEN best := v; sM := startMprev[k-1] END;
+        v := SafeAdd(vIprev[k-1], logTrans[k-1][TIM]);
+        IF v > best THEN best := v; sM := startIprev[k-1] END;
+        v := SafeAdd(vD[k-1], logTrans[k-1][TDM]);
+        IF v > best THEN best := v; sM := startD[k-1] END
+      END;
+      IF ri >= 0 THEN mVal := logEmitM[k][ri] + best ELSE mVal := NegInf END;
+      vM[k] := mVal; startM[k] := sM;
+
+      (* Insert I_k: predecessors are M_k and I_k from prev row *)
+      IF ri >= 0 THEN
+        IF SafeAdd(vMprev[k], logTrans[k][TMI]) >=
+           SafeAdd(vIprev[k], logTrans[k][TII]) THEN
+          iVal := logEmitI[ri] + SafeAdd(vMprev[k], logTrans[k][TMI]);
+          sI   := startMprev[k]
+        ELSE
+          iVal := logEmitI[ri] + SafeAdd(vIprev[k], logTrans[k][TII]);
+          sI   := startIprev[k]
+        END
+      ELSE iVal := NegInf; sI := 0
+      END;
+      vI[k] := iVal; startI[k] := sI;
+
+      IF vM[k] > score THEN
+        score := vM[k]; hitEnd := j; hitStart := startM[k]
+      END
+    END;
+
+    FOR k := 0 TO hmmLen - 1 DO
+      vMprev[k] := vM[k]; vIprev[k] := vI[k];
+      startMprev[k] := startM[k]; startIprev[k] := startI[k]
+    END
+  END;
+
+  IF ~IsNegInf(score) THEN RETURN score / Math.ln(2.0)
+  ELSE hitStart := 0; hitEnd := 0; RETURN NegInf
+  END
+END ViterbiHitPos;
 
 (* ------------------------------------------------------------------ *)
 (*  Viterbi with traceback                                             *)
@@ -1105,6 +1204,7 @@ VAR
   seqLen     : INTEGER;
   hits       : INTEGER;
   dbTotalRes : INTEGER;
+  hitStart, hitEnd : INTEGER;
 BEGIN
   IF ~ReadHMM(hmmPath) THEN
     Out.String("Error: cannot read profile from "); Out.String(hmmPath); Out.Ln;
@@ -1126,11 +1226,13 @@ BEGIN
   Out.String("model_name"); Out.Char(9X);
   Out.String("bits"); Out.Char(9X);
   Out.String("evalue"); Out.Char(9X);
+  Out.String("hit_start"); Out.Char(9X);
+  Out.String("hit_end"); Out.Char(9X);
   Out.String("seq_len"); Out.Ln;
 
   hits := 0; rec.seq := NIL;
   WHILE BioIO.ReadFasta(rdr, rec) DO
-    bits := Viterbi(rec.seq, dbTotalRes);
+    bits := ViterbiHitPos(rec.seq, dbTotalRes, hitStart, hitEnd);
     IF bits >= minBits THEN
       seqLen := BioSeq.Length(rec.seq);
       evalue := CalcEvalue(dbTotalRes, bits);
@@ -1138,6 +1240,8 @@ BEGIN
       Out.String(hmmName);  Out.Char(9X);
       Out.Fixed(bits, 0, 2); Out.Char(9X);
       PrintEvalue(evalue);   Out.Char(9X);
+      Out.Int(hitStart + 1, 0); Out.Char(9X);
+      Out.Int(hitEnd + 1, 0);   Out.Char(9X);
       Out.Int(seqLen, 0); Out.Ln;
       INC(hits)
     END
