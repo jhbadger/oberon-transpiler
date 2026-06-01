@@ -159,23 +159,6 @@ END HashLookup;
 (*  Sequence loading                                                    *)
 (* ------------------------------------------------------------------ *)
 
-PROCEDURE IsNucSeq(seq: BioSeq.Seq): BOOLEAN;
-(* Returns TRUE when >= 75 % of the first 100 residues are A/C/G/T/U/N. *)
-VAR i, len, nuc, tot: INTEGER; c: CHAR;
-BEGIN
-  len := BioSeq.Length(seq);
-  IF len > 100 THEN len := 100 END;
-  nuc := 0; tot := 0;
-  FOR i := 0 TO len - 1 DO
-    c := BioSeq.Get(seq, i);
-    IF (c >= 'a') & (c <= 'z') THEN c := CHR(ORD(c) - 32) END;
-    INC(tot);
-    IF (c = 'A') OR (c = 'C') OR (c = 'G') OR (c = 'T') OR
-       (c = 'U') OR (c = 'N') THEN INC(nuc) END
-  END;
-  RETURN (tot > 0) & (nuc * 100 >= tot * 75)
-END IsNucSeq;
-
 PROCEDURE LoadOrg(org: INTEGER; path: ARRAY OF CHAR): BOOLEAN;
 VAR rdr: BioIO.FastaReader; rec: BioIO.FastaRecord; cnt, i: INTEGER;
 BEGIN
@@ -424,7 +407,7 @@ BEGIN
 
   (* Detect sequence type from first loaded sequence *)
   IF seqCnt[0] > 0 THEN
-    isProtein := ~IsNucSeq(seqStore[0][0])
+    isProtein := ~BioSeq.IsNucleotide(seqStore[0][0])
   ELSE
     isProtein := TRUE
   END;

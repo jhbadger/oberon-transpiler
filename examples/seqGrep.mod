@@ -87,20 +87,6 @@ END Decompress;
    Nucleotide detection (same heuristic as FastaStats)
    ----------------------------------------------------------------------- *)
 
-PROCEDURE IsNucleotide(seq: BioSeq.Seq): BOOLEAN;
-VAR total, nucl: INTEGER;
-BEGIN
-  total := BioSeq.Length(seq);
-  IF total = 0 THEN RETURN TRUE END;
-  nucl := BioSeq.Count(seq, 'A') + BioSeq.Count(seq, 'T') +
-          BioSeq.Count(seq, 'G') + BioSeq.Count(seq, 'C') +
-          BioSeq.Count(seq, 'U') + BioSeq.Count(seq, 'N') +
-          BioSeq.Count(seq, 'a') + BioSeq.Count(seq, 't') +
-          BioSeq.Count(seq, 'g') + BioSeq.Count(seq, 'c') +
-          BioSeq.Count(seq, 'u') + BioSeq.Count(seq, 'n');
-  RETURN (FLT(nucl) / FLT(total)) > 0.85
-END IsNucleotide;
-
 (* -----------------------------------------------------------------------
    Search helpers
    ----------------------------------------------------------------------- *)
@@ -338,7 +324,7 @@ BEGIN
   rec.seq := NIL;
   WHILE BioIO.ReadFasta(rdr, rec) DO
     IF ~typeKnown THEN
-      isNucl    := IsNucleotide(rec.seq);
+      isNucl    := BioSeq.IsNucleotide(rec.seq);
       typeKnown := TRUE
     END;
     ProcessSeq(origName, rec.name, rec.desc, rec.seq, NIL,
@@ -364,7 +350,7 @@ BEGIN
   rec.seq := NIL; rec.qual := NIL;
   WHILE BioIO.ReadFastq(rdr, rec) DO
     IF ~typeKnown THEN
-      isNucl    := IsNucleotide(rec.seq);
+      isNucl    := BioSeq.IsNucleotide(rec.seq);
       typeKnown := TRUE
     END;
     ProcessSeq(origName, rec.name, "", rec.seq, rec.qual,

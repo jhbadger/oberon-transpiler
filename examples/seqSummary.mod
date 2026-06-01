@@ -28,20 +28,6 @@ VAR
 
 (* ---- helpers --------------------------------------------------------- *)
 
-PROCEDURE IsNucleotide(seq: BioSeq.Seq): BOOLEAN;
-VAR total, nucl: INTEGER;
-BEGIN
-  total := BioSeq.Length(seq);
-  IF total = 0 THEN RETURN TRUE END;
-  nucl := BioSeq.Count(seq, 'A') + BioSeq.Count(seq, 'T') +
-          BioSeq.Count(seq, 'G') + BioSeq.Count(seq, 'C') +
-          BioSeq.Count(seq, 'U') + BioSeq.Count(seq, 'N') +
-          BioSeq.Count(seq, 'a') + BioSeq.Count(seq, 't') +
-          BioSeq.Count(seq, 'g') + BioSeq.Count(seq, 'c') +
-          BioSeq.Count(seq, 'u') + BioSeq.Count(seq, 'n');
-  RETURN (FLT(nucl) / FLT(total)) > 0.85
-END IsNucleotide;
-
 (* Detect format from file extension, ignoring a trailing ".gz". *)
 PROCEDURE DetectFormat(fname: ARRAY OF CHAR): FileFormat;
 VAR base: ARRAY 1024 OF CHAR; len: INTEGER;
@@ -177,7 +163,7 @@ PROCEDURE ProcessSeq(name: ARRAY OF CHAR; seq: BioSeq.Seq; summary: BOOLEAN);
 VAR size, gc, i: INTEGER; aa: ARRAY NumAA OF INTEGER;
 BEGIN
   IF ~type_known THEN
-    is_nucl    := IsNucleotide(seq);
+    is_nucl    := BioSeq.IsNucleotide(seq);
     type_known := TRUE;
     FOR i := 0 TO NumAA - 1 DO total_aa_count[i] := 0 END;
     IF ~summary THEN PrintHeader(is_nucl) END

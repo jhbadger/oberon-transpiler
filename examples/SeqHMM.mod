@@ -103,19 +103,10 @@ BEGIN
 END ResIdx;
 
 PROCEDURE DetectAlph(): INTEGER;
-VAR s, i, len: INTEGER; c: CHAR;
+VAR s: INTEGER;
 BEGIN
   FOR s := 0 TO seqCount - 1 DO
-    len := BioSeq.Length(seqs[s]);
-    FOR i := 0 TO len - 1 DO
-      c := CAP(BioSeq.Get(seqs[s], i));
-      IF (c = 'D') OR (c = 'E') OR (c = 'F') OR (c = 'H') OR
-         (c = 'I') OR (c = 'K') OR (c = 'L') OR (c = 'M') OR
-         (c = 'N') OR (c = 'P') OR (c = 'Q') OR (c = 'R') OR
-         (c = 'S') OR (c = 'V') OR (c = 'W') OR (c = 'Y') THEN
-        RETURN 20
-      END
-    END
+    IF ~BioSeq.IsNucleotide(seqs[s]) THEN RETURN 20 END
   END;
   RETURN 4
 END DetectAlph;

@@ -234,6 +234,26 @@ BEGIN
   RETURN n
 END Count;
 
+PROCEDURE IsNucleotide*(s: Seq): BOOLEAN;
+(* Returns TRUE when >= 85% of residues are A/C/G/T/U/N (case-insensitive). *)
+VAR total, nucl: INTEGER; c: ChunkPtr; i: INTEGER; ch: CHAR;
+BEGIN
+  IF (s = NIL) OR (s.length = 0) THEN RETURN TRUE END;
+  total := 0; nucl := 0;
+  c := s.head;
+  WHILE c # NIL DO
+    FOR i := 0 TO c.len - 1 DO
+      ch := c.data[i];
+      IF (ch >= 'a') & (ch <= 'z') THEN ch := CHR(ORD(ch) - 32) END;
+      INC(total);
+      IF (ch = 'A') OR (ch = 'C') OR (ch = 'G') OR (ch = 'T') OR
+         (ch = 'U') OR (ch = 'N') THEN INC(nucl) END
+    END;
+    c := c.next
+  END;
+  RETURN nucl * 100 >= total * 85
+END IsNucleotide;
+
 PROCEDURE GCContent*(s: Seq): REAL;
 (*
     Return the fraction of G and C bases (upper or lower case).
