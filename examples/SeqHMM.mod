@@ -10,6 +10,12 @@ MODULE SeqHMM;
     Insert-state transitions are fixed: TMI=1%, TIM=90%, TII=10%.
     Writes a binary .hmm profile.
 
+  Emit mode:    SeqHMM emit   <model.hmm> [-n <count>] [-c]
+    -c: emit the consensus (argmax residue at each match state).
+    Default: stochastically sample sequences by walking the HMM state machine
+    (match → emit from profile; insert → emit from background; delete → skip).
+    Insert loops are capped at 100 per position to bound output length.
+
   Search mode:  SeqHMM search <model.hmm> <db.fa> [-t <minBits>]
     Reads profile and FASTA database.
     Scores each sequence with local Viterbi in log space.
@@ -28,7 +34,7 @@ MODULE SeqHMM;
     WriteReal logTrans[0..L-1][0..6]         (TMM TMI TMD TIM TII TDM TDD)
 *)
 
-IMPORT BioIO, BioSeq, Files, Out, Args, Strings, Math;
+IMPORT BioIO, BioSeq, Files, Out, Args, Strings, Math, Random;
 
 CONST
   MaxLen  = 2000;
@@ -385,6 +391,141 @@ BEGIN
 END PrintEvalue;
 
 (* ------------------------------------------------------------------ *)
+(*  Emit mode                                                           *)
+(* ------------------------------------------------------------------ *)
+
+PROCEDURE IdxToRes(idx: INTEGER): CHAR;
+BEGIN
+  IF hmmAlph = 4 THEN
+    IF    idx = 0 THEN RETURN 'A' ELSIF idx = 1 THEN RETURN 'C'
+    ELSIF idx = 2 THEN RETURN 'G' ELSE               RETURN 'T'
+    END
+  ELSE
+    IF    idx =  0 THEN RETURN 'A' ELSIF idx =  1 THEN RETURN 'C'
+    ELSIF idx =  2 THEN RETURN 'D' ELSIF idx =  3 THEN RETURN 'E'
+    ELSIF idx =  4 THEN RETURN 'F' ELSIF idx =  5 THEN RETURN 'G'
+    ELSIF idx =  6 THEN RETURN 'H' ELSIF idx =  7 THEN RETURN 'I'
+    ELSIF idx =  8 THEN RETURN 'K' ELSIF idx =  9 THEN RETURN 'L'
+    ELSIF idx = 10 THEN RETURN 'M' ELSIF idx = 11 THEN RETURN 'N'
+    ELSIF idx = 12 THEN RETURN 'P' ELSIF idx = 13 THEN RETURN 'Q'
+    ELSIF idx = 14 THEN RETURN 'R' ELSIF idx = 15 THEN RETURN 'S'
+    ELSIF idx = 16 THEN RETURN 'T' ELSIF idx = 17 THEN RETURN 'V'
+    ELSIF idx = 18 THEN RETURN 'W' ELSE               RETURN 'Y'
+    END
+  END
+END IdxToRes;
+
+PROCEDURE SampleMatchEmit(k: INTEGER): INTEGER;
+VAR probs: ARRAY MaxAlph OF REAL; sum, u: REAL; r: INTEGER;
+BEGIN
+  sum := 0.0;
+  FOR r := 0 TO hmmAlph - 1 DO
+    probs[r] := Math.exp(logEmitM[k][r] + logBg[r]);
+    sum := sum + probs[r]
+  END;
+  u := Random.Real() * sum; r := 0;
+  WHILE (r < hmmAlph - 1) & (u > probs[r]) DO u := u - probs[r]; INC(r) END;
+  RETURN r
+END SampleMatchEmit;
+
+PROCEDURE SampleBgEmit(): INTEGER;
+VAR probs: ARRAY MaxAlph OF REAL; sum, u: REAL; r: INTEGER;
+BEGIN
+  sum := 0.0;
+  FOR r := 0 TO hmmAlph - 1 DO
+    probs[r] := Math.exp(logBg[r]); sum := sum + probs[r]
+  END;
+  u := Random.Real() * sum; r := 0;
+  WHILE (r < hmmAlph - 1) & (u > probs[r]) DO u := u - probs[r]; INC(r) END;
+  RETURN r
+END SampleBgEmit;
+
+PROCEDURE SampleTrans(l0, l1, l2: REAL): INTEGER;
+(* Sample from up to 3 transitions; pass NegInf for unused slots. *)
+VAR p0, p1, p2, sum, u: REAL;
+BEGIN
+  p0 := 0.0; p1 := 0.0; p2 := 0.0;
+  IF l0 > NegInf / 2.0 THEN p0 := Math.exp(l0) END;
+  IF l1 > NegInf / 2.0 THEN p1 := Math.exp(l1) END;
+  IF l2 > NegInf / 2.0 THEN p2 := Math.exp(l2) END;
+  sum := p0 + p1 + p2;
+  IF sum <= 0.0 THEN RETURN 0 END;
+  u := Random.Real() * sum;
+  IF u < p0 THEN RETURN 0 END; u := u - p0;
+  IF u < p1 THEN RETURN 1 END;
+  RETURN 2
+END SampleTrans;
+
+PROCEDURE EmitConsensus;
+(* Most probable residue at each match state, no insert/delete sampling. *)
+VAR k, r, best, col: INTEGER; maxLP, lp: REAL;
+BEGIN
+  Out.Char('>'); Out.String(hmmName); Out.String("-consensus"); Out.Ln;
+  col := 0;
+  FOR k := 0 TO hmmLen - 1 DO
+    best := 0; maxLP := logEmitM[k][0] + logBg[0];
+    FOR r := 1 TO hmmAlph - 1 DO
+      lp := logEmitM[k][r] + logBg[r];
+      IF lp > maxLP THEN maxLP := lp; best := r END
+    END;
+    Out.Char(IdxToRes(best)); INC(col);
+    IF col = 60 THEN Out.Ln; col := 0 END
+  END;
+  IF col > 0 THEN Out.Ln END
+END EmitConsensus;
+
+PROCEDURE EmitSample(seqNum: INTEGER);
+CONST BufLen = 8001;
+VAR
+  buf      : ARRAY BufLen OF CHAR;
+  blen, k, t, r, col, insCount : INTEGER;
+  state    : INTEGER; (* 0=M  1=I  2=D *)
+BEGIN
+  blen := 0; k := 0; state := 0;
+  WHILE k < hmmLen DO
+    IF state = 0 THEN  (* Match M_k: emit, then transition *)
+      r := SampleMatchEmit(k);
+      IF blen < BufLen - 1 THEN buf[blen] := IdxToRes(r); INC(blen) END;
+      t := SampleTrans(logTrans[k][TMM], logTrans[k][TMI], logTrans[k][TMD]);
+      IF    t = 0 THEN INC(k)
+      ELSIF t = 1 THEN state := 1; insCount := 0
+      ELSE               INC(k); state := 2
+      END
+    ELSIF state = 1 THEN  (* Insert I_k: emit background, then transition *)
+      r := SampleBgEmit();
+      IF blen < BufLen - 1 THEN buf[blen] := IdxToRes(r); INC(blen) END;
+      INC(insCount);
+      t := SampleTrans(logTrans[k][TIM], logTrans[k][TII], NegInf);
+      IF (t = 0) OR (insCount >= 100) THEN INC(k); state := 0 END
+    ELSE  (* Delete D_k: no emit, advance *)
+      t := SampleTrans(logTrans[k][TDM], logTrans[k][TDD], NegInf);
+      INC(k);
+      IF t = 1 THEN state := 2 ELSE state := 0 END
+    END
+  END;
+  buf[blen] := 0X;
+  Out.Char('>'); Out.String(hmmName); Out.Char('-'); Out.Int(seqNum, 0); Out.Ln;
+  k := 0; col := 0;
+  WHILE buf[k] # 0X DO
+    Out.Char(buf[k]); INC(k); INC(col);
+    IF col = 60 THEN Out.Ln; col := 0 END
+  END;
+  IF col > 0 THEN Out.Ln END
+END EmitSample;
+
+PROCEDURE DoEmit(hmmPath: ARRAY OF CHAR; nSeqs: INTEGER; consensus: BOOLEAN);
+VAR n: INTEGER;
+BEGIN
+  IF ~ReadHMM(hmmPath) THEN
+    Out.String("Error: cannot read profile from "); Out.String(hmmPath); Out.Ln;
+    RETURN
+  END;
+  IF consensus THEN EmitConsensus
+  ELSE FOR n := 1 TO nSeqs DO EmitSample(n) END
+  END
+END DoEmit;
+
+(* ------------------------------------------------------------------ *)
 (*  Build mode                                                          *)
 (* ------------------------------------------------------------------ *)
 
@@ -498,23 +639,28 @@ END DoSearch;
 VAR
   mode, arg1, arg2, opt, sval : ARRAY 1024 OF CHAR;
   minBits : REAL;
+  nSeqs   : INTEGER;
+  consensus : BOOLEAN;
   i : INTEGER;
 
 BEGIN
   NegInf := -1.0E30;
 
-  IF Args.Count() < 3 THEN
+  IF Args.Count() < 2 THEN
     Out.String("Usage:"); Out.Ln;
     Out.String("  SeqHMM build  <msa.afa> <model.hmm>"); Out.Ln;
     Out.String("  SeqHMM search <model.hmm> <db.fa> [-t <minBits>]"); Out.Ln;
+    Out.String("  SeqHMM emit   <model.hmm> [-n <count>] [-c]"); Out.Ln;
     Out.String("Options:"); Out.Ln;
-    Out.String("  -t <real>  bit-score threshold (default 10.0)"); Out.Ln;
+    Out.String("  -t <real>  bit-score threshold for search (default 10.0)"); Out.Ln;
+    Out.String("  -n <int>   number of sequences to emit (default 1)"); Out.Ln;
+    Out.String("  -c         emit consensus (most probable) sequence"); Out.Ln;
     RETURN
   END;
 
   Args.Get(1, mode);
   Args.Get(2, arg1);
-  Args.Get(3, arg2);
+  IF Args.Count() >= 3 THEN Args.Get(3, arg2) ELSE arg2[0] := 0X END;
 
   IF Strings.Compare(mode, "build") = 0 THEN
     DoBuild(arg1, arg2)
@@ -535,8 +681,26 @@ BEGIN
     END;
     DoSearch(arg1, arg2, minBits)
 
+  ELSIF Strings.Compare(mode, "emit") = 0 THEN
+    nSeqs := 1; consensus := FALSE;
+    i := 3;
+    WHILE i <= Args.Count() DO
+      Args.Get(i, opt);
+      IF Strings.Compare(opt, "-n") = 0 THEN
+        INC(i);
+        IF i <= Args.Count() THEN
+          Args.Get(i, sval);
+          IF ~Strings.StrToInt(sval, nSeqs) OR (nSeqs < 1) THEN nSeqs := 1 END
+        END
+      ELSIF Strings.Compare(opt, "-c") = 0 THEN
+        consensus := TRUE
+      END;
+      INC(i)
+    END;
+    DoEmit(arg1, nSeqs, consensus)
+
   ELSE
     Out.String("Unknown mode: "); Out.String(mode); Out.Ln;
-    Out.String("Use 'build' or 'search'."); Out.Ln
+    Out.String("Use 'build', 'search', or 'emit'."); Out.Ln
   END
 END SeqHMM.
