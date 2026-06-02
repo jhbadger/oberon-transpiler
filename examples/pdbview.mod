@@ -1,7 +1,7 @@
 MODULE pdbview;
+
 (*
   pdbview — Terminal PDB structure viewer built on TUI / Widgets / FileDialog.
-
   Two rendering back-ends:
     Terminal  half-block pixel buffer 240x100  (default, works everywhere)
     Sixel     DEC Sixel graphics 640x480       (toggle with X, needs xterm/iTerm2)
@@ -13,6 +13,7 @@ MODULE pdbview;
     Secondary   helix=red  sheet=yellow  coil=white
 
   Keyboard shortcuts
+
     Arrow keys        Rotate around Y / X axis
     Shift+Up/Down     Rotate around Z axis
     + / -             Zoom in / out
@@ -62,22 +63,29 @@ CONST
   CmdOpen      = 10;
   CmdReload    = 11;
   CmdQuit      = 12;
+
   CmdModeBC    = 20;
   CmdModeBS    = 21;
   CmdModeSF    = 22;
+
   CmdColChain  = 30;
   CmdColElem   = 31;
   CmdColBfac   = 32;
   CmdColSS     = 33;
+
   CmdTogHet    = 40;
+
   CmdReset     = 50;
   CmdTogSixel  = 55;
+
   CmdHelp      = 60;
+
   CmdNextModel = 70;
   CmdPrevModel = 71;
 
   CanvasW = 240;
   CanvasH = 100;
+
   SixelW  = 640;
   SixelH  = 480;
 
@@ -205,6 +213,7 @@ BEGIN
   r[6]:=0.0; r[7]:=0.0; r[8]:=1.0;
   MatMul(r,m,tmp); m:=tmp
 END RotZ;
+
 
 (* ════════════════════════════════════════════════════════════════
    Sixel palette
@@ -349,6 +358,7 @@ BEGIN
   END; RETURN SixPalChain0+6
 END AtomColorSix;
 
+
 (* ════════════════════════════════════════════════════════════════
    View reset
    ════════════════════════════════════════════════════════════════ *)
@@ -388,20 +398,35 @@ BEGIN
 END ResetView;
 
 (* ════════════════════════════════════════════════════════════════
-   Painter sort
+   Painter sort (Quicksort Implementation)
    ════════════════════════════════════════════════════════════════ *)
 
-PROCEDURE SortDraw(VAR buf: ARRAY OF DrawEntry; n: INTEGER);
-VAR i, j: INTEGER; tmp: DrawEntry;
+PROCEDURE QuickSortRecursive(VAR buf: ARRAY OF DrawEntry; low, high: INTEGER);
+VAR i, j: INTEGER; pivot: DrawEntry;
 BEGIN
-  FOR i := 1 TO n-1 DO
-    tmp := buf[i]; j := i-1;
-    WHILE (j >= 0) & (buf[j].z < tmp.z) DO
-      buf[j+1] := buf[j]; DEC(j)
-    END;
-    buf[j+1] := tmp
+  IF low < high THEN
+    i := low; j := high;
+    pivot := buf[(low + high) DIV 2];
+    REPEAT
+      WHILE buf[i].z > pivot.z DO INC(i) END;
+      WHILE buf[j].z < pivot.z DO DEC(j) END;
+      IF i <= j THEN
+        Swap(buf[i], buf[j]);
+        INC(i); DEC(j);
+      END;
+    UNTIL i > j;
+    QuickSortRecursive(buf, low, j);
+    QuickSortRecursive(buf, i, high);
+  END;
+END QuickSortRecursive;
+
+PROCEDURE SortDraw(VAR buf: ARRAY OF DrawEntry; n: INTEGER);
+BEGIN
+  IF n > 1 THEN
+    QuickSortRecursive(buf, 0, n - 1)
   END
 END SortDraw;
+
 
 (* ════════════════════════════════════════════════════════════════
    Atom picking
@@ -442,6 +467,7 @@ BEGIN
     RETURN (px >= 0) & (px < CanvasW) & (py >= 0) & (py < CanvasH)
   END
 END Project;
+
 
 (* ════════════════════════════════════════════════════════════════
    Back-end drawing primitives
@@ -495,6 +521,7 @@ BEGIN
   END
 END BECircle;
 
+
 (* ════════════════════════════════════════════════════════════════
    Rendering
    ════════════════════════════════════════════════════════════════ *)
@@ -533,10 +560,8 @@ BEGIN
 
   prevOK := FALSE; prevChain := 0X; prevPX := 0; prevPY := 0;
   v.drawN := 0;
-
   FOR i := 0 TO v.model.count-1 DO
     a := v.model.atoms[i];
-
     IF (~a.isHet OR v.showHet) & (v.drawN < MaxDraw) THEN
       IF Project(v, i, px, py, pz) &
          (px >= cx0) & (px <= cx1) & (py >= cy0) & (py <= cy1) THEN
@@ -586,6 +611,7 @@ BEGIN
           END
         END
       END;
+
       FOR j := 0 TO v.drawN-1 DO
         i   := v.drawBuf[j].idx;
         px  := v.drawBuf[j].projX;
@@ -646,6 +672,7 @@ VAR bfg, bbg: INTEGER;
 BEGIN
   WITH v: ViewerWinRec DO
     IF v.useSixel THEN RETURN END;
+
     IF v.focused THEN bfg := TUI.White; bbg := TUI.Blue
     ELSE              bfg := TUI.White; bbg := TUI.Black
     END;
@@ -702,7 +729,6 @@ BEGIN
     IF ev.kind = TUI.EvKey THEN
       ch := ev.key;
       v.inertOn := FALSE;
-
       IF    ch = TUI.KLeft      THEN RotY(v.rot,-RotStep); v.inertDX := -RotStep
       ELSIF ch = TUI.KRight     THEN RotY(v.rot, RotStep); v.inertDX :=  RotStep
       ELSIF ch = TUI.KUp        THEN RotX(v.rot,-RotStep); v.inertDY := -RotStep
@@ -887,13 +913,11 @@ END OnMenuCmd;
 PROCEDURE BuildMenus;
 BEGIN
   mbar := Widgets.NewMenuBar(1, 1, TUI.Cols);
-
   Widgets.MenuBarAddMenu(mbar, "File");
   Widgets.MenuBarAddItem(mbar, 0, "Open...    Ctrl+O", CmdOpen);
   Widgets.MenuBarAddItem(mbar, 0, "Reload     F5",     CmdReload);
   Widgets.MenuBarAddSep (mbar, 0);
   Widgets.MenuBarAddItem(mbar, 0, "Quit       Ctrl+Q", CmdQuit);
-
   Widgets.MenuBarAddMenu(mbar, "View");
   Widgets.MenuBarAddItem(mbar, 1, "Backbone          (M)", CmdModeBC);
   Widgets.MenuBarAddItem(mbar, 1, "Ball+Stick        (M)", CmdModeBS);
@@ -908,17 +932,13 @@ BEGIN
   Widgets.MenuBarAddItem(mbar, 1, "Toggle Sixel      (X)", CmdTogSixel);
   Widgets.MenuBarAddSep (mbar, 1);
   Widgets.MenuBarAddItem(mbar, 1, "Reset View        (R)", CmdReset);
-
   Widgets.MenuBarAddMenu(mbar, "Model");
   Widgets.MenuBarAddItem(mbar, 2, "Next Model  PgDn", CmdNextModel);
   Widgets.MenuBarAddItem(mbar, 2, "Prev Model  PgUp", CmdPrevModel);
-
   Widgets.MenuBarAddMenu(mbar, "Help");
   Widgets.MenuBarAddItem(mbar, 3, "Help  F1", CmdHelp);
-
   mbar.onCmd := OnMenuCmd;
   TUI.AddView(mbar);
-
   sline := Widgets.NewStatusLine(1, TUI.Rows, TUI.Cols, "");
   sline.alwaysOnTop := TRUE;
   TUI.AddView(sline)
@@ -927,6 +947,12 @@ END BuildMenus;
 (* ════════════════════════════════════════════════════════════════
    Main
    ════════════════════════════════════════════════════════════════ *)
+
+PROCEDURE Swap(VAR a, b: DrawEntry);
+VAR tmp: DrawEntry;
+BEGIN
+    tmp := a; a := b; b := tmp;
+END Swap;
 
 VAR ev: TUI.Event; ch: CHAR; arg: ARRAY 1024 OF CHAR;
 
@@ -974,6 +1000,7 @@ BEGIN
       TUI.InvalidateFront();
       TUI.Flush()
     END;
+
     IF vw.sceneDirty THEN
       RenderScene(vw); vw.sceneDirty := FALSE
     ELSE
@@ -981,8 +1008,8 @@ BEGIN
       ELSE Terminal.Flush()
       END
     END;
-    Terminal.HideCursor();
 
+    Terminal.HideCursor();
     IF vw.inertOn THEN
       IF TUI.PollEvent(ev) = 0 THEN Time.Sleep(30); ev.kind := TUI.EvNone END
     ELSE
@@ -1014,3 +1041,5 @@ BEGIN
 
   TUI.Done()
 END pdbview.
+
+
