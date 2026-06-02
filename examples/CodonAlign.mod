@@ -18,17 +18,18 @@ MODULE CodonAlign;
   Groups where any organism's sequence is absent are skipped.
 *)
 
-IMPORT BioIO, BioSeq, BioAlign, Files, Out, Args, Strings;
+IMPORT BioIO, BioSeq, BioAlign, Files, Out, Args, Strings, Parallel;
 
 CONST
-  MaxOrgs    = 8;
-  MaxProts   = 4096;
-  MaxNameLen = 128;
-  HashTabSz  = 8192;
-  SeqLenCap  = 10000;
-  MaxAln     = 20002;
-  MaxGapPos  = 10001;
-  OutWidth   = 60;
+  MaxOrgs        = 8;
+  MaxProts       = 4096;
+  MaxNameLen     = 128;
+  HashTabSz      = 8192;
+  SeqLenCap      = 10000;
+  MaxAln         = 20002;
+  MaxGapPos      = 10001;
+  OutWidth       = 60;
+  MaxAlignWorkers = MaxOrgs - 1;
 
 VAR
   orgCount : INTEGER;
@@ -38,9 +39,12 @@ VAR
   hashTab  : ARRAY MaxOrgs OF ARRAY HashTabSz OF INTEGER;
 
   mat      : BioAlign.ScoreMatrix;
-  aln      : BioAlign.Alignment;
-  tmpQ     : BioSeq.Seq;
   tmpR     : BioSeq.Seq;
+
+  wkState  : ARRAY MaxAlignWorkers OF BioAlign.DPState;
+  wkTmpQ   : ARRAY MaxAlignWorkers OF BioSeq.Seq;
+  wkAln    : ARRAY MaxAlignWorkers OF BioAlign.Alignment;
+  wkFlatBuf: ARRAY MaxAlignWorkers OF ARRAY SeqLenCap + 1 OF CHAR;
 
   alnQry   : ARRAY MaxOrgs OF ARRAY MaxAln OF CHAR;
   alnRef   : ARRAY MaxOrgs OF ARRAY MaxAln OF CHAR;
@@ -50,7 +54,6 @@ VAR
   groupSeqs: ARRAY MaxOrgs OF BioSeq.Seq;
   seq0buf  : ARRAY SeqLenCap + 1 OF CHAR;
   seq0len  : INTEGER;
-  flatBuf  : ARRAY SeqLenCap + 1 OF CHAR;
 
   alignedNt: ARRAY MaxOrgs OF ARRAY MaxAln OF CHAR;
   alnTotal : INTEGER;
@@ -232,26 +235,22 @@ END LoadOrg;
 (*  Alignment workspace helpers                                         *)
 (* ------------------------------------------------------------------ *)
 
-PROCEDURE BuildAligned(i: INTEGER);
-(* Extract pairwise aligned strings from aln into alnQry[i] / alnRef[i].
-   tmpQ = seqi (query), tmpR = seq0 (reference).
-   opIns = gap in ref (seq0 advances in query only);
-   opDel = gap in query (seq0 advances in ref only). *)
+PROCEDURE BuildAlignedW(wi, i: INTEGER);
 VAR k, p, pos, qi, ri: INTEGER;
 BEGIN
   qi := 0; ri := 0; pos := 0;
-  FOR k := 0 TO aln.nOps - 1 DO
-    FOR p := 0 TO aln.cigar[k].len - 1 DO
-      IF aln.cigar[k].op = BioAlign.opIns THEN
-        alnQry[i][pos] := BioSeq.Get(tmpQ, qi);
+  FOR k := 0 TO wkAln[wi].nOps - 1 DO
+    FOR p := 0 TO wkAln[wi].cigar[k].len - 1 DO
+      IF wkAln[wi].cigar[k].op = BioAlign.opIns THEN
+        alnQry[i][pos] := BioSeq.Get(wkTmpQ[wi], qi);
         alnRef[i][pos] := '-';
         INC(qi)
-      ELSIF aln.cigar[k].op = BioAlign.opDel THEN
+      ELSIF wkAln[wi].cigar[k].op = BioAlign.opDel THEN
         alnQry[i][pos] := '-';
         alnRef[i][pos] := BioSeq.Get(tmpR, ri);
         INC(ri)
       ELSE
-        alnQry[i][pos] := BioSeq.Get(tmpQ, qi);
+        alnQry[i][pos] := BioSeq.Get(wkTmpQ[wi], qi);
         alnRef[i][pos] := BioSeq.Get(tmpR, ri);
         INC(qi); INC(ri)
       END;
@@ -259,7 +258,16 @@ BEGIN
     END
   END;
   alnLen[i] := pos
-END BuildAligned;
+END BuildAlignedW;
+
+PROCEDURE AlignWorkerCA(wi: INTEGER);
+VAR i: INTEGER;
+BEGIN
+  i := wi + 1;
+  BioAlign.GlobalW(wkTmpQ[wi], tmpR, mat, wkAln[wi], wkState[wi]);
+  BuildAlignedW(wi, i);
+  CalcGapsBef(i)
+END AlignWorkerCA;
 
 PROCEDURE CalcGapsBef(i: INTEGER);
 (* gapsBef[i][j] = gap columns in alnRef[i] before the j-th non-gap char. *)
@@ -391,14 +399,12 @@ BEGIN
   FOR i := 1 TO N - 1 DO
     len := BioSeq.Length(groupSeqs[i]);
     IF len > SeqLenCap THEN len := SeqLenCap END;
-    BioSeq.Slice(groupSeqs[i], 0, len, flatBuf);
-    flatBuf[len] := 0X;
-    BioSeq.FromStr(tmpQ, "");
-    BioSeq.Append(tmpQ, flatBuf, len);
-    BioAlign.Global(tmpQ, tmpR, mat, aln);
-    BuildAligned(i);
-    CalcGapsBef(i)
+    BioSeq.Slice(groupSeqs[i], 0, len, wkFlatBuf[i - 1]);
+    wkFlatBuf[i - 1][len] := 0X;
+    BioSeq.FromStr(wkTmpQ[i - 1], "");
+    BioSeq.Append(wkTmpQ[i - 1], wkFlatBuf[i - 1], len)
   END;
+  Parallel.For(0, N - 1, AlignWorkerCA, Parallel.NumCPU());
 
   CalcExtraGaps(N);
   BuildNtOrg0;
@@ -453,7 +459,7 @@ BEGIN
   Files.Set(tsvRider, tsvFile, 0);
   Files.ReadLine(tsvRider, tsvLine);  (* discard header *)
 
-  BioSeq.New(tmpQ);
+  FOR mainI := 0 TO MaxAlignWorkers - 1 DO BioSeq.New(wkTmpQ[mainI]) END;
   BioSeq.New(tmpR);
 
   LOOP

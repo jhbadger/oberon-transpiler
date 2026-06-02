@@ -28,7 +28,7 @@ MODULE DeBruijn;
   larger values for bigger genomes.
 *)
 
-IMPORT BioIO, BioSeq, BioAlpha, Out, Args, Strings;
+IMPORT BioIO, BioSeq, BioAlpha, Out, Args, Strings, Parallel;
 
 CONST
   MaxK     = 31;        (* maximum supported k-mer size *)
@@ -36,8 +36,10 @@ CONST
   MaxNodes = 500000;    (* max unique (k-1)-mers in the graph *)
   MaxEdges = 600000;    (* max unique k-mers in the graph *)
   MaxOut   = 4;         (* at most 4 out-edges per node (A/C/G/T) *)
-  CntSize  = 1048576;   (* 2^20, k-mer count table for -c filter pass *)
-  LineWid  = 60;        (* FASTA output line width *)
+  CntSize       = 1048576;   (* 2^20, k-mer count table for -c filter pass *)
+  LineWid       = 60;        (* FASTA output line width *)
+  MaxCntWorkers = 8;         (* parallel workers for Pass 1 k-mer counting *)
+  MaxReadLen    = 10000;     (* max read length staged per worker *)
 
 TYPE
   NodeRec = RECORD
@@ -60,7 +62,11 @@ VAR
   nEdges   : INTEGER;
   nodeHash : ARRAY HashSize OF INTEGER;     (* -1 = empty *)
   edgeHash : ARRAY HashSize OF INTEGER;     (* -1 = empty *)
-  cntTable : ARRAY CntSize  OF INTEGER;     (* k-mer count filter *)
+  cntTable : ARRAY CntSize  OF INTEGER;     (* k-mer count filter, filled by MergeCntTbls *)
+  wkReadBuf: ARRAY MaxCntWorkers OF ARRAY MaxReadLen + 1 OF CHAR;
+  wkRCBuf  : ARRAY MaxCntWorkers OF ARRAY MaxReadLen + 1 OF CHAR;
+  wkReadLen: ARRAY MaxCntWorkers OF INTEGER;
+  wkCntTbl : ARRAY MaxCntWorkers OF ARRAY CntSize OF INTEGER;
   K        : INTEGER;
   KM1      : INTEGER;    (* K - 1 *)
   minLen   : INTEGER;
@@ -198,46 +204,92 @@ BEGIN
 END AddEdge;
 
 (* ------------------------------------------------------------------ *)
-(*  Pass 1 — count k-mers into cntTable                                *)
+(*  Pass 1 — count k-mers in parallel into per-worker tables           *)
 (* ------------------------------------------------------------------ *)
 
-PROCEDURE CountKmer(buf: ARRAY OF CHAR);
-BEGIN INC(cntTable[CntHash(buf)]) END CountKmer;
-
-PROCEDURE CountRead(seq: BioSeq.Seq);
-VAR buf: ARRAY MaxK + 1 OF CHAR; rc: BioSeq.Seq; slen, i: INTEGER;
+PROCEDURE CountWorkerW(wi: INTEGER);
+VAR i, j, slen: INTEGER; kbuf: ARRAY MaxK + 1 OF CHAR;
 BEGIN
-  slen := BioSeq.Length(seq);
-  FOR i := 0 TO slen - K DO BioSeq.Slice(seq, i, K, buf); CountKmer(buf) END;
+  slen := wkReadLen[wi];
+  FOR i := 0 TO slen - K DO
+    FOR j := 0 TO K - 1 DO kbuf[j] := wkReadBuf[wi][i + j] END;
+    kbuf[K] := 0X;
+    INC(wkCntTbl[wi][CntHash(kbuf)])
+  END;
   IF ~noRC THEN
-    BioSeq.New(rc);
-    BioSeq.RevComp(seq, alpha, rc);
-    FOR i := 0 TO slen - K DO BioSeq.Slice(rc, i, K, buf); CountKmer(buf) END;
-    BioSeq.Free(rc)
+    FOR i := 0 TO slen - 1 DO
+      wkRCBuf[wi][slen - 1 - i] := BioAlpha.Complement(alpha, wkReadBuf[wi][i])
+    END;
+    FOR i := 0 TO slen - K DO
+      FOR j := 0 TO K - 1 DO kbuf[j] := wkRCBuf[wi][i + j] END;
+      kbuf[K] := 0X;
+      INC(wkCntTbl[wi][CntHash(kbuf)])
+    END
   END
-END CountRead;
+END CountWorkerW;
 
-PROCEDURE CountFastq(path: ARRAY OF CHAR);
-VAR rdr: BioIO.FastqReader; rec: BioIO.FastqRecord;
+PROCEDURE InitCntWorkers(ncpu: INTEGER);
+VAR wi, h: INTEGER;
+BEGIN
+  FOR wi := 0 TO ncpu - 1 DO
+    FOR h := 0 TO CntSize - 1 DO wkCntTbl[wi][h] := 0 END
+  END
+END InitCntWorkers;
+
+PROCEDURE MergeCntTbls(ncpu: INTEGER);
+VAR wi, h: INTEGER;
+BEGIN
+  FOR h := 0 TO CntSize - 1 DO cntTable[h] := 0 END;
+  FOR wi := 0 TO ncpu - 1 DO
+    FOR h := 0 TO CntSize - 1 DO INC(cntTable[h], wkCntTbl[wi][h]) END
+  END
+END MergeCntTbls;
+
+PROCEDURE CountFastqP(path: ARRAY OF CHAR; ncpu: INTEGER);
+VAR rdr: BioIO.FastqReader; rec: BioIO.FastqRecord; wi, slen: INTEGER;
 BEGIN
   rec.seq := NIL; rec.qual := NIL;
   IF ~BioIO.OpenFastq(rdr, path) THEN RETURN END;
+  wi := 0;
   WHILE BioIO.ReadFastq(rdr, rec) DO
-    BioSeq.ToUpper(rec.seq); CountRead(rec.seq)
+    BioSeq.ToUpper(rec.seq);
+    slen := BioSeq.Length(rec.seq);
+    IF slen > MaxReadLen THEN slen := MaxReadLen END;
+    BioSeq.Slice(rec.seq, 0, slen, wkReadBuf[wi]);
+    wkReadBuf[wi][slen] := 0X;
+    wkReadLen[wi] := slen;
+    INC(wi);
+    IF wi >= ncpu THEN
+      Parallel.For(0, wi, CountWorkerW, ncpu);
+      wi := 0
+    END
   END;
+  IF wi > 0 THEN Parallel.For(0, wi, CountWorkerW, wi) END;
   BioIO.CloseFastq(rdr)
-END CountFastq;
+END CountFastqP;
 
-PROCEDURE CountFasta(path: ARRAY OF CHAR);
-VAR rdr: BioIO.FastaReader; rec: BioIO.FastaRecord;
+PROCEDURE CountFastaP(path: ARRAY OF CHAR; ncpu: INTEGER);
+VAR rdr: BioIO.FastaReader; rec: BioIO.FastaRecord; wi, slen: INTEGER;
 BEGIN
   rec.seq := NIL;
   IF ~BioIO.OpenFasta(rdr, path) THEN RETURN END;
+  wi := 0;
   WHILE BioIO.ReadFasta(rdr, rec) DO
-    BioSeq.ToUpper(rec.seq); CountRead(rec.seq)
+    BioSeq.ToUpper(rec.seq);
+    slen := BioSeq.Length(rec.seq);
+    IF slen > MaxReadLen THEN slen := MaxReadLen END;
+    BioSeq.Slice(rec.seq, 0, slen, wkReadBuf[wi]);
+    wkReadBuf[wi][slen] := 0X;
+    wkReadLen[wi] := slen;
+    INC(wi);
+    IF wi >= ncpu THEN
+      Parallel.For(0, wi, CountWorkerW, ncpu);
+      wi := 0
+    END
   END;
+  IF wi > 0 THEN Parallel.For(0, wi, CountWorkerW, wi) END;
   BioIO.CloseFasta(rdr)
-END CountFasta;
+END CountFastaP;
 
 (* ------------------------------------------------------------------ *)
 (*  Pass 2 — build graph (filtered by cntTable when minCov > 1)        *)
@@ -400,15 +452,16 @@ BEGIN FOR i := 0 TO CntSize - 1 DO cntTable[i] := 0 END END InitCntTable;
 (* ------------------------------------------------------------------ *)
 
 PROCEDURE Run(f: ARRAY OF CHAR);
-VAR fq: BOOLEAN;
+VAR fq: BOOLEAN; ncpu: INTEGER;
 BEGIN
   fq := IsFastq(f);
   IF minCov > 1 THEN
-    (* Pass 1: fill count table *)
-    InitCntTable();
-    IF fq THEN CountFastq(f) ELSE CountFasta(f) END
+    ncpu := Parallel.NumCPU();
+    IF ncpu > MaxCntWorkers THEN ncpu := MaxCntWorkers END;
+    InitCntWorkers(ncpu);
+    IF fq THEN CountFastqP(f, ncpu) ELSE CountFastaP(f, ncpu) END;
+    MergeCntTbls(ncpu)
   END;
-  (* Pass 2 (or only pass when minCov = 1): build graph *)
   IF fq THEN RunFastq(f) ELSE RunFasta(f) END
 END Run;
 

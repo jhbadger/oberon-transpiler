@@ -21,17 +21,18 @@ MODULE OrthoAlign;
   Groups where any organism's sequence is absent in its FASTA file are skipped.
 *)
 
-IMPORT BioIO, BioSeq, BioAlign, Files, Out, Args, Strings;
+IMPORT BioIO, BioSeq, BioAlign, Files, Out, Args, Strings, Parallel;
 
 CONST
-  MaxOrgs    = 8;
-  MaxProts   = 4096;
-  MaxNameLen = 128;
-  HashTabSz  = 8192;   (* open-addressing hash, >= 2*MaxProts *)
-  SeqLenCap  = 10000;  (* must be <= BioAlign.MaxSeqLen *)
-  MaxAln     = 20002;  (* = 2*SeqLenCap + 2: max columns in pairwise alignment *)
-  MaxGapPos  = 10001;  (* = SeqLenCap + 1: positions 0..len0 inclusive *)
-  OutWidth   = 60;
+  MaxOrgs        = 8;
+  MaxProts       = 4096;
+  MaxNameLen     = 128;
+  HashTabSz      = 8192;   (* open-addressing hash, >= 2*MaxProts *)
+  SeqLenCap      = 10000;  (* must be <= BioAlign.MaxSeqLen *)
+  MaxAln         = 20002;  (* = 2*SeqLenCap + 2: max columns in pairwise alignment *)
+  MaxGapPos      = 10001;  (* = SeqLenCap + 1: positions 0..len0 inclusive *)
+  OutWidth       = 60;
+  MaxAlignWorkers = MaxOrgs - 1;
 
 VAR
   orgCount : INTEGER;
@@ -45,9 +46,13 @@ VAR
   mat      : BioAlign.ScoreMatrix;
 
   (* Alignment workspace — module-level to avoid stack overflow *)
-  aln      : BioAlign.Alignment;
-  tmpQ     : BioSeq.Seq;   (* reusable query seq for BioAlign *)
-  tmpR     : BioSeq.Seq;   (* reusable reference seq for BioAlign *)
+  tmpR     : BioSeq.Seq;   (* reusable reference seq (seq0), set before Parallel.For *)
+
+  wkState  : ARRAY MaxAlignWorkers OF BioAlign.DPState;
+  wkTmpQ   : ARRAY MaxAlignWorkers OF BioSeq.Seq;
+  wkAln    : ARRAY MaxAlignWorkers OF BioAlign.Alignment;
+  wkFlatBuf: ARRAY MaxAlignWorkers OF ARRAY SeqLenCap + 1 OF CHAR;
+
   alnQry   : ARRAY MaxOrgs OF ARRAY MaxAln OF CHAR;  (* aligned query per org *)
   alnRef   : ARRAY MaxOrgs OF ARRAY MaxAln OF CHAR;  (* aligned ref (seq0) per org *)
   alnLen   : ARRAY MaxOrgs OF INTEGER;
@@ -58,7 +63,6 @@ VAR
   seq0len  : INTEGER;
   workBuf  : ARRAY MaxAln OF CHAR;   (* character accumulator for BioSeq.Append *)
   workLen  : INTEGER;
-  flatBuf  : ARRAY SeqLenCap + 1 OF CHAR;  (* temp flat buffer for seqi *)
 
   (* Main-body variables *)
   tsvPath  : ARRAY 1024 OF CHAR;
@@ -199,25 +203,22 @@ BEGIN
   END
 END WorkFlush;
 
-PROCEDURE BuildAligned(i: INTEGER);
-(* Reconstruct aligned string pair from the current BioAlign.Alignment aln.
-   tmpQ is seqi (query), tmpR is seq0 (reference).
-   opIns = gap in ref (seq0), opDel = gap in query (seqi). *)
+PROCEDURE BuildAlignedW(wi, i: INTEGER);
 VAR k, p, pos, qi, ri: INTEGER;
 BEGIN
   qi := 0; ri := 0; pos := 0;
-  FOR k := 0 TO aln.nOps - 1 DO
-    FOR p := 0 TO aln.cigar[k].len - 1 DO
-      IF aln.cigar[k].op = BioAlign.opIns THEN
-        alnQry[i][pos] := BioSeq.Get(tmpQ, qi);
+  FOR k := 0 TO wkAln[wi].nOps - 1 DO
+    FOR p := 0 TO wkAln[wi].cigar[k].len - 1 DO
+      IF wkAln[wi].cigar[k].op = BioAlign.opIns THEN
+        alnQry[i][pos] := BioSeq.Get(wkTmpQ[wi], qi);
         alnRef[i][pos] := '-';
         INC(qi)
-      ELSIF aln.cigar[k].op = BioAlign.opDel THEN
+      ELSIF wkAln[wi].cigar[k].op = BioAlign.opDel THEN
         alnQry[i][pos] := '-';
         alnRef[i][pos] := BioSeq.Get(tmpR, ri);
         INC(ri)
-      ELSE  (* opMatch or opSubst *)
-        alnQry[i][pos] := BioSeq.Get(tmpQ, qi);
+      ELSE
+        alnQry[i][pos] := BioSeq.Get(wkTmpQ[wi], qi);
         alnRef[i][pos] := BioSeq.Get(tmpR, ri);
         INC(qi); INC(ri)
       END;
@@ -225,7 +226,16 @@ BEGIN
     END
   END;
   alnLen[i] := pos
-END BuildAligned;
+END BuildAlignedW;
+
+PROCEDURE AlignWorker(wi: INTEGER);
+VAR i: INTEGER;
+BEGIN
+  i := wi + 1;
+  BioAlign.GlobalW(wkTmpQ[wi], tmpR, mat, wkAln[wi], wkState[wi]);
+  BuildAlignedW(wi, i);
+  CalcGapsBef(i)
+END AlignWorker;
 
 PROCEDURE CalcGapsBef(i: INTEGER);
 (* Fill gapsBef[i][0..seq0len]:
@@ -314,18 +324,15 @@ BEGIN
   BioSeq.FromStr(tmpR, "");
   BioSeq.Append(tmpR, seq0buf, seq0len);
 
-  (* Pairwise alignments of seqi vs seq0 *)
   FOR i := 1 TO N - 1 DO
     len := BioSeq.Length(groupSeqs[i]);
     IF len > SeqLenCap THEN len := SeqLenCap END;
-    BioSeq.Slice(groupSeqs[i], 0, len, flatBuf);
-    flatBuf[len] := 0X;
-    BioSeq.FromStr(tmpQ, "");
-    BioSeq.Append(tmpQ, flatBuf, len);
-    BioAlign.Global(tmpQ, tmpR, mat, aln);
-    BuildAligned(i);
-    CalcGapsBef(i)
+    BioSeq.Slice(groupSeqs[i], 0, len, wkFlatBuf[i - 1]);
+    wkFlatBuf[i - 1][len] := 0X;
+    BioSeq.FromStr(wkTmpQ[i - 1], "");
+    BioSeq.Append(wkTmpQ[i - 1], wkFlatBuf[i - 1], len)
   END;
+  Parallel.For(0, N - 1, AlignWorker, Parallel.NumCPU());
 
   CalcExtraGaps(N);
   AppendOrg0;
@@ -417,7 +424,7 @@ BEGIN
 
   (* Initialise per-organism alignment buffers and reusable seq objects *)
   FOR mainI := 0 TO orgCount - 1 DO BioSeq.New(alignBuf[mainI]) END;
-  BioSeq.New(tmpQ);
+  FOR mainI := 0 TO MaxAlignWorkers - 1 DO BioSeq.New(wkTmpQ[mainI]) END;
   BioSeq.New(tmpR);
 
   (* Process each orthogroup row *)

@@ -64,6 +64,12 @@ TYPE
     identity*       : REAL
   END;
 
+  DPState* = RECORD
+    dpM, dpX, dpY : POINTER TO ARRAY OF INTEGER;
+    tbM, tbX, tbY : POINTER TO ARRAY OF INTEGER;
+    stride, alloc : INTEGER
+  END;
+
 (* Heap-allocated DP storage — shared across all alignment procedures.
    Grown on demand; dpStride = rLen+1 for the current call. *)
 VAR
@@ -97,6 +103,22 @@ BEGIN
     dpAlloc := needed
   END
 END EnsureDP;
+
+PROCEDURE EnsureDPS(VAR s: DPState; qLen, rLen: INTEGER);
+VAR needed: INTEGER;
+BEGIN
+  s.stride := rLen + 1;
+  needed   := (qLen + 1) * (rLen + 1);
+  IF needed > s.alloc THEN
+    IF s.dpM # NIL THEN
+      FREE(s.dpM); FREE(s.dpX); FREE(s.dpY);
+      FREE(s.tbM); FREE(s.tbX); FREE(s.tbY)
+    END;
+    NEW(s.dpM, needed); NEW(s.dpX, needed); NEW(s.dpY, needed);
+    NEW(s.tbM, needed); NEW(s.tbX, needed); NEW(s.tbY, needed);
+    s.alloc := needed
+  END
+END EnsureDPS;
 
 (* ------------------------------------------------------------------ *)
 (*  Public: scoring setup                                               *)
@@ -540,6 +562,96 @@ BEGIN
   ReverseCigar(aln);
   CalcIdentity(aln, q, r)
 END Global;
+
+(* ------------------------------------------------------------------ *)
+(*  GlobalW — thread-safe Global using per-worker DPState              *)
+(* ------------------------------------------------------------------ *)
+
+PROCEDURE GlobalW*(q, r: BioSeq.Seq; VAR m: ScoreMatrix; VAR aln: Alignment;
+                   VAR s: DPState);
+VAR
+  qLen, rLen      : INTEGER;
+  i, j, best, sc  : INTEGER;
+  layer, r0, r1   : INTEGER;
+BEGIN
+  qLen := BioSeq.Length(q);
+  rLen := BioSeq.Length(r);
+  ASSERT(qLen <= MaxSeqLen);
+  ASSERT(rLen <= MaxSeqLen);
+  EnsureDPS(s, qLen, rLen);
+
+  s.dpM^[0] := 0;  s.dpX^[0] := NEG_INF;  s.dpY^[0] := NEG_INF;
+
+  FOR i := 1 TO qLen DO
+    r1 := i * s.stride;
+    s.dpM^[r1] := NEG_INF;
+    s.dpX^[r1] := m.gapOpen + i * m.gapExt;
+    s.dpY^[r1] := NEG_INF;
+    s.tbX^[r1] := tbFromX
+  END;
+
+  FOR j := 1 TO rLen DO
+    s.dpM^[j] := NEG_INF;
+    s.dpX^[j] := NEG_INF;
+    s.dpY^[j] := m.gapOpen + j * m.gapExt;
+    s.tbY^[j] := tbFromY
+  END;
+
+  FOR i := 1 TO qLen DO
+    r0 := (i - 1) * s.stride;
+    r1 := i * s.stride;
+    FOR j := 1 TO rLen DO
+      sc := PairScore(m, BioSeq.Get(q, i - 1), BioSeq.Get(r, j - 1));
+
+      best := s.dpM^[r0 + j - 1];  s.tbM^[r1 + j] := tbFromM;
+      IF s.dpX^[r0 + j - 1] > best THEN best := s.dpX^[r0 + j - 1];  s.tbM^[r1 + j] := tbFromX END;
+      IF s.dpY^[r0 + j - 1] > best THEN best := s.dpY^[r0 + j - 1];  s.tbM^[r1 + j] := tbFromY END;
+      s.dpM^[r1 + j] := best + sc;
+
+      IF s.dpM^[r0 + j] + m.gapOpen >= s.dpX^[r0 + j] + m.gapExt THEN
+        s.dpX^[r1 + j] := s.dpM^[r0 + j] + m.gapOpen;  s.tbX^[r1 + j] := tbFromM
+      ELSE
+        s.dpX^[r1 + j] := s.dpX^[r0 + j] + m.gapExt;   s.tbX^[r1 + j] := tbFromX
+      END;
+
+      IF s.dpM^[r1 + j - 1] + m.gapOpen >= s.dpY^[r1 + j - 1] + m.gapExt THEN
+        s.dpY^[r1 + j] := s.dpM^[r1 + j - 1] + m.gapOpen;  s.tbY^[r1 + j] := tbFromM
+      ELSE
+        s.dpY^[r1 + j] := s.dpY^[r1 + j - 1] + m.gapExt;   s.tbY^[r1 + j] := tbFromY
+      END
+    END
+  END;
+
+  r0 := qLen * s.stride;
+  aln.score := s.dpM^[r0 + rLen];  layer := tbFromM;
+  IF s.dpX^[r0 + rLen] > aln.score THEN aln.score := s.dpX^[r0 + rLen];  layer := tbFromX END;
+  IF s.dpY^[r0 + rLen] > aln.score THEN aln.score := s.dpY^[r0 + rLen];  layer := tbFromY END;
+
+  aln.qEnd   := qLen;  aln.rEnd   := rLen;
+  aln.qStart := 0;     aln.rStart := 0;
+  aln.nOps   := 0;
+
+  i := qLen;  j := rLen;
+  WHILE (i > 0) OR (j > 0) DO
+    IF layer = tbFromM THEN
+      IF BioSeq.Get(q, i - 1) = BioSeq.Get(r, j - 1) THEN
+        AppendCigar(aln, opMatch)
+      ELSE
+        AppendCigar(aln, opSubst)
+      END;
+      layer := s.tbM^[i * s.stride + j];  DEC(i);  DEC(j)
+    ELSIF layer = tbFromX THEN
+      AppendCigar(aln, opIns);
+      layer := s.tbX^[i * s.stride + j];  DEC(i)
+    ELSE
+      AppendCigar(aln, opDel);
+      layer := s.tbY^[i * s.stride + j];  DEC(j)
+    END
+  END;
+
+  ReverseCigar(aln);
+  CalcIdentity(aln, q, r)
+END GlobalW;
 
 (* ------------------------------------------------------------------ *)
 (*  Local — Smith-Waterman with affine gap penalties                   *)
