@@ -216,7 +216,7 @@ Reusable library modules live in `Modules/`. Pass `--mod-path Modules` to use th
 | `examples/speedscript.mod` | Recreation of 1980s word processor |
 | `examples/chatbot.mod` | Keyword-driven chatbot (personality loaded from config file) |
 | `examples/ollamachat.mod` | Interactive chat client for a local Ollama server |
-| `examples/pdbview.mod` | Terminal PDB structure viewer |
+
 
 ### Bioinformatics / data science
 
@@ -229,13 +229,14 @@ Reusable library modules live in `Modules/`. Pass `--mod-path Modules` to use th
 | `examples/CodonAlign.mod` | Per-orthogroup nucleotide alignment with codon annotation |
 | `examples/OrthoAlign.mod` | Concatenated supermatrix alignment from ortholog groups |
 | `examples/OrthoFind.mod` | Reciprocal best hit ortholog finder for protein FASTA files |
+| `examples/pdbview.mod` | Terminal PDB structure viewer |
 | `examples/SeqBlast.mod` | BLAST-like local alignment search with gapped extension |
 | `examples/SeqHMM.mod` | Profile HMM builder and sequence-database searcher |
 | `examples/EnzymeExplorer.mod` | Interactive enzyme database browser |
 
 ## IDE
 
-Launch with `./oberon [file.mod]`. The IDE is a Turbo Pascal-style full-screen editor built on [magiblot/tvision](https://github.com/magiblot/tvision).
+Launch with `./oberon [file.mod]`. The IDE is a Turbo Pascal-style full-screen editor.
 
 | Key | Action |
 |-----|--------|
