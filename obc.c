@@ -409,6 +409,22 @@ static int parse_ffi_file(const char *ffifile, const char *modname)
             }
             header[sizeof(header)-1] = '\0';
 
+        } else if (strncmp(p, "LINK_LINUX", 10) == 0 && (p[10] == ' ' || p[10] == '\t')) {
+            p += 11;
+            while (*p == ' ' || *p == '\t') p++;
+            trim_trailing(p);
+#ifdef __linux__
+            if (*p) add_ldflag(p);
+#endif
+
+        } else if (strncmp(p, "LINK_MACOS", 10) == 0 && (p[10] == ' ' || p[10] == '\t')) {
+            p += 11;
+            while (*p == ' ' || *p == '\t') p++;
+            trim_trailing(p);
+#ifdef __APPLE__
+            if (*p) add_ldflag(p);
+#endif
+
         } else if (strncmp(p, "LINK", 4) == 0 && (p[4] == ' ' || p[4] == '\t')) {
             p += 5;
             while (*p == ' ' || *p == '\t') p++;
