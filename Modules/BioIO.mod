@@ -5,7 +5,7 @@ MODULE BioIO;
   Writers accept a Files.Rider set up by the caller (Files.New + Files.Set).
 *)
 
-IMPORT BioSeq, Files, Strings;
+IMPORT BioSeq, Env, Files, OS, Strings;
 
 CONST
   LineBuf = 1024;
@@ -34,20 +34,23 @@ TYPE
 
   (* buf / hasBuf hold the lookahead line between ReadFasta calls. *)
   FastaReader* = RECORD
-    rider  : Files.Rider;
-    done*  : BOOLEAN;
-    buf    : ARRAY LineBuf OF CHAR;
-    hasBuf : BOOLEAN
+    rider   : Files.Rider;
+    done*   : BOOLEAN;
+    buf     : ARRAY LineBuf OF CHAR;
+    hasBuf  : BOOLEAN;
+    tmpPath : ARRAY 1024 OF CHAR
   END;
 
   FastqReader* = RECORD
-    rider : Files.Rider;
-    done* : BOOLEAN
+    rider   : Files.Rider;
+    done*   : BOOLEAN;
+    tmpPath : ARRAY 1024 OF CHAR
   END;
 
   BedReader* = RECORD
-    rider : Files.Rider;
-    done* : BOOLEAN
+    rider   : Files.Rider;
+    done*   : BOOLEAN;
+    tmpPath : ARRAY 1024 OF CHAR
   END;
 
 (* ------------------------------------------------------------------ *)
@@ -153,14 +156,58 @@ BEGIN
 END IsBedSkip;
 
 (* ------------------------------------------------------------------ *)
+(*  Compressed-file helpers                                             *)
+(* ------------------------------------------------------------------ *)
+
+VAR tmpSeq: INTEGER;
+
+PROCEDURE IsGzipped(path: ARRAY OF CHAR): BOOLEAN;
+BEGIN
+  RETURN Strings.EndsWith(path, ".gz")
+END IsGzipped;
+
+PROCEDURE MakeTmpPath(VAR path: ARRAY OF CHAR);
+VAR i: INTEGER;
+BEGIN
+  IF ~Env.Get("TMPDIR", path) THEN COPY("/tmp", path) END;
+  Strings.Append("/_bioio_", path);
+  i := Strings.Length(path);
+  path[i] := CHR(tmpSeq MOD 10 + ORD('0'));
+  path[i+1] := 0X;
+  Strings.Append(".tmp", path);
+  tmpSeq := (tmpSeq + 1) MOD 10
+END MakeTmpPath;
+
+PROCEDURE GzOpen(path: ARRAY OF CHAR; VAR f: Files.File;
+                 VAR tmpPath: ARRAY OF CHAR): BOOLEAN;
+VAR cmd: ARRAY 2048 OF CHAR;
+BEGIN
+  IF IsGzipped(path) THEN
+    MakeTmpPath(tmpPath);
+    COPY("gunzip -c ", cmd);
+    Strings.Append(path, cmd);
+    Strings.Append(" > ", cmd);
+    Strings.Append(tmpPath, cmd);
+    IF OS.Exec(cmd) # 0 THEN
+      tmpPath[0] := 0X; f := NIL; RETURN FALSE
+    END;
+    f := Files.Old(tmpPath);
+    IF f = NIL THEN Files.Delete(tmpPath); tmpPath[0] := 0X; RETURN FALSE END
+  ELSE
+    f := Files.Old(path);
+    tmpPath[0] := 0X
+  END;
+  RETURN f # NIL
+END GzOpen;
+
+(* ------------------------------------------------------------------ *)
 (*  FASTA reader                                                        *)
 (* ------------------------------------------------------------------ *)
 
 PROCEDURE OpenFasta*(VAR r: FastaReader; path: ARRAY OF CHAR): BOOLEAN;
 VAR f: Files.File;
 BEGIN
-  f := Files.Old(path);
-  IF f = NIL THEN r.done := TRUE; RETURN FALSE END;
+  IF ~GzOpen(path, f, r.tmpPath) THEN r.done := TRUE; RETURN FALSE END;
   Files.Set(r.rider, f, 0);
   r.done   := FALSE;
   r.hasBuf := FALSE;
@@ -226,7 +273,8 @@ END ReadFasta;
 
 PROCEDURE CloseFasta*(VAR r: FastaReader);
 BEGIN
-  r.done := TRUE; r.hasBuf := FALSE
+  r.done := TRUE; r.hasBuf := FALSE;
+  IF r.tmpPath[0] # 0X THEN Files.Delete(r.tmpPath); r.tmpPath[0] := 0X END
 END CloseFasta;
 
 PROCEDURE WriteFasta*(VAR r: Files.Rider; VAR rec: FastaRecord; width: INTEGER);
@@ -252,8 +300,7 @@ END WriteFasta;
 PROCEDURE OpenFastq*(VAR r: FastqReader; path: ARRAY OF CHAR): BOOLEAN;
 VAR f: Files.File;
 BEGIN
-  f := Files.Old(path);
-  IF f = NIL THEN r.done := TRUE; RETURN FALSE END;
+  IF ~GzOpen(path, f, r.tmpPath) THEN r.done := TRUE; RETURN FALSE END;
   Files.Set(r.rider, f, 0);
   r.done := FALSE;
   RETURN TRUE
@@ -304,7 +351,8 @@ END ReadFastq;
 
 PROCEDURE CloseFastq*(VAR r: FastqReader);
 BEGIN
-  r.done := TRUE
+  r.done := TRUE;
+  IF r.tmpPath[0] # 0X THEN Files.Delete(r.tmpPath); r.tmpPath[0] := 0X END
 END CloseFastq;
 
 PROCEDURE WriteFastq*(VAR r: Files.Rider; VAR rec: FastqRecord);
@@ -327,8 +375,7 @@ END WriteFastq;
 PROCEDURE OpenBed*(VAR r: BedReader; path: ARRAY OF CHAR): BOOLEAN;
 VAR f: Files.File;
 BEGIN
-  f := Files.Old(path);
-  IF f = NIL THEN r.done := TRUE; RETURN FALSE END;
+  IF ~GzOpen(path, f, r.tmpPath) THEN r.done := TRUE; RETURN FALSE END;
   Files.Set(r.rider, f, 0);
   r.done := FALSE;
   RETURN TRUE
@@ -371,7 +418,8 @@ END ReadBed;
 
 PROCEDURE CloseBed*(VAR r: BedReader);
 BEGIN
-  r.done := TRUE
+  r.done := TRUE;
+  IF r.tmpPath[0] # 0X THEN Files.Delete(r.tmpPath); r.tmpPath[0] := 0X END
 END CloseBed;
 
 PROCEDURE WriteBed*(VAR r: Files.Rider; VAR rec: BedRecord);

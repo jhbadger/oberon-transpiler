@@ -19,7 +19,7 @@ MODULE SeqBlast;
     E-value   = qLen * sLen * 2^(-bitScore).
 *)
 
-IMPORT BioIO, BioSeq, BioAlpha, BioPattern, Out, Args, Strings, OS, Files, Math, Parallel;
+IMPORT BioIO, BioSeq, BioAlpha, BioPattern, Out, Args, Strings, Math, Parallel;
 
 CONST
   MaxHSPs      = 512;
@@ -28,9 +28,6 @@ CONST
   MaxW         = 32;
   MaxAlnRegion = 512;               (* max region length per axis for gapped NW *)
   MaxAlnStr    = MaxAlnRegion * 2 + 2;  (* max alignment string (includes gaps) *)
-
-  TmpQ  = "/tmp/_seqblast_q.tmp";
-  TmpDB = "/tmp/_seqblast_db.tmp";
 
   Lambda  = 0.318;
   KStat   = 0.130;
@@ -908,23 +905,6 @@ BEGIN
 END LoadQuery;
 
 (* ------------------------------------------------------------------ *)
-(*  Gzip helpers                                                        *)
-(* ------------------------------------------------------------------ *)
-
-PROCEDURE IsGzipped(fname: ARRAY OF CHAR): BOOLEAN;
-BEGIN RETURN Strings.EndsWith(fname, ".gz") END IsGzipped;
-
-PROCEDURE Decompress(fname, tmp: ARRAY OF CHAR): BOOLEAN;
-VAR cmd: ARRAY 2048 OF CHAR;
-BEGIN
-  COPY("gunzip -c ", cmd);
-  Strings.Append(fname, cmd);
-  Strings.Append(" > ", cmd);
-  Strings.Append(tmp, cmd);
-  RETURN OS.Exec(cmd) = 0
-END Decompress;
-
-(* ------------------------------------------------------------------ *)
 (*  Main search loop                                                    *)
 (* ------------------------------------------------------------------ *)
 
@@ -1054,39 +1034,10 @@ END ParseArgs;
 (*  Entry point                                                         *)
 (* ------------------------------------------------------------------ *)
 
-VAR
-  qGz, dbGz    : BOOLEAN;
-  qPath, dbPath : ARRAY 1024 OF CHAR;
-
 BEGIN
   IF ~ParseArgs() THEN RETURN END;
 
-  qGz := IsGzipped(queryFile);
-  IF qGz THEN
-    IF ~Decompress(queryFile, TmpQ) THEN
-      Out.String("Error: gunzip failed for query."); Out.Ln; RETURN
-    END;
-    COPY(TmpQ, qPath)
-  ELSE
-    COPY(queryFile, qPath)
-  END;
-
-  IF ~LoadQuery(qPath) THEN
-    IF qGz THEN Files.Delete(TmpQ) END;
-    RETURN
-  END;
-
-  dbGz := IsGzipped(dbFile);
-  IF dbGz THEN
-    IF ~Decompress(dbFile, TmpDB) THEN
-      Out.String("Error: gunzip failed for DB."); Out.Ln;
-      IF qGz THEN Files.Delete(TmpQ) END;
-      RETURN
-    END;
-    COPY(TmpDB, dbPath)
-  ELSE
-    COPY(dbFile, dbPath)
-  END;
+  IF ~LoadQuery(queryFile) THEN RETURN END;
 
   IF ~alnMode THEN
     Out.String("qseqid");   Out.Char(9X); Out.String("sseqid");   Out.Char(9X);
@@ -1097,8 +1048,5 @@ BEGIN
     Out.String("evalue");   Out.Char(9X); Out.String("bitscore"); Out.Ln
   END;
 
-  SearchDB(dbPath);
-
-  IF qGz  THEN Files.Delete(TmpQ)  END;
-  IF dbGz THEN Files.Delete(TmpDB) END
+  SearchDB(dbFile)
 END SeqBlast.

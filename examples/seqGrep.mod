@@ -25,10 +25,9 @@ MODULE SeqGrep;
   Strand is '+' for forward, '-' for reverse complement hits, '.' for protein.
 *)
 
-IMPORT BioIO, BioSeq, BioPattern, BioAlpha, Args, Strings, Out, OS, Files;
+IMPORT BioIO, BioSeq, BioPattern, BioAlpha, Args, Strings, Out;
 
 CONST
-  TmpPath    = "/tmp/_seqgrep_decomp.tmp";
   MaxFiles   = 64;
   MaxPattern = 256;
 
@@ -53,13 +52,8 @@ TYPE
   END;
 
 (* -----------------------------------------------------------------------
-   Utility: gzip, format detection (shared with FastaStats convention)
+   Utility: format detection
    ----------------------------------------------------------------------- *)
-
-PROCEDURE IsGzipped(fname: ARRAY OF CHAR): BOOLEAN;
-BEGIN
-  RETURN Strings.EndsWith(fname, ".gz")
-END IsGzipped;
 
 PROCEDURE DetectFormat(fname: ARRAY OF CHAR): INTEGER;
 VAR base: ARRAY 1024 OF CHAR; len: INTEGER;
@@ -72,16 +66,6 @@ BEGIN
   END;
   RETURN FileFASTA
 END DetectFormat;
-
-PROCEDURE Decompress(fname: ARRAY OF CHAR): BOOLEAN;
-VAR cmd: ARRAY 2048 OF CHAR;
-BEGIN
-  COPY("gunzip -c ", cmd);
-  Strings.Append(fname, cmd);
-  Strings.Append(" > ", cmd);
-  Strings.Append(TmpPath, cmd);
-  RETURN OS.Exec(cmd) = 0
-END Decompress;
 
 (* -----------------------------------------------------------------------
    Nucleotide detection (same heuristic as FastaStats)
@@ -362,27 +346,14 @@ END RunFastq;
 PROCEDURE ProcessFile(fname: ARRAY OF CHAR;
                       VAR bm: BioPattern.BMState;
                       VAR opt: Options);
-VAR workPath: ARRAY 1024 OF CHAR; gz: BOOLEAN; fmt: INTEGER;
+VAR fmt: INTEGER;
 BEGIN
-  gz  := IsGzipped(fname);
   fmt := DetectFormat(fname);
-  IF gz THEN
-    IF ~Decompress(fname) THEN
-      Out.String("Error: gunzip failed for: "); Out.String(fname); Out.Ln;
-      RETURN
-    END;
-    COPY(TmpPath, workPath)
-  ELSE
-    COPY(fname, workPath)
-  END;
-
   IF fmt = FileFASTQ THEN
-    RunFastq(workPath, fname, bm, opt)
+    RunFastq(fname, fname, bm, opt)
   ELSE
-    RunFasta(workPath, fname, bm, opt)
-  END;
-
-  IF gz THEN Files.Delete(TmpPath) END
+    RunFasta(fname, fname, bm, opt)
+  END
 END ProcessFile;
 
 (* -----------------------------------------------------------------------

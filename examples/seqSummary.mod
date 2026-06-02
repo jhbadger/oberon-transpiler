@@ -1,16 +1,6 @@
 MODULE SeqSummary;
 
-IMPORT BioIO, BioSeq, Out, Args, Strings, OS, Files;
-
-(* -----------------------------------------------------------------------
-   Gzip strategy: if the file ends with ".gz", decompress to a temp file
-   via "gunzip -c <src> > <tmp>", process the temp file, then delete it.
-   This avoids any external library dependency while being transparent to
-   the rest of the module.
-   ----------------------------------------------------------------------- *)
-
-CONST
-  TmpPath = "/tmp/_fastastats_decomp.tmp";
+IMPORT BioIO, BioSeq, Out, Args, Strings;
 
 TYPE
   FileFormat = INTEGER;   (* 0 = FASTA, 1 = FASTQ *)
@@ -43,24 +33,6 @@ BEGIN
   END;
   RETURN 0   (* default to FASTA *)
 END DetectFormat;
-
-(* Returns TRUE if fname ends with ".gz". *)
-PROCEDURE IsGzipped(fname: ARRAY OF CHAR): BOOLEAN;
-BEGIN
-  RETURN Strings.EndsWith(fname, ".gz")
-END IsGzipped;
-
-(* Decompress fname to TmpPath. Returns TRUE on success. *)
-PROCEDURE Decompress(fname: ARRAY OF CHAR): BOOLEAN;
-VAR cmd: ARRAY 2048 OF CHAR; rc: INTEGER;
-BEGIN
-  COPY("gunzip -c ", cmd);
-  Strings.Append(fname, cmd);
-  Strings.Append(" > ", cmd);
-  Strings.Append(TmpPath, cmd);
-  rc := OS.Exec(cmd);
-  RETURN rc = 0
-END Decompress;
 
 (* ---- stats accumulator ---------------------------------------------- *)
 
@@ -214,10 +186,7 @@ END ProcessFastq;
 (* ---- top-level dispatcher ------------------------------------------- *)
 
 PROCEDURE ProcessFile(filename: ARRAY OF CHAR; summary: BOOLEAN);
-VAR
-  fmt:      FileFormat;
-  workPath: ARRAY 1024 OF CHAR;
-  gz:       BOOLEAN;
+VAR fmt: FileFormat;
 BEGIN
   (* reset global accumulators *)
   total_size := 0; num_sequences := 0;
@@ -227,25 +196,11 @@ BEGIN
   type_known := FALSE;
 
   fmt := DetectFormat(filename);
-  gz  := IsGzipped(filename);
-
-  IF gz THEN
-    IF ~Decompress(filename) THEN
-      Out.String("Error: gunzip failed for: "); Out.String(filename); Out.Ln;
-      RETURN
-    END;
-    COPY(TmpPath, workPath)
-  ELSE
-    COPY(filename, workPath)
-  END;
-
   IF fmt = 1 THEN
-    ProcessFastq(workPath, summary)
+    ProcessFastq(filename, summary)
   ELSE
-    ProcessFasta(workPath, summary)
-  END;
-
-  IF gz THEN Files.Delete(TmpPath) END
+    ProcessFasta(filename, summary)
+  END
 END ProcessFile;
 
 (* ---- summary output -------------------------------------------------- *)

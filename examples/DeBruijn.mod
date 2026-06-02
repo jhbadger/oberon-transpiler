@@ -28,7 +28,7 @@ MODULE DeBruijn;
   larger values for bigger genomes.
 *)
 
-IMPORT BioIO, BioSeq, BioAlpha, Out, Args, Strings, OS, Files;
+IMPORT BioIO, BioSeq, BioAlpha, Out, Args, Strings;
 
 CONST
   MaxK     = 31;        (* maximum supported k-mer size *)
@@ -37,7 +37,6 @@ CONST
   MaxEdges = 600000;    (* max unique k-mers in the graph *)
   MaxOut   = 4;         (* at most 4 out-edges per node (A/C/G/T) *)
   CntSize  = 1048576;   (* 2^20, k-mer count table for -c filter pass *)
-  TmpPath  = "/tmp/_debruijn.tmp";
   LineWid  = 60;        (* FASTA output line width *)
 
 TYPE
@@ -79,9 +78,6 @@ VAR
 (*  File helpers                                                        *)
 (* ------------------------------------------------------------------ *)
 
-PROCEDURE IsGzipped(f: ARRAY OF CHAR): BOOLEAN;
-BEGIN RETURN Strings.EndsWith(f, ".gz") END IsGzipped;
-
 PROCEDURE IsFastq(f: ARRAY OF CHAR): BOOLEAN;
 VAR base: ARRAY 1024 OF CHAR; len: INTEGER;
 BEGIN
@@ -90,16 +86,6 @@ BEGIN
   IF Strings.EndsWith(base, ".gz") THEN base[len - 3] := 0X END;
   RETURN Strings.EndsWith(base, ".fastq") OR Strings.EndsWith(base, ".fq")
 END IsFastq;
-
-PROCEDURE Decompress(f: ARRAY OF CHAR): BOOLEAN;
-VAR cmd: ARRAY 2048 OF CHAR;
-BEGIN
-  COPY("gunzip -c ", cmd);
-  Strings.Append(f, cmd);
-  Strings.Append(" > ", cmd);
-  Strings.Append(TmpPath, cmd);
-  RETURN OS.Exec(cmd) = 0
-END Decompress;
 
 (* ------------------------------------------------------------------ *)
 (*  Hash functions                                                      *)
@@ -414,30 +400,16 @@ BEGIN FOR i := 0 TO CntSize - 1 DO cntTable[i] := 0 END END InitCntTable;
 (* ------------------------------------------------------------------ *)
 
 PROCEDURE Run(f: ARRAY OF CHAR);
-VAR workPath: ARRAY 1024 OF CHAR; gz, fq: BOOLEAN;
+VAR fq: BOOLEAN;
 BEGIN
-  gz := IsGzipped(f);
   fq := IsFastq(f);
-  IF gz THEN
-    IF ~Decompress(f) THEN
-      Out.String("Error: gunzip failed for: "); Out.String(f); Out.Ln;
-      RETURN
-    END;
-    COPY(TmpPath, workPath)
-  ELSE
-    COPY(f, workPath)
-  END;
-
   IF minCov > 1 THEN
     (* Pass 1: fill count table *)
     InitCntTable();
-    IF fq THEN CountFastq(workPath) ELSE CountFasta(workPath) END
+    IF fq THEN CountFastq(f) ELSE CountFasta(f) END
   END;
-
   (* Pass 2 (or only pass when minCov = 1): build graph *)
-  IF fq THEN RunFastq(workPath) ELSE RunFasta(workPath) END;
-
-  IF gz THEN Files.Delete(TmpPath) END
+  IF fq THEN RunFastq(f) ELSE RunFasta(f) END
 END Run;
 
 (* ------------------------------------------------------------------ *)
