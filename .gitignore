@@ -1,5 +1,8 @@
 *
 !*.*
 !*/
-
+*.tmp
 *.h
+.DS_Store
+.obc_clipboard
+.obc_errors

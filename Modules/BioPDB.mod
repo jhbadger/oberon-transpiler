@@ -36,11 +36,25 @@ CONST
   MaxChains* = 26;
 
   (* Error codes returned by Load / LoadModel *)
-  ErrNone*       = 0;
-  ErrFileOpen*   = 1;
+  ErrNone*        = 0;
+  ErrFileOpen*    = 1;
   ErrTooManyAtoms* = 2;
 
+  (* Secondary structure codes *)
+  SSCoil*  = 0;
+  SSHelix* = 1;
+  SSSheet* = 2;
+
+  (* Maximum residues tracked for secondary structure per model *)
+  MaxSSRes* = 20000;
+
 TYPE
+  SSEntry* = RECORD
+    chain*  : CHAR;
+    resSeq* : INTEGER;
+    ss*     : INTEGER
+  END;
+
   Atom* = RECORD
     serial*     : INTEGER;
     name*       : ARRAY 5  OF CHAR;  (* e.g. " CA " *)
@@ -59,12 +73,13 @@ TYPE
   Model* = RECORD
     atoms*  : ARRAY MaxAtoms OF Atom;
     count*  : INTEGER;
-    (* Axis-aligned bounding box *)
     minX*, maxX* : REAL;
     minY*, maxY* : REAL;
     minZ*, maxZ* : REAL;
-    (* Centroid (mean of all atom positions) *)
-    cx*, cy*, cz* : REAL
+    cx*, cy*, cz* : REAL;
+    (* Secondary structure table — populated by Load/LoadModel/ReadModel *)
+    ssMap*   : ARRAY MaxSSRes OF SSEntry;
+    ssCount* : INTEGER
   END;
 
   (* Reader for iterating over models in a multi-model file.
@@ -73,7 +88,9 @@ TYPE
   PDBReader* = RECORD
     rider   : Files.Rider;
     done*   : BOOLEAN;
-    tmpPath : ARRAY 1024 OF CHAR
+    tmpPath : ARRAY 1024 OF CHAR;
+    (* SS table parsed once at open; copied into each model on ReadModel *)
+    ssModel : Model
   END;
 
 (* ------------------------------------------------------------------ *)
@@ -185,7 +202,92 @@ BEGIN
 END ComputeBounds;
 
 (* ------------------------------------------------------------------ *)
-(*  Core line parser: fill one Atom from a PDB ATOM/HETATM line.       *)
+(*  Secondary structure parsing                                         *)
+(* ------------------------------------------------------------------ *)
+
+(* Parse integer from fixed 0-based columns [lo,hi] of a PDB line. *)
+PROCEDURE SSColInt(VAR line: ARRAY OF CHAR; lo, hi: INTEGER): INTEGER;
+VAR i, n, sign: INTEGER;
+BEGIN
+  WHILE (lo <= hi) & (line[lo] = ' ') DO INC(lo) END;
+  n := 0; sign := 1;
+  IF (lo <= hi) & (line[lo] = '-') THEN sign := -1; INC(lo) END;
+  FOR i := lo TO hi DO
+    IF (line[i] >= '0') & (line[i] <= '9') THEN
+      n := n * 10 + ORD(line[i]) - ORD('0')
+    END
+  END;
+  RETURN sign * n
+END SSColInt;
+
+(* Mark every residue in [seqStart..seqEnd] on chain with ss code. *)
+PROCEDURE MarkSS(VAR m: Model; chain: CHAR;
+                 seqStart, seqEnd, ss: INTEGER);
+VAR r: INTEGER;
+BEGIN
+  FOR r := seqStart TO seqEnd DO
+    IF m.ssCount < MaxSSRes THEN
+      m.ssMap[m.ssCount].chain  := chain;
+      m.ssMap[m.ssCount].resSeq := r;
+      m.ssMap[m.ssCount].ss     := ss;
+      INC(m.ssCount)
+    END
+  END
+END MarkSS;
+
+(*
+  Parse HELIX and SHEET records from an already-open rider into m.ssMap.
+  The rider must be positioned at the start of the file.
+  Stops at the first ATOM/HETATM/MODEL line (SS records appear in the
+  PDB header before coordinates).
+
+  HELIX column offsets (0-based):
+    19      init chain ID
+    21-24   init seq num
+    31      end chain ID
+    33-36   end seq num
+
+  SHEET column offsets (0-based):
+    21      init chain ID
+    22-25   init seq num
+    32      end chain ID
+    33-36   end seq num
+*)
+PROCEDURE ParseSS(VAR r: Files.Rider; VAR m: Model);
+VAR line: ARRAY 128 OF CHAR;
+    chainS: CHAR;
+    seqS, seqE: INTEGER;
+BEGIN
+  m.ssCount := 0;
+  LOOP
+    IF r.eof THEN EXIT END;
+    Files.ReadLine(r, line);
+    IF r.eof & (line[0] = 0X) THEN EXIT END;
+
+    IF RecordIs(line, "HELIX ") OR RecordIs(line, "HELIX") THEN
+      IF LEN(line) > 36 THEN
+        chainS := line[19];
+        seqS   := SSColInt(line, 21, 24);
+        seqE   := SSColInt(line, 33, 36);
+        MarkSS(m, chainS, seqS, seqE, SSHelix)
+      END
+    ELSIF RecordIs(line, "SHEET ") OR RecordIs(line, "SHEET") THEN
+      IF LEN(line) > 36 THEN
+        chainS := line[21];
+        seqS   := SSColInt(line, 22, 25);
+        seqE   := SSColInt(line, 33, 36);
+        MarkSS(m, chainS, seqS, seqE, SSSheet)
+      END
+    ELSIF RecordIs(line, "ATOM  ") OR RecordIs(line, "ATOM ") OR
+          RecordIs(line, "HETATM") OR RecordIs(line, "MODEL ") OR
+          RecordIs(line, "MODEL") THEN
+      EXIT
+    END
+  END
+END ParseSS;
+
+(* ------------------------------------------------------------------ *)
+(*  Core line parser                                                    *)
 (* ------------------------------------------------------------------ *)
 
 PROCEDURE ParseAtomLine(line: ARRAY OF CHAR; VAR a: Atom; het: BOOLEAN);
@@ -318,6 +420,22 @@ BEGIN
   RETURN f # NIL
 END GzOpen;
 
+(*
+  Look up the secondary structure code for a given chain + residue number.
+  Returns SSCoil if not found (residues not covered by HELIX/SHEET records).
+  Linear scan — adequate for typical protein sizes (≤ a few thousand residues).
+*)
+PROCEDURE LookupSS*(VAR m: Model; chain: CHAR; resSeq: INTEGER): INTEGER;
+VAR i: INTEGER;
+BEGIN
+  FOR i := 0 TO m.ssCount - 1 DO
+    IF (m.ssMap[i].chain = chain) & (m.ssMap[i].resSeq = resSeq) THEN
+      RETURN m.ssMap[i].ss
+    END
+  END;
+  RETURN SSCoil
+END LookupSS;
+
 (* ------------------------------------------------------------------ *)
 (*  Convenience loaders                                                 *)
 (* ------------------------------------------------------------------ *)
@@ -440,9 +558,12 @@ END LoadModel;
     END
 *)
 PROCEDURE OpenPDB*(VAR r: PDBReader; path: ARRAY OF CHAR): BOOLEAN;
-VAR f: Files.File;
+VAR f: Files.File; ssRider: Files.Rider;
 BEGIN
   IF ~GzOpen(path, f, r.tmpPath) THEN r.done := TRUE; RETURN FALSE END;
+  (* Parse SS from a fresh rider before handing the file to the caller *)
+  Files.Set(ssRider, f, 0);
+  ParseSS(ssRider, r.ssModel);
   Files.Set(r.rider, f, 0);
   r.done := FALSE;
   RETURN TRUE
@@ -455,7 +576,7 @@ END OpenPDB;
 *)
 PROCEDURE ReadModel*(VAR r: PDBReader; VAR m: Model;
                      VAR err: INTEGER): BOOLEAN;
-VAR line: ARRAY 128 OF CHAR; scanning: BOOLEAN;
+VAR line: ARRAY 128 OF CHAR; scanning: BOOLEAN; i: INTEGER;
 BEGIN
   IF r.done THEN RETURN FALSE END;
   m.count := 0; err := ErrNone;
@@ -487,7 +608,13 @@ BEGIN
     r.done := TRUE; RETURN FALSE
   END;
 
-  (* If file has no MODEL records, one pass = one model = done. *)
+  (* Copy the SS table parsed at open time into this model *)
+  m.ssCount := r.ssModel.ssCount;
+  IF m.ssCount > MaxSSRes THEN m.ssCount := MaxSSRes END;
+  FOR i := 0 TO m.ssCount - 1 DO
+    m.ssMap[i] := r.ssModel.ssMap[i]
+  END;
+
   IF m.count > 0 THEN RETURN TRUE END;
   r.done := TRUE;
   RETURN FALSE
