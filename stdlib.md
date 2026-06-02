@@ -1318,6 +1318,7 @@ Runs loop bodies in parallel using POSIX threads.  Links with `-lpthread` on Lin
 | Function / Procedure | Description |
 |----------------------|-------------|
 | `Parallel.NumCPU(): INTEGER` | Return the number of logical CPU cores available (from `sysconf(_SC_NPROCESSORS_ONLN)`). Use this to pick a sensible thread count. |
+| `Parallel.SetMaxCPU(n: INTEGER)` | Cap the number of threads used by subsequent `Parallel.For` calls to `n`.  Requests with `nthreads` > `n` are silently clamped.  Pass 0 to remove the cap.  Useful on shared systems to avoid starving other processes. |
 | `Parallel.For(lo, hi, body: PROCEDURE(INTEGER); nthreads: INTEGER)` | Call `body(i)` for every integer `i` in `[lo, hi)`, using up to `nthreads` threads.  The calls are unordered and may run concurrently.  Returns only after all iterations complete.  `body` must be a module-level procedure (not a nested procedure). |
 
 **Thread-safety rules:** Each worker invocation receives a unique `i`, so writing to arrays indexed by `i` is safe without locks.  Any shared state accessed inside `body` must be read-only, or protected externally.  The standard library allocator (`NEW`) is thread-safe.
@@ -1867,6 +1868,62 @@ Reader for VCF 4.x files (plain text; bgzipped is not supported).  Skips `##`-he
 | `BioVCF.ReadVCF(VAR r: VCFReader; VAR rec: VCFRecord): BOOLEAN` | Read the next data record into `rec`.  Returns FALSE at EOF or on error. |
 | `BioVCF.CloseVCF(VAR r: VCFReader)` | Close the file. |
 | `BioVCF.WriteVCF(VAR wr: Files.Rider; VAR rec: VCFRecord)` | Write one VCF data line (no header) to rider `wr`. |
+
+---
+
+## BioPDB - Protein Data Bank File I/O
+
+```
+IMPORT BioPDB;
+```
+
+Parses ATOM and HETATM records from PDB-format files (plain or `.gz`).  Supports multi-model files (NMR ensembles, MD trajectories).  Also parses HELIX/SHEET records for secondary-structure annotation and can write models back to PDB format.
+
+### Constants
+
+| Constant | Value | Description |
+|----------|-------|-------------|
+| `BioPDB.MaxAtoms` | 8192 | Maximum atoms per model. |
+| `BioPDB.MaxChains` | 26 | Maximum chain IDs tracked. |
+| `BioPDB.MaxSSRes` | 20000 | Maximum residues tracked in the secondary-structure table per model. |
+| `BioPDB.ErrNone` | 0 | No error. |
+| `BioPDB.ErrFileOpen` | 1 | File could not be opened (or requested model number not found). |
+| `BioPDB.ErrTooManyAtoms` | 2 | Atom count exceeded `MaxAtoms`. |
+| `BioPDB.SSCoil` | 0 | Secondary structure: coil / unassigned. |
+| `BioPDB.SSHelix` | 1 | Secondary structure: alpha helix. |
+| `BioPDB.SSSheet` | 2 | Secondary structure: beta sheet. |
+
+### Types
+
+| Type | Public fields | Description |
+|------|---------------|-------------|
+| `BioPDB.SSEntry` | `chain: CHAR; resSeq: INTEGER; ss: INTEGER` | One secondary-structure assignment (one residue). |
+| `BioPDB.Atom` | `serial: INTEGER; name: ARRAY 5; altLoc: CHAR; resName: ARRAY 4; chainID: CHAR; resSeq: INTEGER; iCode: CHAR; x, y, z: REAL; occupancy, tempFactor: REAL; element: ARRAY 3; isHet: BOOLEAN` | One ATOM or HETATM record.  `isHet` is TRUE for HETATM lines. |
+| `BioPDB.Model` | `atoms: ARRAY MaxAtoms OF Atom; count: INTEGER; minX, maxX, minY, maxY, minZ, maxZ: REAL; cx, cy, cz: REAL; ssMap: ARRAY MaxSSRes OF SSEntry; ssCount: INTEGER` | A loaded model.  Bounding box and centroid are computed on load.  `ssMap` holds secondary-structure assignments parsed from HELIX/SHEET records. |
+| `BioPDB.PDBReader` | `done: BOOLEAN` | Streaming reader for multi-model files.  Use `OpenPDB` / `ReadModel` / `ClosePDB`. |
+
+### Procedures
+
+| Procedure / Function | Description |
+|----------------------|-------------|
+| `BioPDB.Load(path: ARRAY OF CHAR; VAR m: Model; VAR err: INTEGER): BOOLEAN` | Load the first model (or entire file if no MODEL records) into `m`.  Returns TRUE on success; sets `err` to an `Err*` constant. |
+| `BioPDB.LoadModel(path: ARRAY OF CHAR; VAR m: Model; modelNo: INTEGER; VAR err: INTEGER): BOOLEAN` | Load a specific 1-based model number into `m`.  For files without MODEL records, `modelNo = 1` is equivalent to `Load`. |
+| `BioPDB.LookupSS(VAR m: Model; chain: CHAR; resSeq: INTEGER): INTEGER` | Return the secondary-structure code (`SSCoil`, `SSHelix`, or `SSSheet`) for the given chain and residue sequence number.  Returns `SSCoil` if not found. |
+| `BioPDB.OpenPDB(VAR r: PDBReader; path: ARRAY OF CHAR): BOOLEAN` | Open a PDB file for streaming model-by-model access.  Returns TRUE on success. |
+| `BioPDB.ReadModel(VAR r: PDBReader; VAR m: Model; VAR err: INTEGER): BOOLEAN` | Read the next model into `m`.  Returns FALSE at EOF or on error.  Secondary-structure data parsed at open time is copied into each model automatically. |
+| `BioPDB.ClosePDB(VAR r: PDBReader)` | Close the streaming reader and clean up any temporary decompressed file. |
+| `BioPDB.WriteModel(VAR r: Files.Rider; VAR m: Model; modelNo: INTEGER)` | Write `m` to an open `Files.Rider` in PDB format.  Pass `modelNo > 0` to wrap with MODEL/ENDMDL records; pass 0 to write a bare END record. |
+
+**Usage pattern (streaming):**
+```
+VAR rdr: BioPDB.PDBReader;  m: BioPDB.Model;  err: INTEGER;
+IF BioPDB.OpenPDB(rdr, "ensemble.pdb") THEN
+  WHILE BioPDB.ReadModel(rdr, m, err) DO
+    (* process m.atoms[0 .. m.count-1] *)
+  END;
+  BioPDB.ClosePDB(rdr)
+END
+```
 
 ---
 
