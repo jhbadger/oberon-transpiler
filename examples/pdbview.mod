@@ -987,7 +987,7 @@ END BuildMenus;
    Main
    ════════════════════════════════════════════════════════════════ *)
 
-VAR ev: TUI.Event; ch: CHAR; arg: ARRAY 1024 OF CHAR;
+VAR ev: TUI.Event; ch: CHAR; arg, argTmp: ARRAY 1024 OF CHAR; argI, argJ: INTEGER;
 
 BEGIN
   TUI.Init();
@@ -1013,7 +1013,22 @@ BEGIN
   TUI.AddView(vw); TUI.SetFocus(vw);
   ResetView(vw);
 
-  IF Args.Count() > 0 THEN Args.Get(1, arg); LoadPDB(arg, 1) END;
+  argI := 1;
+  WHILE argI <= Args.Count() DO
+    Args.Get(argI, arg);
+    IF Strings.Compare(arg, "-j") = 0 THEN
+      INC(argI);
+      IF argI <= Args.Count() THEN
+        Args.Get(argI, argTmp);
+        IF Strings.StrToInt(argTmp, argJ) & (argJ > 0) THEN
+          Parallel.SetMaxCPU(argJ)
+        END
+      END
+    ELSIF arg[0] # '-' THEN
+      LoadPDB(arg, 1)
+    END;
+    INC(argI)
+  END;
 
   WHILE running DO
     IF vw.inertOn THEN

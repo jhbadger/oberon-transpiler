@@ -78,7 +78,7 @@ VAR
   fname    : ARRAY 1024 OF CHAR;
   arg      : ARRAY 1024 OF CHAR;
   tmp      : ARRAY 64 OF CHAR;
-  mi       : INTEGER;
+  mi, jVal : INTEGER;
 
 (* ------------------------------------------------------------------ *)
 (*  File helpers                                                        *)
@@ -499,6 +499,14 @@ BEGIN
         IF ~Strings.StrToInt(tmp, minCov) THEN minCov := 1 END;
         IF minCov < 1 THEN minCov := 1 END
       END
+    ELSIF Strings.Compare(arg, "-j") = 0 THEN
+      INC(mi);
+      IF mi <= Args.Count() THEN
+        Args.Get(mi, tmp);
+        IF Strings.StrToInt(tmp, jVal) & (jVal > 0) THEN
+          Parallel.SetMaxCPU(jVal)
+        END
+      END
     ELSIF Strings.Compare(arg, "-norc") = 0 THEN
       noRC := TRUE
     ELSE
@@ -508,11 +516,12 @@ BEGIN
   END;
 
   IF fname = "" THEN
-    Out.String("Usage: DeBruijn [-k <ksize>] [-m <minlen>] [-c <mincov>] <reads.[fastq|fq|fasta|fa][.gz]>"); Out.Ln;
+    Out.String("Usage: DeBruijn [-k <ksize>] [-m <minlen>] [-c <mincov>] [-j <threads>] <reads.[fastq|fq|fasta|fa][.gz]>"); Out.Ln;
     Out.String("  -k  k-mer size (3.."); Out.Int(MaxK, 0); Out.String(", default 31)"); Out.Ln;
     Out.String("  -m  minimum contig output length (default 200)"); Out.Ln;
     Out.String("  -c     minimum k-mer coverage to include (default 1; use 2-3 for real reads)"); Out.Ln;
     Out.String("  -norc  do not add reverse complement of each read"); Out.Ln;
+    Out.String("  -j <int>  max threads to use (default: all CPUs)"); Out.Ln;
     Out.String("         use with reads_1.fastq alone to avoid doubling the graph"); Out.Ln;
     HALT(1)
   END;

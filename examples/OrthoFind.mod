@@ -408,14 +408,22 @@ END OutputGroups;
 (*  Entry point                                                         *)
 (* ------------------------------------------------------------------ *)
 
-VAR i, j: INTEGER; arg: ARRAY 1024 OF CHAR;
+VAR i, j, jVal: INTEGER; arg, tmp: ARRAY 1024 OF CHAR;
 
 BEGIN
   orgCount := 0;
   i := 1;
   WHILE i <= Args.Count() DO
     Args.Get(i, arg);
-    IF (arg[0] # '-') & (orgCount < MaxOrgs) THEN
+    IF Strings.Compare(arg, "-j") = 0 THEN
+      INC(i);
+      IF i <= Args.Count() THEN
+        Args.Get(i, tmp);
+        IF Strings.StrToInt(tmp, jVal) & (jVal > 0) THEN
+          Parallel.SetMaxCPU(jVal)
+        END
+      END
+    ELSIF (arg[0] # '-') & (orgCount < MaxOrgs) THEN
       BaseName(arg, orgLabel[orgCount]);
       IF LoadOrg(orgCount, arg) THEN INC(orgCount) END
     END;
@@ -423,7 +431,8 @@ BEGIN
   END;
 
   IF orgCount < 2 THEN
-    Out.String("Usage: OrthoFind <org1.faa> <org2.faa> [org3.faa ...]"); Out.Ln;
+    Out.String("Usage: OrthoFind [-j <threads>] <org1.faa> <org2.faa> [org3.faa ...]"); Out.Ln;
+    Out.String("  -j <int>  max threads to use (default: all CPUs)"); Out.Ln;
     Out.String("  Finds orthologous protein groups via Reciprocal Best Hits."); Out.Ln;
     Out.String("  Input:  protein FASTA files, one per organism."); Out.Ln;
     Out.String("  Output: TSV on stdout (group + one column per organism)."); Out.Ln;

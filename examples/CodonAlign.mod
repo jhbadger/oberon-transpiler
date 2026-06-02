@@ -69,6 +69,7 @@ VAR
   tsvFile  : Files.File;
   tsvRider : Files.Rider;
   mainArg  : ARRAY 1024 OF CHAR;
+  mainTmp  : ARRAY 32 OF CHAR;
   mainI, mainPos, mainIdx : INTEGER;
   mainOk   : BOOLEAN;
 
@@ -429,7 +430,15 @@ BEGIN
   mainI := 1;
   WHILE mainI <= Args.Count() DO
     Args.Get(mainI, mainArg);
-    IF mainArg[0] # '-' THEN
+    IF Strings.Compare(mainArg, "-j") = 0 THEN
+      INC(mainI);
+      IF mainI <= Args.Count() THEN
+        Args.Get(mainI, mainTmp);
+        IF Strings.StrToInt(mainTmp, mainPos) & (mainPos > 0) THEN
+          Parallel.SetMaxCPU(mainPos)
+        END
+      END
+    ELSIF mainArg[0] # '-' THEN
       IF tsvPath[0] = 0X THEN
         COPY(mainArg, tsvPath)
       ELSIF orgCount < MaxOrgs THEN
@@ -441,7 +450,8 @@ BEGIN
   END;
 
   IF (tsvPath[0] = 0X) OR (orgCount < 2) THEN
-    Out.String("Usage: CodonAlign <orthogroups.tsv> <org1.nt> <org2.nt> [...]"); Out.Ln;
+    Out.String("Usage: CodonAlign [-j <threads>] <orthogroups.tsv> <org1.nt> <org2.nt> [...]"); Out.Ln;
+    Out.String("  -j <int>         max threads to use (default: all CPUs)"); Out.Ln;
     Out.String("  orthogroups.tsv  output from OrthoFind"); Out.Ln;
     Out.String("  nucleotide files one per organism, in TSV column order"); Out.Ln;
     Out.String("  Writes <groupId>.afa for each orthogroup."); Out.Ln;

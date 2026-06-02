@@ -967,8 +967,8 @@ END SearchDB;
 
 PROCEDURE ParseArgs(): BOOLEAN;
 VAR
-  i, posCount : INTEGER;
-  arg, next   : ARRAY 1024 OF CHAR;
+  i, posCount, jVal : INTEGER;
+  arg, next         : ARRAY 1024 OF CHAR;
 BEGIN
   wordSize  := 11;
   eThresh   := 10.0;
@@ -1001,6 +1001,11 @@ BEGIN
     ELSIF Strings.Compare(arg, "-E") = 0 THEN
       INC(i); Args.Get(i, next); IF ~Strings.StrToInt(next, gapExt) THEN gapExt := -2 END;
       IF gapExt > 0 THEN gapExt := -gapExt END
+    ELSIF Strings.Compare(arg, "-j") = 0 THEN
+      INC(i); Args.Get(i, next);
+      IF Strings.StrToInt(next, jVal) & (jVal > 0) THEN
+        Parallel.SetMaxCPU(jVal)
+      END
     ELSIF Strings.Compare(arg, "-aln") = 0 THEN
       alnMode := TRUE
     ELSE
@@ -1022,6 +1027,7 @@ BEGIN
     Out.String("  -G <int>   gap-open penalty (default 5)"); Out.Ln;
     Out.String("  -E <int>   gap-extend penalty (default 2)"); Out.Ln;
     Out.String("  -aln       pairwise alignment output"); Out.Ln;
+    Out.String("  -j <int>   max threads to use (default: all CPUs)"); Out.Ln;
     RETURN FALSE
   END;
 

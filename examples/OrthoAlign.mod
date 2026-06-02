@@ -71,6 +71,7 @@ VAR
   tsvFile  : Files.File;
   tsvRider : Files.Rider;
   mainArg  : ARRAY 1024 OF CHAR;
+  mainTmp  : ARRAY 32 OF CHAR;
   mainI, mainPos, mainIdx : INTEGER;
   mainOk   : BOOLEAN;
 
@@ -378,7 +379,15 @@ BEGIN
   mainI := 1;
   WHILE mainI <= Args.Count() DO
     Args.Get(mainI, mainArg);
-    IF mainArg[0] # '-' THEN
+    IF Strings.Compare(mainArg, "-j") = 0 THEN
+      INC(mainI);
+      IF mainI <= Args.Count() THEN
+        Args.Get(mainI, mainTmp);
+        IF Strings.StrToInt(mainTmp, mainPos) & (mainPos > 0) THEN
+          Parallel.SetMaxCPU(mainPos)
+        END
+      END
+    ELSIF mainArg[0] # '-' THEN
       IF tsvPath[0] = 0X THEN
         COPY(mainArg, tsvPath)
       ELSIF orgCount < MaxOrgs THEN
@@ -390,7 +399,8 @@ BEGIN
   END;
 
   IF (tsvPath[0] = 0X) OR (orgCount < 2) THEN
-    Out.String("Usage: OrthoAlign <orthogroups.tsv> <org1.fa> <org2.fa> [...]"); Out.Ln;
+    Out.String("Usage: OrthoAlign [-j <threads>] <orthogroups.tsv> <org1.fa> <org2.fa> [...]"); Out.Ln;
+    Out.String("  -j <int>         max threads to use (default: all CPUs)"); Out.Ln;
     Out.String("  orthogroups.tsv  output from OrthoFind"); Out.Ln;
     Out.String("  FASTA files      one per organism, in the same column order"); Out.Ln;
     Out.String("                   as the TSV (protein or nucleotide, auto-detected)"); Out.Ln;

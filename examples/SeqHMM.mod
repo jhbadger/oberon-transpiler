@@ -1408,7 +1408,7 @@ END DoSearch;
 VAR
   mode, arg1, arg2, opt, sval, outPath : ARRAY 1024 OF CHAR;
   minBits  : REAL;
-  nSeqs    : INTEGER;
+  nSeqs, jVal : INTEGER;
   consensus : BOOLEAN;
   i : INTEGER;
 
@@ -1427,12 +1427,28 @@ BEGIN
     Out.String("  -n <int>   number of sequences to emit (default 1)"); Out.Ln;
     Out.String("  -c         emit consensus (most probable) sequence"); Out.Ln;
     Out.String("  -o <file>  output file for align (default: stdout)"); Out.Ln;
+    Out.String("  -j <int>   max threads to use (default: all CPUs)"); Out.Ln;
     RETURN
   END;
 
   Args.Get(1, mode);
   Args.Get(2, arg1);
   IF Args.Count() >= 3 THEN Args.Get(3, arg2) ELSE arg2[0] := 0X END;
+
+  i := 1;
+  WHILE i <= Args.Count() DO
+    Args.Get(i, opt);
+    IF Strings.Compare(opt, "-j") = 0 THEN
+      INC(i);
+      IF i <= Args.Count() THEN
+        Args.Get(i, sval);
+        IF Strings.StrToInt(sval, jVal) & (jVal > 0) THEN
+          Parallel.SetMaxCPU(jVal)
+        END
+      END
+    END;
+    INC(i)
+  END;
 
   IF Strings.Compare(mode, "build") = 0 THEN
     DoBuild(arg1, arg2)
