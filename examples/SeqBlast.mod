@@ -19,10 +19,11 @@ MODULE SeqBlast;
     E-value   = qLen * sLen * 2^(-bitScore).
 *)
 
-IMPORT BioIO, BioSeq, BioAlpha, BioPattern, Out, Args, Strings, OS, Files, Math;
+IMPORT BioIO, BioSeq, BioAlpha, BioPattern, Out, Args, Strings, OS, Files, Math, Parallel;
 
 CONST
   MaxHSPs      = 512;
+  MaxBlastWorkers = 8;  (* parallel subject sequences; each needs ~9 MB workspace *)
   MaxQLen      = 65536;
   MaxW         = 32;
   MaxAlnRegion = 512;               (* max region length per axis for gapped NW *)
@@ -70,6 +71,19 @@ VAR
   (* DP and traceback tables for GappedAlign — global to stay off the stack *)
   dpM, dpIX, dpIY : ARRAY MaxAlnRegion+1 OF ARRAY MaxAlnRegion+1 OF INTEGER;
   tbM, tbIX, tbIY : ARRAY MaxAlnRegion+1 OF ARRAY MaxAlnRegion+1 OF INTEGER;
+
+(* Per-worker workspace for parallel database search. *)
+VAR
+  wkSubjSeq  : ARRAY MaxBlastWorkers OF BioSeq.Seq;
+  wkSubjName : ARRAY MaxBlastWorkers OF ARRAY 256 OF CHAR;
+  wkSubjLen  : ARRAY MaxBlastWorkers OF INTEGER;
+  wkRcSeq    : ARRAY MaxBlastWorkers OF BioSeq.Seq;
+  wkHspListP : ARRAY MaxBlastWorkers OF ARRAY MaxHSPs OF HSPRec;
+  wkHspCntP  : ARRAY MaxBlastWorkers OF INTEGER;
+  wkHspListM : ARRAY MaxBlastWorkers OF ARRAY MaxHSPs OF HSPRec;
+  wkHspCntM  : ARRAY MaxBlastWorkers OF INTEGER;
+  wkDpM, wkDpIX, wkDpIY : ARRAY MaxBlastWorkers OF ARRAY MaxAlnRegion+1 OF ARRAY MaxAlnRegion+1 OF INTEGER;
+  wkTbM, wkTbIX, wkTbIY : ARRAY MaxBlastWorkers OF ARRAY MaxAlnRegion+1 OF ARRAY MaxAlnRegion+1 OF INTEGER;
 
 (* ------------------------------------------------------------------ *)
 
@@ -363,6 +377,345 @@ BEGIN
     INC(hspCount)
   END
 END AddHSP;
+
+(* ------------------------------------------------------------------ *)
+(*  Parallel-safe search workers                                        *)
+(* ------------------------------------------------------------------ *)
+
+PROCEDURE OverlapsW(VAR ex: HSPRec; VAR rec: HSPRec): BOOLEAN;
+VAR qOvl, sOvl, qSpan, sSpan: INTEGER;
+BEGIN
+  qOvl  := IntMin(ex.qEnd, rec.qEnd) - IntMax(ex.qStart, rec.qStart) + 1;
+  sOvl  := IntMin(ex.sEnd, rec.sEnd) - IntMax(ex.sStart, rec.sStart) + 1;
+  IF (qOvl <= 0) OR (sOvl <= 0) THEN RETURN FALSE END;
+  qSpan := IntMin(ex.qEnd - ex.qStart + 1, rec.qEnd - rec.qStart + 1);
+  sSpan := IntMin(ex.sEnd - ex.sStart + 1, rec.sEnd - rec.sStart + 1);
+  RETURN (qOvl * 2 > qSpan) & (sOvl * 2 > sSpan)
+END OverlapsW;
+
+PROCEDURE AddHSPW(wi: INTEGER; isPlus: BOOLEAN; VAR rec: HSPRec);
+VAR i: INTEGER;
+BEGIN
+  IF isPlus THEN
+    FOR i := 0 TO wkHspCntP[wi] - 1 DO
+      IF OverlapsW(wkHspListP[wi][i], rec) THEN
+        IF rec.rawScore > wkHspListP[wi][i].rawScore THEN wkHspListP[wi][i] := rec END;
+        RETURN
+      END
+    END;
+    IF wkHspCntP[wi] < MaxHSPs THEN
+      wkHspListP[wi][wkHspCntP[wi]] := rec; INC(wkHspCntP[wi])
+    END
+  ELSE
+    FOR i := 0 TO wkHspCntM[wi] - 1 DO
+      IF OverlapsW(wkHspListM[wi][i], rec) THEN
+        IF rec.rawScore > wkHspListM[wi][i].rawScore THEN wkHspListM[wi][i] := rec END;
+        RETURN
+      END
+    END;
+    IF wkHspCntM[wi] < MaxHSPs THEN
+      wkHspListM[wi][wkHspCntM[wi]] := rec; INC(wkHspCntM[wi])
+    END
+  END
+END AddHSPW;
+
+PROCEDURE GappedAlignW(wi: INTEGER; subj: BioSeq.Seq; VAR rec: HSPRec);
+CONST
+  GapInf = -1000000;
+  FromM  = 0; FromIX = 1; FromIY = 2;
+  GapNew = 0; GapExt = 1;
+VAR
+  n, m, i, j, k  : INTEGER;
+  go1             : INTEGER;
+  v1, v2, v3, bst : INTEGER;
+  state           : INTEGER;
+  qc, sc, tmp     : CHAR;
+  pos             : INTEGER;
+BEGIN
+  n := rec.qEnd - rec.qStart + 1;
+  m := rec.sEnd - rec.sStart + 1;
+  IF n > MaxAlnRegion THEN n := MaxAlnRegion; rec.qEnd := rec.qStart + n - 1 END;
+  IF m > MaxAlnRegion THEN m := MaxAlnRegion; rec.sEnd := rec.sStart + m - 1 END;
+
+  go1 := gapOpen + gapExt;
+
+  wkDpM[wi][0][0]  := 0;    wkDpIX[wi][0][0] := GapInf; wkDpIY[wi][0][0] := GapInf;
+  wkTbM[wi][0][0]  := FromM; wkTbIX[wi][0][0] := GapNew; wkTbIY[wi][0][0] := GapNew;
+
+  FOR i := 1 TO n DO
+    wkDpM[wi][i][0]  := GapInf;
+    wkDpIX[wi][i][0] := go1 + (i - 1) * gapExt;
+    wkDpIY[wi][i][0] := GapInf;
+    wkTbM[wi][i][0]  := FromIX;
+    IF i = 1 THEN wkTbIX[wi][i][0] := GapNew ELSE wkTbIX[wi][i][0] := GapExt END;
+    wkTbIY[wi][i][0] := GapNew
+  END;
+
+  FOR j := 1 TO m DO
+    wkDpM[wi][0][j]  := GapInf;
+    wkDpIX[wi][0][j] := GapInf;
+    wkDpIY[wi][0][j] := go1 + (j - 1) * gapExt;
+    wkTbM[wi][0][j]  := FromIY;
+    wkTbIX[wi][0][j] := GapNew;
+    IF j = 1 THEN wkTbIY[wi][0][j] := GapNew ELSE wkTbIY[wi][0][j] := GapExt END
+  END;
+
+  FOR i := 1 TO n DO
+    FOR j := 1 TO m DO
+      v1 := wkDpM[wi][i-1][j-1]; v2 := wkDpIX[wi][i-1][j-1]; v3 := wkDpIY[wi][i-1][j-1];
+      IF v1 >= v2 THEN
+        IF v1 >= v3 THEN bst := v1; wkTbM[wi][i][j] := FromM
+        ELSE              bst := v3; wkTbM[wi][i][j] := FromIY
+        END
+      ELSIF v2 >= v3 THEN bst := v2; wkTbM[wi][i][j] := FromIX
+      ELSE                bst := v3; wkTbM[wi][i][j] := FromIY
+      END;
+      IF bst > GapInf THEN
+        qc := queryBuf[rec.qStart + i - 1];
+        sc := BioSeq.Get(subj, rec.sStart + j - 1);
+        IF (qc >= 'a') & (qc <= 'z') THEN qc := CAP(qc) END;
+        IF (sc >= 'a') & (sc <= 'z') THEN sc := CAP(sc) END;
+        IF qc = sc THEN wkDpM[wi][i][j] := bst + matchScr
+        ELSE             wkDpM[wi][i][j] := bst + mmScr
+        END
+      ELSE wkDpM[wi][i][j] := GapInf
+      END;
+
+      v1 := wkDpM[wi][i-1][j] + go1; v2 := wkDpIX[wi][i-1][j] + gapExt;
+      IF v1 >= v2 THEN wkDpIX[wi][i][j] := v1; wkTbIX[wi][i][j] := GapNew
+      ELSE              wkDpIX[wi][i][j] := v2; wkTbIX[wi][i][j] := GapExt
+      END;
+
+      v1 := wkDpM[wi][i][j-1] + go1; v2 := wkDpIY[wi][i][j-1] + gapExt;
+      IF v1 >= v2 THEN wkDpIY[wi][i][j] := v1; wkTbIY[wi][i][j] := GapNew
+      ELSE              wkDpIY[wi][i][j] := v2; wkTbIY[wi][i][j] := GapExt
+      END
+    END
+  END;
+
+  bst := wkDpM[wi][n][m]; state := FromM;
+  IF wkDpIX[wi][n][m] > bst THEN bst := wkDpIX[wi][n][m]; state := FromIX END;
+  IF wkDpIY[wi][n][m] > bst THEN bst := wkDpIY[wi][n][m]; state := FromIY END;
+  rec.rawScore := bst;
+
+  pos := 0; i := n; j := m;
+  rec.nIdent := 0; rec.nMismatch := 0; rec.nGapOpen := 0;
+  WHILE (i > 0) OR (j > 0) DO
+    IF pos >= MaxAlnStr - 1 THEN EXIT END;
+    IF state = FromM THEN
+      qc := queryBuf[rec.qStart + i - 1];
+      sc := BioSeq.Get(subj, rec.sStart + j - 1);
+      IF (qc >= 'a') & (qc <= 'z') THEN qc := CAP(qc) END;
+      IF (sc >= 'a') & (sc <= 'z') THEN sc := CAP(sc) END;
+      rec.qAln[pos] := qc; rec.sAln[pos] := sc;
+      IF qc = sc THEN rec.mAln[pos] := '|'; INC(rec.nIdent)
+      ELSE             rec.mAln[pos] := ' '; INC(rec.nMismatch)
+      END;
+      INC(pos);
+      state := wkTbM[wi][i][j]; DEC(i); DEC(j)
+    ELSIF state = FromIX THEN
+      qc := queryBuf[rec.qStart + i - 1];
+      rec.qAln[pos] := qc; rec.sAln[pos] := '-'; rec.mAln[pos] := ' ';
+      INC(pos);
+      IF wkTbIX[wi][i][j] = GapNew THEN INC(rec.nGapOpen); state := FromM
+      ELSE state := FromIX
+      END;
+      DEC(i)
+    ELSE
+      sc := BioSeq.Get(subj, rec.sStart + j - 1);
+      IF (sc >= 'a') & (sc <= 'z') THEN sc := CAP(sc) END;
+      rec.qAln[pos] := '-'; rec.sAln[pos] := sc; rec.mAln[pos] := ' ';
+      INC(pos);
+      IF wkTbIY[wi][i][j] = GapNew THEN INC(rec.nGapOpen); state := FromM
+      ELSE state := FromIY
+      END;
+      DEC(j)
+    END
+  END;
+  rec.alnStr := pos; rec.aLen := pos;
+
+  FOR k := 0 TO pos DIV 2 - 1 DO
+    tmp := rec.qAln[k]; rec.qAln[k] := rec.qAln[pos-1-k]; rec.qAln[pos-1-k] := tmp;
+    tmp := rec.sAln[k]; rec.sAln[k] := rec.sAln[pos-1-k]; rec.sAln[pos-1-k] := tmp;
+    tmp := rec.mAln[k]; rec.mAln[k] := rec.mAln[pos-1-k]; rec.mAln[pos-1-k] := tmp
+  END;
+  rec.qAln[pos] := 0X; rec.sAln[pos] := 0X; rec.mAln[pos] := 0X
+END GappedAlignW;
+
+PROCEDURE FindHSPsW(wi: INTEGER; subj: BioSeq.Seq; sLen: INTEGER; isPlus: BOOLEAN);
+VAR
+  qi, k, W, h : INTEGER;
+  wbuf        : ARRAY MaxW + 1 OF CHAR;
+  bm          : BioPattern.BMState;
+  hits        : BioPattern.HitList;
+  qi0, si0    : INTEGER;
+  ld, ls, rd, rs : INTEGER;
+  ev          : REAL;
+  rec         : HSPRec;
+BEGIN
+  IF isPlus THEN wkHspCntP[wi] := 0 ELSE wkHspCntM[wi] := 0 END;
+  W := wordSize;
+  qi := 0;
+  WHILE qi <= queryLen - W DO
+    FOR k := 0 TO W - 1 DO wbuf[k] := queryBuf[qi + k] END;
+    wbuf[W] := 0X;
+    BioPattern.BMBuild(bm, wbuf);
+    BioPattern.BMSearch(bm, subj, hits);
+    FOR h := 0 TO hits.count - 1 DO
+      qi0 := qi; si0 := hits.hits[h].pos;
+      ExtendLeft (subj, qi0,     si0,     ld, ls);
+      ExtendRight(subj, qi0 + W, si0 + W, rd, rs);
+      rec.qStart := qi0 - ld;   rec.qEnd := qi0 + W - 1 + rd;
+      rec.sStart := si0 - ld;   rec.sEnd := si0 + W - 1 + rs;
+      GappedAlignW(wi, subj, rec);
+      IF rec.rawScore > 0 THEN
+        ev := CalcEvalue(rec.rawScore, queryLen, sLen);
+        IF ev <= eThresh THEN AddHSPW(wi, isPlus, rec) END
+      END
+    END;
+    INC(qi)
+  END
+END FindHSPsW;
+
+PROCEDURE PrintTabularW(wi: INTEGER; isPlus: BOOLEAN);
+VAR i, ss, se, cnt, sLen: INTEGER; pct, ev, bs: REAL;
+BEGIN
+  sLen := wkSubjLen[wi];
+  IF isPlus THEN cnt := wkHspCntP[wi] ELSE cnt := wkHspCntM[wi] END;
+  FOR i := 0 TO cnt - 1 DO
+    IF isPlus THEN
+      ev  := CalcEvalue(wkHspListP[wi][i].rawScore, queryLen, sLen);
+      bs  := BitScore(wkHspListP[wi][i].rawScore);
+      pct := FLT(wkHspListP[wi][i].nIdent) / FLT(wkHspListP[wi][i].aLen) * 100.0;
+      ss  := wkHspListP[wi][i].sStart + 1;
+      se  := wkHspListP[wi][i].sEnd   + 1;
+      Out.String("query"); Out.Char(9X); Out.String(wkSubjName[wi]); Out.Char(9X);
+      Out.Fixed(pct, 0, 2); Out.Char(9X);
+      Out.Int(wkHspListP[wi][i].aLen, 0); Out.Char(9X);
+      Out.Int(wkHspListP[wi][i].nMismatch, 0); Out.Char(9X);
+      Out.Int(wkHspListP[wi][i].nGapOpen, 0); Out.Char(9X);
+      Out.Int(wkHspListP[wi][i].qStart + 1, 0); Out.Char(9X);
+      Out.Int(wkHspListP[wi][i].qEnd   + 1, 0); Out.Char(9X)
+    ELSE
+      ev  := CalcEvalue(wkHspListM[wi][i].rawScore, queryLen, sLen);
+      bs  := BitScore(wkHspListM[wi][i].rawScore);
+      pct := FLT(wkHspListM[wi][i].nIdent) / FLT(wkHspListM[wi][i].aLen) * 100.0;
+      ss  := sLen - wkHspListM[wi][i].sStart;
+      se  := sLen - wkHspListM[wi][i].sEnd;
+      Out.String("query"); Out.Char(9X); Out.String(wkSubjName[wi]); Out.Char(9X);
+      Out.Fixed(pct, 0, 2); Out.Char(9X);
+      Out.Int(wkHspListM[wi][i].aLen, 0); Out.Char(9X);
+      Out.Int(wkHspListM[wi][i].nMismatch, 0); Out.Char(9X);
+      Out.Int(wkHspListM[wi][i].nGapOpen, 0); Out.Char(9X);
+      Out.Int(wkHspListM[wi][i].qStart + 1, 0); Out.Char(9X);
+      Out.Int(wkHspListM[wi][i].qEnd   + 1, 0); Out.Char(9X)
+    END;
+    Out.Int(ss, 0); Out.Char(9X); Out.Int(se, 0); Out.Char(9X);
+    PrintEvalue(ev); Out.Char(9X); Out.Fixed(bs, 0, 1); Out.Ln
+  END
+END PrintTabularW;
+
+PROCEDURE PrintAlnFmtW(wi: INTEGER; isPlus: BOOLEAN);
+CONST Width = 60;
+VAR
+  i, p, j, w, cnt, sLen : INTEGER;
+  qPos, sPos            : INTEGER;
+  qLo, sLo, qHi, sHi   : INTEGER;
+  ev, bs, pct           : REAL;
+  qline, sline, mline   : ARRAY 61 OF CHAR;
+BEGIN
+  sLen := wkSubjLen[wi];
+  IF isPlus THEN cnt := wkHspCntP[wi] ELSE cnt := wkHspCntM[wi] END;
+  FOR i := 0 TO cnt - 1 DO
+    IF isPlus THEN
+      ev  := CalcEvalue(wkHspListP[wi][i].rawScore, queryLen, sLen);
+      bs  := BitScore(wkHspListP[wi][i].rawScore);
+      pct := FLT(wkHspListP[wi][i].nIdent) / FLT(wkHspListP[wi][i].aLen) * 100.0
+    ELSE
+      ev  := CalcEvalue(wkHspListM[wi][i].rawScore, queryLen, sLen);
+      bs  := BitScore(wkHspListM[wi][i].rawScore);
+      pct := FLT(wkHspListM[wi][i].nIdent) / FLT(wkHspListM[wi][i].aLen) * 100.0
+    END;
+    Out.Ln;
+    Out.String("> "); Out.String(wkSubjName[wi]); Out.Ln;
+    Out.String("  Score = "); Out.Fixed(bs, 0, 1);
+    Out.String(" bits (");
+    IF isPlus THEN Out.Int(wkHspListP[wi][i].rawScore, 0)
+    ELSE           Out.Int(wkHspListM[wi][i].rawScore, 0)
+    END;
+    Out.String("),  Expect = "); PrintEvalue(ev); Out.Ln;
+    Out.String("  Identities = ");
+    IF isPlus THEN Out.Int(wkHspListP[wi][i].nIdent, 0); Out.String("/"); Out.Int(wkHspListP[wi][i].aLen, 0)
+    ELSE           Out.Int(wkHspListM[wi][i].nIdent, 0); Out.String("/"); Out.Int(wkHspListM[wi][i].aLen, 0)
+    END;
+    Out.String(" ("); Out.Fixed(pct, 0, 0); Out.String("%)");
+    Out.String(",  Gaps = ");
+    IF isPlus THEN Out.Int(wkHspListP[wi][i].nGapOpen, 0)
+    ELSE           Out.Int(wkHspListM[wi][i].nGapOpen, 0)
+    END;
+    IF isPlus THEN Out.String("  Strand: Plus/Plus")
+    ELSE           Out.String("  Strand: Plus/Minus")
+    END;
+    Out.Ln; Out.Ln;
+
+    IF isPlus THEN
+      qPos := wkHspListP[wi][i].qStart + 1;
+      sPos := wkHspListP[wi][i].sStart + 1;
+      p := 0;
+      WHILE p < wkHspListP[wi][i].alnStr DO
+        w := IntMin(Width, wkHspListP[wi][i].alnStr - p);
+        qLo := qPos; sLo := sPos;
+        FOR j := 0 TO w - 1 DO
+          qline[j] := wkHspListP[wi][i].qAln[p + j];
+          sline[j] := wkHspListP[wi][i].sAln[p + j];
+          mline[j] := wkHspListP[wi][i].mAln[p + j];
+          IF wkHspListP[wi][i].qAln[p + j] # '-' THEN INC(qPos) END;
+          IF wkHspListP[wi][i].sAln[p + j] # '-' THEN INC(sPos) END
+        END;
+        qline[w] := 0X; sline[w] := 0X; mline[w] := 0X;
+        qHi := qPos - 1; sHi := sPos - 1;
+        Out.String("Query "); Out.Int(qLo, 6); Out.String("  "); Out.String(qline);
+        Out.String("  "); Out.Int(qHi, 0); Out.Ln;
+        Out.String("              "); Out.String(mline); Out.Ln;
+        Out.String("Sbjct "); Out.Int(sLo, 6); Out.String("  "); Out.String(sline);
+        Out.String("  "); Out.Int(sHi, 0); Out.Ln; Out.Ln;
+        INC(p, w)
+      END
+    ELSE
+      qPos := wkHspListM[wi][i].qStart + 1;
+      sPos := sLen - wkHspListM[wi][i].sStart;
+      p := 0;
+      WHILE p < wkHspListM[wi][i].alnStr DO
+        w := IntMin(Width, wkHspListM[wi][i].alnStr - p);
+        qLo := qPos; sLo := sPos;
+        FOR j := 0 TO w - 1 DO
+          qline[j] := wkHspListM[wi][i].qAln[p + j];
+          sline[j] := wkHspListM[wi][i].sAln[p + j];
+          mline[j] := wkHspListM[wi][i].mAln[p + j];
+          IF wkHspListM[wi][i].qAln[p + j] # '-' THEN INC(qPos) END;
+          IF wkHspListM[wi][i].sAln[p + j] # '-' THEN DEC(sPos) END
+        END;
+        qline[w] := 0X; sline[w] := 0X; mline[w] := 0X;
+        qHi := qPos - 1; sHi := sPos + 1;
+        Out.String("Query "); Out.Int(qLo, 6); Out.String("  "); Out.String(qline);
+        Out.String("  "); Out.Int(qHi, 0); Out.Ln;
+        Out.String("              "); Out.String(mline); Out.Ln;
+        Out.String("Sbjct "); Out.Int(sLo, 6); Out.String("  "); Out.String(sline);
+        Out.String("  "); Out.Int(sHi, 0); Out.Ln; Out.Ln;
+        INC(p, w)
+      END
+    END
+  END
+END PrintAlnFmtW;
+
+PROCEDURE SearchWorker(wi: INTEGER);
+VAR alpha: BioAlpha.Alphabet;
+BEGIN
+  BioAlpha.DNA(alpha);
+  FindHSPsW(wi, wkSubjSeq[wi], wkSubjLen[wi], TRUE);
+  BioSeq.RevComp(wkSubjSeq[wi], alpha, wkRcSeq[wi]);
+  FindHSPsW(wi, wkRcSeq[wi], wkSubjLen[wi], FALSE)
+END SearchWorker;
 
 (* ------------------------------------------------------------------ *)
 (*  Search one subject                                                  *)

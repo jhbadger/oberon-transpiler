@@ -41,7 +41,7 @@ MODULE SeqHMM;
     WriteReal logTrans[0..L-1][0..6]         (TMM TMI TMD TIM TII TDM TDD)
 *)
 
-IMPORT BioIO, BioSeq, Files, Out, Args, Strings, Math, Random;
+IMPORT BioIO, BioSeq, Files, Out, Args, Strings, Math, Random, Parallel;
 
 CONST
   MaxLen  = 2000;
@@ -66,6 +66,9 @@ CONST
 
   (* Maximum steps in a single aligned path (match+insert+delete). *)
   MaxPathLen = MaxLen * 2 + 2;
+
+  (* Maximum parallel workers for DoSearch. *)
+  MaxWorkers = 64;
 
 VAR
   NegInf       : REAL;   (* initialised to -1.0E30 in BEGIN *)
@@ -202,6 +205,16 @@ BEGIN
   seqBuf[T] := 0X;
   RETURN T
 END LoadSeq;
+
+PROCEDURE LoadSeqW(seq: BioSeq.Seq; wi: INTEGER): INTEGER;
+VAR T: INTEGER;
+BEGIN
+  T := BioSeq.Length(seq);
+  IF T > MaxSeqLen THEN T := MaxSeqLen END;
+  BioSeq.Slice(seq, 0, T, wkSeqBuf[wi]);
+  wkSeqBuf[wi][T] := 0X;
+  RETURN T
+END LoadSeqW;
 
 (* ------------------------------------------------------------------ *)
 (*  Build                                                               *)
@@ -486,6 +499,104 @@ BEGIN
 END ViterbiHitPos;
 
 (* ------------------------------------------------------------------ *)
+(*  Parallel-safe Viterbi worker (for DoSearch)                       *)
+(* ------------------------------------------------------------------ *)
+
+PROCEDURE ViterbiHitPosW(wi: INTEGER);
+(*
+  Thread-safe version of ViterbiHitPos.  Scores wkSeqs[wi] using
+  per-worker workspace arrays (wkVM/wkVMprev/wkVI/wkVIprev/wkVD/wkSeqBuf),
+  writing bit score to wkBits[wi] and positions to wkStart[wi]/wkEnd[wi].
+*)
+VAR
+  T, k, j, ri   : INTEGER;
+  best, logEntry, score, v : REAL;
+  c              : CHAR;
+  mVal, iVal, dVal : REAL;
+  sM, sI         : INTEGER;
+  startM, startMprev : ARRAY MaxLen + 2 OF INTEGER;
+  startI, startIprev : ARRAY MaxLen + 2 OF INTEGER;
+  startD         : ARRAY MaxLen + 2 OF INTEGER;
+BEGIN
+  T := LoadSeqW(wkSeqs[wi], wi);
+  IF (T = 0) OR (hmmLen = 0) THEN
+    wkBits[wi] := NegInf; wkStart[wi] := 0; wkEnd[wi] := 0; RETURN
+  END;
+
+  logEntry := Math.ln(1.0 / FLT(hmmLen));
+
+  FOR k := 0 TO hmmLen + 1 DO
+    wkVMprev[wi][k] := NegInf; wkVIprev[wi][k] := NegInf; wkVD[wi][k] := NegInf;
+    startMprev[k] := 0; startIprev[k] := 0; startD[k] := 0
+  END;
+  score := NegInf; wkStart[wi] := 0; wkEnd[wi] := 0;
+
+  FOR j := 0 TO T - 1 DO
+    c  := wkSeqBuf[wi][j];
+    ri := ResIdx(c);
+    FOR k := 0 TO hmmLen - 1 DO wkVM[wi][k] := NegInf; wkVI[wi][k] := NegInf END;
+    wkVD[wi][0] := NegInf; startD[0] := j;
+
+    FOR k := 0 TO hmmLen - 1 DO
+      IF k > 0 THEN
+        IF SafeAdd(wkVM[wi][k-1], logTrans[k-1][TMD]) >=
+           SafeAdd(wkVD[wi][k-1], logTrans[k-1][TDD]) THEN
+          dVal      := SafeAdd(wkVM[wi][k-1], logTrans[k-1][TMD]);
+          startD[k] := startM[k-1]
+        ELSE
+          dVal      := SafeAdd(wkVD[wi][k-1], logTrans[k-1][TDD]);
+          startD[k] := startD[k-1]
+        END;
+        wkVD[wi][k] := dVal
+      END;
+
+      IF k = 0 THEN
+        best := logEntry; sM := j
+      ELSE
+        best := logEntry; sM := j;
+        v := SafeAdd(wkVMprev[wi][k-1], logTrans[k-1][TMM]);
+        IF v > best THEN best := v; sM := startMprev[k-1] END;
+        v := SafeAdd(wkVIprev[wi][k-1], logTrans[k-1][TIM]);
+        IF v > best THEN best := v; sM := startIprev[k-1] END;
+        v := SafeAdd(wkVD[wi][k-1], logTrans[k-1][TDM]);
+        IF v > best THEN best := v; sM := startD[k-1] END
+      END;
+      IF ri >= 0 THEN mVal := logEmitM[k][ri] + best ELSE mVal := NegInf END;
+      wkVM[wi][k] := mVal; startM[k] := sM;
+
+      IF ri >= 0 THEN
+        IF SafeAdd(wkVMprev[wi][k], logTrans[k][TMI]) >=
+           SafeAdd(wkVIprev[wi][k], logTrans[k][TII]) THEN
+          iVal := logEmitI[ri] + SafeAdd(wkVMprev[wi][k], logTrans[k][TMI]);
+          sI   := startMprev[k]
+        ELSE
+          iVal := logEmitI[ri] + SafeAdd(wkVIprev[wi][k], logTrans[k][TII]);
+          sI   := startIprev[k]
+        END
+      ELSE iVal := NegInf; sI := 0
+      END;
+      wkVI[wi][k] := iVal; startI[k] := sI;
+
+      IF wkVM[wi][k] > score THEN
+        score := wkVM[wi][k]; wkEnd[wi] := j; wkStart[wi] := startM[k]
+      END
+    END;
+
+    FOR k := 0 TO hmmLen - 1 DO
+      wkVMprev[wi][k] := wkVM[wi][k]; wkVIprev[wi][k] := wkVI[wi][k];
+      startMprev[k] := startM[k]; startIprev[k] := startI[k]
+    END
+  END;
+
+  IF ~IsNegInf(score) THEN wkBits[wi] := score / Math.ln(2.0)
+  ELSE wkBits[wi] := NegInf; wkStart[wi] := 0; wkEnd[wi] := 0
+  END
+END ViterbiHitPosW;
+
+PROCEDURE ScoreWorker(wi: INTEGER);
+BEGIN ViterbiHitPosW(wi) END ScoreWorker;
+
+(* ------------------------------------------------------------------ *)
 (*  Viterbi with traceback                                             *)
 (* ------------------------------------------------------------------ *)
 
@@ -615,6 +726,21 @@ VAR
   paths    : ARRAY MaxSeqs OF PathRec;
   nPaths   : INTEGER;
   maxIns   : ARRAY MaxLen + 1 OF INTEGER;  (* max insert count after column k *)
+
+(* Per-worker workspace for parallel search scoring. *)
+VAR
+  wkSeqs   : ARRAY MaxWorkers OF BioSeq.Seq;
+  wkNames  : ARRAY MaxWorkers OF ARRAY 256 OF CHAR;
+  wkBits   : ARRAY MaxWorkers OF REAL;
+  wkStart  : ARRAY MaxWorkers OF INTEGER;
+  wkEnd    : ARRAY MaxWorkers OF INTEGER;
+  wkLen    : ARRAY MaxWorkers OF INTEGER;
+  wkSeqBuf : ARRAY MaxWorkers OF ARRAY MaxSeqLen + 1 OF CHAR;
+  wkVM     : ARRAY MaxWorkers OF ARRAY MaxLen + 2 OF REAL;
+  wkVMprev : ARRAY MaxWorkers OF ARRAY MaxLen + 2 OF REAL;
+  wkVI     : ARRAY MaxWorkers OF ARRAY MaxLen + 2 OF REAL;
+  wkVIprev : ARRAY MaxWorkers OF ARRAY MaxLen + 2 OF REAL;
+  wkVD     : ARRAY MaxWorkers OF ARRAY MaxLen + 2 OF REAL;
 
 PROCEDURE WalkTraceback(bestJ, bestK, seqT: INTEGER; VAR pr: PathRec);
 (*
@@ -1195,16 +1321,35 @@ BEGIN
   RETURN total
 END CountDbResidues;
 
+PROCEDURE FlushBatch(wkCount, dbTotalRes: INTEGER; minBits: REAL;
+                     VAR hits: INTEGER);
+VAR wi: INTEGER; evalue: REAL;
+BEGIN
+  FOR wi := 0 TO wkCount - 1 DO
+    IF wkBits[wi] >= minBits THEN
+      evalue := CalcEvalue(dbTotalRes, wkBits[wi]);
+      Out.String(wkNames[wi]); Out.Char(9X);
+      Out.String(hmmName);     Out.Char(9X);
+      Out.Fixed(wkBits[wi], 0, 2); Out.Char(9X);
+      PrintEvalue(evalue);     Out.Char(9X);
+      Out.Int(wkStart[wi] + 1, 0); Out.Char(9X);
+      Out.Int(wkEnd[wi] + 1, 0);   Out.Char(9X);
+      Out.Int(wkLen[wi], 0); Out.Ln;
+      INC(hits)
+    END
+  END
+END FlushBatch;
+
 PROCEDURE DoSearch(hmmPath, dbPath: ARRAY OF CHAR; minBits: REAL);
+(*
+  Scores each database sequence against the loaded profile.
+  Sequences are processed in batches of ncpu in parallel; output order
+  matches the input order within each batch, and batches are sequential.
+*)
 VAR
   rdr        : BioIO.FastaReader;
   rec        : BioIO.FastaRecord;
-  bits       : REAL;
-  evalue     : REAL;
-  seqLen     : INTEGER;
-  hits       : INTEGER;
-  dbTotalRes : INTEGER;
-  hitStart, hitEnd : INTEGER;
+  hits, wkCount, ncpu, dbTotalRes : INTEGER;
 BEGIN
   IF ~ReadHMM(hmmPath) THEN
     Out.String("Error: cannot read profile from "); Out.String(hmmPath); Out.Ln;
@@ -1222,6 +1367,9 @@ BEGIN
     RETURN
   END;
 
+  ncpu := Parallel.NumCPU();
+  IF ncpu > MaxWorkers THEN ncpu := MaxWorkers END;
+
   Out.String("seq_name"); Out.Char(9X);
   Out.String("model_name"); Out.Char(9X);
   Out.String("bits"); Out.Char(9X);
@@ -1230,21 +1378,22 @@ BEGIN
   Out.String("hit_end"); Out.Char(9X);
   Out.String("seq_len"); Out.Ln;
 
-  hits := 0; rec.seq := NIL;
+  hits := 0; wkCount := 0; rec.seq := NIL;
   WHILE BioIO.ReadFasta(rdr, rec) DO
-    bits := ViterbiHitPos(rec.seq, dbTotalRes, hitStart, hitEnd);
-    IF bits >= minBits THEN
-      seqLen := BioSeq.Length(rec.seq);
-      evalue := CalcEvalue(dbTotalRes, bits);
-      Out.String(rec.name); Out.Char(9X);
-      Out.String(hmmName);  Out.Char(9X);
-      Out.Fixed(bits, 0, 2); Out.Char(9X);
-      PrintEvalue(evalue);   Out.Char(9X);
-      Out.Int(hitStart + 1, 0); Out.Char(9X);
-      Out.Int(hitEnd + 1, 0);   Out.Char(9X);
-      Out.Int(seqLen, 0); Out.Ln;
-      INC(hits)
+    Strings.Copy(rec.name, wkNames[wkCount]);
+    wkSeqs[wkCount] := rec.seq;
+    wkLen[wkCount]  := BioSeq.Length(rec.seq);
+    rec.seq := NIL;
+    INC(wkCount);
+    IF wkCount = ncpu THEN
+      Parallel.For(0, wkCount, ScoreWorker, ncpu);
+      FlushBatch(wkCount, dbTotalRes, minBits, hits);
+      wkCount := 0
     END
+  END;
+  IF wkCount > 0 THEN
+    Parallel.For(0, wkCount, ScoreWorker, ncpu);
+    FlushBatch(wkCount, dbTotalRes, minBits, hits)
   END;
   BioIO.CloseFasta(rdr);
 

@@ -18,7 +18,7 @@ MODULE OrthoFind;
   truncated to SeqBuf amino acids.
 *)
 
-IMPORT BioIO, BioSeq, BioAlign, Out, Args, Strings;
+IMPORT BioIO, BioSeq, BioAlign, Out, Args, Strings, Parallel;
 
 CONST
   MaxOrgs  = 8;
@@ -28,6 +28,7 @@ CONST
   XDrop    = 30;     (* BLOSUM62 X-drop threshold *)
   MinScore = 40;     (* minimum raw score to record a hit *)
   HashSz   = 17576;  (* 26^3: all 3-mers of uppercase letters *)
+  MaxPairWorkers = MaxOrgs * MaxOrgs;  (* one workspace slot per (i,j) pair *)
 
 VAR
   orgCount : INTEGER;
@@ -45,6 +46,17 @@ VAR
   sbuf : ARRAY SeqBuf OF CHAR;   (* flat subject sequence buffer *)
   slen : INTEGER;
   qhash: ARRAY HashSz OF INTEGER; (* 3-mer → first position in qbuf; -1 = absent *)
+
+(* Per-pair workspace for parallel ComputePair execution. *)
+VAR
+  wkPairI   : ARRAY MaxPairWorkers OF INTEGER;
+  wkPairJ   : ARRAY MaxPairWorkers OF INTEGER;
+  wkPairCnt : INTEGER;
+  wkQbuf    : ARRAY MaxPairWorkers OF ARRAY SeqBuf OF CHAR;
+  wkQlen    : ARRAY MaxPairWorkers OF INTEGER;
+  wkQhash   : ARRAY MaxPairWorkers OF ARRAY HashSz OF INTEGER;
+  wkSbuf    : ARRAY MaxPairWorkers OF ARRAY SeqBuf OF CHAR;
+  wkSlen    : ARRAY MaxPairWorkers OF INTEGER;
 
 (* ------------------------------------------------------------------ *)
 (*  Scoring                                                             *)
@@ -155,6 +167,92 @@ BEGIN
     END
   END
 END FindBest;
+
+PROCEDURE BuildHashW(wi: INTEGER);
+VAR i, k: INTEGER;
+BEGIN
+  FOR i := 0 TO HashSz - 1 DO wkQhash[wi][i] := -1 END;
+  i := 0;
+  WHILE i + W <= wkQlen[wi] DO
+    k := HashKey(wkQbuf[wi][i], wkQbuf[wi][i + 1], wkQbuf[wi][i + 2]);
+    IF (k >= 0) & (wkQhash[wi][k] < 0) THEN wkQhash[wi][k] := i END;
+    INC(i)
+  END
+END BuildHashW;
+
+PROCEDURE ExtRightW(wi, qi0, si0: INTEGER; VAR rd, rs: INTEGER);
+VAR best, cur, d: INTEGER;
+BEGIN
+  best := 0; cur := 0; rd := 0; d := 0;
+  LOOP
+    IF (qi0 + d >= wkQlen[wi]) OR (si0 + d >= wkSlen[wi]) THEN EXIT END;
+    INC(cur, Score2(wkQbuf[wi][qi0 + d], wkSbuf[wi][si0 + d]));
+    IF cur > best THEN best := cur; rd := d + 1 END;
+    IF best - cur >= XDrop THEN EXIT END;
+    INC(d)
+  END;
+  rs := best
+END ExtRightW;
+
+PROCEDURE ExtLeftW(wi, qi0, si0: INTEGER; VAR ld, ls: INTEGER);
+VAR best, cur, d: INTEGER;
+BEGIN
+  best := 0; cur := 0; ld := 0; d := 1;
+  LOOP
+    IF (qi0 - d < 0) OR (si0 - d < 0) THEN EXIT END;
+    INC(cur, Score2(wkQbuf[wi][qi0 - d], wkSbuf[wi][si0 - d]));
+    IF cur > best THEN best := cur; ld := d END;
+    IF best - cur >= XDrop THEN EXIT END;
+    INC(d)
+  END;
+  ls := best
+END ExtLeftW;
+
+PROCEDURE FindBestW(wi, sOrg: INTEGER; VAR bIdx, bScr: INTEGER);
+VAR m, j, k, qi, seedScr, ld, ls, rd, rs, total: INTEGER;
+BEGIN
+  bIdx := -1; bScr := MinScore - 1;
+  FOR m := 0 TO protCnt[sOrg] - 1 DO
+    wkSlen[wi] := BioSeq.Length(protSeq[sOrg][m]);
+    IF wkSlen[wi] >= SeqBuf THEN wkSlen[wi] := SeqBuf - 1 END;
+    BioSeq.Slice(protSeq[sOrg][m], 0, wkSlen[wi], wkSbuf[wi]);
+    wkSbuf[wi][wkSlen[wi]] := 0X;
+    j := 0;
+    WHILE j + W <= wkSlen[wi] DO
+      k := HashKey(wkSbuf[wi][j], wkSbuf[wi][j + 1], wkSbuf[wi][j + 2]);
+      IF (k >= 0) & (wkQhash[wi][k] >= 0) THEN
+        qi := wkQhash[wi][k];
+        seedScr := Score2(wkQbuf[wi][qi],     wkSbuf[wi][j])
+                 + Score2(wkQbuf[wi][qi + 1], wkSbuf[wi][j + 1])
+                 + Score2(wkQbuf[wi][qi + 2], wkSbuf[wi][j + 2]);
+        ExtLeftW (wi, qi,     j,     ld, ls);
+        ExtRightW(wi, qi + W, j + W, rd, rs);
+        total := ls + seedScr + rs;
+        IF total > bScr THEN bScr := total; bIdx := m END
+      END;
+      INC(j)
+    END
+  END
+END FindBestW;
+
+PROCEDURE ComputePairW(wi: INTEGER);
+(* Score all proteins of wkPairI[wi] against wkPairJ[wi] using per-worker buffers.
+   Writes directly to bestHit[i][j][k] and bestScore[i][j][k]; each k is unique
+   per worker so there is no write contention. *)
+VAR k, bIdx, bScr, orgI, orgJ: INTEGER;
+BEGIN
+  orgI := wkPairI[wi]; orgJ := wkPairJ[wi];
+  FOR k := 0 TO protCnt[orgI] - 1 DO
+    wkQlen[wi] := BioSeq.Length(protSeq[orgI][k]);
+    IF wkQlen[wi] >= SeqBuf THEN wkQlen[wi] := SeqBuf - 1 END;
+    BioSeq.Slice(protSeq[orgI][k], 0, wkQlen[wi], wkQbuf[wi]);
+    wkQbuf[wi][wkQlen[wi]] := 0X;
+    BuildHashW(wi);
+    FindBestW(wi, orgJ, bIdx, bScr);
+    bestHit  [orgI][orgJ][k] := bIdx;
+    bestScore[orgI][orgJ][k] := bScr
+  END
+END ComputePairW;
 
 PROCEDURE ComputePair(orgI, orgJ: INTEGER);
 (* Fill bestHit[orgI][orgJ][*] and bestScore[orgI][orgJ][*]. *)
@@ -337,11 +435,20 @@ BEGIN
 
   BioAlign.BLOSUM62(mat);
 
+  (* Enumerate all (i,j) pairs and score them in parallel.
+     Each pair writes to a disjoint slice of bestHit/bestScore, so there
+     is no write contention between workers. *)
+  wkPairCnt := 0;
   FOR i := 0 TO orgCount - 1 DO
     FOR j := 0 TO orgCount - 1 DO
-      IF i # j THEN ComputePair(i, j) END
+      IF i # j THEN
+        wkPairI[wkPairCnt] := i;
+        wkPairJ[wkPairCnt] := j;
+        INC(wkPairCnt)
+      END
     END
   END;
+  Parallel.For(0, wkPairCnt, ComputePairW, Parallel.NumCPU());
 
   OutputGroups
 END OrthoFind.
