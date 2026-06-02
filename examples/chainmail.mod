@@ -625,21 +625,31 @@ VAR att, def: Unit;
     aArmy, dArmy: Army;
     nd, i, d, kills, roll, minScore, denType: INTEGER;
     numStr: ARRAY 8 OF CHAR;
+    attLabel, defLabel: ARRAY 16 OF CHAR;
 BEGIN
   aArmy := ArmyOf(attSide); att := aArmy.units[attIdx];
   dArmy := ArmyOf(defSide); def := dArmy.units[defIdx];
 
+  IF attSide = RED THEN COPY("R.", attLabel) ELSE COPY("B.", attLabel) END;
+  IF att.fantasy THEN AppendStr(attLabel, ftName[att.ftype])
+  ELSE AppendStr(attLabel, unitName[att.utype]) END;
+  IF defSide = RED THEN COPY("R.", defLabel) ELSE COPY("B.", defLabel) END;
+  IF def.fantasy THEN AppendStr(defLabel, ftName[def.ftype])
+  ELSE AppendStr(defLabel, unitName[def.utype]) END;
+
   IF att.fantasy & def.fantasy THEN
     (* FCT ranged: attacker rolls once, no reply *)
     roll := D6D6();
+    COPY(attLabel, msg); AppendStr(msg, "->"); AppendStr(msg, defLabel);
+    AppendStr(msg, ": 2d6="); IntStr(roll, numStr); AppendStr(msg, numStr);
     IF roll > fct[att.ftype][def.ftype] THEN
       ReduceFigures(defSide, defIdx, 999);
-      COPY("FCT shot: KILL", msg)
+      AppendStr(msg, " KILL")
     ELSIF roll = fct[att.ftype][def.ftype] THEN
       RetreatUnit(defSide, defIdx, 1);
-      COPY("FCT shot: fall back", msg)
+      AppendStr(msg, " fallback")
     ELSE
-      COPY("FCT shot: no effect", msg)
+      AppendStr(msg, " miss")
     END;
     RETURN
   END;
@@ -652,9 +662,10 @@ BEGIN
       d := D6(); IF d >= ftShootMin[att.ftype] THEN INC(kills) END
     END;
     ReduceFigures(defSide, defIdx, kills);
-    COPY(ftName[att.ftype], msg); AppendStr(msg, ": ");
-    IntStr(nd, numStr); AppendStr(msg, numStr);
-    AppendStr(msg, "d6->"); IntStr(kills, numStr); AppendStr(msg, numStr);
+    COPY(attLabel, msg); AppendStr(msg, "->"); AppendStr(msg, defLabel);
+    AppendStr(msg, ": "); IntStr(nd, numStr); AppendStr(msg, numStr);
+    AppendStr(msg, "d6(>="); IntStr(ftShootMin[att.ftype], numStr); AppendStr(msg, numStr);
+    AppendStr(msg, ")->"); IntStr(kills, numStr); AppendStr(msg, numStr);
     AppendStr(msg, " kill(s)");
     RETURN
   END;
@@ -677,8 +688,10 @@ BEGIN
   END;
   ReduceFigures(defSide, defIdx, kills);
 
-  COPY("Shot: ", msg); IntStr(nd, numStr); AppendStr(msg, numStr);
-  AppendStr(msg, "d6->"); IntStr(kills, numStr); AppendStr(msg, numStr);
+  COPY(attLabel, msg); AppendStr(msg, "->"); AppendStr(msg, defLabel);
+  AppendStr(msg, ": "); IntStr(nd, numStr); AppendStr(msg, numStr);
+  AppendStr(msg, "d6(>="); IntStr(minScore, numStr); AppendStr(msg, numStr);
+  AppendStr(msg, ")->"); IntStr(kills, numStr); AppendStr(msg, numStr);
   AppendStr(msg, " kill(s)")
 END ResolveShot;
 
@@ -694,11 +707,20 @@ VAR att, def: Unit;
     aArmy, dArmy: Army;
     effAtype, effDtype, attFigs: INTEGER;
     nd, i, d, kills1, kills2, roll1, roll2: INTEGER;
+    attND, attMin, defND, defMin: INTEGER;
     flanked, rearAtt, fb1, fb2: BOOLEAN;
     numStr: ARRAY 8 OF CHAR;
+    attLabel, defLabel: ARRAY 16 OF CHAR;
 BEGIN
   aArmy := ArmyOf(attSide); att := aArmy.units[attIdx];
   dArmy := ArmyOf(defSide); def := dArmy.units[defIdx];
+  defND := 0; defMin := 0;
+  IF attSide = RED THEN COPY("R.", attLabel) ELSE COPY("B.", attLabel) END;
+  IF att.fantasy THEN AppendStr(attLabel, ftName[att.ftype])
+  ELSE AppendStr(attLabel, unitName[att.utype]) END;
+  IF defSide = RED THEN COPY("R.", defLabel) ELSE COPY("B.", defLabel) END;
+  IF def.fantasy THEN AppendStr(defLabel, ftName[def.ftype])
+  ELSE AppendStr(defLabel, unitName[def.utype]) END;
 
   rearAtt := FALSE; flanked := FALSE;
   fb1 := FALSE; fb2 := FALSE;
@@ -722,8 +744,8 @@ BEGIN
     aArmy := ArmyOf(attSide); dArmy := ArmyOf(defSide);
     IF fb1 & dArmy.units[defIdx].alive THEN RetreatUnit(defSide, defIdx, 1) END;
     IF fb2 & aArmy.units[attIdx].alive THEN RetreatUnit(attSide, attIdx, 1) END;
-    COPY("FCT ", msg);
-    IntStr(roll1, numStr); AppendStr(msg, numStr);
+    COPY(attLabel, msg); AppendStr(msg, "->"); AppendStr(msg, defLabel);
+    AppendStr(msg, ": FCT "); IntStr(roll1, numStr); AppendStr(msg, numStr);
     AppendStr(msg, "/"); IntStr(roll2, numStr); AppendStr(msg, numStr);
     IF    kills1 > 0 THEN AppendStr(msg, " DEF KILLED")
     ELSIF fb1        THEN AppendStr(msg, " def back")
@@ -755,6 +777,7 @@ BEGIN
   IF ~att.fantasy & ~def.fantasy & (terrain[def.row][def.col] = TERR_HILL) THEN
     nd := nd DIV 2; IF nd < 1 THEN nd := 1 END
   END;
+  attND := nd; attMin := meleeMin[effAtype][effDtype];
   kills1 := 0;
   FOR i := 1 TO nd DO
     d := D6(); IF d >= meleeMin[effAtype][effDtype] THEN INC(kills1) END
@@ -768,6 +791,7 @@ BEGIN
       nd := meleeNum[ftAttType[def.ftype]][effAtype] * ftAttMult[def.ftype]
             DIV meleeDen[ftAttType[def.ftype]][effAtype];
       IF nd < 1 THEN nd := 1 END;
+      defND := nd; defMin := meleeMin[ftAttType[def.ftype]][effAtype];
       FOR i := 1 TO nd DO
         d := D6();
         IF d >= meleeMin[ftAttType[def.ftype]][effAtype] THEN INC(kills2) END
@@ -777,6 +801,7 @@ BEGIN
       nd := meleeNum[def.utype][ftDefType[att.ftype]] * def.figures
             DIV meleeDen[def.utype][ftDefType[att.ftype]];
       IF nd < 1 THEN nd := 1 END;
+      defND := nd; defMin := meleeMin[def.utype][ftDefType[att.ftype]];
       FOR i := 1 TO nd DO
         d := D6();
         IF d >= meleeMin[def.utype][ftDefType[att.ftype]] THEN INC(kills2) END
@@ -785,6 +810,7 @@ BEGIN
       (* Both normal *)
       nd := meleeNum[effDtype][effAtype] * def.figures DIV meleeDen[effDtype][effAtype];
       IF nd < 1 THEN nd := 1 END;
+      defND := nd; defMin := meleeMin[effDtype][effAtype];
       FOR i := 1 TO nd DO
         d := D6(); IF d >= meleeMin[effDtype][effAtype] THEN INC(kills2) END
       END
@@ -802,9 +828,15 @@ BEGIN
     AppendStr(msg, "")  (* placeholder so compiler doesn't optimise away *)
   END;
 
-  COPY("Melee: ", msg);
-  IntStr(kills1, numStr); AppendStr(msg, numStr); AppendStr(msg, "k/");
-  IntStr(kills2, numStr); AppendStr(msg, numStr); AppendStr(msg, "k");
+  COPY(attLabel, msg); AppendStr(msg, "->"); AppendStr(msg, defLabel);
+  AppendStr(msg, ": "); IntStr(attND, numStr); AppendStr(msg, numStr);
+  AppendStr(msg, "d6(>="); IntStr(attMin, numStr); AppendStr(msg, numStr);
+  AppendStr(msg, ")->"); IntStr(kills1, numStr); AppendStr(msg, numStr); AppendStr(msg, "k");
+  IF ~noCounter & ~rearAtt THEN
+    AppendStr(msg, "/"); IntStr(defND, numStr); AppendStr(msg, numStr);
+    AppendStr(msg, "d6(>="); IntStr(defMin, numStr); AppendStr(msg, numStr);
+    AppendStr(msg, ")->"); IntStr(kills2, numStr); AppendStr(msg, numStr); AppendStr(msg, "k")
+  END;
   IF rearAtt THEN AppendStr(msg, " REAR!")
   ELSIF flanked THEN AppendStr(msg, " flank")
   END;
@@ -852,7 +884,7 @@ END RetreatUnit;
  * Called after any figure loss.  Returns TRUE if unit stands.
  *)
 PROCEDURE CheckUnitMorale(side, idx: INTEGER; VAR msg: ARRAY OF CHAR): BOOLEAN;
-VAR a: Army; u: Unit; roll: INTEGER;
+VAR a: Army; u: Unit; roll, needScore: INTEGER;
     numStr: ARRAY 8 OF CHAR;
 BEGIN
   a := ArmyOf(side); u := a.units[idx];
@@ -869,32 +901,22 @@ BEGIN
   SetArmy(side, a);
 
   roll := D6D6();
+  IF side = RED THEN COPY("R.", msg) ELSE COPY("B.", msg) END;
   IF u.fantasy THEN
-    IF roll >= 7 THEN  (* fantasy creatures need 7+ to stand *)
-      COPY(ftName[u.ftype], msg);
-      AppendStr(msg, " stands (morale ");
-      IntStr(roll, numStr); AppendStr(msg, numStr); AppendStr(msg, ")");
-      RETURN TRUE
-    ELSE
-      COPY(ftName[u.ftype], msg);
-      AppendStr(msg, " retreats! (");
-      IntStr(roll, numStr); AppendStr(msg, numStr); AppendStr(msg, ")");
-      RetreatUnit(side, idx, 2);
-      RETURN FALSE
-    END
+    AppendStr(msg, ftName[u.ftype]); needScore := 7
   ELSE
-    IF roll >= moraleScore[u.utype] THEN
-      COPY(unitName[u.utype], msg);
-      AppendStr(msg, " stands (morale ");
-      IntStr(roll, numStr); AppendStr(msg, numStr); AppendStr(msg, ")");
-      RETURN TRUE
-    ELSE
-      COPY(unitName[u.utype], msg);
-      AppendStr(msg, " retreats! (morale ");
-      IntStr(roll, numStr); AppendStr(msg, numStr); AppendStr(msg, ")");
-      RetreatUnit(side, idx, 2);
-      RETURN FALSE
-    END
+    AppendStr(msg, unitName[u.utype]); needScore := moraleScore[u.utype]
+  END;
+  AppendStr(msg, " 2d6>="); IntStr(needScore, numStr); AppendStr(msg, numStr);
+  AppendStr(msg, ": "); IntStr(roll, numStr); AppendStr(msg, numStr);
+
+  IF roll >= needScore THEN
+    AppendStr(msg, " stands");
+    RETURN TRUE
+  ELSE
+    AppendStr(msg, " retreats!");
+    RetreatUnit(side, idx, 2);
+    RETURN FALSE
   END
 END CheckUnitMorale;
 
@@ -908,24 +930,29 @@ PROCEDURE CheckChargeMorale(defSide, defIdx, cavUtype: INTEGER;
 VAR a: Army; def: Unit;
     roll, need, cavClass: INTEGER;
     numStr: ARRAY 8 OF CHAR;
+    cavLabel, defLabel: ARRAY 16 OF CHAR;
 BEGIN
   a := ArmyOf(defSide); def := a.units[defIdx];
   IF def.utype >= LHT THEN RETURN TRUE END;  (* cavalry vs cavalry: no check *)
   cavClass := cavUtype - LHT;
   IF (cavClass < 0) OR (cavClass > 2) THEN RETURN TRUE END;
 
+  IF (1 - defSide) = RED THEN COPY("R.", cavLabel) ELSE COPY("B.", cavLabel) END;
+  AppendStr(cavLabel, unitName[cavUtype]);
+  IF defSide = RED THEN COPY("R.", defLabel) ELSE COPY("B.", defLabel) END;
+  AppendStr(defLabel, unitName[def.utype]);
+
   need := chargeTarget[def.utype][cavClass];
   roll := D6D6();
 
+  COPY(cavLabel, msg); AppendStr(msg, "->"); AppendStr(msg, defLabel);
+  AppendStr(msg, ": 2d6>="); IntStr(need, numStr); AppendStr(msg, numStr);
+  AppendStr(msg, ": "); IntStr(roll, numStr); AppendStr(msg, numStr);
   IF roll >= need THEN
-    COPY(unitName[def.utype], msg);
-    AppendStr(msg, " stands charge (");
-    IntStr(roll, numStr); AppendStr(msg, numStr); AppendStr(msg, ")");
+    AppendStr(msg, " stands");
     RETURN TRUE
   ELSE
-    COPY(unitName[def.utype], msg);
-    AppendStr(msg, " flees charge! (");
-    IntStr(roll, numStr); AppendStr(msg, numStr); AppendStr(msg, ")");
+    AppendStr(msg, " flees!");
     RetreatUnit(defSide, defIdx, 2);
     RETURN FALSE
   END
