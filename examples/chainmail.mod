@@ -96,8 +96,9 @@ VAR
   victoryType : INTEGER;
   scenario    : INTEGER;
 
-  msgLog  : ARRAY 8 OF ARRAY 64 OF CHAR;
-  logHead : INTEGER;
+  msgLog     : ARRAY 64 OF ARRAY 64 OF CHAR;
+  logHead    : INTEGER;
+  logScroll  : INTEGER;
 
   curCol, curRow : INTEGER;
   selUnit        : INTEGER;
@@ -424,8 +425,9 @@ BEGIN RETURN Max(Abs(c1 - c2), Abs(r1 - r2)) END CDist;
 
 PROCEDURE AppendLog(msg: ARRAY OF CHAR);
 BEGIN
-  COPY(msg, msgLog[logHead MOD 8]);
-  INC(logHead)
+  COPY(msg, msgLog[logHead MOD 64]);
+  INC(logHead);
+  logScroll := 0
 END AppendLog;
 
 PROCEDURE IntStr(n: INTEGER; VAR s: ARRAY OF CHAR);
@@ -1374,15 +1376,29 @@ BEGIN
 END DrawUnitList;
 
 PROCEDURE DrawLog;
-VAR i, sy, nShow: INTEGER;
+VAR i, sy, nShow, base, avail: INTEGER;
+    hdr: ARRAY 24 OF CHAR; n: ARRAY 8 OF CHAR;
 BEGIN
   sy := MAPY + GRID_H + 2;
   nShow := TUI.Rows - sy - 1;
   IF nShow > 8 THEN nShow := 8 END;
   IF nShow < 1 THEN RETURN END;
-  TUI.PutStr(1, sy - 1, "--- Log ---", TUI.Yellow, TUI.Black);
+  (* clamp scroll: can't scroll past stored history or show empty slots *)
+  avail := logHead - nShow;
+  IF avail < 0 THEN avail := 0 END;
+  IF logScroll > avail THEN logScroll := avail END;
+  IF logScroll < 0 THEN logScroll := 0 END;
+  IF logScroll = 0 THEN
+    COPY("--- Log (PgUp) ---", hdr)
+  ELSE
+    COPY("--- Log +", hdr);
+    IntStr(logScroll, n); AppendStr(hdr, n); AppendStr(hdr, " (PgDn) ---")
+  END;
+  TUI.PutStr(1, sy - 1, hdr, TUI.Yellow, TUI.Black);
+  base := logHead - logScroll;
   FOR i := 0 TO nShow - 1 DO
-    TUI.PutStr(1, sy + i, msgLog[(logHead - nShow + i + 64) MOD 8], TUI.White, TUI.Black)
+    TUI.PutStr(1, sy + i,
+      msgLog[(base - nShow + i + 256) MOD 64], TUI.White, TUI.Black)
   END
 END DrawLog;
 
@@ -1849,7 +1865,8 @@ PROCEDURE ClearLog;
 VAR i: INTEGER;
 BEGIN
   logHead := 0;
-  FOR i := 0 TO 7 DO msgLog[i][0] := 0X END
+  logScroll := 0;
+  FOR i := 0 TO 63 DO msgLog[i][0] := 0X END
 END ClearLog;
 
 PROCEDURE ChooseScenario;
@@ -1990,7 +2007,10 @@ BEGIN
       IF (ev.key = ORD('q')) OR (ev.key = ORD('Q')) OR (ev.key = 17) THEN EXIT END;
       IF gameOver THEN EXIT END;
 
-      IF activeSide = RED THEN
+      IF ev.key = ORD(TUI.KPgUp) THEN INC(logScroll)
+      ELSIF ev.key = ORD(TUI.KPgDn) THEN
+        DEC(logScroll); IF logScroll < 0 THEN logScroll := 0 END
+      ELSIF activeSide = RED THEN
         CASE phase OF
           PH_MOVE:
             IF ((ev.key = ORD('n')) OR (ev.key = ORD('N'))) & (selUnit < 0) THEN AdvancePhase
