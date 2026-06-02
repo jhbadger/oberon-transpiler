@@ -446,10 +446,12 @@ END LookupSS;
 *)
 PROCEDURE Load*(path: ARRAY OF CHAR; VAR m: Model; VAR err: INTEGER): BOOLEAN;
 VAR f: Files.File; r: Files.Rider; tmpPath: ARRAY 1024 OF CHAR;
-    line: ARRAY 128 OF CHAR;
+    line: ARRAY 128 OF CHAR; ssRider: Files.Rider;
 BEGIN
   err := ErrNone; m.count := 0;
   IF ~GzOpen(path, f, tmpPath) THEN err := ErrFileOpen; RETURN FALSE END;
+  Files.Set(ssRider, f, 0);
+  ParseSS(ssRider, m);
   Files.Set(r, f, 0);
 
   (* Skip to first ATOM/HETATM or MODEL record *)
@@ -498,11 +500,13 @@ END Load;
 PROCEDURE LoadModel*(path: ARRAY OF CHAR; VAR m: Model;
                      modelNo: INTEGER; VAR err: INTEGER): BOOLEAN;
 VAR f: Files.File; r: Files.Rider; tmpPath: ARRAY 1024 OF CHAR;
-    line: ARRAY 128 OF CHAR; cur: INTEGER; found: BOOLEAN;
+    line: ARRAY 128 OF CHAR; cur: INTEGER; found: BOOLEAN; ssRider: Files.Rider;
 BEGIN
   err := ErrNone; m.count := 0;
   IF modelNo < 1 THEN modelNo := 1 END;
   IF ~GzOpen(path, f, tmpPath) THEN err := ErrFileOpen; RETURN FALSE END;
+  Files.Set(ssRider, f, 0);
+  ParseSS(ssRider, m);
   Files.Set(r, f, 0);
 
   cur := 0; found := FALSE;
