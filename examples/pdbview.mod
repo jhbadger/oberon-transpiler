@@ -1,19 +1,17 @@
 MODULE pdbview;
 
 (*
+
   pdbview — Terminal PDB structure viewer built on TUI / Widgets / FileDialog.
   Two rendering back-ends:
     Terminal  half-block pixel buffer 240x100  (default, works everywhere)
     Sixel     DEC Sixel graphics 640x480       (toggle with X, needs xterm/iTerm2)
-
   Colour schemes:
     Chain       one colour per chain ID
     CPK/Element C=white N=blue O=red S=yellow ...
     B-factor    blue (low) to red (high)
     Secondary   helix=red  sheet=yellow  coil=white
-
   Keyboard shortcuts
-
     Arrow keys        Rotate around Y / X axis
     Shift+Up/Down     Rotate around Z axis
     + / -             Zoom in / out
@@ -35,7 +33,7 @@ MODULE pdbview;
     Scroll wheel      Zoom
 *)
 
-IMPORT TUI, Widgets, FileDialog, Help,
+IMPORT TUI, Widgets, FileDialog, Help, Parallel,
        BioPDB, Strings, Math, Terminal, Sixel, Time, Args, Out;
 
 (* ════════════════════════════════════════════════════════════════
@@ -115,6 +113,13 @@ TYPE
     projY : INTEGER
   END;
 
+  ProjCacheEntry = RECORD
+    onScreen : BOOLEAN;
+    z        : REAL;
+    projX    : INTEGER;
+    projY    : INTEGER
+  END;
+
   ViewerWin  = POINTER TO ViewerWinRec;
   ViewerWinRec = RECORD (TUI.WindowRec)
     model        : BioPDB.Model;
@@ -151,6 +156,7 @@ VAR
   running    : BOOLEAN;
   statusMsg  : ARRAY 256 OF CHAR;
   sixelReady : BOOLEAN;
+  projCache  : ARRAY MaxDraw OF ProjCacheEntry;
 
 (* ════════════════════════════════════════════════════════════════
    Matrix helpers
@@ -213,7 +219,6 @@ BEGIN
   r[6]:=0.0; r[7]:=0.0; r[8]:=1.0;
   MatMul(r,m,tmp); m:=tmp
 END RotZ;
-
 
 (* ════════════════════════════════════════════════════════════════
    Sixel palette
@@ -358,7 +363,6 @@ BEGIN
   END; RETURN SixPalChain0+6
 END AtomColorSix;
 
-
 (* ════════════════════════════════════════════════════════════════
    View reset
    ════════════════════════════════════════════════════════════════ *)
@@ -401,6 +405,12 @@ END ResetView;
    Painter sort (Quicksort Implementation)
    ════════════════════════════════════════════════════════════════ *)
 
+PROCEDURE Swap(VAR a, b: DrawEntry);
+VAR tmp: DrawEntry;
+BEGIN
+  tmp := a; a := b; b := tmp
+END Swap;
+
 PROCEDURE QuickSortRecursive(VAR buf: ARRAY OF DrawEntry; low, high: INTEGER);
 VAR i, j: INTEGER; pivot: DrawEntry;
 BEGIN
@@ -426,7 +436,6 @@ BEGIN
     QuickSortRecursive(buf, 0, n - 1)
   END
 END SortDraw;
-
 
 (* ════════════════════════════════════════════════════════════════
    Atom picking
@@ -467,7 +476,6 @@ BEGIN
     RETURN (px >= 0) & (px < CanvasW) & (py >= 0) & (py < CanvasH)
   END
 END Project;
-
 
 (* ════════════════════════════════════════════════════════════════
    Back-end drawing primitives
@@ -521,10 +529,27 @@ BEGIN
   END
 END BECircle;
 
-
 (* ════════════════════════════════════════════════════════════════
-   Rendering
+   Rendering (Parallelized)
    ════════════════════════════════════════════════════════════════ *)
+
+PROCEDURE ProjectAtomWorker(i: INTEGER);
+VAR px, py: INTEGER; pz: REAL; a: BioPDB.Atom;
+BEGIN
+  a := vw.model.atoms[i];
+  IF (~a.isHet OR vw.showHet) THEN
+    IF Project(vw, i, px, py, pz) THEN
+      projCache[i].onScreen := TRUE;
+      projCache[i].projX := px;
+      projCache[i].projY := py;
+      projCache[i].z := pz;
+    ELSE
+      projCache[i].onScreen := FALSE;
+    END;
+  ELSE
+    projCache[i].onScreen := FALSE;
+  END;
+END ProjectAtomWorker;
 
 PROCEDURE RenderScene(v: ViewerWin);
 VAR i, j, px, py, col, r: INTEGER;
@@ -535,6 +560,7 @@ VAR i, j, px, py, col, r: INTEGER;
     prevOK, isCA: BOOLEAN;
     cx0, cy0, cx1, cy1: INTEGER;
     greyCol, cyanCol: INTEGER;
+    nThreads: INTEGER;
 BEGIN
   IF v.useSixel THEN
     IF ~sixelReady THEN InitSixelPalette END;
@@ -558,22 +584,35 @@ BEGIN
     RETURN
   END;
 
-  prevOK := FALSE; prevChain := 0X; prevPX := 0; prevPY := 0;
   v.drawN := 0;
-  FOR i := 0 TO v.model.count-1 DO
-    a := v.model.atoms[i];
-    IF (~a.isHet OR v.showHet) & (v.drawN < MaxDraw) THEN
-      IF Project(v, i, px, py, pz) &
-         (px >= cx0) & (px <= cx1) & (py >= cy0) & (py <= cy1) THEN
-        v.drawBuf[v.drawN].z     := pz;
-        v.drawBuf[v.drawN].idx   := i;
-        v.drawBuf[v.drawN].projX := px;
-        v.drawBuf[v.drawN].projY := py;
-        INC(v.drawN)
-      END
-    END;
+  nThreads := Parallel.NumCPU();
+  IF nThreads < 1 THEN nThreads := 1 END;
 
-    IF v.renderMode = ModeBackbone THEN
+  (* Parallel projection for Ball+Stick and SpaceFill *)
+  IF v.renderMode # ModeBackbone THEN
+    Parallel.For(0, v.model.count, ProjectAtomWorker, nThreads);
+
+    FOR i := 0 TO v.model.count-1 DO
+      IF projCache[i].onScreen THEN
+        px := projCache[i].projX;
+        py := projCache[i].projY;
+        IF (v.drawN < MaxDraw) &
+           (px >= cx0) & (px <= cx1) & (py >= cy0) & (py <= cy1) THEN
+          v.drawBuf[v.drawN].z     := projCache[i].z;
+          v.drawBuf[v.drawN].idx   := i;
+          v.drawBuf[v.drawN].projX := px;
+          v.drawBuf[v.drawN].projY := py;
+          INC(v.drawN);
+        END;
+      END;
+    END;
+  END;
+
+  (* Sequential drawing for Backbone *)
+  IF v.renderMode = ModeBackbone THEN
+    prevOK := FALSE; prevChain := 0X; prevPX := 0; prevPY := 0;
+    FOR i := 0 TO v.model.count-1 DO
+      a := v.model.atoms[i];
       isCA := (Strings.Pos("CA", a.name) >= 0) & ~a.isHet;
       IF isCA THEN
         IF v.useSixel THEN col := AtomColorSix(v, i)
@@ -948,12 +987,6 @@ END BuildMenus;
    Main
    ════════════════════════════════════════════════════════════════ *)
 
-PROCEDURE Swap(VAR a, b: DrawEntry);
-VAR tmp: DrawEntry;
-BEGIN
-    tmp := a; a := b; b := tmp;
-END Swap;
-
 VAR ev: TUI.Event; ch: CHAR; arg: ARRAY 1024 OF CHAR;
 
 BEGIN
@@ -1041,5 +1074,3 @@ BEGIN
 
   TUI.Done()
 END pdbview.
-
-
