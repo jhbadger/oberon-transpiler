@@ -2007,8 +2007,8 @@ BEGIN
       IF (ev.key = ORD('q')) OR (ev.key = ORD('Q')) OR (ev.key = 17) THEN EXIT END;
       IF gameOver THEN EXIT END;
 
-      IF ev.key = ORD(TUI.KPgUp) THEN INC(logScroll)
-      ELSIF ev.key = ORD(TUI.KPgDn) THEN
+      IF ev.key = TUI.KPgUp THEN INC(logScroll)
+      ELSIF ev.key = TUI.KPgDn THEN
         DEC(logScroll); IF logScroll < 0 THEN logScroll := 0 END
       ELSIF activeSide = RED THEN
         CASE phase OF
