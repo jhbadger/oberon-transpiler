@@ -3,6 +3,7 @@
 
 typedef void (*Parallel_BodyFn)(int);
 
+void Parallel_SetMaxCPU(int n);
 int  Parallel_NumCPU(void);
 void Parallel_For(int lo, int hi, Parallel_BodyFn body, int nthreads);
 

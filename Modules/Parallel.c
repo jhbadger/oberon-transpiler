@@ -8,6 +8,12 @@
 #  include <unistd.h>
 #endif
 
+static int maxCPU = 0;  /* 0 = no cap */
+
+void Parallel_SetMaxCPU(int n) {
+    maxCPU = (n > 0) ? n : 0;
+}
+
 typedef struct {
     Parallel_BodyFn body;
     int lo;
@@ -26,11 +32,13 @@ int Parallel_NumCPU(void) {
     int n = 1;
     size_t sz = sizeof(n);
     sysctlbyname("hw.logicalcpu", &n, &sz, NULL, 0);
-    return n > 0 ? n : 1;
+    if (n < 1) n = 1;
 #else
     int n = (int)sysconf(_SC_NPROCESSORS_ONLN);
-    return n > 0 ? n : 1;
+    if (n < 1) n = 1;
 #endif
+    if (maxCPU > 0 && n > maxCPU) n = maxCPU;
+    return n;
 }
 
 void Parallel_For(int lo, int hi, Parallel_BodyFn body, int nthreads) {
