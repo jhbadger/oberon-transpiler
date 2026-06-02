@@ -2762,27 +2762,28 @@ void codegen(Node *module, FILE *out, int is_main, const char *srcfile) {
         emit(g,"}\n");
         emit(g,"static void Terminal_Flush(void) {\n");
         emit(g,"    for(int row=0;row<_GFX_H;row+=2) {\n");
-        /* Find the last non-empty column so we don't write trailing spaces
-         * that would wrap onto the next terminal line on narrow terminals. */
-        emit(g,"        int last=-1;\n");
+        /* Track first and last non-empty columns: start the cursor at first so
+         * we never write over terminal columns that hold TUI border characters. */
+        emit(g,"        int first=-1,last=-1;\n");
         emit(g,"        for(int c=0;c<_GFX_W;c++) {\n");
         emit(g,"            int b=(row+1<_GFX_H)?_gfx_buf[row+1][c]:0;\n");
-        emit(g,"            if(_gfx_buf[row][c]||b) last=c;\n");
+        emit(g,"            if(_gfx_buf[row][c]||b){if(first<0)first=c;last=c;}\n");
         emit(g,"        }\n");
         emit(g,"        if(last<0) continue;\n");
-        emit(g,"        printf(\"\\033[%%d;1H\",row/2+1);\n");
-        emit(g,"        for(int col=0;col<=last;col++) {\n");
+        emit(g,"        printf(\"\\033[%%d;%%dH\",row/2+1,first+1);\n");
+        emit(g,"        for(int col=first;col<=last;col++) {\n");
         emit(g,"            int top=_gfx_buf[row][col];\n");
         emit(g,"            int bot=(row+1<_GFX_H)?_gfx_buf[row+1][col]:0;\n");
-        emit(g,"            if(!top&&!bot) { printf(\"\\033[0m \"); }\n");
+        /* empty interior pixel: advance cursor without writing, preserving TUI background */
+        emit(g,"            if(!top&&!bot) { printf(\"\\033[C\"); }\n");
         /* same color both halves → full block █ */
         emit(g,"            else if(top&&bot&&top==bot) { printf(\"\\033[38;5;%%dm\\xe2\\x96\\x88\",top); }\n");
         /* different colors → ▀ with fg=top, bg=bot */
         emit(g,"            else if(top&&bot) { printf(\"\\033[38;5;%%d;48;5;%%dm\\xe2\\x96\\x80\",top,bot); }\n");
-        /* top only → ▀ */
-        emit(g,"            else if(top) { printf(\"\\033[38;5;%%dm\\xe2\\x96\\x80\",top); }\n");
-        /* bot only → ▄ */
-        emit(g,"            else { printf(\"\\033[38;5;%%dm\\xe2\\x96\\x84\",bot); }\n");
+        /* top only → ▀ with explicit black bg so the bottom half doesn't bleed */
+        emit(g,"            else if(top) { printf(\"\\033[38;5;%%d;48;5;0m\\xe2\\x96\\x80\",top); }\n");
+        /* bot only → ▄ with explicit black bg so the top half doesn't bleed */
+        emit(g,"            else { printf(\"\\033[38;5;%%d;48;5;0m\\xe2\\x96\\x84\",bot); }\n");
         emit(g,"        }\n");
         emit(g,"    }\n");
         emit(g,"    printf(\"\\033[0m\"); fflush(stdout);\n");
