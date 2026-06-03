@@ -16,19 +16,21 @@ MODULE pdbview;
     Shift+Up/Down     Rotate around Z axis
     + / -             Zoom in / out
     W A S D           Pan view
-    R                 Reset view (clears pick)
+    R                 Reset view (clears picks)
+    F                 Center view on picked atom
     M                 Cycle render mode (Backbone -> Ball-and-Stick -> Space Fill)
     H                 Toggle HETATM visibility
     C                 Cycle colour scheme (Chain->CPK->B-factor->Secondary)
     B                 Jump to B-factor colouring
     X                 Toggle Sixel high-res mode
-    Esc               Clear picked atom
+    Esc               Clear picked atoms
     PgUp / PgDn       Previous / next model
     F5                Reload current file
     Ctrl+O            Open file
     Ctrl+Q / Q        Quit
     F1                Help
-    LMB click         Pick atom
+    LMB drag          Rotate view (with inertia)
+    LMB click         Pick atom (1st click picks, 2nd measures distance)
     RMB drag          Pan view
     Scroll wheel      Zoom
 *)
@@ -136,11 +138,19 @@ TYPE
     useSixel     : BOOLEAN;
     inertDX      : REAL;
     inertDY      : REAL;
+    inertDZ      : REAL;
     inertOn      : BOOLEAN;
     pickedAtom   : INTEGER;
+    pickedAtom2  : INTEGER;
     dragActive   : BOOLEAN;
     dragLastX    : INTEGER;
     dragLastY    : INTEGER;
+    rotDragActive : BOOLEAN;
+    rotLastX     : INTEGER;
+    rotLastY     : INTEGER;
+    lmbMoved     : BOOLEAN;
+    chainCount   : INTEGER;
+    residueCount : INTEGER;
     drawBuf      : ARRAY MaxDraw OF DrawEntry;
     drawN        : INTEGER
   END;
@@ -219,6 +229,51 @@ BEGIN
   r[6]:=0.0; r[7]:=0.0; r[8]:=1.0;
   MatMul(r,m,tmp); m:=tmp
 END RotZ;
+
+PROCEDURE AtomDistance(v: ViewerWin; i, j: INTEGER): REAL;
+VAR dx, dy, dz: REAL;
+BEGIN
+  dx := v.model.atoms[i].x - v.model.atoms[j].x;
+  dy := v.model.atoms[i].y - v.model.atoms[j].y;
+  dz := v.model.atoms[i].z - v.model.atoms[j].z;
+  RETURN Math.sqrt(dx*dx + dy*dy + dz*dz)
+END AtomDistance;
+
+PROCEDURE CenterOnAtom(v: ViewerWin; i: INTEGER);
+VAR px, py, centX, centY: INTEGER; pz: REAL;
+BEGIN
+  IF ~Project(v, i, px, py, pz) THEN RETURN END;
+  IF v.useSixel THEN
+    centX := SixelW DIV 2; centY := SixelH DIV 2
+  ELSE
+    centX := v.x + (v.w - 2) DIV 2;
+    centY := (v.y + (v.h - 2) DIV 2) * 2
+  END;
+  v.panX := v.panX + FLT(centX - px);
+  v.panY := v.panY + FLT(centY - py)
+END CenterOnAtom;
+
+PROCEDURE ComputeCounts(v: ViewerWin);
+VAR i: INTEGER; seen: ARRAY 256 OF BOOLEAN;
+    prevChain: CHAR; prevRes: INTEGER;
+BEGIN
+  FOR i := 0 TO 255 DO seen[i] := FALSE END;
+  v.chainCount := 0; v.residueCount := 0;
+  prevChain := 0X; prevRes := -1;
+  FOR i := 0 TO v.model.count-1 DO
+    IF ~v.model.atoms[i].isHet THEN
+      IF ~seen[ORD(v.model.atoms[i].chainID)] THEN
+        seen[ORD(v.model.atoms[i].chainID)] := TRUE;
+        INC(v.chainCount)
+      END;
+      IF (v.model.atoms[i].chainID # prevChain) OR (v.model.atoms[i].resSeq # prevRes) THEN
+        INC(v.residueCount);
+        prevChain := v.model.atoms[i].chainID;
+        prevRes   := v.model.atoms[i].resSeq
+      END
+    END
+  END
+END ComputeCounts;
 
 (* ════════════════════════════════════════════════════════════════
    Sixel palette
@@ -420,8 +475,8 @@ BEGIN
   v.panX := canW / 2.0;
   v.panY := canH / 2.0;
   IF ~v.useSixel THEN
-    v.panX := v.panX + FLT(v.x);
-    v.panY := v.panY + FLT(v.y * 2)
+    v.panX := v.panX + FLT(v.x + 1);
+    v.panY := v.panY + FLT((v.y + 1) * 2)
   END
 END RecenterView;
 
@@ -612,7 +667,7 @@ VAR i, j, px, py, col, r: INTEGER;
     prevPX, prevPY: INTEGER;
     prevOK, isBackbone: BOOLEAN;
     cx0, cy0, cx1, cy1: INTEGER;
-    greyCol, cyanCol: INTEGER;
+    greyCol, cyanCol, yellowCol: INTEGER;
     nThreads: INTEGER;
     zMin, zMax: REAL;
 BEGIN
@@ -620,16 +675,16 @@ BEGIN
     IF ~sixelReady THEN InitSixelPalette END;
     Sixel.Init(SixelW, SixelH);
     cx0 := 0; cy0 := 0; cx1 := SixelW-1; cy1 := SixelH-1;
-    greyCol := SixPalGrey; cyanCol := SixPalCyan
+    greyCol := SixPalGrey; cyanCol := SixPalCyan; yellowCol := SixPalSheet
   ELSE
-    cx0 := v.x;  cx1 := v.x + v.w - 3;
-    cy0 := v.y * 2;  cy1 := (v.y + v.h - 3) * 2 + 1;
+    cx0 := v.x + 1;  cx1 := v.x + v.w - 2;
+    cy0 := (v.y + 1) * 2;  cy1 := (v.y + v.h - 2) * 2 + 1;
     IF cx0 < 0        THEN cx0 := 0        END;
     IF cy0 < 0        THEN cy0 := 0        END;
     IF cx1 >= CanvasW THEN cx1 := CanvasW-1 END;
     IF cy1 >= CanvasH THEN cy1 := CanvasH-1 END;
     Terminal.ClearBuf();
-    greyCol := 240; cyanCol := 51
+    greyCol := 240; cyanCol := 51; yellowCol := 226
   END;
 
   IF ~v.loaded OR (v.model.count = 0) THEN
@@ -664,18 +719,26 @@ BEGIN
 
   (* Sequential drawing for Backbone (protein CA + nucleic acid P) *)
   IF v.renderMode = ModeBackbone THEN
-    (* Pass 1: project backbone atoms into drawBuf for picking, collect z range *)
+    (* Pass 1: project backbone atoms into projCache + drawBuf for picking *)
     FOR i := 0 TO v.model.count-1 DO
       a := v.model.atoms[i];
       isBackbone := ((Strings.Pos("CA", a.name) >= 0) OR
                      ((a.name[0] = 'P') & (a.name[1] = 0X))) & ~a.isHet;
-      IF isBackbone & Project(v, i, px, py, pz) &
-         (px >= cx0) & (px <= cx1) & (py >= cy0) & (py <= cy1) THEN
-        IF v.drawN < MaxDraw THEN
-          v.drawBuf[v.drawN].z := pz; v.drawBuf[v.drawN].idx := i;
-          v.drawBuf[v.drawN].projX := px; v.drawBuf[v.drawN].projY := py;
-          INC(v.drawN)
+      IF isBackbone THEN
+        IF Project(v, i, px, py, pz) THEN
+          projCache[i].onScreen := TRUE;
+          projCache[i].projX := px; projCache[i].projY := py; projCache[i].z := pz;
+          IF (v.drawN < MaxDraw) &
+             (px >= cx0) & (px <= cx1) & (py >= cy0) & (py <= cy1) THEN
+            v.drawBuf[v.drawN].z := pz; v.drawBuf[v.drawN].idx := i;
+            v.drawBuf[v.drawN].projX := px; v.drawBuf[v.drawN].projY := py;
+            INC(v.drawN)
+          END
+        ELSE
+          projCache[i].onScreen := FALSE
         END
+      ELSE
+        projCache[i].onScreen := FALSE
       END
     END;
     zMin := 1.0E30; zMax := -1.0E30;
@@ -684,7 +747,7 @@ BEGIN
       IF v.drawBuf[j].z > zMax THEN zMax := v.drawBuf[j].z END
     END;
     IF zMin >= zMax THEN zMin := zMax - 1.0 END;
-    (* Pass 2: draw in atom order to preserve chain-gap semantics *)
+    (* Pass 2: draw in atom order using cached projections *)
     prevOK := FALSE; prevChain := 0X; prevPX := 0; prevPY := 0;
     FOR i := 0 TO v.model.count-1 DO
       a := v.model.atoms[i];
@@ -694,17 +757,20 @@ BEGIN
         IF v.useSixel THEN col := AtomColorSix(v, i)
         ELSE               col := AtomColorTerm(v, i)
         END;
-        IF Project(v, i, px, py, pz) &
-           (px >= cx0) & (px <= cx1) & (py >= cy0) & (py <= cy1) THEN
+        IF projCache[i].onScreen THEN
+          px := projCache[i].projX; py := projCache[i].projY; pz := projCache[i].z;
           IF ~v.useSixel THEN
             col := DimTermColor(col, DepthFactor(pz, zMin, zMax));
             py := py DIV 2 * 2
           END;
-          IF prevOK & (a.chainID = prevChain) THEN
-            BELine(v, prevPX, prevPY, px, py, col)
-          END;
-          BEPlot(v, px, py, col);
-          prevPX := px; prevPY := py; prevChain := a.chainID; prevOK := TRUE
+          IF (px >= cx0) & (px <= cx1) & (py >= cy0) & (py <= cy1) THEN
+            IF prevOK & (a.chainID = prevChain) THEN
+              BELine(v, prevPX, prevPY, px, py, col)
+            END;
+            BEPlot(v, px, py, col);
+            prevPX := px; prevPY := py; prevChain := a.chainID; prevOK := TRUE
+          ELSE prevOK := FALSE
+          END
         ELSE prevOK := FALSE
         END
       END
@@ -787,6 +853,13 @@ BEGIN
       BECircle(v, px, py, r, cyanCol, FALSE)
     END
   END;
+  IF v.pickedAtom2 >= 0 THEN
+    IF Project(v, v.pickedAtom2, px, py, pz) &
+       (px >= cx0) & (px <= cx1) & (py >= cy0) & (py <= cy1) THEN
+      r := 5; IF v.useSixel THEN r := 12 END;
+      BECircle(v, px, py, r, yellowCol, FALSE)
+    END
+  END;
 
   IF v.useSixel THEN Terminal.Goto(1,1); Sixel.Flush()
   ELSE Terminal.Flush()
@@ -855,72 +928,105 @@ END DrawViewer;
    ════════════════════════════════════════════════════════════════ *)
 
 PROCEDURE HandleViewer(v: TUI.View; ev: TUI.Event): BOOLEAN;
-VAR ch: CHAR; dx, dy, mpx, mpy: INTEGER;
+VAR ch: CHAR; dx, dy, mpx, mpy, newPick: INTEGER;
 BEGIN
   WITH v: ViewerWinRec DO
     IF ev.kind = TUI.EvKey THEN
       ch := ev.key;
-      v.inertOn := FALSE;
-      IF    ch = TUI.KLeft      THEN RotY(v.rot,-RotStep); v.inertDX := -RotStep
-      ELSIF ch = TUI.KRight     THEN RotY(v.rot, RotStep); v.inertDX :=  RotStep
-      ELSIF ch = TUI.KUp        THEN RotX(v.rot,-RotStep); v.inertDY := -RotStep
-      ELSIF ch = TUI.KDown      THEN RotX(v.rot, RotStep); v.inertDY :=  RotStep
-      ELSIF ch = TUI.KShiftUp   THEN RotZ(v.rot,-RotStep)
-      ELSIF ch = TUI.KShiftDown THEN RotZ(v.rot, RotStep)
-      ELSIF (ch='+') OR (ch='=') THEN v.scale := v.scale * ZoomStep
-      ELSIF  ch='-'               THEN v.scale := v.scale / ZoomStep
-      ELSIF (ch='W') OR (ch='w') THEN v.panY := v.panY - 4.0
-      ELSIF (ch='S') OR (ch='s') THEN v.panY := v.panY + 4.0
-      ELSIF (ch='A') OR (ch='a') THEN v.panX := v.panX - 4.0
-      ELSIF (ch='D') OR (ch='d') THEN v.panX := v.panX + 4.0
-      ELSIF (ch='R') OR (ch='r') THEN
-        ResetView(v); v.inertDX:=0.0; v.inertDY:=0.0; v.pickedAtom:=-1
-      ELSIF (ch='M') OR (ch='m') THEN v.renderMode := (v.renderMode+1) MOD 3
-      ELSIF (ch='C') OR (ch='c') THEN v.colourScheme := (v.colourScheme+1) MOD 4
-      ELSIF (ch='H') OR (ch='h') THEN v.showHet := ~v.showHet
-      ELSIF (ch='B') OR (ch='b') THEN
-        IF v.colourScheme = ColourBfactor THEN v.colourScheme := ColourChain
-        ELSE v.colourScheme := ColourBfactor END
-      ELSIF (ch='X') OR (ch='x') THEN
-        v.useSixel := ~v.useSixel;
-        ResetView(v); v.pickedAtom := -1;
-        IF v.useSixel & ~sixelReady THEN InitSixelPalette END;
-        TUI.InvalidateFront()
-      ELSIF ch = TUI.KEsc  THEN v.pickedAtom := -1
-      ELSIF ch = TUI.KPgUp THEN
-        IF v.modelNo > 1 THEN v.modelNo := v.modelNo-1 END
-      ELSIF ch = TUI.KPgDn THEN v.modelNo := v.modelNo+1
-      ELSE RETURN FALSE
+      IF    ch = TUI.KLeft      THEN RotY(v.rot,-RotStep); v.inertDX := -RotStep; v.inertDY := 0.0; v.inertDZ := 0.0; v.inertOn := TRUE
+      ELSIF ch = TUI.KRight     THEN RotY(v.rot, RotStep); v.inertDX :=  RotStep; v.inertDY := 0.0; v.inertDZ := 0.0; v.inertOn := TRUE
+      ELSIF ch = TUI.KUp        THEN RotX(v.rot,-RotStep); v.inertDX := 0.0; v.inertDY := -RotStep; v.inertDZ := 0.0; v.inertOn := TRUE
+      ELSIF ch = TUI.KDown      THEN RotX(v.rot, RotStep); v.inertDX := 0.0; v.inertDY :=  RotStep; v.inertDZ := 0.0; v.inertOn := TRUE
+      ELSIF ch = TUI.KShiftUp   THEN RotZ(v.rot,-RotStep); v.inertDX := 0.0; v.inertDY := 0.0; v.inertDZ := -RotStep; v.inertOn := TRUE
+      ELSIF ch = TUI.KShiftDown THEN RotZ(v.rot, RotStep); v.inertDX := 0.0; v.inertDY := 0.0; v.inertDZ :=  RotStep; v.inertOn := TRUE
+      ELSE
+        v.inertOn := FALSE; v.inertDX := 0.0; v.inertDY := 0.0; v.inertDZ := 0.0;
+        IF    (ch='+') OR (ch='=') THEN v.scale := v.scale * ZoomStep
+        ELSIF  ch='-'               THEN v.scale := v.scale / ZoomStep
+        ELSIF (ch='W') OR (ch='w') THEN v.panY := v.panY - 4.0
+        ELSIF (ch='S') OR (ch='s') THEN v.panY := v.panY + 4.0
+        ELSIF (ch='A') OR (ch='a') THEN v.panX := v.panX - 4.0
+        ELSIF (ch='D') OR (ch='d') THEN v.panX := v.panX + 4.0
+        ELSIF (ch='R') OR (ch='r') THEN
+          ResetView(v); v.pickedAtom := -1; v.pickedAtom2 := -1
+        ELSIF (ch='F') OR (ch='f') THEN
+          IF v.pickedAtom >= 0 THEN CenterOnAtom(v, v.pickedAtom) END
+        ELSIF (ch='M') OR (ch='m') THEN v.renderMode := (v.renderMode+1) MOD 3
+        ELSIF (ch='C') OR (ch='c') THEN v.colourScheme := (v.colourScheme+1) MOD 4
+        ELSIF (ch='H') OR (ch='h') THEN v.showHet := ~v.showHet
+        ELSIF (ch='B') OR (ch='b') THEN
+          IF v.colourScheme = ColourBfactor THEN v.colourScheme := ColourChain
+          ELSE v.colourScheme := ColourBfactor END
+        ELSIF (ch='X') OR (ch='x') THEN
+          v.useSixel := ~v.useSixel;
+          ResetView(v); v.pickedAtom := -1; v.pickedAtom2 := -1;
+          IF v.useSixel & ~sixelReady THEN InitSixelPalette END;
+          TUI.InvalidateFront()
+        ELSIF ch = TUI.KEsc  THEN v.pickedAtom := -1; v.pickedAtom2 := -1
+        ELSIF ch = TUI.KPgUp THEN
+          IF v.modelNo > 1 THEN v.modelNo := v.modelNo-1 END
+        ELSIF ch = TUI.KPgDn THEN v.modelNo := v.modelNo+1
+        ELSE RETURN FALSE
+        END
       END;
       v.sceneDirty := TRUE;
       RETURN TRUE
 
     ELSIF ev.kind = TUI.EvMouse THEN
       IF ev.mb = 0 THEN
-        v.inertOn := FALSE;
-        IF v.useSixel THEN
-          mpx := (ev.mx-1) * (SixelW DIV TUI.Cols);
-          mpy := (ev.my-1) * (SixelH DIV TUI.Rows);
-          v.pickedAtom := PickAtom(v, mpx, mpy, MaxPickDistSixel)
-        ELSE
-          v.pickedAtom := PickAtom(v, ev.mx-1, (ev.my-1)*2+1, MaxPickDistTerm)
-        END;
-        v.sceneDirty := TRUE
+        v.rotDragActive := TRUE; v.lmbMoved := FALSE;
+        v.rotLastX := ev.mx; v.rotLastY := ev.my
       ELSIF ev.mb = 2 THEN
         v.dragActive := TRUE; v.dragLastX := ev.mx; v.dragLastY := ev.my
-      ELSIF (ev.mb = 32) & v.dragActive THEN
-        dx := ev.mx - v.dragLastX; dy := ev.my - v.dragLastY;
-        IF v.useSixel THEN
-          v.panX := v.panX + FLT(dx) * FLT(SixelW DIV TUI.Cols);
-          v.panY := v.panY + FLT(dy) * FLT(SixelH DIV TUI.Rows)
-        ELSE
-          v.panX := v.panX + FLT(dx);
-          v.panY := v.panY + FLT(dy) * 2.0
-        END;
-        v.dragLastX := ev.mx; v.dragLastY := ev.my; v.sceneDirty := TRUE
+      ELSIF ev.mb = 32 THEN
+        IF v.rotDragActive THEN
+          dx := ev.mx - v.rotLastX; dy := ev.my - v.rotLastY;
+          IF (dx # 0) OR (dy # 0) THEN
+            v.lmbMoved := TRUE;
+            RotY(v.rot, FLT(dx) * 0.03);
+            RotX(v.rot, FLT(dy) * 0.03);
+            v.inertDX := FLT(dx) * 0.03;
+            v.inertDY := FLT(dy) * 0.03;
+            v.inertDZ := 0.0;
+            v.rotLastX := ev.mx; v.rotLastY := ev.my;
+            v.sceneDirty := TRUE
+          END
+        ELSIF v.dragActive THEN
+          dx := ev.mx - v.dragLastX; dy := ev.my - v.dragLastY;
+          IF v.useSixel THEN
+            v.panX := v.panX + FLT(dx) * FLT(SixelW DIV TUI.Cols);
+            v.panY := v.panY + FLT(dy) * FLT(SixelH DIV TUI.Rows)
+          ELSE
+            v.panX := v.panX + FLT(dx);
+            v.panY := v.panY + FLT(dy) * 2.0
+          END;
+          v.dragLastX := ev.mx; v.dragLastY := ev.my; v.sceneDirty := TRUE
+        END
       ELSIF ev.mb = 3 THEN
-        v.dragActive := FALSE;
-        v.inertOn := (ABS(v.inertDX) > InertCutoff) OR (ABS(v.inertDY) > InertCutoff)
+        IF v.rotDragActive THEN
+          IF ~v.lmbMoved THEN
+            v.inertOn := FALSE;
+            IF v.useSixel THEN
+              mpx := (ev.mx-1) * (SixelW DIV TUI.Cols);
+              mpy := (ev.my-1) * (SixelH DIV TUI.Rows);
+              newPick := PickAtom(v, mpx, mpy, MaxPickDistSixel)
+            ELSE
+              newPick := PickAtom(v, ev.mx-1, (ev.my-1)*2+1, MaxPickDistTerm)
+            END;
+            IF v.pickedAtom < 0 THEN
+              v.pickedAtom := newPick; v.pickedAtom2 := -1
+            ELSIF v.pickedAtom2 < 0 THEN
+              v.pickedAtom2 := newPick
+            ELSE
+              v.pickedAtom := newPick; v.pickedAtom2 := -1
+            END
+          ELSE
+            v.inertOn := (ABS(v.inertDX) > InertCutoff) OR (ABS(v.inertDY) > InertCutoff) OR
+                         (ABS(v.inertDZ) > InertCutoff)
+          END;
+          v.rotDragActive := FALSE; v.sceneDirty := TRUE
+        END;
+        v.dragActive := FALSE
       ELSIF ev.mb = 64 THEN v.scale := v.scale * ZoomStep; v.sceneDirty := TRUE
       ELSIF ev.mb = 65 THEN v.scale := v.scale / ZoomStep; v.sceneDirty := TRUE
       END;
@@ -935,10 +1041,29 @@ END HandleViewer;
    ════════════════════════════════════════════════════════════════ *)
 
 PROCEDURE UpdateStatus;
-VAR buf, tmp: ARRAY 256 OF CHAR; a: BioPDB.Atom; ss: INTEGER;
+VAR buf, tmp: ARRAY 256 OF CHAR; a: BioPDB.Atom; ss: INTEGER; dist: REAL;
 BEGIN
   IF statusMsg[0] # 0X THEN
     Strings.Copy(statusMsg, buf)
+  ELSIF (vw.pickedAtom >= 0) & (vw.pickedAtom2 >= 0) THEN
+    a := vw.model.atoms[vw.pickedAtom];
+    Strings.Copy("  ", buf);
+    Strings.Append(a.resName, buf); Strings.Append(" ", buf);
+    buf[Strings.Length(buf)] := a.chainID; buf[Strings.Length(buf)+1] := 0X;
+    Strings.Append(" ", buf);
+    Strings.IntToStr(a.resSeq, tmp); Strings.Append(tmp, buf);
+    Strings.Append(" ", buf); Strings.Append(a.name, buf);
+    Strings.Append(" <-> ", buf);
+    a := vw.model.atoms[vw.pickedAtom2];
+    Strings.Append(a.resName, buf); Strings.Append(" ", buf);
+    buf[Strings.Length(buf)] := a.chainID; buf[Strings.Length(buf)+1] := 0X;
+    Strings.Append(" ", buf);
+    Strings.IntToStr(a.resSeq, tmp); Strings.Append(tmp, buf);
+    Strings.Append(" ", buf); Strings.Append(a.name, buf);
+    dist := AtomDistance(vw, vw.pickedAtom, vw.pickedAtom2);
+    Strings.Append("  dist:", buf);
+    Strings.RealToStr(dist, tmp); Strings.Append(tmp, buf);
+    Strings.Append(" A  [Esc=clear]", buf)
   ELSIF vw.pickedAtom >= 0 THEN
     a := vw.model.atoms[vw.pickedAtom];
     Strings.Copy("  Picked: ", buf);
@@ -959,19 +1084,24 @@ BEGIN
     | BioPDB.SSSheet : Strings.Append("sheet", buf)
     ELSE               Strings.Append("coil",  buf)
     END;
-    Strings.Append("  [Esc=clear]", buf)
+    Strings.Append("  [click 2nd atom=dist  Esc=clear]", buf)
   ELSIF vw.loaded THEN
     Strings.Copy("  Atoms:", buf);
     Strings.IntToStr(vw.model.count, tmp); Strings.Append(tmp, buf);
+    Strings.Append("  Res:", buf);
+    Strings.IntToStr(vw.residueCount, tmp); Strings.Append(tmp, buf);
+    Strings.Append("  Ch:", buf);
+    Strings.IntToStr(vw.chainCount, tmp); Strings.Append(tmp, buf);
     Strings.Append("  SS:", buf);
     Strings.IntToStr(vw.model.ssCount, tmp); Strings.Append(tmp, buf);
-    Strings.Append(" res  Model:", buf);
+    Strings.Append("  Mdl:", buf);
     Strings.IntToStr(vw.modelNo, tmp); Strings.Append(tmp, buf);
     IF vw.useSixel THEN Strings.Append("  [SIXEL]", buf) END;
-    Strings.Append("  Arrows:rot  WASD:pan  +/-:zoom  X:sixel  R:reset  M:mode  C:col  H:het  LMB:pick", buf)
+    Strings.Append("  LMBdrag:rot  WASD:pan  +/-:zoom  F:center  R:reset  M:mode  C:col  H:het  LMBclick:pick", buf)
   ELSE
     Strings.Copy("  No file loaded. Ctrl+O to open.", buf)
   END;
+  IF Strings.Length(buf) > TUI.Cols - 1 THEN buf[TUI.Cols - 1] := 0X END;
   Strings.Copy(buf, sline.text);
   statusMsg[0] := 0X
 END UpdateStatus;
@@ -987,8 +1117,9 @@ BEGIN
     Strings.Copy(path, vw.filePath);
     vw.modelNo    := modelNo;
     vw.loaded     := TRUE;
-    vw.pickedAtom := -1;
+    vw.pickedAtom := -1; vw.pickedAtom2 := -1;
     ResetView(vw);
+    ComputeCounts(vw);
     Strings.Copy("Loaded.", statusMsg)
   ELSE
     vw.loaded := FALSE;
@@ -1023,12 +1154,12 @@ BEGIN
   ELSIF cmd = CmdTogHet   THEN vw.showHet := ~vw.showHet; vw.sceneDirty := TRUE
   ELSIF cmd = CmdTogSixel THEN
     vw.useSixel := ~vw.useSixel;
-    ResetView(vw); vw.pickedAtom := -1;
+    ResetView(vw); vw.pickedAtom := -1; vw.pickedAtom2 := -1;
     IF vw.useSixel & ~sixelReady THEN InitSixelPalette END;
     TUI.InvalidateFront(); vw.sceneDirty := TRUE
   ELSIF cmd = CmdReset THEN
-    ResetView(vw); vw.inertDX:=0.0; vw.inertDY:=0.0;
-    vw.pickedAtom:=-1; vw.sceneDirty:=TRUE
+    ResetView(vw); vw.inertDX:=0.0; vw.inertDY:=0.0; vw.inertDZ:=0.0;
+    vw.pickedAtom:=-1; vw.pickedAtom2:=-1; vw.sceneDirty:=TRUE
   ELSIF cmd = CmdNextModel THEN
     IF vw.loaded THEN LoadPDB(vw.filePath, vw.modelNo+1) END
   ELSIF cmd = CmdPrevModel THEN
@@ -1096,9 +1227,11 @@ BEGIN
   vw.renderMode := ModeBackbone; vw.colourScheme := ColourChain;
   vw.showHet := FALSE; vw.useSixel := FALSE;
   vw.drawN := 0; vw.sceneDirty := TRUE;
-  vw.inertDX := 0.0; vw.inertDY := 0.0; vw.inertOn := FALSE;
-  vw.pickedAtom := -1;
+  vw.inertDX := 0.0; vw.inertDY := 0.0; vw.inertDZ := 0.0; vw.inertOn := FALSE;
+  vw.pickedAtom := -1; vw.pickedAtom2 := -1;
   vw.dragActive := FALSE; vw.dragLastX := 0; vw.dragLastY := 0;
+  vw.rotDragActive := FALSE; vw.rotLastX := 0; vw.rotLastY := 0; vw.lmbMoved := FALSE;
+  vw.chainCount := 0; vw.residueCount := 0;
   MatIdentity(vw.rot);
   vw.scale := 4.0; vw.panX := FLT(CanvasW)/2.0; vw.panY := FLT(CanvasH)/2.0;
 
@@ -1125,11 +1258,13 @@ BEGIN
 
   WHILE running DO
     IF vw.inertOn THEN
-      RotY(vw.rot, vw.inertDX); RotX(vw.rot, vw.inertDY);
+      RotY(vw.rot, vw.inertDX); RotX(vw.rot, vw.inertDY); RotZ(vw.rot, vw.inertDZ);
       vw.inertDX := vw.inertDX * InertDecay;
       vw.inertDY := vw.inertDY * InertDecay;
-      IF (ABS(vw.inertDX) < InertCutoff) & (ABS(vw.inertDY) < InertCutoff) THEN
-        vw.inertOn := FALSE; vw.inertDX := 0.0; vw.inertDY := 0.0
+      vw.inertDZ := vw.inertDZ * InertDecay;
+      IF (ABS(vw.inertDX) < InertCutoff) & (ABS(vw.inertDY) < InertCutoff) &
+         (ABS(vw.inertDZ) < InertCutoff) THEN
+        vw.inertOn := FALSE; vw.inertDX := 0.0; vw.inertDY := 0.0; vw.inertDZ := 0.0
       END;
       vw.sceneDirty := TRUE
     END;
