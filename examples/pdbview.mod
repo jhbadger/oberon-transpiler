@@ -1,11 +1,9 @@
 MODULE pdbview;
 
 (*
-
   pdbview — Terminal PDB structure viewer built on TUI / Widgets / FileDialog.
-  Two rendering back-ends:
-    Terminal  half-block pixel buffer 240x100  (default, works everywhere)
-    Sixel     DEC Sixel graphics 640x480       (toggle with X, needs xterm/iTerm2)
+  Rendering:
+    Terminal  half-block pixel buffer 240x100
   Colour schemes:
     Chain       one colour per chain ID
     CPK/Element C=white N=blue O=red S=yellow ...
@@ -22,7 +20,7 @@ MODULE pdbview;
     H                 Toggle HETATM visibility
     C                 Cycle colour scheme (Chain->CPK->B-factor->Secondary)
     B                 Jump to B-factor colouring
-    X                 Toggle Sixel high-res mode
+    V                 Save SVG snapshot of current view
     Esc               Clear picked atoms
     PgUp / PgDn       Previous / next model
     F5                Reload current file
@@ -35,8 +33,8 @@ MODULE pdbview;
     Scroll wheel      Zoom
 *)
 
-IMPORT TUI, Widgets, FileDialog, Help, Parallel,
-       BioPDB, Strings, Math, Terminal, Sixel, Time, Args, Out;
+IMPORT TUI, Widgets, FileDialog, Parallel, Files,
+       BioPDB, Strings, Math, Terminal, Time, Args, Out;
 
 (* ════════════════════════════════════════════════════════════════
    Constants
@@ -57,8 +55,7 @@ CONST
   InertDecay  = 0.85;
   InertCutoff = 0.002;
 
-  MaxPickDistTerm  =  8;
-  MaxPickDistSixel = 20;
+  MaxPickDist = 8;
 
   CmdOpen      = 10;
   CmdReload    = 11;
@@ -74,10 +71,9 @@ CONST
   CmdColSS     = 33;
 
   CmdTogHet    = 40;
+  CmdSaveSVG   = 45;
 
   CmdReset     = 50;
-  CmdTogSixel  = 55;
-
   CmdHelp      = 60;
 
   CmdNextModel = 70;
@@ -86,20 +82,10 @@ CONST
   CanvasW = 240;
   CanvasH = 100;
 
-  SixelW  = 640;
-  SixelH  = 480;
+  SvgW = 800;
+  SvgH = 600;
 
   MaxDraw = BioPDB.MaxAtoms;
-
-  (* Sixel palette indices *)
-  SixPalChain0 =  1;   (* +0..6  chain colours  *)
-  SixPalElem0  =  8;   (* +0..6  CPK elements   *)
-  SixPalBfac0  = 15;   (* +0..4  B-factor stops *)
-  SixPalHelix  = 20;
-  SixPalSheet  = 21;
-  SixPalCoil   = 22;
-  SixPalGrey   = 23;
-  SixPalCyan   = 24;
 
 (* ════════════════════════════════════════════════════════════════
    Types
@@ -135,7 +121,6 @@ TYPE
     renderMode   : INTEGER;
     colourScheme : INTEGER;
     showHet      : BOOLEAN;
-    useSixel     : BOOLEAN;
     inertDX      : REAL;
     inertDY      : REAL;
     inertDZ      : REAL;
@@ -159,14 +144,18 @@ TYPE
    Module globals
    ════════════════════════════════════════════════════════════════ *)
 
+CONST
+  HelpN = 38;
+
 VAR
   vw         : ViewerWin;
   mbar       : Widgets.MenuBar;
   sline      : Widgets.StatusLine;
   running    : BOOLEAN;
   statusMsg  : ARRAY 256 OF CHAR;
-  sixelReady : BOOLEAN;
   projCache  : ARRAY MaxDraw OF ProjCacheEntry;
+  helpScroll : INTEGER;
+  helpWin    : TUI.Window;
 
 (* ════════════════════════════════════════════════════════════════
    Matrix helpers
@@ -243,12 +232,8 @@ PROCEDURE CenterOnAtom(v: ViewerWin; i: INTEGER);
 VAR px, py, centX, centY: INTEGER; pz: REAL;
 BEGIN
   IF ~Project(v, i, px, py, pz) THEN RETURN END;
-  IF v.useSixel THEN
-    centX := SixelW DIV 2; centY := SixelH DIV 2
-  ELSE
-    centX := v.x + (v.w - 2) DIV 2;
-    centY := (v.y + (v.h - 2) DIV 2) * 2
-  END;
+  centX := v.x + (v.w - 2) DIV 2;
+  centY := (v.y + (v.h - 2) DIV 2) * 2;
   v.panX := v.panX + FLT(centX - px);
   v.panY := v.panY + FLT(centY - py)
 END CenterOnAtom;
@@ -276,41 +261,7 @@ BEGIN
 END ComputeCounts;
 
 (* ════════════════════════════════════════════════════════════════
-   Sixel palette
-   ════════════════════════════════════════════════════════════════ *)
-
-PROCEDURE InitSixelPalette;
-BEGIN
-  Sixel.SetPalette(0,   0,  0,  0);
-  Sixel.SetPalette(SixPalChain0+0, 220, 40, 40);
-  Sixel.SetPalette(SixPalChain0+1,  40,200, 40);
-  Sixel.SetPalette(SixPalChain0+2,  40, 40,220);
-  Sixel.SetPalette(SixPalChain0+3, 220,220, 40);
-  Sixel.SetPalette(SixPalChain0+4, 200, 40,200);
-  Sixel.SetPalette(SixPalChain0+5,  40,200,220);
-  Sixel.SetPalette(SixPalChain0+6, 240,240,240);
-  Sixel.SetPalette(SixPalElem0+0, 220,220,220);
-  Sixel.SetPalette(SixPalElem0+1,  40, 40,255);
-  Sixel.SetPalette(SixPalElem0+2, 255, 40, 40);
-  Sixel.SetPalette(SixPalElem0+3, 255,220, 40);
-  Sixel.SetPalette(SixPalElem0+4, 180,180,180);
-  Sixel.SetPalette(SixPalElem0+5, 255,140, 40);
-  Sixel.SetPalette(SixPalElem0+6,  40,200, 40);
-  Sixel.SetPalette(SixPalBfac0+0,  40, 40,255);
-  Sixel.SetPalette(SixPalBfac0+1,  40,220,220);
-  Sixel.SetPalette(SixPalBfac0+2, 240,240,240);
-  Sixel.SetPalette(SixPalBfac0+3, 240,240, 40);
-  Sixel.SetPalette(SixPalBfac0+4, 255, 40, 40);
-  Sixel.SetPalette(SixPalHelix, 220, 40, 40);
-  Sixel.SetPalette(SixPalSheet, 220,200, 40);
-  Sixel.SetPalette(SixPalCoil,  200,200,200);
-  Sixel.SetPalette(SixPalGrey,  100,100,100);
-  Sixel.SetPalette(SixPalCyan,   40,220,220);
-  sixelReady := TRUE
-END InitSixelPalette;
-
-(* ════════════════════════════════════════════════════════════════
-   Colour helpers
+   Terminal colour helpers
    ════════════════════════════════════════════════════════════════ *)
 
 PROCEDURE ChainColorTerm(ch: CHAR): INTEGER;
@@ -324,9 +275,6 @@ BEGIN
   END; RETURN 255
 END ChainColorTerm;
 
-PROCEDURE ChainColorSix(ch: CHAR): INTEGER;
-BEGIN RETURN SixPalChain0 + ORD(ch) MOD 7 END ChainColorSix;
-
 PROCEDURE ElementColorTerm(VAR elem: ARRAY OF CHAR): INTEGER;
 BEGIN
   IF (elem[0]='C') & (elem[1]=0X) THEN RETURN 255
@@ -338,18 +286,6 @@ BEGIN
   ELSE                   RETURN  46
   END
 END ElementColorTerm;
-
-PROCEDURE ElementColorSix(VAR elem: ARRAY OF CHAR): INTEGER;
-BEGIN
-  IF (elem[0]='C') & (elem[1]=0X) THEN RETURN SixPalElem0+0
-  ELSIF elem[0]='N' THEN RETURN SixPalElem0+1
-  ELSIF elem[0]='O' THEN RETURN SixPalElem0+2
-  ELSIF elem[0]='S' THEN RETURN SixPalElem0+3
-  ELSIF elem[0]='H' THEN RETURN SixPalElem0+4
-  ELSIF elem[0]='P' THEN RETURN SixPalElem0+5
-  ELSE                   RETURN SixPalElem0+6
-  END
-END ElementColorSix;
 
 PROCEDURE BfacStop(b: REAL): INTEGER;
 VAR t: INTEGER;
@@ -369,9 +305,6 @@ BEGIN
   END
 END BfactorColorTerm;
 
-PROCEDURE BfactorColorSix(b: REAL): INTEGER;
-BEGIN RETURN SixPalBfac0 + BfacStop(b) END BfactorColorSix;
-
 PROCEDURE SSColorTerm(ss: INTEGER): INTEGER;
 BEGIN
   CASE ss OF
@@ -380,15 +313,6 @@ BEGIN
   ELSE               RETURN 255
   END
 END SSColorTerm;
-
-PROCEDURE SSColorSix(ss: INTEGER): INTEGER;
-BEGIN
-  CASE ss OF
-    BioPDB.SSHelix : RETURN SixPalHelix
-  | BioPDB.SSSheet : RETURN SixPalSheet
-  ELSE               RETURN SixPalCoil
-  END
-END SSColorSix;
 
 PROCEDURE DepthFactor(z, zMin, zMax: REAL): REAL;
 VAR t: REAL;
@@ -443,19 +367,86 @@ BEGIN
   END; RETURN 255
 END AtomColorTerm;
 
-PROCEDURE AtomColorSix(v: ViewerWin; i: INTEGER): INTEGER;
+(* ════════════════════════════════════════════════════════════════
+   SVG colour helpers — RGB values matching the terminal palette
+   ════════════════════════════════════════════════════════════════ *)
+
+PROCEDURE ChainColorRGB(ch: CHAR; VAR r, g, b: INTEGER);
+VAR i: INTEGER;
+BEGIN
+  i := ORD(ch) MOD 7;
+  CASE i OF
+    0: r:=220; g:= 40; b:= 40
+  | 1: r:= 40; g:=200; b:= 40
+  | 2: r:= 40; g:= 40; b:=220
+  | 3: r:=220; g:=220; b:= 40
+  | 4: r:=200; g:= 40; b:=200
+  | 5: r:= 40; g:=200; b:=220
+  | 6: r:=240; g:=240; b:=240
+  END
+END ChainColorRGB;
+
+PROCEDURE ElementColorRGB(VAR elem: ARRAY OF CHAR; VAR r, g, b: INTEGER);
+BEGIN
+  IF (elem[0]='C') & (elem[1]=0X) THEN r:=220; g:=220; b:=220
+  ELSIF elem[0]='N' THEN r:= 40; g:= 40; b:=255
+  ELSIF elem[0]='O' THEN r:=255; g:= 40; b:= 40
+  ELSIF elem[0]='S' THEN r:=255; g:=220; b:= 40
+  ELSIF elem[0]='H' THEN r:=180; g:=180; b:=180
+  ELSIF elem[0]='P' THEN r:=255; g:=140; b:= 40
+  ELSE                   r:= 40; g:=200; b:= 40
+  END
+END ElementColorRGB;
+
+PROCEDURE BfactorColorRGB(b: REAL; VAR r, g, bl: INTEGER);
+BEGIN
+  CASE BfacStop(b) OF
+    0: r:= 40; g:= 40; bl:=255
+  | 1: r:= 40; g:=220; bl:=220
+  | 2: r:=240; g:=240; bl:=240
+  | 3: r:=240; g:=240; bl:= 40
+  ELSE r:=255; g:= 40; bl:= 40
+  END
+END BfactorColorRGB;
+
+PROCEDURE SSColorRGB(ss: INTEGER; VAR r, g, b: INTEGER);
+BEGIN
+  CASE ss OF
+    BioPDB.SSHelix : r:=220; g:= 40; b:= 40
+  | BioPDB.SSSheet : r:=220; g:=200; b:= 40
+  ELSE               r:=200; g:=200; b:=200
+  END
+END SSColorRGB;
+
+PROCEDURE AtomColorRGB(v: ViewerWin; i: INTEGER; VAR r, g, b: INTEGER);
 VAR ss: INTEGER;
 BEGIN
   CASE v.colourScheme OF
-    ColourChain   : RETURN ChainColorSix(v.model.atoms[i].chainID)
-  | ColourElement : RETURN ElementColorSix(v.model.atoms[i].element)
-  | ColourBfactor : RETURN BfactorColorSix(v.model.atoms[i].tempFactor)
+    ColourChain   : ChainColorRGB(v.model.atoms[i].chainID, r, g, b)
+  | ColourElement : ElementColorRGB(v.model.atoms[i].element, r, g, b)
+  | ColourBfactor : BfactorColorRGB(v.model.atoms[i].tempFactor, r, g, b)
   | ColourSecStr  :
       ss := BioPDB.LookupSS(v.model, v.model.atoms[i].chainID,
                              v.model.atoms[i].resSeq);
-      RETURN SSColorSix(ss)
-  END; RETURN SixPalChain0+6
-END AtomColorSix;
+      SSColorRGB(ss, r, g, b)
+  END
+END AtomColorRGB;
+
+PROCEDURE HexDigit(n: INTEGER): CHAR;
+BEGIN
+  IF n < 10 THEN RETURN CHR(ORD('0') + n)
+  ELSE RETURN CHR(ORD('a') + n - 10)
+  END
+END HexDigit;
+
+PROCEDURE RGBToHex(r, g, b: INTEGER; VAR hex: ARRAY OF CHAR);
+BEGIN
+  hex[0] := '#';
+  hex[1] := HexDigit(r DIV 16); hex[2] := HexDigit(r MOD 16);
+  hex[3] := HexDigit(g DIV 16); hex[4] := HexDigit(g MOD 16);
+  hex[5] := HexDigit(b DIV 16); hex[6] := HexDigit(b MOD 16);
+  hex[7] := 0X
+END RGBToHex;
 
 (* ════════════════════════════════════════════════════════════════
    View reset
@@ -464,20 +455,12 @@ END AtomColorSix;
 PROCEDURE RecenterView(v: ViewerWin);
 VAR canW, canH: REAL;
 BEGIN
-  IF v.useSixel THEN
-    canW := FLT(SixelW); canH := FLT(SixelH)
-  ELSE
-    canW := FLT(v.w - 2);
-    canH := FLT((v.h - 2) * 2);
-    IF canW > FLT(CanvasW) THEN canW := FLT(CanvasW) END;
-    IF canH > FLT(CanvasH) THEN canH := FLT(CanvasH) END
-  END;
-  v.panX := canW / 2.0;
-  v.panY := canH / 2.0;
-  IF ~v.useSixel THEN
-    v.panX := v.panX + FLT(v.x + 1);
-    v.panY := v.panY + FLT((v.y + 1) * 2)
-  END
+  canW := FLT(v.w - 2);
+  canH := FLT((v.h - 2) * 2);
+  IF canW > FLT(CanvasW) THEN canW := FLT(CanvasW) END;
+  IF canH > FLT(CanvasH) THEN canH := FLT(CanvasH) END;
+  v.panX := canW / 2.0 + FLT(v.x + 1);
+  v.panY := canH / 2.0 + FLT((v.y + 1) * 2)
 END RecenterView;
 
 PROCEDURE ResetView(v: ViewerWin);
@@ -486,14 +469,10 @@ BEGIN
   MatIdentity(v.rot);
   RecenterView(v);
   IF v.loaded THEN
-    IF v.useSixel THEN
-      canW := FLT(SixelW); canH := FLT(SixelH)
-    ELSE
-      canW := FLT(v.w - 2);
-      canH := FLT((v.h - 2) * 2);
-      IF canW > FLT(CanvasW) THEN canW := FLT(CanvasW) END;
-      IF canH > FLT(CanvasH) THEN canH := FLT(CanvasH) END
-    END;
+    canW := FLT(v.w - 2);
+    canH := FLT((v.h - 2) * 2);
+    IF canW > FLT(CanvasW) THEN canW := FLT(CanvasW) END;
+    IF canH > FLT(CanvasH) THEN canH := FLT(CanvasH) END;
     spanX := v.model.maxX - v.model.minX;
     spanY := v.model.maxY - v.model.minY;
     spanZ := v.model.maxZ - v.model.minZ;
@@ -578,67 +557,11 @@ BEGIN
   px := FLOOR(rx * v.scale + v.panX);
   py := FLOOR(-ry * v.scale + v.panY);
   pz := rz;
-  IF v.useSixel THEN
-    RETURN (px >= 0) & (px < SixelW) & (py >= 0) & (py < SixelH)
-  ELSE
-    RETURN (px >= 0) & (px < CanvasW) & (py >= 0) & (py < CanvasH)
-  END
+  RETURN (px >= 0) & (px < CanvasW) & (py >= 0) & (py < CanvasH)
 END Project;
 
 (* ════════════════════════════════════════════════════════════════
-   Back-end drawing primitives
-   ════════════════════════════════════════════════════════════════ *)
-
-PROCEDURE BELine(v: ViewerWin; x0, y0, x1, y1, col: INTEGER);
-BEGIN
-  IF v.useSixel THEN Sixel.Line(x0, y0, x1, y1, col)
-  ELSE               Terminal.Line(x0, y0, x1, y1, col)
-  END
-END BELine;
-
-PROCEDURE BEPlot(v: ViewerWin; x, y, col: INTEGER);
-BEGIN
-  IF v.useSixel THEN Sixel.Plot(x, y, col)
-  ELSE               Terminal.Plot(x, y, col)
-  END
-END BEPlot;
-
-PROCEDURE BECircle(v: ViewerWin; x, y, r, col: INTEGER; filled: BOOLEAN);
-VAR dy, dx, x0, x1, cx, cy, d: INTEGER;
-BEGIN
-  IF v.useSixel THEN
-    IF filled THEN
-      FOR dy := -r TO r DO
-        dx := FLOOR(Math.sqrt(FLT(r*r - dy*dy)));
-        x0 := x-dx; x1 := x+dx;
-        IF x0 < 0       THEN x0 := 0       END;
-        IF x1 >= SixelW THEN x1 := SixelW-1 END;
-        IF (y+dy >= 0) & (y+dy < SixelH) THEN
-          Sixel.Line(x0, y+dy, x1, y+dy, col)
-        END
-      END
-    ELSE
-      cx := 0; cy := r; d := 3-2*r;
-      WHILE cx <= cy DO
-        Sixel.Plot(x+cx,y+cy,col); Sixel.Plot(x-cx,y+cy,col);
-        Sixel.Plot(x+cx,y-cy,col); Sixel.Plot(x-cx,y-cy,col);
-        Sixel.Plot(x+cy,y+cx,col); Sixel.Plot(x-cy,y+cx,col);
-        Sixel.Plot(x+cy,y-cx,col); Sixel.Plot(x-cy,y-cx,col);
-        IF d < 0 THEN d := d+4*cx+6
-        ELSE d := d+4*(cx-cy)+10; DEC(cy)
-        END;
-        INC(cx)
-      END
-    END
-  ELSE
-    IF filled THEN Terminal.FillCircle(x, y, r, col)
-    ELSE           Terminal.Circle(x, y, r, col)
-    END
-  END
-END BECircle;
-
-(* ════════════════════════════════════════════════════════════════
-   Rendering (Parallelized)
+   Rendering
    ════════════════════════════════════════════════════════════════ *)
 
 PROCEDURE ProjectAtomWorker(i: INTEGER);
@@ -667,29 +590,19 @@ VAR i, j, px, py, col, r: INTEGER;
     prevPX, prevPY: INTEGER;
     prevOK, isBackbone: BOOLEAN;
     cx0, cy0, cx1, cy1: INTEGER;
-    greyCol, cyanCol, yellowCol: INTEGER;
     nThreads: INTEGER;
     zMin, zMax: REAL;
 BEGIN
-  IF v.useSixel THEN
-    IF ~sixelReady THEN InitSixelPalette END;
-    Sixel.Init(SixelW, SixelH);
-    cx0 := 0; cy0 := 0; cx1 := SixelW-1; cy1 := SixelH-1;
-    greyCol := SixPalGrey; cyanCol := SixPalCyan; yellowCol := SixPalSheet
-  ELSE
-    cx0 := v.x + 1;  cx1 := v.x + v.w - 2;
-    cy0 := (v.y + 1) * 2;  cy1 := (v.y + v.h - 2) * 2 + 1;
-    IF cx0 < 0        THEN cx0 := 0        END;
-    IF cy0 < 0        THEN cy0 := 0        END;
-    IF cx1 >= CanvasW THEN cx1 := CanvasW-1 END;
-    IF cy1 >= CanvasH THEN cy1 := CanvasH-1 END;
-    Terminal.ClearBuf();
-    greyCol := 240; cyanCol := 51; yellowCol := 226
-  END;
+  cx0 := v.x + 1;  cx1 := v.x + v.w - 2;
+  cy0 := (v.y + 1) * 2;  cy1 := (v.y + v.h - 2) * 2 + 1;
+  IF cx0 < 0        THEN cx0 := 0        END;
+  IF cy0 < 0        THEN cy0 := 0        END;
+  IF cx1 >= CanvasW THEN cx1 := CanvasW-1 END;
+  IF cy1 >= CanvasH THEN cy1 := CanvasH-1 END;
+  Terminal.ClearBuf();
 
   IF ~v.loaded OR (v.model.count = 0) THEN
-    IF v.useSixel THEN Terminal.Goto(1,1); Sixel.Flush()
-    ELSE Terminal.Flush() END;
+    Terminal.Flush();
     RETURN
   END;
 
@@ -697,10 +610,8 @@ BEGIN
   nThreads := Parallel.NumCPU();
   IF nThreads < 1 THEN nThreads := 1 END;
 
-  (* Parallel projection for Ball+Stick and SpaceFill *)
   IF v.renderMode # ModeBackbone THEN
     Parallel.For(0, v.model.count, ProjectAtomWorker, nThreads);
-
     FOR i := 0 TO v.model.count-1 DO
       IF projCache[i].onScreen THEN
         px := projCache[i].projX;
@@ -717,9 +628,7 @@ BEGIN
     END;
   END;
 
-  (* Sequential drawing for Backbone (protein CA + nucleic acid P) *)
   IF v.renderMode = ModeBackbone THEN
-    (* Pass 1: project backbone atoms into projCache + drawBuf for picking *)
     FOR i := 0 TO v.model.count-1 DO
       a := v.model.atoms[i];
       isBackbone := ((Strings.Pos("CA", a.name) >= 0) OR
@@ -747,27 +656,22 @@ BEGIN
       IF v.drawBuf[j].z > zMax THEN zMax := v.drawBuf[j].z END
     END;
     IF zMin >= zMax THEN zMin := zMax - 1.0 END;
-    (* Pass 2: draw in atom order using cached projections *)
     prevOK := FALSE; prevChain := 0X; prevPX := 0; prevPY := 0;
     FOR i := 0 TO v.model.count-1 DO
       a := v.model.atoms[i];
       isBackbone := ((Strings.Pos("CA", a.name) >= 0) OR
                      ((a.name[0] = 'P') & (a.name[1] = 0X))) & ~a.isHet;
       IF isBackbone THEN
-        IF v.useSixel THEN col := AtomColorSix(v, i)
-        ELSE               col := AtomColorTerm(v, i)
-        END;
+        col := DimTermColor(AtomColorTerm(v, i),
+               DepthFactor(projCache[i].z, zMin, zMax));
         IF projCache[i].onScreen THEN
           px := projCache[i].projX; py := projCache[i].projY; pz := projCache[i].z;
-          IF ~v.useSixel THEN
-            col := DimTermColor(col, DepthFactor(pz, zMin, zMax));
-            py := py DIV 2 * 2
-          END;
+          py := py DIV 2 * 2;
           IF (px >= cx0) & (px <= cx1) & (py >= cy0) & (py <= cy1) THEN
             IF prevOK & (a.chainID = prevChain) THEN
-              BELine(v, prevPX, prevPY, px, py, col)
+              Terminal.Line(prevPX, prevPY, px, py, col)
             END;
-            BEPlot(v, px, py, col);
+            Terminal.Plot(px, py, col);
             prevPX := px; prevPY := py; prevChain := a.chainID; prevOK := TRUE
           ELSE prevOK := FALSE
           END
@@ -796,28 +700,22 @@ BEGIN
           IF isBackbone & Project(v, i, px, py, pz) &
              (px >= cx0) & (px <= cx1) & (py >= cy0) & (py <= cy1) THEN
             IF prevOK & (a.chainID = prevChain) THEN
-              BELine(v, prevPX, prevPY, px, py, greyCol)
+              Terminal.Line(prevPX, prevPY, px, py, 240)
             END;
             prevPX := px; prevPY := py; prevChain := a.chainID; prevOK := TRUE
           ELSIF isBackbone THEN prevOK := FALSE
           END
         END
       END;
-
       FOR j := 0 TO v.drawN-1 DO
         i   := v.drawBuf[j].idx;
         px  := v.drawBuf[j].projX;
         py  := v.drawBuf[j].projY;
-        IF v.useSixel THEN col := AtomColorSix(v, i)
-        ELSE               col := AtomColorTerm(v, i)
-        END;
-        IF ~v.useSixel THEN
-          col := DimTermColor(col, DepthFactor(v.drawBuf[j].z, zMin, zMax))
-        END;
+        col := DimTermColor(AtomColorTerm(v, i),
+               DepthFactor(v.drawBuf[j].z, zMin, zMax));
         a := v.model.atoms[i];
         IF a.element[0] = 'H' THEN r := 1 ELSE r := 2 END;
-        IF v.useSixel THEN r := r * 4 END;
-        BECircle(v, px, py, r, col, TRUE)
+        Terminal.FillCircle(px, py, r, col)
       END
 
     ELSE (* ModeSpaceFill *)
@@ -825,12 +723,8 @@ BEGIN
         i   := v.drawBuf[j].idx;
         px  := v.drawBuf[j].projX;
         py  := v.drawBuf[j].projY;
-        IF v.useSixel THEN col := AtomColorSix(v, i)
-        ELSE               col := AtomColorTerm(v, i)
-        END;
-        IF ~v.useSixel THEN
-          col := DimTermColor(col, DepthFactor(v.drawBuf[j].z, zMin, zMax))
-        END;
+        col := DimTermColor(AtomColorTerm(v, i),
+               DepthFactor(v.drawBuf[j].z, zMin, zMax));
         a := v.model.atoms[i];
         IF    a.element[0]='H' THEN r := FLOOR(1.2  * v.scale)
         ELSIF a.element[0]='C' THEN r := FLOOR(1.7  * v.scale)
@@ -841,7 +735,7 @@ BEGIN
         END;
         IF r < 2  THEN r := 2  END;
         IF r > 60 THEN r := 60 END;
-        BECircle(v, px, py, r, col, TRUE)
+        Terminal.FillCircle(px, py, r, col)
       END
     END
   END;
@@ -849,21 +743,17 @@ BEGIN
   IF v.pickedAtom >= 0 THEN
     IF Project(v, v.pickedAtom, px, py, pz) &
        (px >= cx0) & (px <= cx1) & (py >= cy0) & (py <= cy1) THEN
-      r := 5; IF v.useSixel THEN r := 12 END;
-      BECircle(v, px, py, r, cyanCol, FALSE)
+      Terminal.Circle(px, py, 5, 51)
     END
   END;
   IF v.pickedAtom2 >= 0 THEN
     IF Project(v, v.pickedAtom2, px, py, pz) &
        (px >= cx0) & (px <= cx1) & (py >= cy0) & (py <= cy1) THEN
-      r := 5; IF v.useSixel THEN r := 12 END;
-      BECircle(v, px, py, r, yellowCol, FALSE)
+      Terminal.Circle(px, py, 5, 226)
     END
   END;
 
-  IF v.useSixel THEN Terminal.Goto(1,1); Sixel.Flush()
-  ELSE Terminal.Flush()
-  END
+  Terminal.Flush()
 END RenderScene;
 
 (* ════════════════════════════════════════════════════════════════
@@ -876,8 +766,6 @@ VAR bfg, bbg: INTEGER;
     tlen, tx: INTEGER;
 BEGIN
   WITH v: ViewerWinRec DO
-    IF v.useSixel THEN RETURN END;
-
     IF v.focused THEN bfg := TUI.White; bbg := TUI.Blue
     ELSE              bfg := TUI.White; bbg := TUI.Black
     END;
@@ -911,8 +799,7 @@ BEGIN
     END;
     TUI.PutStr(v.x+11, v.y+v.h-1, titleBuf, TUI.Green, bbg);
 
-    IF v.showHet  THEN TUI.PutStr(v.x+20, v.y+v.h-1, " HET   ", TUI.Yellow,  bbg) END;
-    IF v.useSixel THEN TUI.PutStr(v.x+28, v.y+v.h-1, " SIXEL ", TUI.Magenta, bbg) END;
+    IF v.showHet THEN TUI.PutStr(v.x+20, v.y+v.h-1, " HET ", TUI.Yellow, bbg) END;
 
     IF v.loaded THEN
       Strings.IntToStr(v.model.count, titleBuf);
@@ -928,7 +815,7 @@ END DrawViewer;
    ════════════════════════════════════════════════════════════════ *)
 
 PROCEDURE HandleViewer(v: TUI.View; ev: TUI.Event): BOOLEAN;
-VAR ch: CHAR; dx, dy, mpx, mpy, newPick: INTEGER;
+VAR ch: CHAR; dx, dy, newPick: INTEGER;
 BEGIN
   WITH v: ViewerWinRec DO
     IF ev.kind = TUI.EvKey THEN
@@ -957,11 +844,7 @@ BEGIN
         ELSIF (ch='B') OR (ch='b') THEN
           IF v.colourScheme = ColourBfactor THEN v.colourScheme := ColourChain
           ELSE v.colourScheme := ColourBfactor END
-        ELSIF (ch='X') OR (ch='x') THEN
-          v.useSixel := ~v.useSixel;
-          ResetView(v); v.pickedAtom := -1; v.pickedAtom2 := -1;
-          IF v.useSixel & ~sixelReady THEN InitSixelPalette END;
-          TUI.InvalidateFront()
+        ELSIF (ch='V') OR (ch='v') THEN OnMenuCmd(CmdSaveSVG)
         ELSIF ch = TUI.KEsc  THEN v.pickedAtom := -1; v.pickedAtom2 := -1
         ELSIF ch = TUI.KPgUp THEN
           IF v.modelNo > 1 THEN v.modelNo := v.modelNo-1 END
@@ -993,26 +876,15 @@ BEGIN
           END
         ELSIF v.dragActive THEN
           dx := ev.mx - v.dragLastX; dy := ev.my - v.dragLastY;
-          IF v.useSixel THEN
-            v.panX := v.panX + FLT(dx) * FLT(SixelW DIV TUI.Cols);
-            v.panY := v.panY + FLT(dy) * FLT(SixelH DIV TUI.Rows)
-          ELSE
-            v.panX := v.panX + FLT(dx);
-            v.panY := v.panY + FLT(dy) * 2.0
-          END;
+          v.panX := v.panX + FLT(dx);
+          v.panY := v.panY + FLT(dy) * 2.0;
           v.dragLastX := ev.mx; v.dragLastY := ev.my; v.sceneDirty := TRUE
         END
       ELSIF ev.mb = 3 THEN
         IF v.rotDragActive THEN
           IF ~v.lmbMoved THEN
             v.inertOn := FALSE;
-            IF v.useSixel THEN
-              mpx := (ev.mx-1) * (SixelW DIV TUI.Cols);
-              mpy := (ev.my-1) * (SixelH DIV TUI.Rows);
-              newPick := PickAtom(v, mpx, mpy, MaxPickDistSixel)
-            ELSE
-              newPick := PickAtom(v, ev.mx-1, (ev.my-1)*2+1, MaxPickDistTerm)
-            END;
+            newPick := PickAtom(v, ev.mx-1, (ev.my-1)*2+1, MaxPickDist);
             IF v.pickedAtom < 0 THEN
               v.pickedAtom := newPick; v.pickedAtom2 := -1
             ELSIF v.pickedAtom2 < 0 THEN
@@ -1096,8 +968,7 @@ BEGIN
     Strings.IntToStr(vw.model.ssCount, tmp); Strings.Append(tmp, buf);
     Strings.Append("  Mdl:", buf);
     Strings.IntToStr(vw.modelNo, tmp); Strings.Append(tmp, buf);
-    IF vw.useSixel THEN Strings.Append("  [SIXEL]", buf) END;
-    Strings.Append("  LMBdrag:rot  WASD:pan  +/-:zoom  F:center  R:reset  M:mode  C:col  H:het  LMBclick:pick", buf)
+    Strings.Append("  LMBdrag:rot  WASD:pan  +/-:zoom  F:center  R:reset  M:mode  C:col  H:het  V:svg", buf)
   ELSE
     Strings.Copy("  No file loaded. Ctrl+O to open.", buf)
   END;
@@ -1131,6 +1002,377 @@ BEGIN
 END LoadPDB;
 
 (* ════════════════════════════════════════════════════════════════
+   SVG export
+   ════════════════════════════════════════════════════════════════ *)
+
+PROCEDURE WStr(VAR rd: Files.Rider; s: ARRAY OF CHAR);
+VAR i: INTEGER;
+BEGIN
+  i := 0; WHILE s[i] # 0X DO Files.Write(rd, ORD(s[i])); INC(i) END
+END WStr;
+
+PROCEDURE WInt(VAR rd: Files.Rider; n: INTEGER);
+VAR buf: ARRAY 16 OF CHAR;
+BEGIN Strings.IntToStr(n, buf); WStr(rd, buf) END WInt;
+
+PROCEDURE WReal1(VAR rd: Files.Rider; x: REAL);
+VAR buf: ARRAY 24 OF CHAR;
+BEGIN Strings.RealToStr(x, buf); WStr(rd, buf) END WReal1;
+
+PROCEDURE SaveSVG(v: ViewerWin);
+VAR f: Files.File; rd: Files.Rider;
+    svgPath: ARRAY 1024 OF CHAR;
+    i, j, px, py, r2: INTEGER;
+    pz, ax, ay, az, rx, ry, rz: REAL;
+    a: BioPDB.Atom;
+    prevChain: CHAR;
+    prevPX, prevPY: INTEGER;
+    prevOK, isBackbone, firstSeg: BOOLEAN;
+    cr, cg, cb: INTEGER;
+    hex: ARRAY 8 OF CHAR;
+    sc, panX, panY: REAL;
+    spanX, spanY, spanZ, span: REAL;
+    zMin, zMax, opac: REAL;
+    drawBuf: ARRAY MaxDraw OF DrawEntry;
+    drawN: INTEGER;
+BEGIN
+  IF ~v.loaded THEN
+    Strings.Copy("No file loaded.", statusMsg); RETURN
+  END;
+
+  (* Build output path: strip extension, add .svg *)
+  Strings.Copy(v.filePath, svgPath);
+  i := Strings.Length(svgPath);
+  WHILE (i > 0) & (svgPath[i-1] # '.') & (svgPath[i-1] # '/') DO DEC(i) END;
+  IF (i > 0) & (svgPath[i-1] = '.') THEN DEC(i); svgPath[i] := 0X END;
+  Strings.Append(".svg", svgPath);
+
+  f := Files.New(svgPath);
+  IF f = NIL THEN Strings.Copy("Cannot create SVG.", statusMsg); RETURN END;
+  Files.Set(rd, f, 0);
+
+  (* Auto-fit scale for SVG canvas using current rotation *)
+  spanX := v.model.maxX - v.model.minX;
+  spanY := v.model.maxY - v.model.minY;
+  spanZ := v.model.maxZ - v.model.minZ;
+  span  := spanX;
+  IF spanY > span THEN span := spanY END;
+  IF spanZ > span THEN span := spanZ END;
+  IF span < 1.0 THEN span := 1.0 END;
+  IF SvgW < SvgH THEN sc := FLT(SvgW) * 0.8 / span
+  ELSE                sc := FLT(SvgH) * 0.8 / span
+  END;
+  panX := FLT(SvgW DIV 2);
+  panY := FLT(SvgH DIV 2);
+
+  WStr(rd, '<?xml version="1.0" encoding="UTF-8"?>');
+  Files.Write(rd, 10);
+  WStr(rd, '<svg xmlns="http://www.w3.org/2000/svg" width="');
+  WInt(rd, SvgW); WStr(rd, '" height="'); WInt(rd, SvgH);
+  WStr(rd, '" style="background:#111">'); Files.Write(rd, 10);
+
+  (* Project all atoms for this export *)
+  drawN := 0;
+  FOR i := 0 TO v.model.count-1 DO
+    a := v.model.atoms[i];
+    IF ~a.isHet OR v.showHet THEN
+      ax := a.x - v.model.cx; ay := a.y - v.model.cy; az := a.z - v.model.cz;
+      MatApply(v.rot, ax, ay, az, rx, ry, rz);
+      px := FLOOR(rx * sc + panX);
+      py := FLOOR(-ry * sc + panY);
+      IF (px >= 0) & (px < SvgW) & (py >= 0) & (py < SvgH) & (drawN < MaxDraw) THEN
+        drawBuf[drawN].z := rz; drawBuf[drawN].idx := i;
+        drawBuf[drawN].projX := px; drawBuf[drawN].projY := py;
+        INC(drawN)
+      END
+    END
+  END;
+
+  IF v.renderMode # ModeBackbone THEN
+    SortDraw(drawBuf, drawN);
+    IF drawN > 0 THEN
+      zMax := drawBuf[0].z; zMin := drawBuf[drawN-1].z
+    ELSE
+      zMax := 1.0; zMin := 0.0
+    END;
+    IF zMin >= zMax THEN zMin := zMax - 1.0 END
+  END;
+
+  IF v.renderMode = ModeBackbone THEN
+    (* Collect z range over backbone atoms only *)
+    zMin := 1.0E30; zMax := -1.0E30;
+    FOR j := 0 TO drawN-1 DO
+      i := drawBuf[j].idx; a := v.model.atoms[i];
+      isBackbone := ((Strings.Pos("CA", a.name) >= 0) OR
+                     ((a.name[0] = 'P') & (a.name[1] = 0X))) & ~a.isHet;
+      IF isBackbone THEN
+        IF drawBuf[j].z < zMin THEN zMin := drawBuf[j].z END;
+        IF drawBuf[j].z > zMax THEN zMax := drawBuf[j].z END
+      END
+    END;
+    IF zMin >= zMax THEN zMin := zMax - 1.0 END;
+
+    (* Emit backbone polylines per chain, in atom order *)
+    prevOK := FALSE; prevChain := 0X; prevPX := 0; prevPY := 0;
+    FOR i := 0 TO v.model.count-1 DO
+      a := v.model.atoms[i];
+      IF ~a.isHet OR v.showHet THEN
+        isBackbone := ((Strings.Pos("CA", a.name) >= 0) OR
+                       ((a.name[0] = 'P') & (a.name[1] = 0X))) & ~a.isHet;
+        IF isBackbone THEN
+          ax := a.x - v.model.cx; ay := a.y - v.model.cy; az := a.z - v.model.cz;
+          MatApply(v.rot, ax, ay, az, rx, ry, rz);
+          px := FLOOR(rx * sc + panX);
+          py := FLOOR(-ry * sc + panY);
+          IF (px >= 0) & (px < SvgW) & (py >= 0) & (py < SvgH) THEN
+            AtomColorRGB(v, i, cr, cg, cb);
+            opac := 0.35 + 0.65 * DepthFactor(rz, zMin, zMax);
+            RGBToHex(cr, cg, cb, hex);
+            IF prevOK & (a.chainID = prevChain) THEN
+              WStr(rd, '<line x1="'); WInt(rd, prevPX);
+              WStr(rd, '" y1="'); WInt(rd, prevPY);
+              WStr(rd, '" x2="'); WInt(rd, px);
+              WStr(rd, '" y2="'); WInt(rd, py);
+              WStr(rd, '" stroke="'); WStr(rd, hex);
+              WStr(rd, '" stroke-width="1.5" opacity="');
+              WReal1(rd, opac); WStr(rd, '"/>'); Files.Write(rd, 10)
+            END;
+            WStr(rd, '<circle cx="'); WInt(rd, px);
+            WStr(rd, '" cy="'); WInt(rd, py);
+            WStr(rd, '" r="2" fill="'); WStr(rd, hex);
+            WStr(rd, '" opacity="'); WReal1(rd, opac);
+            WStr(rd, '"/>'); Files.Write(rd, 10);
+            prevPX := px; prevPY := py; prevChain := a.chainID; prevOK := TRUE
+          ELSE prevOK := FALSE
+          END
+        END
+      END
+    END
+
+  ELSIF v.renderMode = ModeBallStick THEN
+    (* Backbone sticks first (grey), then atoms front-to-back *)
+    prevOK := FALSE; prevChain := 0X;
+    FOR i := 0 TO v.model.count-1 DO
+      a := v.model.atoms[i];
+      IF ~a.isHet THEN
+        isBackbone := (Strings.Pos("CA", a.name) >= 0) OR
+                      ((a.name[0] = 'P') & (a.name[1] = 0X));
+        IF isBackbone THEN
+          ax := a.x - v.model.cx; ay := a.y - v.model.cy; az := a.z - v.model.cz;
+          MatApply(v.rot, ax, ay, az, rx, ry, rz);
+          px := FLOOR(rx * sc + panX);
+          py := FLOOR(-ry * sc + panY);
+          IF (px >= 0) & (px < SvgW) & (py >= 0) & (py < SvgH) THEN
+            IF prevOK & (a.chainID = prevChain) THEN
+              WStr(rd, '<line x1="'); WInt(rd, prevPX);
+              WStr(rd, '" y1="'); WInt(rd, prevPY);
+              WStr(rd, '" x2="'); WInt(rd, px);
+              WStr(rd, '" y2="'); WInt(rd, py);
+              WStr(rd, '" stroke="#666" stroke-width="1"/>'); Files.Write(rd, 10)
+            END;
+            prevPX := px; prevPY := py; prevChain := a.chainID; prevOK := TRUE
+          ELSE prevOK := FALSE
+          END
+        END
+      END
+    END;
+    FOR j := drawN-1 TO 0 BY -1 DO
+      i := drawBuf[j].idx; px := drawBuf[j].projX; py := drawBuf[j].projY;
+      AtomColorRGB(v, i, cr, cg, cb);
+      RGBToHex(cr, cg, cb, hex);
+      opac := 0.4 + 0.6 * DepthFactor(drawBuf[j].z, zMin, zMax);
+      a := v.model.atoms[i];
+      IF a.element[0] = 'H' THEN r2 := 3 ELSE r2 := 5 END;
+      WStr(rd, '<circle cx="'); WInt(rd, px);
+      WStr(rd, '" cy="'); WInt(rd, py);
+      WStr(rd, '" r="'); WInt(rd, r2);
+      WStr(rd, '" fill="'); WStr(rd, hex);
+      WStr(rd, '" opacity="'); WReal1(rd, opac);
+      WStr(rd, '"/>'); Files.Write(rd, 10)
+    END
+
+  ELSE (* ModeSpaceFill — draw back-to-front *)
+    FOR j := drawN-1 TO 0 BY -1 DO
+      i := drawBuf[j].idx; px := drawBuf[j].projX; py := drawBuf[j].projY;
+      AtomColorRGB(v, i, cr, cg, cb);
+      RGBToHex(cr, cg, cb, hex);
+      opac := 0.5 + 0.5 * DepthFactor(drawBuf[j].z, zMin, zMax);
+      a := v.model.atoms[i];
+      IF    a.element[0]='H' THEN r2 := FLOOR(1.2  * sc)
+      ELSIF a.element[0]='C' THEN r2 := FLOOR(1.7  * sc)
+      ELSIF a.element[0]='N' THEN r2 := FLOOR(1.55 * sc)
+      ELSIF a.element[0]='O' THEN r2 := FLOOR(1.52 * sc)
+      ELSIF a.element[0]='S' THEN r2 := FLOOR(1.8  * sc)
+      ELSE                        r2 := FLOOR(1.7  * sc)
+      END;
+      IF r2 < 2 THEN r2 := 2 END;
+      WStr(rd, '<circle cx="'); WInt(rd, px);
+      WStr(rd, '" cy="'); WInt(rd, py);
+      WStr(rd, '" r="'); WInt(rd, r2);
+      WStr(rd, '" fill="'); WStr(rd, hex);
+      WStr(rd, '" opacity="'); WReal1(rd, opac);
+      WStr(rd, '"/>'); Files.Write(rd, 10)
+    END
+  END;
+
+  WStr(rd, "</svg>"); Files.Write(rd, 10);
+  Files.Register(f);
+  Files.Close(f);
+  Strings.Copy("SVG saved: ", statusMsg);
+  Strings.Append(svgPath, statusMsg)
+END SaveSVG;
+
+(* ════════════════════════════════════════════════════════════════
+   Built-in help popup
+   ════════════════════════════════════════════════════════════════ *)
+
+PROCEDURE HelpLine(i: INTEGER; VAR s: ARRAY OF CHAR);
+BEGIN
+  CASE i OF
+    0: Strings.Copy("pdbview  —  Terminal PDB Structure Viewer", s)
+  | 1: Strings.Copy("", s)
+  | 2: Strings.Copy("# Rotation", s)
+  | 3: Strings.Copy("  Arrow keys         Rotate around Y / X axis", s)
+  | 4: Strings.Copy("  Shift+Up/Down      Rotate around Z axis", s)
+  | 5: Strings.Copy("  LMB drag           Rotate (with inertia)", s)
+  | 6: Strings.Copy("", s)
+  | 7: Strings.Copy("# Zoom & Pan", s)
+  | 8: Strings.Copy("  + / -              Zoom in / out", s)
+  | 9: Strings.Copy("  Scroll wheel       Zoom in / out", s)
+  | 10: Strings.Copy("  W A S D            Pan view", s)
+  | 11: Strings.Copy("  RMB drag           Pan view", s)
+  | 12: Strings.Copy("", s)
+  | 13: Strings.Copy("# Render Mode  (M cycles)", s)
+  | 14: Strings.Copy("  Backbone           CA / P trace", s)
+  | 15: Strings.Copy("  Ball+Stick         Atoms + backbone sticks", s)
+  | 16: Strings.Copy("  Space Fill         Van der Waals spheres", s)
+  | 17: Strings.Copy("", s)
+  | 18: Strings.Copy("# Colour Scheme  (C cycles)", s)
+  | 19: Strings.Copy("  Chain              One colour per chain", s)
+  | 20: Strings.Copy("  CPK / Element      C=grey N=blue O=red S=yellow", s)
+  | 21: Strings.Copy("  B-factor           Blue (low) → Red (high)", s)
+  | 22: Strings.Copy("  Secondary          Helix=red  Sheet=yellow  Coil=white", s)
+  | 23: Strings.Copy("  B                  Toggle B-factor colouring", s)
+  | 24: Strings.Copy("", s)
+  | 25: Strings.Copy("# Picking", s)
+  | 26: Strings.Copy("  LMB click          Pick atom (shows residue / B / SS)", s)
+  | 27: Strings.Copy("  LMB click (2nd)    Measure distance to 2nd atom", s)
+  | 28: Strings.Copy("  F                  Centre view on picked atom", s)
+  | 29: Strings.Copy("  Esc                Clear picked atoms", s)
+  | 30: Strings.Copy("", s)
+  | 31: Strings.Copy("# Files & Models", s)
+  | 32: Strings.Copy("  Ctrl+O             Open PDB file", s)
+  | 33: Strings.Copy("  F5                 Reload current file", s)
+  | 34: Strings.Copy("  H                  Toggle HETATM visibility", s)
+  | 35: Strings.Copy("  V                  Save SVG snapshot", s)
+  | 36: Strings.Copy("  PgUp / PgDn        Previous / next model", s)
+  | 37: Strings.Copy("  R                  Reset view", s)
+  | 38: Strings.Copy("  Ctrl+Q / Q         Quit", s)
+  ELSE  s[0] := 0X
+  END
+END HelpLine;
+
+PROCEDURE DrawHelpWin(v: TUI.View);
+VAR row, contentH: INTEGER;
+    line: ARRAY 64 OF CHAR;
+    fg, li: INTEGER;
+BEGIN
+  WITH v: TUI.WindowRec DO
+    TUI.FillRect(v.x+1, v.y+1, v.w-2, v.h-2, ' ', TUI.White, TUI.Black);
+    TUI.DrawBox(v.x, v.y, v.w, v.h, TUI.White, TUI.Blue);
+    TUI.PutStr(v.x + (v.w - 8) DIV 2, v.y, " Help ", TUI.Yellow, TUI.Blue);
+    contentH := v.h - 3;
+    FOR row := 0 TO contentH - 1 DO
+      li := helpScroll + row;
+      IF li <= HelpN THEN
+        HelpLine(li, line);
+        IF line[0] = '#' THEN
+          fg := TUI.Cyan;
+          Strings.Extract(line, 2, Strings.Length(line) - 2, line)
+        ELSIF line[0] = 0X THEN
+          fg := TUI.White
+        ELSE
+          fg := TUI.White
+        END;
+        IF line[0] # 0X THEN
+          TUI.PutStr(v.x + 2, v.y + 1 + row, line, fg, TUI.Black)
+        END
+      END
+    END;
+    TUI.FillRect(v.x+1, v.y+v.h-2, v.w-2, 1, ' ', TUI.Black, TUI.White);
+    TUI.PutStr(v.x+2, v.y+v.h-2,
+      "Up/Dn/PgUp/PgDn: scroll   Esc: close", TUI.Black, TUI.White)
+  END
+END DrawHelpWin;
+
+PROCEDURE ShowHelp;
+VAR ev: TUI.Event; ch: CHAR;
+    savedDesktop: TUI.View; savedFocus: TUI.View;
+    dw, dh, dx, dy, contentH, maxScroll: INTEGER;
+BEGIN
+  savedDesktop := TUI.Desktop;
+  savedFocus   := TUI.Focused;
+  TUI.Desktop  := NIL;
+  TUI.Focused  := NIL;
+  helpScroll   := 0;
+
+  dw := 62; dh := 24;
+  IF TUI.Cols - 4 < dw THEN dw := TUI.Cols - 4 END;
+  IF TUI.Rows - 4 < dh THEN dh := TUI.Rows - 4 END;
+  IF dw < 40 THEN dw := 40 END;
+  IF dh < 10 THEN dh := 10 END;
+  dx := (TUI.Cols - dw) DIV 2 + 1;
+  dy := (TUI.Rows - dh) DIV 2 + 1;
+  contentH := dh - 3;
+
+  NEW(helpWin);
+  helpWin.x := dx; helpWin.y := dy; helpWin.w := dw; helpWin.h := dh;
+  helpWin.title[0] := 0X; helpWin.moveable := FALSE;
+  helpWin.draw := DrawHelpWin; helpWin.handle := NIL;
+  helpWin.next := NIL; helpWin.child := NIL;
+  helpWin.focused := FALSE; helpWin.alwaysOnTop := FALSE;
+  TUI.AddView(helpWin);
+
+  REPEAT
+    TUI.ClearBack(TUI.White, TUI.Black);
+    TUI.DrawAll();
+    TUI.Flush();
+    TUI.WaitEvent(ev);
+    IF ev.kind = TUI.EvKey THEN
+      ch := ev.key;
+      maxScroll := HelpN - contentH + 1;
+      IF maxScroll < 0 THEN maxScroll := 0 END;
+      IF ch = TUI.KEsc THEN
+        helpScroll := -1   (* sentinel to exit *)
+      ELSIF ch = TUI.KUp THEN
+        IF helpScroll > 0 THEN DEC(helpScroll) END
+      ELSIF ch = TUI.KDown THEN
+        IF helpScroll < maxScroll THEN INC(helpScroll) END
+      ELSIF ch = TUI.KPgUp THEN
+        DEC(helpScroll, contentH);
+        IF helpScroll < 0 THEN helpScroll := 0 END
+      ELSIF ch = TUI.KPgDn THEN
+        INC(helpScroll, contentH);
+        IF helpScroll > maxScroll THEN helpScroll := maxScroll END
+      END
+    ELSIF ev.kind = TUI.EvMouse THEN
+      maxScroll := HelpN - contentH + 1;
+      IF maxScroll < 0 THEN maxScroll := 0 END;
+      IF ev.mb = 64 THEN
+        IF helpScroll > 0 THEN DEC(helpScroll) END
+      ELSIF ev.mb = 65 THEN
+        IF helpScroll < maxScroll THEN INC(helpScroll) END
+      END
+    ELSIF ev.kind = TUI.EvResize THEN
+      TUI.InvalidateFront()
+    END
+  UNTIL helpScroll < 0;
+
+  TUI.Desktop := savedDesktop;
+  TUI.SetFocus(savedFocus)
+END ShowHelp;
+
+(* ════════════════════════════════════════════════════════════════
    Menu command handler
    ════════════════════════════════════════════════════════════════ *)
 
@@ -1152,11 +1394,7 @@ BEGIN
   ELSIF cmd = CmdColBfac  THEN vw.colourScheme := ColourBfactor; vw.sceneDirty := TRUE
   ELSIF cmd = CmdColSS    THEN vw.colourScheme := ColourSecStr;  vw.sceneDirty := TRUE
   ELSIF cmd = CmdTogHet   THEN vw.showHet := ~vw.showHet; vw.sceneDirty := TRUE
-  ELSIF cmd = CmdTogSixel THEN
-    vw.useSixel := ~vw.useSixel;
-    ResetView(vw); vw.pickedAtom := -1; vw.pickedAtom2 := -1;
-    IF vw.useSixel & ~sixelReady THEN InitSixelPalette END;
-    TUI.InvalidateFront(); vw.sceneDirty := TRUE
+  ELSIF cmd = CmdSaveSVG  THEN SaveSVG(vw)
   ELSIF cmd = CmdReset THEN
     ResetView(vw); vw.inertDX:=0.0; vw.inertDY:=0.0; vw.inertDZ:=0.0;
     vw.pickedAtom:=-1; vw.pickedAtom2:=-1; vw.sceneDirty:=TRUE
@@ -1164,7 +1402,7 @@ BEGIN
     IF vw.loaded THEN LoadPDB(vw.filePath, vw.modelNo+1) END
   ELSIF cmd = CmdPrevModel THEN
     IF vw.loaded & (vw.modelNo > 1) THEN LoadPDB(vw.filePath, vw.modelNo-1) END
-  ELSIF cmd = CmdHelp THEN Help.Show("BioPDB")
+  ELSIF cmd = CmdHelp THEN ShowHelp()
   END;
   TUI.SetFocus(vw)
 END OnMenuCmd;
@@ -1179,6 +1417,7 @@ BEGIN
   Widgets.MenuBarAddMenu(mbar, "File");
   Widgets.MenuBarAddItem(mbar, 0, "Open...    Ctrl+O", CmdOpen);
   Widgets.MenuBarAddItem(mbar, 0, "Reload     F5",     CmdReload);
+  Widgets.MenuBarAddItem(mbar, 0, "Save SVG   V",      CmdSaveSVG);
   Widgets.MenuBarAddSep (mbar, 0);
   Widgets.MenuBarAddItem(mbar, 0, "Quit       Ctrl+Q", CmdQuit);
   Widgets.MenuBarAddMenu(mbar, "View");
@@ -1192,7 +1431,6 @@ BEGIN
   Widgets.MenuBarAddItem(mbar, 1, "Colour: 2nd Str   (C)", CmdColSS);
   Widgets.MenuBarAddSep (mbar, 1);
   Widgets.MenuBarAddItem(mbar, 1, "Toggle HETATM     (H)", CmdTogHet);
-  Widgets.MenuBarAddItem(mbar, 1, "Toggle Sixel      (X)", CmdTogSixel);
   Widgets.MenuBarAddSep (mbar, 1);
   Widgets.MenuBarAddItem(mbar, 1, "Reset View        (R)", CmdReset);
   Widgets.MenuBarAddMenu(mbar, "Model");
@@ -1215,7 +1453,7 @@ VAR ev: TUI.Event; ch: CHAR; arg, argTmp: ARRAY 1024 OF CHAR; argI, argJ: INTEGE
 
 BEGIN
   TUI.Init();
-  running := TRUE; sixelReady := FALSE; statusMsg[0] := 0X;
+  running := TRUE; statusMsg[0] := 0X;
 
   NEW(vw);
   vw.x := 1; vw.y := 2; vw.w := TUI.Cols; vw.h := TUI.Rows-2;
@@ -1225,7 +1463,7 @@ BEGIN
   vw.focused := FALSE; vw.alwaysOnTop := FALSE;
   vw.loaded := FALSE; vw.filePath[0] := 0X; vw.modelNo := 1;
   vw.renderMode := ModeBackbone; vw.colourScheme := ColourChain;
-  vw.showHet := FALSE; vw.useSixel := FALSE;
+  vw.showHet := FALSE;
   vw.drawN := 0; vw.sceneDirty := TRUE;
   vw.inertDX := 0.0; vw.inertDY := 0.0; vw.inertDZ := 0.0; vw.inertOn := FALSE;
   vw.pickedAtom := -1; vw.pickedAtom2 := -1;
@@ -1270,19 +1508,15 @@ BEGIN
     END;
 
     UpdateStatus();
-    IF ~vw.useSixel THEN
-      TUI.ClearBack(TUI.White, TUI.Black);
-      TUI.DrawAll();
-      TUI.InvalidateFront();
-      TUI.Flush()
-    END;
+    TUI.ClearBack(TUI.White, TUI.Black);
+    TUI.DrawAll();
+    TUI.InvalidateFront();
+    TUI.Flush();
 
     IF vw.sceneDirty THEN
       RenderScene(vw); vw.sceneDirty := FALSE
     ELSE
-      IF vw.useSixel THEN RenderScene(vw)
-      ELSE Terminal.Flush()
-      END
+      Terminal.Flush()
     END;
 
     Terminal.HideCursor();
