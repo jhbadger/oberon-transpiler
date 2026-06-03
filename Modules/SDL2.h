@@ -114,16 +114,29 @@ enum { SDL2_FlipNone = SDL_FLIP_NONE       };
 enum { SDL2_FlipH    = SDL_FLIP_HORIZONTAL };
 enum { SDL2_FlipV    = SDL_FLIP_VERTICAL   };
 
+/* ── OpenGL window flag ──────────────────────────────────────────────────── */
+enum { SDL2_WinOpenGL = SDL_WINDOW_OPENGL };
+
+/* ── OpenGL context attribute constants (for SDL2_GL_SetAttribute) ───────── */
+enum { SDL2_GLA_DepthSize    = SDL_GL_DEPTH_SIZE             };
+enum { SDL2_GLA_Doublebuffer = SDL_GL_DOUBLEBUFFER           };
+enum { SDL2_GLA_MajorVersion = SDL_GL_CONTEXT_MAJOR_VERSION  };
+enum { SDL2_GLA_MinorVersion = SDL_GL_CONTEXT_MINOR_VERSION  };
+enum { SDL2_GLA_ProfileMask  = SDL_GL_CONTEXT_PROFILE_MASK   };
+enum { SDL2_GL_ProfileCore   = SDL_GL_CONTEXT_PROFILE_CORE   };
+
 /* ── Opaque handle types ─────────────────────────────────────────────────── */
 typedef struct SDL2_WindowRec_s   { int _tag; } SDL2_WindowRec;
 typedef struct SDL2_RendererRec_s { int _tag; } SDL2_RendererRec;
 typedef struct SDL2_TextureRec_s  { int _tag; } SDL2_TextureRec;
 typedef struct SDL2_SurfaceRec_s  { int _tag; } SDL2_SurfaceRec;
+typedef struct SDL2_GLCtxRec_s    { int _tag; } SDL2_GLCtxRec;
 
 typedef SDL2_WindowRec   *SDL2_Window;
 typedef SDL2_RendererRec *SDL2_Renderer;
 typedef SDL2_TextureRec  *SDL2_Texture;
 typedef SDL2_SurfaceRec  *SDL2_Surface;
+typedef SDL2_GLCtxRec    *SDL2_GLCtx;
 
 /* ── Event type: opaque pointer; access via SDL2_Event* functions ─────────── */
 typedef struct SDL2_EventRec_s {
@@ -138,6 +151,7 @@ typedef SDL2_EventRec *SDL2_Event;
 #define _TAG_SDL2_TextureRec  3
 #define _TAG_SDL2_SurfaceRec  4
 #define _TAG_SDL2_EventRec    5
+#define _TAG_SDL2_GLCtxRec    6
 
 /* ── System ──────────────────────────────────────────────────────────────── */
 int   SDL2_Init(int flags);
@@ -219,6 +233,12 @@ int  SDL2_MouseX(void);
 int  SDL2_MouseY(void);
 int  SDL2_MouseButtons(void);
 int  SDL2_IsKeyDown(int key);         /* 1 if key currently held             */
+
+/* ── OpenGL context ──────────────────────────────────────────────────────── */
+int        SDL2_GL_SetAttribute(int attr, int value);
+SDL2_GLCtx SDL2_GL_CreateContext(SDL2_Window win);
+void       SDL2_GL_DeleteContext(SDL2_GLCtx ctx);
+void       SDL2_GL_SwapWindow(SDL2_Window win);
 
 /* ── Module init (no-op — called by obc runtime) ─────────────────────────── */
 void SDL2_init(void);

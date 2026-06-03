@@ -333,5 +333,23 @@ int SDL2_IsKeyDown(int key) {
     return (sc < SDL_NUM_SCANCODES) ? (int)state[sc] : 0;
 }
 
+/* ── OpenGL context ──────────────────────────────────────────────────────── */
+
+int SDL2_GL_SetAttribute(int attr, int value) {
+    return SDL_GL_SetAttribute((SDL_GLattr)attr, value);
+}
+
+SDL2_GLCtx SDL2_GL_CreateContext(SDL2_Window win) {
+    return (SDL2_GLCtx)SDL_GL_CreateContext(W(win));
+}
+
+void SDL2_GL_DeleteContext(SDL2_GLCtx ctx) {
+    SDL_GL_DeleteContext((SDL_GLContext)ctx);
+}
+
+void SDL2_GL_SwapWindow(SDL2_Window win) {
+    SDL_GL_SwapWindow(W(win));
+}
+
 /* ── Module init ─────────────────────────────────────────────────────────── */
 void SDL2_init(void) { }

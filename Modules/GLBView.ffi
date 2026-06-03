@@ -1,0 +1,9 @@
+HEADER "GLBView.h"
+CSRC   GLBView.c
+CSRC   meshopt/meshopt_all.cpp
+PKGCONFIG sdl2
+PKGCONFIG libwebp
+LDFLAGS_MACOS -framework OpenGL
+LDFLAGS_LINUX -lGL
+LINK_MACOS c++
+LINK_LINUX stdc++

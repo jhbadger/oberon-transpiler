@@ -99,12 +99,21 @@ static void pkgconfig_query(const char *pkgname) {
         if (fgets(buf, sizeof(buf), pipe)) {
             char *tok = strtok(buf, " \t\r\n");
             while (tok) {
-                if (tok[0] == '-' && tok[1] == 'l' && tok[2] != '\0')
+                if (tok[0] == '-' && tok[1] == 'l' && tok[2] != '\0') {
                     add_ldflag(tok + 2);
-                else if (tok[0] == '-' && tok[1] == 'L' && tok[2] != '\0')
+                } else if (tok[0] == '-' && tok[1] == 'L' && tok[2] != '\0') {
                     add_extra_ldir(tok);
-                else if (tok[0] == '-' && tok[1] == 'f') /* e.g. -framework */
-                    add_extra_ldir(tok);          /* pass through verbatim */
+                } else if (strcmp(tok, "-framework") == 0) {
+                    /* -framework Name is a two-token flag; combine and store verbatim */
+                    char *name = strtok(NULL, " \t\r\n");
+                    if (name) {
+                        char fw[256];
+                        snprintf(fw, sizeof(fw), "-framework %s", name);
+                        add_extra_ldir(fw);
+                    }
+                } else if (tok[0] == '-' && tok[1] == 'f') {
+                    add_extra_ldir(tok);   /* other -f... flags verbatim */
+                }
                 tok = strtok(NULL, " \t\r\n");
             }
         }
@@ -417,6 +426,24 @@ static int parse_ffi_file(const char *ffifile, const char *modname)
             if (*p) add_ldflag(p);
 #endif
 
+        } else if (strncmp(p, "LDFLAGS_MACOS", 13) == 0 && (p[13] == ' ' || p[13] == '\t')) {
+            /* Verbatim linker flags for macOS (e.g. "-framework OpenGL") */
+            p += 14;
+            while (*p == ' ' || *p == '\t') p++;
+            trim_trailing(p);
+#ifdef __APPLE__
+            if (*p) add_extra_ldir(p);
+#endif
+
+        } else if (strncmp(p, "LDFLAGS_LINUX", 13) == 0 && (p[13] == ' ' || p[13] == '\t')) {
+            /* Verbatim linker flags for Linux (e.g. "-lGL") */
+            p += 14;
+            while (*p == ' ' || *p == '\t') p++;
+            trim_trailing(p);
+#ifdef __linux__
+            if (*p) add_extra_ldir(p);
+#endif
+
         } else if (strncmp(p, "LINK_MACOS", 10) == 0 && (p[10] == ' ' || p[10] == '\t')) {
             p += 11;
             while (*p == ' ' || *p == '\t') p++;
@@ -711,6 +738,39 @@ int main(int argc, char *argv[]) {
 
     /* ── Build gcc command: all generated .c files → binary ──────── */
     {
+        /* Pre-compile any .cpp CSRC files to temp .o objects using g++.
+         * The resulting .o paths replace the .cpp entries in g_csrcfiles. */
+        for (int i = 0; i < g_ncsrcfiles; i++) {
+            const char *ext = strrchr(g_csrcfiles[i], '.');
+            if (!ext || (strcmp(ext, ".cpp") != 0 && strcmp(ext, ".cc") != 0
+                         && strcmp(ext, ".cxx") != 0))
+                continue;
+
+            /* Build temp .o path: /tmp/obc_<basename>.o */
+            const char *base = strrchr(g_csrcfiles[i], '/');
+            base = base ? base + 1 : g_csrcfiles[i];
+            char opath[512];
+            snprintf(opath, sizeof(opath), "/tmp/obc_%s.o", base);
+
+            char cxxcmd[4096];
+            int cpos = snprintf(cxxcmd, sizeof(cxxcmd),
+                                "g++ -c -O -w -o %s", opath);
+            for (int j = 0; j < g_nincdirs; j++)
+                cpos += snprintf(cxxcmd + cpos, sizeof(cxxcmd) - (size_t)cpos,
+                                 " -I%s", g_incdirs[j]);
+            snprintf(cxxcmd + cpos, sizeof(cxxcmd) - (size_t)cpos,
+                     " %s", g_csrcfiles[i]);
+
+            if (system(cxxcmd) != 0) {
+                fprintf(stderr, "obc: g++ pre-compile failed for %s\n",
+                        g_csrcfiles[i]);
+                return 1;
+            }
+            /* Replace .cpp entry with the compiled .o */
+            strncpy(g_csrcfiles[i], opath, sizeof(g_csrcfiles[0]) - 1);
+            g_csrcfiles[i][sizeof(g_csrcfiles[0]) - 1] = '\0';
+        }
+
         char cmd[8192];
         int pos = snprintf(cmd, sizeof(cmd),
             "bash -c 'set -o pipefail;gcc --std=c11 %s-O -Wno-incompatible-pointer-types -o %s",
