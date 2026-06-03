@@ -335,6 +335,45 @@ BEGIN
   END
 END SSColorSix;
 
+PROCEDURE DepthFactor(z, zMin, zMax: REAL): REAL;
+VAR t: REAL;
+BEGIN
+  IF zMax > zMin THEN
+    t := (z - zMin) / (zMax - zMin);
+    IF t < 0.0 THEN t := 0.0 END;
+    IF t > 1.0 THEN t := 1.0 END;
+    RETURN 0.25 + 0.75 * t
+  END;
+  RETURN 1.0
+END DepthFactor;
+
+PROCEDURE DimTermColor(col: INTEGER; t: REAL): INTEGER;
+VAR r, g, b, idx: INTEGER;
+BEGIN
+  IF col >= 232 THEN
+    r := (col - 232) * 10 + 8; g := r; b := r
+  ELSIF col >= 16 THEN
+    idx := col - 16;
+    r := (idx DIV 36) * 51;
+    g := ((idx MOD 36) DIV 6) * 51;
+    b := (idx MOD 6) * 51
+  ELSE
+    r := 170; g := 170; b := 170
+  END;
+  r := FLOOR(FLT(r) * t);
+  g := FLOOR(FLT(g) * t);
+  b := FLOOR(FLT(b) * t);
+  IF (r = g) & (g = b) THEN
+    IF r < 4  THEN RETURN 16 END;
+    IF r > 252 THEN RETURN 231 END;
+    RETURN FLOOR(FLT(r - 8) / 247.0 * 24.0 + 0.5) + 232
+  END;
+  r := FLOOR(FLT(r) / 255.0 * 5.0 + 0.5);
+  g := FLOOR(FLT(g) / 255.0 * 5.0 + 0.5);
+  b := FLOOR(FLT(b) / 255.0 * 5.0 + 0.5);
+  RETURN 16 + 36 * r + 6 * g + b
+END DimTermColor;
+
 PROCEDURE AtomColorTerm(v: ViewerWin; i: INTEGER): INTEGER;
 VAR ss: INTEGER;
 BEGIN
@@ -557,10 +596,11 @@ VAR i, j, px, py, col, r: INTEGER;
     a: BioPDB.Atom;
     prevChain: CHAR;
     prevPX, prevPY: INTEGER;
-    prevOK, isCA: BOOLEAN;
+    prevOK, isBackbone: BOOLEAN;
     cx0, cy0, cx1, cy1: INTEGER;
     greyCol, cyanCol: INTEGER;
     nThreads: INTEGER;
+    zMin, zMax: REAL;
 BEGIN
   IF v.useSixel THEN
     IF ~sixelReady THEN InitSixelPalette END;
@@ -608,18 +648,43 @@ BEGIN
     END;
   END;
 
-  (* Sequential drawing for Backbone *)
+  (* Sequential drawing for Backbone (protein CA + nucleic acid P) *)
   IF v.renderMode = ModeBackbone THEN
+    (* Pass 1: project backbone atoms into drawBuf for picking, collect z range *)
+    FOR i := 0 TO v.model.count-1 DO
+      a := v.model.atoms[i];
+      isBackbone := ((Strings.Pos("CA", a.name) >= 0) OR
+                     ((a.name[0] = 'P') & (a.name[1] = 0X))) & ~a.isHet;
+      IF isBackbone & Project(v, i, px, py, pz) &
+         (px >= cx0) & (px <= cx1) & (py >= cy0) & (py <= cy1) THEN
+        IF v.drawN < MaxDraw THEN
+          v.drawBuf[v.drawN].z := pz; v.drawBuf[v.drawN].idx := i;
+          v.drawBuf[v.drawN].projX := px; v.drawBuf[v.drawN].projY := py;
+          INC(v.drawN)
+        END
+      END
+    END;
+    zMin := 1.0E30; zMax := -1.0E30;
+    FOR j := 0 TO v.drawN-1 DO
+      IF v.drawBuf[j].z < zMin THEN zMin := v.drawBuf[j].z END;
+      IF v.drawBuf[j].z > zMax THEN zMax := v.drawBuf[j].z END
+    END;
+    IF zMin >= zMax THEN zMin := zMax - 1.0 END;
+    (* Pass 2: draw in atom order to preserve chain-gap semantics *)
     prevOK := FALSE; prevChain := 0X; prevPX := 0; prevPY := 0;
     FOR i := 0 TO v.model.count-1 DO
       a := v.model.atoms[i];
-      isCA := (Strings.Pos("CA", a.name) >= 0) & ~a.isHet;
-      IF isCA THEN
+      isBackbone := ((Strings.Pos("CA", a.name) >= 0) OR
+                     ((a.name[0] = 'P') & (a.name[1] = 0X))) & ~a.isHet;
+      IF isBackbone THEN
         IF v.useSixel THEN col := AtomColorSix(v, i)
         ELSE               col := AtomColorTerm(v, i)
         END;
         IF Project(v, i, px, py, pz) &
            (px >= cx0) & (px <= cx1) & (py >= cy0) & (py <= cy1) THEN
+          IF ~v.useSixel THEN
+            col := DimTermColor(col, DepthFactor(pz, zMin, zMax))
+          END;
           IF prevOK & (a.chainID = prevChain) THEN
             BELine(v, prevPX, prevPY, px, py, col)
           END;
@@ -633,20 +698,27 @@ BEGIN
 
   IF v.renderMode # ModeBackbone THEN
     SortDraw(v.drawBuf, v.drawN);
+    IF v.drawN > 0 THEN
+      zMax := v.drawBuf[0].z; zMin := v.drawBuf[v.drawN-1].z
+    ELSE
+      zMax := 1.0; zMin := 0.0
+    END;
+    IF zMin >= zMax THEN zMin := zMax - 1.0 END;
 
     IF v.renderMode = ModeBallStick THEN
       prevOK := FALSE; prevChain := 0X;
       FOR i := 0 TO v.model.count-1 DO
         a := v.model.atoms[i];
         IF ~a.isHet THEN
-          isCA := Strings.Pos("CA", a.name) >= 0;
-          IF isCA & Project(v, i, px, py, pz) &
+          isBackbone := (Strings.Pos("CA", a.name) >= 0) OR
+                        ((a.name[0] = 'P') & (a.name[1] = 0X));
+          IF isBackbone & Project(v, i, px, py, pz) &
              (px >= cx0) & (px <= cx1) & (py >= cy0) & (py <= cy1) THEN
             IF prevOK & (a.chainID = prevChain) THEN
               BELine(v, prevPX, prevPY, px, py, greyCol)
             END;
             prevPX := px; prevPY := py; prevChain := a.chainID; prevOK := TRUE
-          ELSIF isCA THEN prevOK := FALSE
+          ELSIF isBackbone THEN prevOK := FALSE
           END
         END
       END;
@@ -657,6 +729,9 @@ BEGIN
         py  := v.drawBuf[j].projY;
         IF v.useSixel THEN col := AtomColorSix(v, i)
         ELSE               col := AtomColorTerm(v, i)
+        END;
+        IF ~v.useSixel THEN
+          col := DimTermColor(col, DepthFactor(v.drawBuf[j].z, zMin, zMax))
         END;
         a := v.model.atoms[i];
         IF a.element[0] = 'H' THEN r := 1 ELSE r := 2 END;
@@ -671,6 +746,9 @@ BEGIN
         py  := v.drawBuf[j].projY;
         IF v.useSixel THEN col := AtomColorSix(v, i)
         ELSE               col := AtomColorTerm(v, i)
+        END;
+        IF ~v.useSixel THEN
+          col := DimTermColor(col, DepthFactor(v.drawBuf[j].z, zMin, zMax))
         END;
         a := v.model.atoms[i];
         IF    a.element[0]='H' THEN r := FLOOR(1.2  * v.scale)
