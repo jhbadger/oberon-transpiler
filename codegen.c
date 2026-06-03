@@ -3020,7 +3020,7 @@ void codegen(Node *module, FILE *out, int is_main, const char *srcfile) {
         emit(g,"    if (pos>slen) { dst[0]=0; return; }\n");
         emit(g,"    if (len>slen-pos) len=slen-pos;\n");
         emit(g,"    if (len>255) len=255;\n");
-        emit(g,"    strncpy(dst, src+pos, len); dst[len]=0;\n");
+        emit(g,"    memmove(dst, src+pos, len); dst[len]=0;\n");
         emit(g,"}\n");
         /* NextWord(src, VAR pos, VAR dst) — skip whitespace, copy next word, advance pos */
         emit(g,"static void Strings_NextWord(const char *src, int *pos, char *dst) {\n");
