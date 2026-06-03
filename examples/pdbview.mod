@@ -406,10 +406,9 @@ END AtomColorSix;
    View reset
    ════════════════════════════════════════════════════════════════ *)
 
-PROCEDURE ResetView(v: ViewerWin);
-VAR spanX, spanY, spanZ, span, canW, canH: REAL;
+PROCEDURE RecenterView(v: ViewerWin);
+VAR canW, canH: REAL;
 BEGIN
-  MatIdentity(v.rot);
   IF v.useSixel THEN
     canW := FLT(SixelW); canH := FLT(SixelH)
   ELSE
@@ -423,8 +422,23 @@ BEGIN
   IF ~v.useSixel THEN
     v.panX := v.panX + FLT(v.x);
     v.panY := v.panY + FLT(v.y * 2)
-  END;
+  END
+END RecenterView;
+
+PROCEDURE ResetView(v: ViewerWin);
+VAR spanX, spanY, spanZ, span, canW, canH: REAL;
+BEGIN
+  MatIdentity(v.rot);
+  RecenterView(v);
   IF v.loaded THEN
+    IF v.useSixel THEN
+      canW := FLT(SixelW); canH := FLT(SixelH)
+    ELSE
+      canW := FLT(v.w - 2);
+      canH := FLT((v.h - 2) * 2);
+      IF canW > FLT(CanvasW) THEN canW := FLT(CanvasW) END;
+      IF canH > FLT(CanvasH) THEN canH := FLT(CanvasH) END
+    END;
     spanX := v.model.maxX - v.model.minX;
     spanY := v.model.maxY - v.model.minY;
     spanZ := v.model.maxZ - v.model.minZ;
@@ -683,7 +697,8 @@ BEGIN
         IF Project(v, i, px, py, pz) &
            (px >= cx0) & (px <= cx1) & (py >= cy0) & (py <= cy1) THEN
           IF ~v.useSixel THEN
-            col := DimTermColor(col, DepthFactor(pz, zMin, zMax))
+            col := DimTermColor(col, DepthFactor(pz, zMin, zMax));
+            py := py DIV 2 * 2
           END;
           IF prevOK & (a.chainID = prevChain) THEN
             BELine(v, prevPX, prevPY, px, py, col)
@@ -1161,7 +1176,7 @@ BEGIN
     ELSIF ev.kind = TUI.EvResize THEN
       sline.y := TUI.Rows; sline.w := TUI.Cols; mbar.w := TUI.Cols;
       vw.w := TUI.Cols; vw.h := TUI.Rows-2;
-      ResetView(vw); vw.sceneDirty := TRUE; TUI.InvalidateFront()
+      RecenterView(vw); vw.sceneDirty := TRUE; TUI.InvalidateFront()
     END
   END;
 
