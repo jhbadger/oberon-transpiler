@@ -1301,7 +1301,7 @@ BEGIN
     END;
     TUI.FillRect(v.x+1, v.y+v.h-2, v.w-2, 1, ' ', TUI.Black, TUI.White);
     TUI.PutStr(v.x+2, v.y+v.h-2,
-      "Up/Dn/PgUp/PgDn: scroll   Esc: close", TUI.Black, TUI.White)
+      "Up/Dn/PgUp/PgDn: scroll   Esc/Q/Enter: close", TUI.Black, TUI.White)
   END
 END DrawHelpWin;
 
@@ -1342,7 +1342,8 @@ BEGIN
       ch := ev.key;
       maxScroll := HelpN - contentH + 1;
       IF maxScroll < 0 THEN maxScroll := 0 END;
-      IF ch = TUI.KEsc THEN
+      IF (ch = TUI.KEsc) OR (ch = 'q') OR (ch = 'Q') OR
+         (ch = TUI.KEnter) OR (ch = ' ') THEN
         helpScroll := -1   (* sentinel to exit *)
       ELSIF ch = TUI.KUp THEN
         IF helpScroll > 0 THEN DEC(helpScroll) END
