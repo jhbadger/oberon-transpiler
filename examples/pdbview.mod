@@ -1,7 +1,7 @@
 MODULE pdbview;
 
 (*
-  pdbview — Terminal PDB structure viewer built on TUI / Widgets / FileDialog.
+  pdbview -- Terminal PDB structure viewer built on TUI / Widgets / FileDialog.
   Rendering:
     Terminal  half-block pixel buffer 240x100
   Colour schemes:
@@ -20,6 +20,11 @@ MODULE pdbview;
     H                 Toggle HETATM visibility
     C                 Cycle colour scheme (Chain->CPK->B-factor->Secondary)
     B                 Jump to B-factor colouring
+    L                 Toggle diffuse lighting (space-fill)
+    O                 Toggle ambient occlusion (space-fill)
+    Z                 Toggle depth of field
+    [ ]               Move DoF focus plane
+    { }               Shrink / grow DoF range
     V                 Save SVG snapshot of current view
     Esc               Clear picked atoms
     PgUp / PgDn       Previous / next model
@@ -36,9 +41,9 @@ MODULE pdbview;
 IMPORT TUI, Widgets, FileDialog, Parallel, Files,
        BioPDB, Strings, Math, Terminal, Time, Args, Out;
 
-(* ════════════════════════════════════════════════════════════════
-   Constants
-   ════════════════════════════════════════════════════════════════ *)
+(* ================================================================== *)
+(*  Constants                                                          *)
+(* ================================================================== *)
 
 CONST
   ModeBackbone  = 0;
@@ -56,6 +61,9 @@ CONST
   InertCutoff = 0.002;
 
   MaxPickDist = 8;
+
+  PickGridW = 60;
+  PickGridH = 25;
 
   CmdOpen      = 10;
   CmdReload    = 11;
@@ -87,9 +95,11 @@ CONST
 
   MaxDraw = BioPDB.MaxAtoms;
 
-(* ════════════════════════════════════════════════════════════════
-   Types
-   ════════════════════════════════════════════════════════════════ *)
+  HelpN = 46;
+
+(* ================================================================== *)
+(*  Types                                                              *)
+(* ================================================================== *)
 
 TYPE
   Mat3 = ARRAY 9 OF REAL;
@@ -137,15 +147,21 @@ TYPE
     chainCount   : INTEGER;
     residueCount : INTEGER;
     drawBuf      : ARRAY MaxDraw OF DrawEntry;
-    drawN        : INTEGER
+    drawN        : INTEGER;
+    pickGrid     : ARRAY PickGridW * PickGridH OF INTEGER;
+    pickNext     : ARRAY MaxDraw OF INTEGER;
+    lighting     : BOOLEAN;
+    ao           : BOOLEAN;
+    dof          : BOOLEAN;
+    dofFocus     : REAL;
+    dofRange     : REAL;
+    aoCache      : ARRAY BioPDB.MaxAtoms OF REAL;
+    aoDirty      : BOOLEAN
   END;
 
-(* ════════════════════════════════════════════════════════════════
-   Module globals
-   ════════════════════════════════════════════════════════════════ *)
-
-CONST
-  HelpN = 38;
+(* ================================================================== *)
+(*  Module globals                                                     *)
+(* ================================================================== *)
 
 VAR
   vw         : ViewerWin;
@@ -157,9 +173,9 @@ VAR
   helpScroll : INTEGER;
   helpWin    : TUI.Window;
 
-(* ════════════════════════════════════════════════════════════════
-   Matrix helpers
-   ════════════════════════════════════════════════════════════════ *)
+(* ================================================================== *)
+(*  Matrix helpers                                                     *)
+(* ================================================================== *)
 
 PROCEDURE MatIdentity(VAR m: Mat3);
 BEGIN
@@ -260,9 +276,9 @@ BEGIN
   END
 END ComputeCounts;
 
-(* ════════════════════════════════════════════════════════════════
-   Terminal colour helpers
-   ════════════════════════════════════════════════════════════════ *)
+(* ================================================================== *)
+(*  Terminal colour helpers                                            *)
+(* ================================================================== *)
 
 PROCEDURE ChainColorTerm(ch: CHAR): INTEGER;
 VAR i: INTEGER;
@@ -321,7 +337,8 @@ BEGIN
     t := (z - zMin) / (zMax - zMin);
     IF t < 0.0 THEN t := 0.0 END;
     IF t > 1.0 THEN t := 1.0 END;
-    RETURN 0.25 + 0.75 * t
+    t := Math.sqrt(t);           (* gamma ~0.5 for gentler falloff *)
+    RETURN 0.15 + 0.85 * t      (* 0.15 = minimum brightness      *)
   END;
   RETURN 1.0
 END DepthFactor;
@@ -343,7 +360,7 @@ BEGIN
   g := FLOOR(FLT(g) * t);
   b := FLOOR(FLT(b) * t);
   IF (r = g) & (g = b) THEN
-    IF r < 4  THEN RETURN 16 END;
+    IF r < 4   THEN RETURN 16 END;
     IF r > 252 THEN RETURN 231 END;
     RETURN FLOOR(FLT(r - 8) / 247.0 * 24.0 + 0.5) + 232
   END;
@@ -367,9 +384,93 @@ BEGIN
   END; RETURN 255
 END AtomColorTerm;
 
-(* ════════════════════════════════════════════════════════════════
-   SVG colour helpers — RGB values matching the terminal palette
-   ════════════════════════════════════════════════════════════════ *)
+(* ================================================================== *)
+(*  Lighting, ambient occlusion, depth of field                       *)
+(*                                                                    *)
+(*  All float "constants" are inlined as literals to avoid the        *)
+(*  codegen emitting them as C enum (which requires integer type).    *)
+(* ================================================================== *)
+
+(* Diffuse lighting: fixed light from upper-left in view space.
+   Normal approximated as atom-position - model-centre, rotated. *)
+PROCEDURE LightFactor(v: ViewerWin; i: INTEGER): REAL;
+VAR nx, ny, nz, rx, ry, rz, dot, len: REAL;
+BEGIN
+  nx := v.model.atoms[i].x - v.model.cx;
+  ny := v.model.atoms[i].y - v.model.cy;
+  nz := v.model.atoms[i].z - v.model.cz;
+  len := Math.sqrt(nx*nx + ny*ny + nz*nz);
+  IF len < 0.001 THEN RETURN 1.0 END;
+  nx := nx/len; ny := ny/len; nz := nz/len;
+  MatApply(v.rot, nx, ny, nz, rx, ry, rz);
+  (* light direction: (-0.5774, 0.5774, 0.5774) normalised *)
+  dot := rx*(-0.5774) + ry*0.5774 + rz*0.5774;
+  IF dot < 0.0 THEN dot := 0.0 END;
+  RETURN 0.35 + 0.65 * dot   (* 0.35 = ambient minimum *)
+END LightFactor;
+
+(* Ambient occlusion: precomputed neighbour density within 6 A. *)
+PROCEDURE BuildAOCache(v: ViewerWin);
+VAR i, j: INTEGER; dx, dy, dz, d2, occ: REAL;
+BEGIN
+  FOR i := 0 TO v.model.count-1 DO
+    occ := 0.0;
+    FOR j := 0 TO v.model.count-1 DO
+      IF j # i THEN
+        dx := v.model.atoms[i].x - v.model.atoms[j].x;
+        dy := v.model.atoms[i].y - v.model.atoms[j].y;
+        dz := v.model.atoms[i].z - v.model.atoms[j].z;
+        d2 := dx*dx + dy*dy + dz*dz;
+        IF d2 < 36.0 THEN  (* 6.0 * 6.0 *)
+          occ := occ + 0.04 * (1.0 - Math.sqrt(d2) / 6.0)
+        END
+      END
+    END;
+    IF occ > 0.75 THEN occ := 0.75 END;  (* 1.0 - AOMin(0.25) *)
+    v.aoCache[i] := 1.0 - occ
+  END;
+  v.aoDirty := FALSE
+END BuildAOCache;
+
+PROCEDURE AOFactor(v: ViewerWin; i: INTEGER): REAL;
+BEGIN
+  IF v.aoDirty THEN BuildAOCache(v) END;
+  RETURN v.aoCache[i]
+END AOFactor;
+
+(* Depth of field: atoms outside [dofFocus +/- dofRange] are dimmed. *)
+PROCEDURE DofFactor(v: ViewerWin; pz: REAL): REAL;
+VAR dist, t: REAL;
+BEGIN
+  IF ~v.dof THEN RETURN 1.0 END;
+  dist := pz - v.dofFocus;
+  IF dist < 0.0 THEN dist := -dist END;
+  dist := dist - v.dofRange;
+  IF dist <= 0.0 THEN RETURN 1.0 END;
+  t := dist / v.dofRange;
+  IF t > 1.0 THEN t := 1.0 END;
+  RETURN 1.0 - 0.6 * t   (* 0.6 = 1.0 - DofMinLum(0.4) *)
+END DofFactor;
+
+(* Combined colour: depth * DoF * lighting (space-fill only) * AO *)
+PROCEDURE AtomColorTermEx(v: ViewerWin; i: INTEGER;
+                           pz, zMin, zMax: REAL): INTEGER;
+VAR lum, lf, ao: REAL;
+BEGIN
+  lum := DepthFactor(pz, zMin, zMax) * DofFactor(v, pz);
+  IF v.renderMode = ModeSpaceFill THEN
+    IF v.lighting THEN lf := LightFactor(v, i) ELSE lf := 1.0 END;
+    IF v.ao       THEN ao := AOFactor(v, i)     ELSE ao := 1.0 END;
+    lum := lum * lf * ao
+  END;
+  IF lum < 0.05 THEN lum := 0.05 END;
+  IF lum > 1.0  THEN lum := 1.0  END;
+  RETURN DimTermColor(AtomColorTerm(v, i), lum)
+END AtomColorTermEx;
+
+(* ================================================================== *)
+(*  SVG colour helpers                                                 *)
+(* ================================================================== *)
 
 PROCEDURE ChainColorRGB(ch: CHAR; VAR r, g, b: INTEGER);
 VAR i: INTEGER;
@@ -448,9 +549,9 @@ BEGIN
   hex[7] := 0X
 END RGBToHex;
 
-(* ════════════════════════════════════════════════════════════════
-   View reset
-   ════════════════════════════════════════════════════════════════ *)
+(* ================================================================== *)
+(*  View reset                                                         *)
+(* ================================================================== *)
 
 PROCEDURE RecenterView(v: ViewerWin);
 VAR canW, canH: REAL;
@@ -488,15 +589,13 @@ BEGIN
   END
 END ResetView;
 
-(* ════════════════════════════════════════════════════════════════
-   Painter sort (Quicksort Implementation)
-   ════════════════════════════════════════════════════════════════ *)
+(* ================================================================== *)
+(*  Quicksort                                                          *)
+(* ================================================================== *)
 
 PROCEDURE Swap(VAR a, b: DrawEntry);
 VAR tmp: DrawEntry;
-BEGIN
-  tmp := a; a := b; b := tmp
-END Swap;
+BEGIN tmp := a; a := b; b := tmp END Swap;
 
 PROCEDURE QuickSortRecursive(VAR buf: ARRAY OF DrawEntry; low, high: INTEGER);
 VAR i, j: INTEGER; pivot: DrawEntry;
@@ -507,44 +606,72 @@ BEGIN
     REPEAT
       WHILE buf[i].z > pivot.z DO INC(i) END;
       WHILE buf[j].z < pivot.z DO DEC(j) END;
-      IF i <= j THEN
-        Swap(buf[i], buf[j]);
-        INC(i); DEC(j);
-      END;
+      IF i <= j THEN Swap(buf[i], buf[j]); INC(i); DEC(j) END;
     UNTIL i > j;
     QuickSortRecursive(buf, low, j);
-    QuickSortRecursive(buf, i, high);
-  END;
+    QuickSortRecursive(buf, i, high)
+  END
 END QuickSortRecursive;
 
 PROCEDURE SortDraw(VAR buf: ARRAY OF DrawEntry; n: INTEGER);
-BEGIN
-  IF n > 1 THEN
-    QuickSortRecursive(buf, 0, n - 1)
-  END
-END SortDraw;
+BEGIN IF n > 1 THEN QuickSortRecursive(buf, 0, n-1) END END SortDraw;
 
-(* ════════════════════════════════════════════════════════════════
-   Atom picking
-   ════════════════════════════════════════════════════════════════ *)
+(* ================================================================== *)
+(*  Pick grid                                                         *)
+(* ================================================================== *)
+
+PROCEDURE BuildPickGrid(v: ViewerWin);
+VAR i, gx, gy, cell: INTEGER;
+BEGIN
+  FOR i := 0 TO PickGridW * PickGridH - 1 DO v.pickGrid[i] := -1 END;
+  FOR i := 0 TO v.drawN-1 DO
+    gx := v.drawBuf[i].projX * PickGridW DIV CanvasW;
+    gy := v.drawBuf[i].projY * PickGridH DIV CanvasH;
+    IF gx < 0           THEN gx := 0           END;
+    IF gx >= PickGridW  THEN gx := PickGridW-1 END;
+    IF gy < 0           THEN gy := 0           END;
+    IF gy >= PickGridH  THEN gy := PickGridH-1 END;
+    cell             := gy * PickGridW + gx;
+    v.pickNext[i]    := v.pickGrid[cell];
+    v.pickGrid[cell] := i
+  END
+END BuildPickGrid;
 
 PROCEDURE PickAtom(v: ViewerWin; mx, my, maxDist: INTEGER): INTEGER;
-VAR i, best, dx, dy, dist, bestDist: INTEGER;
+VAR gx0, gy0, gx1, gy1, gx, gy, cell, i, best, dx, dy, dist, bestDist: INTEGER;
+    cw, ch: INTEGER;
 BEGIN
   best := -1; bestDist := maxDist*maxDist+1;
-  FOR i := 0 TO v.drawN-1 DO
-    dx := v.drawBuf[i].projX - mx;
-    dy := v.drawBuf[i].projY - my;
-    dist := dx*dx + dy*dy;
-    IF dist < bestDist THEN bestDist := dist; best := i END
+  cw := maxDist * PickGridW DIV CanvasW + 1;
+  ch := maxDist * PickGridH DIV CanvasH + 1;
+  gx0 := mx * PickGridW DIV CanvasW - cw;
+  gy0 := my * PickGridH DIV CanvasH - ch;
+  gx1 := mx * PickGridW DIV CanvasW + cw;
+  gy1 := my * PickGridH DIV CanvasH + ch;
+  IF gx0 < 0          THEN gx0 := 0           END;
+  IF gy0 < 0          THEN gy0 := 0           END;
+  IF gx1 >= PickGridW THEN gx1 := PickGridW-1 END;
+  IF gy1 >= PickGridH THEN gy1 := PickGridH-1 END;
+  FOR gy := gy0 TO gy1 DO
+    FOR gx := gx0 TO gx1 DO
+      cell := gy * PickGridW + gx;
+      i := v.pickGrid[cell];
+      WHILE i >= 0 DO
+        dx := v.drawBuf[i].projX - mx;
+        dy := v.drawBuf[i].projY - my;
+        dist := dx*dx + dy*dy;
+        IF dist < bestDist THEN bestDist := dist; best := i END;
+        i := v.pickNext[i]
+      END
+    END
   END;
   IF best >= 0 THEN RETURN v.drawBuf[best].idx END;
   RETURN -1
 END PickAtom;
 
-(* ════════════════════════════════════════════════════════════════
-   Projection
-   ════════════════════════════════════════════════════════════════ *)
+(* ================================================================== *)
+(*  Projection                                                         *)
+(* ================================================================== *)
 
 PROCEDURE Project(v: ViewerWin; i: INTEGER;
                   VAR px, py: INTEGER; VAR pz: REAL): BOOLEAN;
@@ -560,9 +687,9 @@ BEGIN
   RETURN (px >= 0) & (px < CanvasW) & (py >= 0) & (py < CanvasH)
 END Project;
 
-(* ════════════════════════════════════════════════════════════════
-   Rendering
-   ════════════════════════════════════════════════════════════════ *)
+(* ================================================================== *)
+(*  Rendering                                                          *)
+(* ================================================================== *)
 
 PROCEDURE ProjectAtomWorker(i: INTEGER);
 VAR px, py: INTEGER; pz: REAL; a: BioPDB.Atom;
@@ -571,15 +698,13 @@ BEGIN
   IF (~a.isHet OR vw.showHet) THEN
     IF Project(vw, i, px, py, pz) THEN
       projCache[i].onScreen := TRUE;
-      projCache[i].projX := px;
-      projCache[i].projY := py;
-      projCache[i].z := pz;
+      projCache[i].projX := px; projCache[i].projY := py; projCache[i].z := pz
     ELSE
-      projCache[i].onScreen := FALSE;
-    END;
+      projCache[i].onScreen := FALSE
+    END
   ELSE
-    projCache[i].onScreen := FALSE;
-  END;
+    projCache[i].onScreen := FALSE
+  END
 END ProjectAtomWorker;
 
 PROCEDURE RenderScene(v: ViewerWin);
@@ -593,80 +718,64 @@ VAR i, j, px, py, col, r: INTEGER;
     nThreads: INTEGER;
     zMin, zMax: REAL;
 BEGIN
-  cx0 := v.x + 1;  cx1 := v.x + v.w - 2;
-  cy0 := (v.y + 1) * 2;  cy1 := (v.y + v.h - 2) * 2 + 1;
-  IF cx0 < 0        THEN cx0 := 0        END;
-  IF cy0 < 0        THEN cy0 := 0        END;
+  cx0 := v.x+1;  cx1 := v.x+v.w-2;
+  cy0 := (v.y+1)*2;  cy1 := (v.y+v.h-2)*2+1;
+  IF cx0 < 0        THEN cx0 := 0         END;
+  IF cy0 < 0        THEN cy0 := 0         END;
   IF cx1 >= CanvasW THEN cx1 := CanvasW-1 END;
   IF cy1 >= CanvasH THEN cy1 := CanvasH-1 END;
   Terminal.ClearBuf();
 
   IF ~v.loaded OR (v.model.count = 0) THEN
-    Terminal.Flush();
-    RETURN
+    Terminal.Flush(); RETURN
   END;
 
   v.drawN := 0;
   nThreads := Parallel.NumCPU();
   IF nThreads < 1 THEN nThreads := 1 END;
 
-  IF v.renderMode # ModeBackbone THEN
-    Parallel.For(0, v.model.count, ProjectAtomWorker, nThreads);
+  (* Parallel projection for all modes *)
+  Parallel.For(0, v.model.count, ProjectAtomWorker, nThreads);
+
+  IF v.renderMode = ModeBackbone THEN
+    (* Collect backbone atoms *)
     FOR i := 0 TO v.model.count-1 DO
-      IF projCache[i].onScreen THEN
-        px := projCache[i].projX;
-        py := projCache[i].projY;
+      a := v.model.atoms[i];
+      isBackbone := ((Strings.Pos("CA", a.name) >= 0) OR
+                     ((a.name[0] = 'P') & (a.name[1] = 0X))) & ~a.isHet;
+      IF isBackbone & projCache[i].onScreen THEN
+        px := projCache[i].projX; py := projCache[i].projY;
         IF (v.drawN < MaxDraw) &
            (px >= cx0) & (px <= cx1) & (py >= cy0) & (py <= cy1) THEN
           v.drawBuf[v.drawN].z     := projCache[i].z;
           v.drawBuf[v.drawN].idx   := i;
           v.drawBuf[v.drawN].projX := px;
           v.drawBuf[v.drawN].projY := py;
-          INC(v.drawN);
-        END;
-      END;
-    END;
-  END;
-
-  IF v.renderMode = ModeBackbone THEN
-    FOR i := 0 TO v.model.count-1 DO
-      a := v.model.atoms[i];
-      isBackbone := ((Strings.Pos("CA", a.name) >= 0) OR
-                     ((a.name[0] = 'P') & (a.name[1] = 0X))) & ~a.isHet;
-      IF isBackbone THEN
-        IF Project(v, i, px, py, pz) THEN
-          projCache[i].onScreen := TRUE;
-          projCache[i].projX := px; projCache[i].projY := py; projCache[i].z := pz;
-          IF (v.drawN < MaxDraw) &
-             (px >= cx0) & (px <= cx1) & (py >= cy0) & (py <= cy1) THEN
-            v.drawBuf[v.drawN].z := pz; v.drawBuf[v.drawN].idx := i;
-            v.drawBuf[v.drawN].projX := px; v.drawBuf[v.drawN].projY := py;
-            INC(v.drawN)
-          END
-        ELSE
-          projCache[i].onScreen := FALSE
+          INC(v.drawN)
         END
-      ELSE
-        projCache[i].onScreen := FALSE
       END
     END;
+
+    (* Z range *)
     zMin := 1.0E30; zMax := -1.0E30;
     FOR j := 0 TO v.drawN-1 DO
       IF v.drawBuf[j].z < zMin THEN zMin := v.drawBuf[j].z END;
       IF v.drawBuf[j].z > zMax THEN zMax := v.drawBuf[j].z END
     END;
     IF zMin >= zMax THEN zMin := zMax - 1.0 END;
+
+    (* Draw lines + dots *)
     prevOK := FALSE; prevChain := 0X; prevPX := 0; prevPY := 0;
     FOR i := 0 TO v.model.count-1 DO
       a := v.model.atoms[i];
       isBackbone := ((Strings.Pos("CA", a.name) >= 0) OR
                      ((a.name[0] = 'P') & (a.name[1] = 0X))) & ~a.isHet;
       IF isBackbone THEN
-        col := DimTermColor(AtomColorTerm(v, i),
-               DepthFactor(projCache[i].z, zMin, zMax));
         IF projCache[i].onScreen THEN
-          px := projCache[i].projX; py := projCache[i].projY; pz := projCache[i].z;
-          py := py DIV 2 * 2;
+          px  := projCache[i].projX;
+          py  := projCache[i].projY;
+          pz  := projCache[i].z;
+          col := AtomColorTermEx(v, i, pz, zMin, zMax);
           IF (px >= cx0) & (px <= cx1) & (py >= cy0) & (py <= cy1) THEN
             IF prevOK & (a.chainID = prevChain) THEN
               Terminal.Line(prevPX, prevPY, px, py, col)
@@ -679,9 +788,23 @@ BEGIN
         END
       END
     END
-  END;
 
-  IF v.renderMode # ModeBackbone THEN
+  ELSE
+    (* Ball-and-stick / Space-fill: collect all visible atoms *)
+    FOR i := 0 TO v.model.count-1 DO
+      IF projCache[i].onScreen THEN
+        px := projCache[i].projX; py := projCache[i].projY;
+        IF (v.drawN < MaxDraw) &
+           (px >= cx0) & (px <= cx1) & (py >= cy0) & (py <= cy1) THEN
+          v.drawBuf[v.drawN].z     := projCache[i].z;
+          v.drawBuf[v.drawN].idx   := i;
+          v.drawBuf[v.drawN].projX := px;
+          v.drawBuf[v.drawN].projY := py;
+          INC(v.drawN)
+        END
+      END
+    END;
+
     SortDraw(v.drawBuf, v.drawN);
     IF v.drawN > 0 THEN
       zMax := v.drawBuf[0].z; zMin := v.drawBuf[v.drawN-1].z
@@ -711,8 +834,7 @@ BEGIN
         i   := v.drawBuf[j].idx;
         px  := v.drawBuf[j].projX;
         py  := v.drawBuf[j].projY;
-        col := DimTermColor(AtomColorTerm(v, i),
-               DepthFactor(v.drawBuf[j].z, zMin, zMax));
+        col := AtomColorTermEx(v, i, v.drawBuf[j].z, zMin, zMax);
         a := v.model.atoms[i];
         IF a.element[0] = 'H' THEN r := 1 ELSE r := 2 END;
         Terminal.FillCircle(px, py, r, col)
@@ -723,8 +845,7 @@ BEGIN
         i   := v.drawBuf[j].idx;
         px  := v.drawBuf[j].projX;
         py  := v.drawBuf[j].projY;
-        col := DimTermColor(AtomColorTerm(v, i),
-               DepthFactor(v.drawBuf[j].z, zMin, zMax));
+        col := AtomColorTermEx(v, i, v.drawBuf[j].z, zMin, zMax);
         a := v.model.atoms[i];
         IF    a.element[0]='H' THEN r := FLOOR(1.2  * v.scale)
         ELSIF a.element[0]='C' THEN r := FLOOR(1.7  * v.scale)
@@ -753,12 +874,13 @@ BEGIN
     END
   END;
 
+  BuildPickGrid(v);
   Terminal.Flush()
 END RenderScene;
 
-(* ════════════════════════════════════════════════════════════════
-   TUI draw callback
-   ════════════════════════════════════════════════════════════════ *)
+(* ================================================================== *)
+(*  TUI draw callback                                                  *)
+(* ================================================================== *)
 
 PROCEDURE DrawViewer(v: TUI.View);
 VAR bfg, bbg: INTEGER;
@@ -810,9 +932,9 @@ BEGIN
   END
 END DrawViewer;
 
-(* ════════════════════════════════════════════════════════════════
-   TUI handle callback
-   ════════════════════════════════════════════════════════════════ *)
+(* ================================================================== *)
+(*  TUI handle callback                                                *)
+(* ================================================================== *)
 
 PROCEDURE HandleViewer(v: TUI.View; ev: TUI.Event): BOOLEAN;
 VAR ch: CHAR; dx, dy, newPick: INTEGER;
@@ -820,22 +942,22 @@ BEGIN
   WITH v: ViewerWinRec DO
     IF ev.kind = TUI.EvKey THEN
       ch := ev.key;
-      IF    ch = TUI.KLeft      THEN RotY(v.rot,-RotStep); v.inertDX := -RotStep; v.inertDY := 0.0; v.inertDZ := 0.0; v.inertOn := TRUE
-      ELSIF ch = TUI.KRight     THEN RotY(v.rot, RotStep); v.inertDX :=  RotStep; v.inertDY := 0.0; v.inertDZ := 0.0; v.inertOn := TRUE
-      ELSIF ch = TUI.KUp        THEN RotX(v.rot,-RotStep); v.inertDX := 0.0; v.inertDY := -RotStep; v.inertDZ := 0.0; v.inertOn := TRUE
-      ELSIF ch = TUI.KDown      THEN RotX(v.rot, RotStep); v.inertDX := 0.0; v.inertDY :=  RotStep; v.inertDZ := 0.0; v.inertOn := TRUE
-      ELSIF ch = TUI.KShiftUp   THEN RotZ(v.rot,-RotStep); v.inertDX := 0.0; v.inertDY := 0.0; v.inertDZ := -RotStep; v.inertOn := TRUE
-      ELSIF ch = TUI.KShiftDown THEN RotZ(v.rot, RotStep); v.inertDX := 0.0; v.inertDY := 0.0; v.inertDZ :=  RotStep; v.inertOn := TRUE
+      IF    ch = TUI.KLeft      THEN RotY(v.rot,-RotStep); v.inertDX:=-RotStep; v.inertDY:=0.0; v.inertDZ:=0.0; v.inertOn:=TRUE
+      ELSIF ch = TUI.KRight     THEN RotY(v.rot, RotStep); v.inertDX:= RotStep; v.inertDY:=0.0; v.inertDZ:=0.0; v.inertOn:=TRUE
+      ELSIF ch = TUI.KUp        THEN RotX(v.rot,-RotStep); v.inertDX:=0.0; v.inertDY:=-RotStep; v.inertDZ:=0.0; v.inertOn:=TRUE
+      ELSIF ch = TUI.KDown      THEN RotX(v.rot, RotStep); v.inertDX:=0.0; v.inertDY:= RotStep; v.inertDZ:=0.0; v.inertOn:=TRUE
+      ELSIF ch = TUI.KShiftUp   THEN RotZ(v.rot,-RotStep); v.inertDX:=0.0; v.inertDY:=0.0; v.inertDZ:=-RotStep; v.inertOn:=TRUE
+      ELSIF ch = TUI.KShiftDown THEN RotZ(v.rot, RotStep); v.inertDX:=0.0; v.inertDY:=0.0; v.inertDZ:= RotStep; v.inertOn:=TRUE
       ELSE
-        v.inertOn := FALSE; v.inertDX := 0.0; v.inertDY := 0.0; v.inertDZ := 0.0;
+        v.inertOn:=FALSE; v.inertDX:=0.0; v.inertDY:=0.0; v.inertDZ:=0.0;
         IF    (ch='+') OR (ch='=') THEN v.scale := v.scale * ZoomStep
-        ELSIF  ch='-'               THEN v.scale := v.scale / ZoomStep
+        ELSIF  ch='-'              THEN v.scale := v.scale / ZoomStep
         ELSIF (ch='W') OR (ch='w') THEN v.panY := v.panY - 4.0
         ELSIF (ch='S') OR (ch='s') THEN v.panY := v.panY + 4.0
         ELSIF (ch='A') OR (ch='a') THEN v.panX := v.panX - 4.0
         ELSIF (ch='D') OR (ch='d') THEN v.panX := v.panX + 4.0
         ELSIF (ch='R') OR (ch='r') THEN
-          ResetView(v); v.pickedAtom := -1; v.pickedAtom2 := -1
+          ResetView(v); v.pickedAtom:=-1; v.pickedAtom2:=-1
         ELSIF (ch='F') OR (ch='f') THEN
           IF v.pickedAtom >= 0 THEN CenterOnAtom(v, v.pickedAtom) END
         ELSIF (ch='M') OR (ch='m') THEN v.renderMode := (v.renderMode+1) MOD 3
@@ -845,6 +967,15 @@ BEGIN
           IF v.colourScheme = ColourBfactor THEN v.colourScheme := ColourChain
           ELSE v.colourScheme := ColourBfactor END
         ELSIF (ch='V') OR (ch='v') THEN OnMenuCmd(CmdSaveSVG)
+        ELSIF (ch='L') OR (ch='l') THEN v.lighting := ~v.lighting
+        ELSIF (ch='O') OR (ch='o') THEN v.ao := ~v.ao
+        ELSIF (ch='Z') OR (ch='z') THEN v.dof := ~v.dof
+        ELSIF ch = '[' THEN v.dofFocus := v.dofFocus - 1.0
+        ELSIF ch = ']' THEN v.dofFocus := v.dofFocus + 1.0
+        ELSIF ch = '{' THEN
+          v.dofRange := v.dofRange - 1.0;
+          IF v.dofRange < 1.0 THEN v.dofRange := 1.0 END
+        ELSIF ch = '}' THEN v.dofRange := v.dofRange + 1.0
         ELSIF ch = TUI.KEsc  THEN v.pickedAtom := -1; v.pickedAtom2 := -1
         ELSIF ch = TUI.KPgUp THEN
           IF v.modelNo > 1 THEN v.modelNo := v.modelNo-1 END
@@ -893,7 +1024,8 @@ BEGIN
               v.pickedAtom := newPick; v.pickedAtom2 := -1
             END
           ELSE
-            v.inertOn := (ABS(v.inertDX) > InertCutoff) OR (ABS(v.inertDY) > InertCutoff) OR
+            v.inertOn := (ABS(v.inertDX) > InertCutoff) OR
+                         (ABS(v.inertDY) > InertCutoff) OR
                          (ABS(v.inertDZ) > InertCutoff)
           END;
           v.rotDragActive := FALSE; v.sceneDirty := TRUE
@@ -908,9 +1040,9 @@ BEGIN
   RETURN FALSE
 END HandleViewer;
 
-(* ════════════════════════════════════════════════════════════════
-   Status update
-   ════════════════════════════════════════════════════════════════ *)
+(* ================================================================== *)
+(*  Status update                                                      *)
+(* ================================================================== *)
 
 PROCEDURE UpdateStatus;
 VAR buf, tmp: ARRAY 256 OF CHAR; a: BioPDB.Atom; ss: INTEGER; dist: REAL;
@@ -968,48 +1100,54 @@ BEGIN
     Strings.IntToStr(vw.model.ssCount, tmp); Strings.Append(tmp, buf);
     Strings.Append("  Mdl:", buf);
     Strings.IntToStr(vw.modelNo, tmp); Strings.Append(tmp, buf);
-    Strings.Append("  LMBdrag:rot  WASD:pan  +/-:zoom  F:center  R:reset  M:mode  C:col  H:het  V:svg", buf)
+    Strings.Append("  LMB:rot  WASD:pan  +/-:zoom  M:mode  C:col  L:light  O:ao  Z:dof", buf)
   ELSE
     Strings.Copy("  No file loaded. Ctrl+O to open.", buf)
   END;
-  IF Strings.Length(buf) > TUI.Cols - 1 THEN buf[TUI.Cols - 1] := 0X END;
+  IF Strings.Length(buf) > TUI.Cols-1 THEN buf[TUI.Cols-1] := 0X END;
   Strings.Copy(buf, sline.text);
   statusMsg[0] := 0X
 END UpdateStatus;
 
-(* ════════════════════════════════════════════════════════════════
-   File loading
-   ════════════════════════════════════════════════════════════════ *)
+(* ================================================================== *)
+(*  File loading                                                       *)
+(* ================================================================== *)
 
 PROCEDURE LoadPDB(path: ARRAY OF CHAR; modelNo: INTEGER);
 VAR err: INTEGER; tmp: ARRAY 16 OF CHAR;
 BEGIN
-  IF BioPDB.LoadModel(path, vw.model, modelNo, err) THEN
+  IF BioPDB.LoadAny(path, vw.model, modelNo, err) THEN
     Strings.Copy(path, vw.filePath);
     vw.modelNo    := modelNo;
     vw.loaded     := TRUE;
     vw.pickedAtom := -1; vw.pickedAtom2 := -1;
+    (* For formats with no backbone trace, default to Ball+Stick *)
+    IF vw.model.ssCount = 0 THEN
+      vw.renderMode := ModeBallStick
+    ELSE
+      vw.renderMode := ModeBackbone
+    END;
     ResetView(vw);
     ComputeCounts(vw);
+    vw.aoDirty := TRUE;
+    IF vw.model.count > 50000 THEN vw.ao := FALSE END;
     Strings.Copy("Loaded.", statusMsg)
   ELSE
     vw.loaded := FALSE;
-    Strings.Copy("Failed to load PDB (err=", statusMsg);
+    Strings.Copy("Failed to load (err=", statusMsg);
     Strings.IntToStr(err, tmp); Strings.Append(tmp, statusMsg);
     Strings.Append(").", statusMsg)
   END;
   vw.sceneDirty := TRUE
 END LoadPDB;
 
-(* ════════════════════════════════════════════════════════════════
-   SVG export
-   ════════════════════════════════════════════════════════════════ *)
+(* ================================================================== *)
+(*  SVG export                                                         *)
+(* ================================================================== *)
 
 PROCEDURE WStr(VAR rd: Files.Rider; s: ARRAY OF CHAR);
 VAR i: INTEGER;
-BEGIN
-  i := 0; WHILE s[i] # 0X DO Files.Write(rd, ORD(s[i])); INC(i) END
-END WStr;
+BEGIN i := 0; WHILE s[i] # 0X DO Files.Write(rd, ORD(s[i])); INC(i) END END WStr;
 
 PROCEDURE WInt(VAR rd: Files.Rider; n: INTEGER);
 VAR buf: ARRAY 16 OF CHAR;
@@ -1025,9 +1163,8 @@ VAR f: Files.File; rd: Files.Rider;
     i, j, px, py, r2: INTEGER;
     pz, ax, ay, az, rx, ry, rz: REAL;
     a: BioPDB.Atom;
-    prevChain: CHAR;
-    prevPX, prevPY: INTEGER;
-    prevOK, isBackbone, firstSeg: BOOLEAN;
+    prevChain: CHAR; prevPX, prevPY: INTEGER;
+    prevOK, isBackbone: BOOLEAN;
     cr, cg, cb: INTEGER;
     hex: ARRAY 8 OF CHAR;
     sc, panX, panY: REAL;
@@ -1036,11 +1173,8 @@ VAR f: Files.File; rd: Files.Rider;
     drawBuf: ARRAY MaxDraw OF DrawEntry;
     drawN: INTEGER;
 BEGIN
-  IF ~v.loaded THEN
-    Strings.Copy("No file loaded.", statusMsg); RETURN
-  END;
+  IF ~v.loaded THEN Strings.Copy("No file loaded.", statusMsg); RETURN END;
 
-  (* Build output path: strip extension, add .svg *)
   Strings.Copy(v.filePath, svgPath);
   i := Strings.Length(svgPath);
   WHILE (i > 0) & (svgPath[i-1] # '.') & (svgPath[i-1] # '/') DO DEC(i) END;
@@ -1051,7 +1185,6 @@ BEGIN
   IF f = NIL THEN Strings.Copy("Cannot create SVG.", statusMsg); RETURN END;
   Files.Set(rd, f, 0);
 
-  (* Auto-fit scale for SVG canvas using current rotation *)
   spanX := v.model.maxX - v.model.minX;
   spanY := v.model.maxY - v.model.minY;
   spanZ := v.model.maxZ - v.model.minZ;
@@ -1062,183 +1195,157 @@ BEGIN
   IF SvgW < SvgH THEN sc := FLT(SvgW) * 0.8 / span
   ELSE                sc := FLT(SvgH) * 0.8 / span
   END;
-  panX := FLT(SvgW DIV 2);
-  panY := FLT(SvgH DIV 2);
+  panX := FLT(SvgW DIV 2); panY := FLT(SvgH DIV 2);
 
-  WStr(rd, '<?xml version="1.0" encoding="UTF-8"?>');
-  Files.Write(rd, 10);
+  WStr(rd, '<?xml version="1.0" encoding="UTF-8"?>'); Files.Write(rd, 10);
   WStr(rd, '<svg xmlns="http://www.w3.org/2000/svg" width="');
   WInt(rd, SvgW); WStr(rd, '" height="'); WInt(rd, SvgH);
   WStr(rd, '" style="background:#111">'); Files.Write(rd, 10);
 
-  (* Project all atoms for this export *)
   drawN := 0;
   FOR i := 0 TO v.model.count-1 DO
     a := v.model.atoms[i];
     IF ~a.isHet OR v.showHet THEN
-      ax := a.x - v.model.cx; ay := a.y - v.model.cy; az := a.z - v.model.cz;
+      ax := a.x-v.model.cx; ay := a.y-v.model.cy; az := a.z-v.model.cz;
       MatApply(v.rot, ax, ay, az, rx, ry, rz);
-      px := FLOOR(rx * sc + panX);
-      py := FLOOR(-ry * sc + panY);
+      px := FLOOR(rx*sc+panX); py := FLOOR(-ry*sc+panY);
       IF (px >= 0) & (px < SvgW) & (py >= 0) & (py < SvgH) & (drawN < MaxDraw) THEN
-        drawBuf[drawN].z := rz; drawBuf[drawN].idx := i;
-        drawBuf[drawN].projX := px; drawBuf[drawN].projY := py;
-        INC(drawN)
+        drawBuf[drawN].z:=rz; drawBuf[drawN].idx:=i;
+        drawBuf[drawN].projX:=px; drawBuf[drawN].projY:=py; INC(drawN)
       END
     END
   END;
 
   IF v.renderMode # ModeBackbone THEN
     SortDraw(drawBuf, drawN);
-    IF drawN > 0 THEN
-      zMax := drawBuf[0].z; zMin := drawBuf[drawN-1].z
-    ELSE
-      zMax := 1.0; zMin := 0.0
-    END;
-    IF zMin >= zMax THEN zMin := zMax - 1.0 END
+    IF drawN > 0 THEN zMax:=drawBuf[0].z; zMin:=drawBuf[drawN-1].z
+    ELSE zMax:=1.0; zMin:=0.0 END;
+    IF zMin >= zMax THEN zMin:=zMax-1.0 END
   END;
 
   IF v.renderMode = ModeBackbone THEN
-    (* Collect z range over backbone atoms only *)
-    zMin := 1.0E30; zMax := -1.0E30;
+    zMin:=1.0E30; zMax:=-1.0E30;
     FOR j := 0 TO drawN-1 DO
-      i := drawBuf[j].idx; a := v.model.atoms[i];
+      i:=drawBuf[j].idx; a:=v.model.atoms[i];
       isBackbone := ((Strings.Pos("CA", a.name) >= 0) OR
-                     ((a.name[0] = 'P') & (a.name[1] = 0X))) & ~a.isHet;
+                     ((a.name[0]='P') & (a.name[1]=0X))) & ~a.isHet;
       IF isBackbone THEN
-        IF drawBuf[j].z < zMin THEN zMin := drawBuf[j].z END;
-        IF drawBuf[j].z > zMax THEN zMax := drawBuf[j].z END
+        IF drawBuf[j].z < zMin THEN zMin:=drawBuf[j].z END;
+        IF drawBuf[j].z > zMax THEN zMax:=drawBuf[j].z END
       END
     END;
-    IF zMin >= zMax THEN zMin := zMax - 1.0 END;
-
-    (* Emit backbone polylines per chain, in atom order *)
-    prevOK := FALSE; prevChain := 0X; prevPX := 0; prevPY := 0;
+    IF zMin >= zMax THEN zMin:=zMax-1.0 END;
+    prevOK:=FALSE; prevChain:=0X; prevPX:=0; prevPY:=0;
     FOR i := 0 TO v.model.count-1 DO
-      a := v.model.atoms[i];
+      a:=v.model.atoms[i];
       IF ~a.isHet OR v.showHet THEN
         isBackbone := ((Strings.Pos("CA", a.name) >= 0) OR
-                       ((a.name[0] = 'P') & (a.name[1] = 0X))) & ~a.isHet;
+                       ((a.name[0]='P') & (a.name[1]=0X))) & ~a.isHet;
         IF isBackbone THEN
-          ax := a.x - v.model.cx; ay := a.y - v.model.cy; az := a.z - v.model.cz;
+          ax:=a.x-v.model.cx; ay:=a.y-v.model.cy; az:=a.z-v.model.cz;
           MatApply(v.rot, ax, ay, az, rx, ry, rz);
-          px := FLOOR(rx * sc + panX);
-          py := FLOOR(-ry * sc + panY);
-          IF (px >= 0) & (px < SvgW) & (py >= 0) & (py < SvgH) THEN
+          px:=FLOOR(rx*sc+panX); py:=FLOOR(-ry*sc+panY);
+          IF (px>=0) & (px<SvgW) & (py>=0) & (py<SvgH) THEN
             AtomColorRGB(v, i, cr, cg, cb);
-            opac := 0.35 + 0.65 * DepthFactor(rz, zMin, zMax);
+            opac:=0.35+0.65*DepthFactor(rz, zMin, zMax);
             RGBToHex(cr, cg, cb, hex);
-            IF prevOK & (a.chainID = prevChain) THEN
-              WStr(rd, '<line x1="'); WInt(rd, prevPX);
-              WStr(rd, '" y1="'); WInt(rd, prevPY);
-              WStr(rd, '" x2="'); WInt(rd, px);
-              WStr(rd, '" y2="'); WInt(rd, py);
-              WStr(rd, '" stroke="'); WStr(rd, hex);
-              WStr(rd, '" stroke-width="1.5" opacity="');
-              WReal1(rd, opac); WStr(rd, '"/>'); Files.Write(rd, 10)
+            IF prevOK & (a.chainID=prevChain) THEN
+              WStr(rd,'<line x1="'); WInt(rd,prevPX);
+              WStr(rd,'" y1="'); WInt(rd,prevPY);
+              WStr(rd,'" x2="'); WInt(rd,px);
+              WStr(rd,'" y2="'); WInt(rd,py);
+              WStr(rd,'" stroke="'); WStr(rd,hex);
+              WStr(rd,'" stroke-width="1.5" opacity="');
+              WReal1(rd,opac); WStr(rd,'"/>'); Files.Write(rd,10)
             END;
-            WStr(rd, '<circle cx="'); WInt(rd, px);
-            WStr(rd, '" cy="'); WInt(rd, py);
-            WStr(rd, '" r="2" fill="'); WStr(rd, hex);
-            WStr(rd, '" opacity="'); WReal1(rd, opac);
-            WStr(rd, '"/>'); Files.Write(rd, 10);
-            prevPX := px; prevPY := py; prevChain := a.chainID; prevOK := TRUE
-          ELSE prevOK := FALSE
+            WStr(rd,'<circle cx="'); WInt(rd,px);
+            WStr(rd,'" cy="'); WInt(rd,py);
+            WStr(rd,'" r="2" fill="'); WStr(rd,hex);
+            WStr(rd,'" opacity="'); WReal1(rd,opac);
+            WStr(rd,'"/>'); Files.Write(rd,10);
+            prevPX:=px; prevPY:=py; prevChain:=a.chainID; prevOK:=TRUE
+          ELSE prevOK:=FALSE
           END
         END
       END
     END
 
   ELSIF v.renderMode = ModeBallStick THEN
-    (* Backbone sticks first (grey), then atoms front-to-back *)
-    prevOK := FALSE; prevChain := 0X;
+    prevOK:=FALSE; prevChain:=0X;
     FOR i := 0 TO v.model.count-1 DO
-      a := v.model.atoms[i];
+      a:=v.model.atoms[i];
       IF ~a.isHet THEN
-        isBackbone := (Strings.Pos("CA", a.name) >= 0) OR
-                      ((a.name[0] = 'P') & (a.name[1] = 0X));
+        isBackbone:=(Strings.Pos("CA",a.name)>=0) OR ((a.name[0]='P')&(a.name[1]=0X));
         IF isBackbone THEN
-          ax := a.x - v.model.cx; ay := a.y - v.model.cy; az := a.z - v.model.cz;
-          MatApply(v.rot, ax, ay, az, rx, ry, rz);
-          px := FLOOR(rx * sc + panX);
-          py := FLOOR(-ry * sc + panY);
-          IF (px >= 0) & (px < SvgW) & (py >= 0) & (py < SvgH) THEN
-            IF prevOK & (a.chainID = prevChain) THEN
-              WStr(rd, '<line x1="'); WInt(rd, prevPX);
-              WStr(rd, '" y1="'); WInt(rd, prevPY);
-              WStr(rd, '" x2="'); WInt(rd, px);
-              WStr(rd, '" y2="'); WInt(rd, py);
-              WStr(rd, '" stroke="#666" stroke-width="1"/>'); Files.Write(rd, 10)
+          ax:=a.x-v.model.cx; ay:=a.y-v.model.cy; az:=a.z-v.model.cz;
+          MatApply(v.rot,ax,ay,az,rx,ry,rz);
+          px:=FLOOR(rx*sc+panX); py:=FLOOR(-ry*sc+panY);
+          IF (px>=0)&(px<SvgW)&(py>=0)&(py<SvgH) THEN
+            IF prevOK & (a.chainID=prevChain) THEN
+              WStr(rd,'<line x1="'); WInt(rd,prevPX); WStr(rd,'" y1="'); WInt(rd,prevPY);
+              WStr(rd,'" x2="'); WInt(rd,px); WStr(rd,'" y2="'); WInt(rd,py);
+              WStr(rd,'" stroke="#666" stroke-width="1"/>'); Files.Write(rd,10)
             END;
-            prevPX := px; prevPY := py; prevChain := a.chainID; prevOK := TRUE
-          ELSE prevOK := FALSE
+            prevPX:=px; prevPY:=py; prevChain:=a.chainID; prevOK:=TRUE
+          ELSE prevOK:=FALSE
           END
         END
       END
     END;
     FOR j := drawN-1 TO 0 BY -1 DO
-      i := drawBuf[j].idx; px := drawBuf[j].projX; py := drawBuf[j].projY;
-      AtomColorRGB(v, i, cr, cg, cb);
-      RGBToHex(cr, cg, cb, hex);
-      opac := 0.4 + 0.6 * DepthFactor(drawBuf[j].z, zMin, zMax);
-      a := v.model.atoms[i];
-      IF a.element[0] = 'H' THEN r2 := 3 ELSE r2 := 5 END;
-      WStr(rd, '<circle cx="'); WInt(rd, px);
-      WStr(rd, '" cy="'); WInt(rd, py);
-      WStr(rd, '" r="'); WInt(rd, r2);
-      WStr(rd, '" fill="'); WStr(rd, hex);
-      WStr(rd, '" opacity="'); WReal1(rd, opac);
-      WStr(rd, '"/>'); Files.Write(rd, 10)
+      i:=drawBuf[j].idx; px:=drawBuf[j].projX; py:=drawBuf[j].projY;
+      AtomColorRGB(v,i,cr,cg,cb); RGBToHex(cr,cg,cb,hex);
+      opac:=0.4+0.6*DepthFactor(drawBuf[j].z,zMin,zMax);
+      a:=v.model.atoms[i];
+      IF a.element[0]='H' THEN r2:=3 ELSE r2:=5 END;
+      WStr(rd,'<circle cx="'); WInt(rd,px); WStr(rd,'" cy="'); WInt(rd,py);
+      WStr(rd,'" r="'); WInt(rd,r2); WStr(rd,'" fill="'); WStr(rd,hex);
+      WStr(rd,'" opacity="'); WReal1(rd,opac); WStr(rd,'"/>'); Files.Write(rd,10)
     END
 
-  ELSE (* ModeSpaceFill — draw back-to-front *)
+  ELSE (* ModeSpaceFill *)
     FOR j := drawN-1 TO 0 BY -1 DO
-      i := drawBuf[j].idx; px := drawBuf[j].projX; py := drawBuf[j].projY;
-      AtomColorRGB(v, i, cr, cg, cb);
-      RGBToHex(cr, cg, cb, hex);
-      opac := 0.5 + 0.5 * DepthFactor(drawBuf[j].z, zMin, zMax);
-      a := v.model.atoms[i];
-      IF    a.element[0]='H' THEN r2 := FLOOR(1.2  * sc)
-      ELSIF a.element[0]='C' THEN r2 := FLOOR(1.7  * sc)
-      ELSIF a.element[0]='N' THEN r2 := FLOOR(1.55 * sc)
-      ELSIF a.element[0]='O' THEN r2 := FLOOR(1.52 * sc)
-      ELSIF a.element[0]='S' THEN r2 := FLOOR(1.8  * sc)
-      ELSE                        r2 := FLOOR(1.7  * sc)
+      i:=drawBuf[j].idx; px:=drawBuf[j].projX; py:=drawBuf[j].projY;
+      AtomColorRGB(v,i,cr,cg,cb); RGBToHex(cr,cg,cb,hex);
+      opac:=0.5+0.5*DepthFactor(drawBuf[j].z,zMin,zMax);
+      a:=v.model.atoms[i];
+      IF    a.element[0]='H' THEN r2:=FLOOR(1.2 *sc)
+      ELSIF a.element[0]='C' THEN r2:=FLOOR(1.7 *sc)
+      ELSIF a.element[0]='N' THEN r2:=FLOOR(1.55*sc)
+      ELSIF a.element[0]='O' THEN r2:=FLOOR(1.52*sc)
+      ELSIF a.element[0]='S' THEN r2:=FLOOR(1.8 *sc)
+      ELSE                        r2:=FLOOR(1.7 *sc)
       END;
-      IF r2 < 2 THEN r2 := 2 END;
-      WStr(rd, '<circle cx="'); WInt(rd, px);
-      WStr(rd, '" cy="'); WInt(rd, py);
-      WStr(rd, '" r="'); WInt(rd, r2);
-      WStr(rd, '" fill="'); WStr(rd, hex);
-      WStr(rd, '" opacity="'); WReal1(rd, opac);
-      WStr(rd, '"/>'); Files.Write(rd, 10)
+      IF r2 < 2 THEN r2:=2 END;
+      WStr(rd,'<circle cx="'); WInt(rd,px); WStr(rd,'" cy="'); WInt(rd,py);
+      WStr(rd,'" r="'); WInt(rd,r2); WStr(rd,'" fill="'); WStr(rd,hex);
+      WStr(rd,'" opacity="'); WReal1(rd,opac); WStr(rd,'"/>'); Files.Write(rd,10)
     END
   END;
 
-  WStr(rd, "</svg>"); Files.Write(rd, 10);
-  Files.Register(f);
-  Files.Close(f);
+  WStr(rd,"</svg>"); Files.Write(rd,10);
+  Files.Register(f); Files.Close(f);
   Strings.Copy("SVG saved: ", statusMsg);
   Strings.Append(svgPath, statusMsg)
 END SaveSVG;
 
-(* ════════════════════════════════════════════════════════════════
-   Built-in help popup
-   ════════════════════════════════════════════════════════════════ *)
+(* ================================================================== *)
+(*  Help popup                                                         *)
+(* ================================================================== *)
 
 PROCEDURE HelpLine(i: INTEGER; VAR s: ARRAY OF CHAR);
 BEGIN
   CASE i OF
-    0: Strings.Copy("pdbview  —  Terminal PDB Structure Viewer", s)
-  | 1: Strings.Copy("", s)
-  | 2: Strings.Copy("# Rotation", s)
-  | 3: Strings.Copy("  Arrow keys         Rotate around Y / X axis", s)
-  | 4: Strings.Copy("  Shift+Up/Down      Rotate around Z axis", s)
-  | 5: Strings.Copy("  LMB drag           Rotate (with inertia)", s)
-  | 6: Strings.Copy("", s)
-  | 7: Strings.Copy("# Zoom & Pan", s)
-  | 8: Strings.Copy("  + / -              Zoom in / out", s)
-  | 9: Strings.Copy("  Scroll wheel       Zoom in / out", s)
+    0:  Strings.Copy("pdbview  --  Terminal Structure Viewer", s)
+  | 1:  Strings.Copy("", s)
+  | 2:  Strings.Copy("# Rotation", s)
+  | 3:  Strings.Copy("  Arrow keys         Rotate around Y / X axis", s)
+  | 4:  Strings.Copy("  Shift+Up/Down      Rotate around Z axis", s)
+  | 5:  Strings.Copy("  LMB drag           Rotate (with inertia)", s)
+  | 6:  Strings.Copy("", s)
+  | 7:  Strings.Copy("# Zoom & Pan", s)
+  | 8:  Strings.Copy("  + / -              Zoom in / out", s)
+  | 9:  Strings.Copy("  Scroll wheel       Zoom in / out", s)
   | 10: Strings.Copy("  W A S D            Pan view", s)
   | 11: Strings.Copy("  RMB drag           Pan view", s)
   | 12: Strings.Copy("", s)
@@ -1250,52 +1357,56 @@ BEGIN
   | 18: Strings.Copy("# Colour Scheme  (C cycles)", s)
   | 19: Strings.Copy("  Chain              One colour per chain", s)
   | 20: Strings.Copy("  CPK / Element      C=grey N=blue O=red S=yellow", s)
-  | 21: Strings.Copy("  B-factor           Blue (low) → Red (high)", s)
+  | 21: Strings.Copy("  B-factor           Blue (low) -> Red (high)", s)
   | 22: Strings.Copy("  Secondary          Helix=red  Sheet=yellow  Coil=white", s)
   | 23: Strings.Copy("  B                  Toggle B-factor colouring", s)
   | 24: Strings.Copy("", s)
-  | 25: Strings.Copy("# Picking", s)
-  | 26: Strings.Copy("  LMB click          Pick atom (shows residue / B / SS)", s)
-  | 27: Strings.Copy("  LMB click (2nd)    Measure distance to 2nd atom", s)
-  | 28: Strings.Copy("  F                  Centre view on picked atom", s)
-  | 29: Strings.Copy("  Esc                Clear picked atoms", s)
-  | 30: Strings.Copy("", s)
-  | 31: Strings.Copy("# Files & Models", s)
-  | 32: Strings.Copy("  Ctrl+O             Open PDB file", s)
-  | 33: Strings.Copy("  F5                 Reload current file", s)
-  | 34: Strings.Copy("  H                  Toggle HETATM visibility", s)
-  | 35: Strings.Copy("  V                  Save SVG snapshot", s)
-  | 36: Strings.Copy("  PgUp / PgDn        Previous / next model", s)
-  | 37: Strings.Copy("  R                  Reset view", s)
-  | 38: Strings.Copy("  Ctrl+Q / Q         Quit", s)
+  | 25: Strings.Copy("# Rendering (Space Fill)", s)
+  | 26: Strings.Copy("  L                  Toggle diffuse lighting", s)
+  | 27: Strings.Copy("  O                  Toggle ambient occlusion", s)
+  | 28: Strings.Copy("", s)
+  | 29: Strings.Copy("# Depth of Field  (all modes)", s)
+  | 30: Strings.Copy("  Z                  Toggle DoF blur", s)
+  | 31: Strings.Copy("  [ ]                Move focus plane", s)
+  | 32: Strings.Copy("  { }                Shrink / grow focus range", s)
+  | 33: Strings.Copy("", s)
+  | 34: Strings.Copy("# Picking", s)
+  | 35: Strings.Copy("  LMB click          Pick atom (residue / B / SS)", s)
+  | 36: Strings.Copy("  LMB click (2nd)    Measure distance", s)
+  | 37: Strings.Copy("  F                  Centre on picked atom", s)
+  | 38: Strings.Copy("  Esc                Clear picks", s)
+  | 39: Strings.Copy("", s)
+  | 40: Strings.Copy("# Files & Models", s)
+  | 41: Strings.Copy("  Ctrl+O             Open file (.pdb .cif .sdf .xyz)", s)
+  | 42: Strings.Copy("  F5                 Reload current file", s)
+  | 43: Strings.Copy("  H                  Toggle HETATM visibility", s)
+  | 44: Strings.Copy("  V                  Save SVG snapshot", s)
+  | 45: Strings.Copy("  PgUp / PgDn        Previous / next model/frame", s)
+  | 46: Strings.Copy("  R                  Reset view", s)
+  | 47: Strings.Copy("  Ctrl+Q / Q         Quit", s)
   ELSE  s[0] := 0X
   END
 END HelpLine;
 
 PROCEDURE DrawHelpWin(v: TUI.View);
-VAR row, contentH: INTEGER;
-    line: ARRAY 64 OF CHAR;
-    fg, li: INTEGER;
+VAR row, contentH: INTEGER; line: ARRAY 64 OF CHAR; fg, li: INTEGER;
 BEGIN
   WITH v: TUI.WindowRec DO
     TUI.FillRect(v.x+1, v.y+1, v.w-2, v.h-2, ' ', TUI.White, TUI.Black);
     TUI.DrawBox(v.x, v.y, v.w, v.h, TUI.White, TUI.Blue);
-    TUI.PutStr(v.x + (v.w - 8) DIV 2, v.y, " Help ", TUI.Yellow, TUI.Blue);
+    TUI.PutStr(v.x+(v.w-8) DIV 2, v.y, " Help ", TUI.Yellow, TUI.Blue);
     contentH := v.h - 3;
-    FOR row := 0 TO contentH - 1 DO
+    FOR row := 0 TO contentH-1 DO
       li := helpScroll + row;
       IF li <= HelpN THEN
         HelpLine(li, line);
         IF line[0] = '#' THEN
           fg := TUI.Cyan;
-          Strings.Extract(line, 2, Strings.Length(line) - 2, line)
-        ELSIF line[0] = 0X THEN
-          fg := TUI.White
-        ELSE
-          fg := TUI.White
+          Strings.Extract(line, 2, Strings.Length(line)-2, line)
+        ELSE fg := TUI.White
         END;
         IF line[0] # 0X THEN
-          TUI.PutStr(v.x + 2, v.y + 1 + row, line, fg, TUI.Black)
+          TUI.PutStr(v.x+2, v.y+1+row, line, fg, TUI.Black)
         END
       END
     END;
@@ -1310,78 +1421,62 @@ VAR ev: TUI.Event; ch: CHAR;
     savedDesktop: TUI.View; savedFocus: TUI.View;
     dw, dh, dx, dy, contentH, maxScroll: INTEGER;
 BEGIN
-  savedDesktop := TUI.Desktop;
-  savedFocus   := TUI.Focused;
-  TUI.Desktop  := NIL;
-  TUI.Focused  := NIL;
-  helpScroll   := 0;
-
-  dw := 62; dh := 24;
-  IF TUI.Cols - 4 < dw THEN dw := TUI.Cols - 4 END;
-  IF TUI.Rows - 4 < dh THEN dh := TUI.Rows - 4 END;
+  savedDesktop := TUI.Desktop; savedFocus := TUI.Focused;
+  TUI.Desktop := NIL; TUI.Focused := NIL; helpScroll := 0;
+  dw := 62; dh := 26;
+  IF TUI.Cols-4 < dw THEN dw := TUI.Cols-4 END;
+  IF TUI.Rows-4 < dh THEN dh := TUI.Rows-4 END;
   IF dw < 40 THEN dw := 40 END;
   IF dh < 10 THEN dh := 10 END;
-  dx := (TUI.Cols - dw) DIV 2 + 1;
-  dy := (TUI.Rows - dh) DIV 2 + 1;
-  contentH := dh - 3;
-
+  dx := (TUI.Cols-dw) DIV 2+1; dy := (TUI.Rows-dh) DIV 2+1;
+  contentH := dh-3;
   NEW(helpWin);
-  helpWin.x := dx; helpWin.y := dy; helpWin.w := dw; helpWin.h := dh;
-  helpWin.title[0] := 0X; helpWin.moveable := FALSE;
-  helpWin.draw := DrawHelpWin; helpWin.handle := NIL;
-  helpWin.next := NIL; helpWin.child := NIL;
-  helpWin.focused := FALSE; helpWin.alwaysOnTop := FALSE;
+  helpWin.x:=dx; helpWin.y:=dy; helpWin.w:=dw; helpWin.h:=dh;
+  helpWin.title[0]:=0X; helpWin.moveable:=FALSE;
+  helpWin.draw:=DrawHelpWin; helpWin.handle:=NIL;
+  helpWin.next:=NIL; helpWin.child:=NIL;
+  helpWin.focused:=FALSE; helpWin.alwaysOnTop:=FALSE;
   TUI.AddView(helpWin);
-
   REPEAT
     TUI.ClearBack(TUI.White, TUI.Black);
-    TUI.DrawAll();
-    TUI.Flush();
+    TUI.DrawAll(); TUI.Flush();
     TUI.WaitEvent(ev);
     IF ev.kind = TUI.EvKey THEN
       ch := ev.key;
       maxScroll := HelpN - contentH + 1;
       IF maxScroll < 0 THEN maxScroll := 0 END;
-      IF (ch = TUI.KEsc) OR (ch = 'q') OR (ch = 'Q') OR
-         (ch = TUI.KEnter) OR (ch = ' ') THEN
-        helpScroll := -1   (* sentinel to exit *)
-      ELSIF ch = TUI.KUp THEN
-        IF helpScroll > 0 THEN DEC(helpScroll) END
-      ELSIF ch = TUI.KDown THEN
-        IF helpScroll < maxScroll THEN INC(helpScroll) END
-      ELSIF ch = TUI.KPgUp THEN
-        DEC(helpScroll, contentH);
-        IF helpScroll < 0 THEN helpScroll := 0 END
-      ELSIF ch = TUI.KPgDn THEN
+      IF (ch=TUI.KEsc) OR (ch='q') OR (ch='Q') OR
+         (ch=TUI.KEnter) OR (ch=' ') THEN
+        helpScroll := -1
+      ELSIF ch=TUI.KUp   THEN IF helpScroll>0 THEN DEC(helpScroll) END
+      ELSIF ch=TUI.KDown THEN IF helpScroll<maxScroll THEN INC(helpScroll) END
+      ELSIF ch=TUI.KPgUp THEN
+        DEC(helpScroll, contentH); IF helpScroll<0 THEN helpScroll:=0 END
+      ELSIF ch=TUI.KPgDn THEN
         INC(helpScroll, contentH);
-        IF helpScroll > maxScroll THEN helpScroll := maxScroll END
+        IF helpScroll>maxScroll THEN helpScroll:=maxScroll END
       END
     ELSIF ev.kind = TUI.EvMouse THEN
-      maxScroll := HelpN - contentH + 1;
-      IF maxScroll < 0 THEN maxScroll := 0 END;
-      IF ev.mb = 64 THEN
-        IF helpScroll > 0 THEN DEC(helpScroll) END
-      ELSIF ev.mb = 65 THEN
-        IF helpScroll < maxScroll THEN INC(helpScroll) END
+      maxScroll := HelpN-contentH+1;
+      IF maxScroll<0 THEN maxScroll:=0 END;
+      IF ev.mb=64 THEN IF helpScroll>0 THEN DEC(helpScroll) END
+      ELSIF ev.mb=65 THEN IF helpScroll<maxScroll THEN INC(helpScroll) END
       END
-    ELSIF ev.kind = TUI.EvResize THEN
-      TUI.InvalidateFront()
+    ELSIF ev.kind = TUI.EvResize THEN TUI.InvalidateFront()
     END
   UNTIL helpScroll < 0;
-
-  TUI.Desktop := savedDesktop;
-  TUI.SetFocus(savedFocus)
+  TUI.Desktop := savedDesktop; TUI.SetFocus(savedFocus)
 END ShowHelp;
 
-(* ════════════════════════════════════════════════════════════════
-   Menu command handler
-   ════════════════════════════════════════════════════════════════ *)
+(* ================================================================== *)
+(*  Menu command handler                                               *)
+(* ================================================================== *)
 
 PROCEDURE OnMenuCmd(cmd: INTEGER);
 VAR path: ARRAY 1024 OF CHAR; ok: BOOLEAN;
 BEGIN
   IF cmd = CmdOpen THEN
-    ok := FileDialog.Show("Open PDB File", "", ".pdb", path);
+    ok := FileDialog.Show("Open Structure", "", ".pdb;.cif;.sdf;.mol;.xyz", path);
     IF ok THEN LoadPDB(path, 1) END
   ELSIF cmd = CmdReload THEN
     IF vw.loaded THEN LoadPDB(vw.filePath, vw.modelNo)
@@ -1396,7 +1491,7 @@ BEGIN
   ELSIF cmd = CmdColSS    THEN vw.colourScheme := ColourSecStr;  vw.sceneDirty := TRUE
   ELSIF cmd = CmdTogHet   THEN vw.showHet := ~vw.showHet; vw.sceneDirty := TRUE
   ELSIF cmd = CmdSaveSVG  THEN SaveSVG(vw)
-  ELSIF cmd = CmdReset THEN
+  ELSIF cmd = CmdReset    THEN
     ResetView(vw); vw.inertDX:=0.0; vw.inertDY:=0.0; vw.inertDZ:=0.0;
     vw.pickedAtom:=-1; vw.pickedAtom2:=-1; vw.sceneDirty:=TRUE
   ELSIF cmd = CmdNextModel THEN
@@ -1408,9 +1503,9 @@ BEGIN
   TUI.SetFocus(vw)
 END OnMenuCmd;
 
-(* ════════════════════════════════════════════════════════════════
-   Menu construction
-   ════════════════════════════════════════════════════════════════ *)
+(* ================================================================== *)
+(*  Menu construction                                                  *)
+(* ================================================================== *)
 
 PROCEDURE BuildMenus;
 BEGIN
@@ -1446,9 +1541,9 @@ BEGIN
   TUI.AddView(sline)
 END BuildMenus;
 
-(* ════════════════════════════════════════════════════════════════
-   Main
-   ════════════════════════════════════════════════════════════════ *)
+(* ================================================================== *)
+(*  Main                                                               *)
+(* ================================================================== *)
 
 VAR ev: TUI.Event; ch: CHAR; arg, argTmp: ARRAY 1024 OF CHAR; argI, argJ: INTEGER;
 
@@ -1457,22 +1552,24 @@ BEGIN
   running := TRUE; statusMsg[0] := 0X;
 
   NEW(vw);
-  vw.x := 1; vw.y := 2; vw.w := TUI.Cols; vw.h := TUI.Rows-2;
-  vw.title[0] := 0X; vw.moveable := FALSE;
-  vw.draw := DrawViewer; vw.handle := HandleViewer;
-  vw.next := NIL; vw.child := NIL;
-  vw.focused := FALSE; vw.alwaysOnTop := FALSE;
-  vw.loaded := FALSE; vw.filePath[0] := 0X; vw.modelNo := 1;
-  vw.renderMode := ModeBackbone; vw.colourScheme := ColourChain;
-  vw.showHet := FALSE;
-  vw.drawN := 0; vw.sceneDirty := TRUE;
-  vw.inertDX := 0.0; vw.inertDY := 0.0; vw.inertDZ := 0.0; vw.inertOn := FALSE;
-  vw.pickedAtom := -1; vw.pickedAtom2 := -1;
-  vw.dragActive := FALSE; vw.dragLastX := 0; vw.dragLastY := 0;
-  vw.rotDragActive := FALSE; vw.rotLastX := 0; vw.rotLastY := 0; vw.lmbMoved := FALSE;
-  vw.chainCount := 0; vw.residueCount := 0;
+  vw.x:=1; vw.y:=2; vw.w:=TUI.Cols; vw.h:=TUI.Rows-2;
+  vw.title[0]:=0X; vw.moveable:=FALSE;
+  vw.draw:=DrawViewer; vw.handle:=HandleViewer;
+  vw.next:=NIL; vw.child:=NIL;
+  vw.focused:=FALSE; vw.alwaysOnTop:=FALSE;
+  vw.loaded:=FALSE; vw.filePath[0]:=0X; vw.modelNo:=1;
+  vw.renderMode:=ModeBackbone; vw.colourScheme:=ColourChain;
+  vw.showHet:=FALSE;
+  vw.drawN:=0; vw.sceneDirty:=TRUE;
+  vw.inertDX:=0.0; vw.inertDY:=0.0; vw.inertDZ:=0.0; vw.inertOn:=FALSE;
+  vw.pickedAtom:=-1; vw.pickedAtom2:=-1;
+  vw.dragActive:=FALSE; vw.dragLastX:=0; vw.dragLastY:=0;
+  vw.rotDragActive:=FALSE; vw.rotLastX:=0; vw.rotLastY:=0; vw.lmbMoved:=FALSE;
+  vw.chainCount:=0; vw.residueCount:=0;
+  vw.lighting:=TRUE; vw.ao:=TRUE; vw.dof:=FALSE;
+  vw.dofFocus:=0.0; vw.dofRange:=8.0; vw.aoDirty:=TRUE;
   MatIdentity(vw.rot);
-  vw.scale := 4.0; vw.panX := FLT(CanvasW)/2.0; vw.panY := FLT(CanvasH)/2.0;
+  vw.scale:=4.0; vw.panX:=FLT(CanvasW)/2.0; vw.panY:=FLT(CanvasH)/2.0;
 
   BuildMenus();
   TUI.AddView(vw); TUI.SetFocus(vw);
@@ -1503,7 +1600,7 @@ BEGIN
       vw.inertDZ := vw.inertDZ * InertDecay;
       IF (ABS(vw.inertDX) < InertCutoff) & (ABS(vw.inertDY) < InertCutoff) &
          (ABS(vw.inertDZ) < InertCutoff) THEN
-        vw.inertOn := FALSE; vw.inertDX := 0.0; vw.inertDY := 0.0; vw.inertDZ := 0.0
+        vw.inertOn:=FALSE; vw.inertDX:=0.0; vw.inertDY:=0.0; vw.inertDZ:=0.0
       END;
       vw.sceneDirty := TRUE
     END;
@@ -1544,9 +1641,10 @@ BEGIN
     ELSIF ev.kind = TUI.EvMouse THEN
       IF ~TUI.Dispatch(ev) THEN END
     ELSIF ev.kind = TUI.EvResize THEN
-      sline.y := TUI.Rows; sline.w := TUI.Cols; mbar.w := TUI.Cols;
-      vw.w := TUI.Cols; vw.h := TUI.Rows-2;
-      RecenterView(vw); vw.sceneDirty := TRUE; TUI.InvalidateFront()
+      sline.y:=TUI.Rows; sline.w:=TUI.Cols; mbar.w:=TUI.Cols;
+      vw.w:=TUI.Cols; vw.h:=TUI.Rows-2;
+      RecenterView(vw); vw.sceneDirty:=TRUE;
+      Terminal.InvalidateBuf(); TUI.InvalidateFront()
     END
   END;
 
