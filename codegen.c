@@ -2753,6 +2753,9 @@ void codegen(Node *module, FILE *out, int is_main, const char *srcfile) {
         emit(g,"#define _GFX_W 240\n");
         emit(g,"#define _GFX_H 100\n");
         emit(g,"static int _gfx_buf[_GFX_H][_GFX_W];\n");
+        emit(g,"static int _gfx_prev[_GFX_H][_GFX_W];\n");
+        emit(g,"static int _gfx_dirty = 1;\n");
+        emit(g,"static void Terminal_InvalidateBuf(void) { _gfx_dirty = 1; }\n");
         emit(g,"static void Terminal_ClearBuf(void) {\n");
         emit(g,"    for(int r=0;r<_GFX_H;r++) for(int c=0;c<_GFX_W;c++) _gfx_buf[r][c]=0;\n");
         emit(g,"}\n");
