@@ -59,6 +59,7 @@ PROCEDURE AddChild*(parent: Node; child: Node);
 VAR p: Node;
 BEGIN
   child.parent := parent;
+  child.nextSibling := NIL;
   IF parent.firstChild = NIL THEN
     parent.firstChild := child;
   ELSE
@@ -238,21 +239,25 @@ BEGIN
 END FindNodeByName;
 
 PROCEDURE RerootAtNode*(VAR t: Tree; targetNode: Node);
-VAR p, c: Node; oldBranchLength: REAL;
+VAR c, p, grandparent: Node; oldBranchLength, nextBL: REAL;
 BEGIN
   IF (t = NIL) OR (targetNode = NIL) OR (targetNode = t.root) THEN RETURN END;
-    
+
   c := targetNode;
   oldBranchLength := c.branchLength;
+  grandparent := c.parent;
 
-  WHILE c.parent # NIL DO
-    p := c.parent;
+  WHILE grandparent # NIL DO
+    p := grandparent;
+    grandparent := p.parent;
+    nextBL := p.branchLength;
     RemoveChild(p, c);
     AddChild(c, p);
     p.branchLength := oldBranchLength;
-    oldBranchLength := c.branchLength;
+    oldBranchLength := nextBL;
+    c := p;
   END;
-    
+
   targetNode.parent := NIL;
   targetNode.branchLength := 0.0;
   t.root := targetNode;
@@ -309,7 +314,7 @@ BEGIN
 END;
 END FarthestLeaf;
 
-PROCEDURE FindSplitPoint*(startNode, totalDist: Node; VAR p, c: Node; VAR pos, d1, d2: REAL);
+PROCEDURE FindSplitPoint*(startNode: Node; totalDist: REAL; VAR p, c: Node; VAR pos, d1, d2: REAL);
 VAR curc: Node;
 BEGIN
   pos := 0.0;
@@ -373,7 +378,7 @@ BEGIN
     END;
   END;
 
-  (* Now we have the correct 'c' and 'p' where the split occurs *);
+  (* Now we have the correct 'c' and 'p' where the split occurs *)
   d1 := (totalDist / 2.0) - pos;
   d2 := (pos + c.branchLength) - (totalDist / 2.0);
         
@@ -381,9 +386,9 @@ BEGIN
   RemoveChild(p, c);
   AddChild(p, newRoot);
         
-  (* Corrected Branch Lengths: 
-           d1 is the distance from the leaf-side to the split 
-           d2 is the distance from the root-side to the split *);
+  (* Corrected Branch Lengths:
+           d1 is the distance from the leaf-side to the split
+           d2 is the distance from the root-side to the split *)
   newRoot.branchLength := d2;
   AddChild(newRoot, c);
   c.branchLength := d1;

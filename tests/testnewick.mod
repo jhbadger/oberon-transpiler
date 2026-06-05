@@ -108,7 +108,7 @@ BEGIN
   Out.String("Running Test: Midpoint Rooting... ");
   (* Longest path is A to C, length 10+2 = 12. Midpoint is at dist 6 from A. *)
   (* This will split the A branch (length 10) into two branches of length 6 and 4. *)
-  testStr := "((A:10,B:2):2,C:2);";
+  testStr := "((A:10,B:2),C:2);";
   t := Newick.Parse(testStr);
 
   Newick.MidpointRoot(t);
