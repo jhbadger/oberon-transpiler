@@ -315,7 +315,7 @@ depth: INTEGER; accBL: REAL;
 totalDepth: INTEGER; totalBL: REAL;
 cW, cH, margin: INTEGER;
 isPhylogram: BOOLEAN);
-VAR i: INTEGER; c: Newick.Node;
+VAR i, j: INTEGER; c: Newick.Node;
 firstChildY, lastChildY, sumY, cnt: INTEGER;
 px, py: INTEGER;
 BEGIN
@@ -360,9 +360,9 @@ BEGIN
           lastChildY := v.nodes[j].py;
           INC(sumY, v.nodes[j].py); INC(cnt)
         END
-      END
+      END;
+      c := c.nextSibling
     END;
-    c := c.nextSibling;
   IF cnt > 0 THEN py := sumY DIV cnt ELSE py := cH DIV 2 END;
 
   IF isPhylogram & (totalBL > 0.0) THEN
@@ -392,6 +392,8 @@ VAR i, childLeaves, totalLeaves: INTEGER;
 c: Newick.Node;
 anglePer, a, childR: REAL;
 px, py: INTEGER;
+nl, ll, nl2, ll2: INTEGER;
+aStart: REAL;
 BEGIN
   IF n = NIL THEN RETURN END;
   i := v.nNodes; v.nNodes := v.nNodes + 1;
@@ -414,33 +416,26 @@ BEGIN
     totalLeaves := 0;
     c := n.firstChild;
     WHILE c # NIL DO
-      VAR nl, ll: INTEGER;
-      BEGIN nl:=0; ll:=0; CountNodes(c, nl, ll); INC(totalLeaves, ll) END;
+      nl:=0; ll:=0; CountNodes(c, nl, ll); INC(totalLeaves, ll);
       c := c.nextSibling
     END;
     IF totalLeaves < 1 THEN totalLeaves := 1 END;
     anglePer := (angleEnd - angleStart) / FLT(totalLeaves);
+    aStart := angleStart;
     c := n.firstChild;
-    VAR aStart: REAL;
-    BEGIN
-      aStart := angleStart;
-      WHILE c # NIL DO
-        VAR nl2, ll2: INTEGER;
-        BEGIN
-          nl2:=0; ll2:=0; CountNodes(c, nl2, ll2);
-          IF ll2 < 1 THEN ll2 := 1 END;
-          IF isPhylogram & (totalBL > 0.0) THEN
-            childR := (accBL + n.branchLength + c.branchLength) / totalBL * FLT(cx)
-          ELSE
-            childR := r + FLT(cx) / FLT(v.maxDepth + 1)
-          END;
-          LayoutRadialRecurse(v, c, cx, cy, childR,
-          aStart, aStart + anglePer * FLT(ll2),
-          depth+1, accBL+n.branchLength, totalBL, isPhylogram);
-          aStart := aStart + anglePer * FLT(ll2)
-        END;
-        c := c.nextSibling
-      END
+    WHILE c # NIL DO
+      nl2:=0; ll2:=0; CountNodes(c, nl2, ll2);
+      IF ll2 < 1 THEN ll2 := 1 END;
+      IF isPhylogram & (totalBL > 0.0) THEN
+        childR := (accBL + n.branchLength + c.branchLength) / totalBL * FLT(cx)
+      ELSE
+        childR := r + FLT(cx) / FLT(v.maxDepth + 1)
+      END;
+      LayoutRadialRecurse(v, c, cx, cy, childR,
+      aStart, aStart + anglePer * FLT(ll2),
+      depth+1, accBL+n.branchLength, totalBL, isPhylogram);
+      aStart := aStart + anglePer * FLT(ll2);
+      c := c.nextSibling
     END
   END
 END LayoutRadialRecurse;
@@ -451,6 +446,7 @@ END LayoutRadialRecurse;
 
 PROCEDURE BuildLayout(v: ViewerWin);
 VAR cW, cH, margin: INTEGER;
+i, col: INTEGER; c: Newick.Node;
 BEGIN
   v.nNodes := 0;
   layoutLeafIdx := 0;
@@ -476,15 +472,11 @@ BEGIN
   END;
 
   (* Assign clade colours from root's children *)
-  VAR i, col: INTEGER; c: Newick.Node;
-  BEGIN
-    (* default all to 0 *)
-    FOR i := 0 TO v.nNodes-1 DO v.nodes[i].cladeCol := 0 END;
-    c := v.tree.root.firstChild; col := 0;
-    WHILE c # NIL DO
-      AssignCladeColors(c, col, v);
-      INC(col); c := c.nextSibling
-    END
+  FOR i := 0 TO v.nNodes-1 DO v.nodes[i].cladeCol := 0 END;
+  c := v.tree.root; c := c.firstChild; col := 0;
+  WHILE c # NIL DO
+    AssignCladeColors(c, col, v);
+    INC(col); c := c.nextSibling
   END
 END BuildLayout;
 
@@ -533,6 +525,7 @@ col: INTEGER;
 c: Newick.Node;
 node: Newick.Node;
 cx0, cy0, cx1, cy1: INTEGER;
+mx, my: INTEGER; blBuf: ARRAY 16 OF CHAR;
 BEGIN
   cx0 := v.x+1; cx1 := v.x+v.w-2;
   cy0 := (v.y+1)*2; cy1 := (v.y+v.h-2)*2+1;
@@ -597,17 +590,14 @@ BEGIN
       (* label midpoint of branch *)
       FOR j := 0 TO v.nNodes-1 DO
         IF v.nodes[j].node = node.parent THEN
-          VAR mx, my: INTEGER; blBuf: ARRAY 16 OF CHAR;
-          BEGIN
-            CanvasToScreen(v, (v.nodes[i].px + v.nodes[j].px) DIV 2,
-            (v.nodes[i].py + v.nodes[j].py) DIV 2,
-            mx, my);
-            IF (mx > 0) & (my > 0) & (mx < CanvasW) & (my < CanvasH DIV 2) THEN
-              Strings.RealToStr(node.branchLength, blBuf);
-              blBuf[5] := 0X; (* truncate *)
-              Terminal.Goto(mx+1, my DIV 2 + 1);
-              Out.String(blBuf)
-            END
+          CanvasToScreen(v, (v.nodes[i].px + v.nodes[j].px) DIV 2,
+          (v.nodes[i].py + v.nodes[j].py) DIV 2,
+          mx, my);
+          IF (mx > 0) & (my > 0) & (mx < CanvasW) & (my < CanvasH DIV 2) THEN
+            Strings.RealToStr(node.branchLength, blBuf);
+            blBuf[5] := 0X; (* truncate *)
+            Terminal.Goto(mx+1, my DIV 2 + 1);
+            Out.String(blBuf)
           END
         END
       END
@@ -837,6 +827,7 @@ node: Newick.Node;
 p: Newick.Node;
 ok: BOOLEAN;
 lbl: ARRAY 64 OF CHAR;
+blBuf: ARRAY 16 OF CHAR;
 BEGIN
   IF ~v.loaded THEN Strings.Copy("No file loaded.", statusMsg); RETURN END;
 
@@ -920,16 +911,13 @@ BEGIN
     IF v.showBL & (node.branchLength > 0.0) & (node.parent # NIL) THEN
       FOR j := 0 TO n-1 DO
         IF v.nodes[j].node = node.parent THEN
-          VAR blBuf: ARRAY 16 OF CHAR;
-          BEGIN
-            Strings.RealToStr(node.branchLength, blBuf); blBuf[6] := 0X;
-            WStr(rd, '<text x="');
-            WInt(rd, (pxArr[i]+pxArr[j]) DIV 2);
-            WStr(rd, '" y="');
-            WInt(rd, (pyArr[i]+pyArr[j]) DIV 2 - 2);
-            WStr(rd, '" style="font-size:8px;fill:#888">');
-            WStr(rd, blBuf); WStr(rd, '</text>'); Files.Write(rd, 10)
-          END
+          Strings.RealToStr(node.branchLength, blBuf); blBuf[6] := 0X;
+          WStr(rd, '<text x="');
+          WInt(rd, (pxArr[i]+pxArr[j]) DIV 2);
+          WStr(rd, '" y="');
+          WInt(rd, (pyArr[i]+pyArr[j]) DIV 2 - 2);
+          WStr(rd, '" style="font-size:8px;fill:#888">');
+          WStr(rd, blBuf); WStr(rd, '</text>'); Files.Write(rd, 10)
         END
       END
     END
