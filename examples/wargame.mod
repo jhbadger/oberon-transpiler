@@ -1094,6 +1094,8 @@ VAR c, r: INTEGER;
     label: CHAR;
 BEGIN
   (* Column labels *)
+  TUI.PutCell(MAPX - 2, MAPY - 1, ' ', TUI.Black, TUI.Black);
+  TUI.PutCell(MAPX - 1, MAPY - 1, ' ', TUI.Black, TUI.Black);
   FOR c := 0 TO GRID_W - 1 DO
     IF c < 10 THEN label := CHR(ORD('0') + c)
     ELSE           label := CHR(ORD('A') + c - 10)
@@ -1101,6 +1103,10 @@ BEGIN
     TUI.PutCell(MAPX + c * 2, MAPY - 1, label, TUI.Yellow, TUI.Black);
     TUI.PutCell(MAPX + c * 2 + 1, MAPY - 1, ' ', TUI.Yellow, TUI.Black)
   END;
+  TUI.PutCell(MAPX + GRID_W * 2,     MAPY - 1, ' ', TUI.Black, TUI.Black);
+  TUI.PutCell(MAPX + GRID_W * 2 + 1, MAPY - 1, ' ', TUI.Black, TUI.Black);
+  TUI.PutCell(MAPX + GRID_W * 2 + 2, MAPY - 1, ' ', TUI.Black, TUI.Black);
+  TUI.PutCell(MAPX + GRID_W * 2 + 3, MAPY - 1, ' ', TUI.Black, TUI.Black);
 
   (* Row labels + cells *)
   FOR r := 0 TO GRID_H - 1 DO

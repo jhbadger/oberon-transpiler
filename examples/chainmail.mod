@@ -14,6 +14,7 @@ MODULE Chainmail;
  *   Enter       – select unit / confirm move or shot
  *   Esc         – cancel selection
  *   N           – end current phase
+ *   V           – toggle verbose AI (step through each Blue move)
  *   Q / Ctrl-Q  – quit
  *)
 
@@ -152,6 +153,7 @@ VAR
   unitGlyph : ARRAY NTYPES OF CHAR;
 
   fantasyMode  : BOOLEAN;  (* game-wide: fantasy supplement enabled *)
+  verboseAI    : BOOLEAN;  (* step-through mode: redraw + wait for key after each Blue action *)
 
   ftName       : ARRAY NFTYPES OF ARRAY 12 OF CHAR;
   ftGlyph      : ARRAY NFTYPES OF CHAR;
@@ -1492,90 +1494,6 @@ BEGIN
   END
 END AIMoveCmd;
 
-PROCEDURE DoAITurn;
-VAR i, tSide, tIdx: INTEGER;
-    msg: ARRAY 64 OF CHAR;
-    moraleMsg: ARRAY 64 OF CHAR;
-    noCounter, canShoot: BOOLEAN;
-    prevAttFigs, prevDefFigs, kills1pm, kills2pm: INTEGER;
-BEGIN
-  (* Move Blue commander toward weakest unit *)
-  AIMoveCmd;
-  (* Move — frozen units skip movement (ValidMoveTarget returns FALSE for frozen) *)
-  FOR i := 0 TO blue.count - 1 DO
-    IF blue.units[i].alive & ~blue.units[i].moved THEN AIMoveUnit(i) END
-  END;
-
-  (* Shoot: LF archers and fantasy creatures with ranged ability *)
-  FOR i := 0 TO blue.count - 1 DO
-    IF blue.units[i].alive & ~blue.units[i].shot THEN
-      IF blue.units[i].fantasy THEN
-        canShoot := ftHasShoot[blue.units[i].ftype]
-      ELSE
-        canShoot := (blue.units[i].utype = LF) & ~blue.units[i].moved
-      END;
-      IF canShoot THEN
-        AIFindShotTarget(i, tSide, tIdx);
-        IF tIdx >= 0 THEN
-          ResolveShot(BLUE, i, tSide, tIdx, msg);
-          AppendLog(msg);
-          blue.units[i].shot := TRUE;
-          (* Morale check for target *)
-          IF tSide = RED THEN
-            IF red.units[tIdx].alive THEN
-              IF ~CheckUnitMorale(RED, tIdx, moraleMsg) THEN AppendLog(moraleMsg) END
-            END
-          ELSE
-            IF blue.units[tIdx].alive THEN
-              IF ~CheckUnitMorale(BLUE, tIdx, moraleMsg) THEN AppendLog(moraleMsg) END
-            END
-          END
-        END
-      END
-    END
-  END;
-
-  (* Melee: each Blue unit adjacent to Red *)
-  FOR i := 0 TO blue.count - 1 DO
-    IF blue.units[i].alive THEN
-      FOR tIdx := 0 TO red.count - 1 DO
-        IF red.units[tIdx].alive &
-           (CDist(blue.units[i].col, blue.units[i].row,
-                  red.units[tIdx].col, red.units[tIdx].row) = 1) THEN
-          noCounter := FALSE;
-          (* Cavalry charge morale for Red defender *)
-          IF blue.units[i].charged & (blue.units[i].utype >= LHT) &
-             (red.units[tIdx].utype < LHT) THEN
-            IF ~CheckChargeMorale(RED, tIdx, blue.units[i].utype, msg) THEN
-              AppendLog(msg); noCounter := TRUE
-            ELSE AppendLog(msg)
-            END
-          END;
-          prevAttFigs := blue.units[i].figures;
-          prevDefFigs := red.units[tIdx].figures;
-          ResolveMelee(BLUE, i, RED, tIdx, noCounter, msg);
-          AppendLog(msg);
-          kills1pm := prevDefFigs - red.units[tIdx].figures;
-          kills2pm := prevAttFigs - blue.units[i].figures;
-
-          IF blue.units[i].alive & red.units[tIdx].alive THEN
-            PostMeleeMorale(BLUE, i, RED, tIdx, kills1pm, kills2pm, moraleMsg);
-            IF moraleMsg[0] # 0X THEN AppendLog(moraleMsg) END
-          END;
-
-          IF red.units[tIdx].alive THEN
-            IF ~CheckUnitMorale(RED, tIdx, moraleMsg) THEN AppendLog(moraleMsg) END
-          END;
-          IF blue.units[i].alive THEN
-            IF ~CheckUnitMorale(BLUE, i, moraleMsg) THEN AppendLog(moraleMsg) END
-          END
-        END
-      END
-    END
-  END;
-  CheckElimination
-END DoAITurn;
-
 (* ═══════════════════════════════════════════════════════════════════════ *)
 (*  Display                                                                 *)
 (* ═══════════════════════════════════════════════════════════════════════ *)
@@ -1675,11 +1593,17 @@ END DrawCell;
 PROCEDURE DrawMap;
 VAR c, r: INTEGER; label: CHAR;
 BEGIN
+  TUI.PutCell(MAPX - 2, MAPY - 1, ' ', TUI.Black, TUI.Black);
+  TUI.PutCell(MAPX - 1, MAPY - 1, ' ', TUI.Black, TUI.Black);
   FOR c := 0 TO GRID_W - 1 DO
     IF c < 10 THEN label := CHR(ORD('0') + c) ELSE label := CHR(ORD('A') + c - 10) END;
     TUI.PutCell(MAPX + c*2,     MAPY - 1, label, TUI.Yellow, TUI.Black);
     TUI.PutCell(MAPX + c*2 + 1, MAPY - 1, ' ',   TUI.Yellow, TUI.Black)
   END;
+  TUI.PutCell(MAPX + GRID_W*2,     MAPY - 1, ' ', TUI.Black, TUI.Black);
+  TUI.PutCell(MAPX + GRID_W*2 + 1, MAPY - 1, ' ', TUI.Black, TUI.Black);
+  TUI.PutCell(MAPX + GRID_W*2 + 2, MAPY - 1, ' ', TUI.Black, TUI.Black);
+  TUI.PutCell(MAPX + GRID_W*2 + 3, MAPY - 1, ' ', TUI.Black, TUI.Black);
   FOR r := 0 TO GRID_H - 1 DO
     IF r < 10 THEN label := CHR(ORD('0') + r) ELSE label := CHR(ORD('A') + r - 10) END;
     TUI.PutCell(MAPX - 2, MAPY + r, label, TUI.Yellow, TUI.Black);
@@ -1884,9 +1808,15 @@ BEGIN
           TUI.White, TUI.Black)
     END
   ELSE
-    TUI.PutStr(1, TUI.Rows - 1,
-      "Blue (computer) is playing...                                  ",
-      TUI.Cyan, TUI.Black)
+    IF verboseAI THEN
+      TUI.PutStr(1, TUI.Rows - 1,
+        "Blue moving — press any key to step  [V=toggle verbose]       ",
+        TUI.Cyan, TUI.Black)
+    ELSE
+      TUI.PutStr(1, TUI.Rows - 1,
+        "Blue (computer) is playing...  [V=verbose step-through]       ",
+        TUI.Cyan, TUI.Black)
+    END
   END
 END DrawStatus;
 
@@ -1896,6 +1826,130 @@ BEGIN
   DrawStatus; DrawCursorInfo; DrawMap; DrawUnitList; DrawLog;
   TUI.Flush
 END DrawScreen;
+
+(* ═══════════════════════════════════════════════════════════════════════ *)
+(*  AI (Blue)                                                               *)
+(* ═══════════════════════════════════════════════════════════════════════ *)
+
+PROCEDURE WaitKeyIfVerbose;
+VAR ev2: TUI.Event;
+BEGIN
+  IF ~verboseAI THEN RETURN END;
+  DrawScreen;
+  LOOP
+    TUI.WaitEvent(ev2);
+    IF ev2.kind = TUI.EvKey THEN EXIT
+    ELSIF ev2.kind = TUI.EvResize THEN TUI.UpdateSize
+    END
+  END
+END WaitKeyIfVerbose;
+
+PROCEDURE DoAITurn;
+VAR i, tSide, tIdx: INTEGER;
+    msg: ARRAY 64 OF CHAR;
+    moraleMsg: ARRAY 64 OF CHAR;
+    noCounter, canShoot: BOOLEAN;
+    prevAttFigs, prevDefFigs, kills1pm, kills2pm: INTEGER;
+    prevCol, prevRow: INTEGER;
+BEGIN
+  (* Move Blue commander toward weakest unit *)
+  prevCol := blue.cmdCol; prevRow := blue.cmdRow;
+  AIMoveCmd;
+  IF verboseAI & blue.cmdAlive &
+     ((blue.cmdCol # prevCol) OR (blue.cmdRow # prevRow)) THEN
+    curCol := blue.cmdCol; curRow := blue.cmdRow;
+    WaitKeyIfVerbose
+  END;
+  (* Move — frozen units skip movement (ValidMoveTarget returns FALSE for frozen) *)
+  FOR i := 0 TO blue.count - 1 DO
+    IF blue.units[i].alive & ~blue.units[i].moved THEN
+      prevCol := blue.units[i].col; prevRow := blue.units[i].row;
+      AIMoveUnit(i);
+      IF verboseAI & blue.units[i].alive &
+         ((blue.units[i].col # prevCol) OR (blue.units[i].row # prevRow)) THEN
+        curCol := blue.units[i].col; curRow := blue.units[i].row;
+        WaitKeyIfVerbose
+      END
+    END
+  END;
+
+  (* Shoot: LF archers and fantasy creatures with ranged ability *)
+  FOR i := 0 TO blue.count - 1 DO
+    IF blue.units[i].alive & ~blue.units[i].shot THEN
+      IF blue.units[i].fantasy THEN
+        canShoot := ftHasShoot[blue.units[i].ftype]
+      ELSE
+        canShoot := (blue.units[i].utype = LF) & ~blue.units[i].moved
+      END;
+      IF canShoot THEN
+        AIFindShotTarget(i, tSide, tIdx);
+        IF tIdx >= 0 THEN
+          ResolveShot(BLUE, i, tSide, tIdx, msg);
+          AppendLog(msg);
+          blue.units[i].shot := TRUE;
+          IF verboseAI THEN
+            curCol := blue.units[i].col; curRow := blue.units[i].row;
+            WaitKeyIfVerbose
+          END;
+          (* Morale check for target *)
+          IF tSide = RED THEN
+            IF red.units[tIdx].alive THEN
+              IF ~CheckUnitMorale(RED, tIdx, moraleMsg) THEN AppendLog(moraleMsg) END
+            END
+          ELSE
+            IF blue.units[tIdx].alive THEN
+              IF ~CheckUnitMorale(BLUE, tIdx, moraleMsg) THEN AppendLog(moraleMsg) END
+            END
+          END
+        END
+      END
+    END
+  END;
+
+  (* Melee: each Blue unit adjacent to Red *)
+  FOR i := 0 TO blue.count - 1 DO
+    IF blue.units[i].alive THEN
+      FOR tIdx := 0 TO red.count - 1 DO
+        IF red.units[tIdx].alive &
+           (CDist(blue.units[i].col, blue.units[i].row,
+                  red.units[tIdx].col, red.units[tIdx].row) = 1) THEN
+          noCounter := FALSE;
+          (* Cavalry charge morale for Red defender *)
+          IF blue.units[i].charged & (blue.units[i].utype >= LHT) &
+             (red.units[tIdx].utype < LHT) THEN
+            IF ~CheckChargeMorale(RED, tIdx, blue.units[i].utype, msg) THEN
+              AppendLog(msg); noCounter := TRUE
+            ELSE AppendLog(msg)
+            END
+          END;
+          prevAttFigs := blue.units[i].figures;
+          prevDefFigs := red.units[tIdx].figures;
+          ResolveMelee(BLUE, i, RED, tIdx, noCounter, msg);
+          AppendLog(msg);
+          IF verboseAI THEN
+            curCol := blue.units[i].col; curRow := blue.units[i].row;
+            WaitKeyIfVerbose
+          END;
+          kills1pm := prevDefFigs - red.units[tIdx].figures;
+          kills2pm := prevAttFigs - blue.units[i].figures;
+
+          IF blue.units[i].alive & red.units[tIdx].alive THEN
+            PostMeleeMorale(BLUE, i, RED, tIdx, kills1pm, kills2pm, moraleMsg);
+            IF moraleMsg[0] # 0X THEN AppendLog(moraleMsg) END
+          END;
+
+          IF red.units[tIdx].alive THEN
+            IF ~CheckUnitMorale(RED, tIdx, moraleMsg) THEN AppendLog(moraleMsg) END
+          END;
+          IF blue.units[i].alive THEN
+            IF ~CheckUnitMorale(BLUE, i, moraleMsg) THEN AppendLog(moraleMsg) END
+          END
+        END
+      END
+    END
+  END;
+  CheckElimination
+END DoAITurn;
 
 (* ═══════════════════════════════════════════════════════════════════════ *)
 (*  Player Input                                                             *)
@@ -2371,6 +2425,7 @@ BEGIN
   cmdSelected := FALSE;
   undoTop     := 0;
   gameOver    := FALSE;
+  verboseAI   := FALSE;
   curCol   := 0; curRow := 5;
   AppendLog("Chainmail begins. Red moves first.")
 END SetupGame;
@@ -2403,6 +2458,8 @@ BEGIN
       IF ev.key = TUI.KPgUp THEN INC(logScroll)
       ELSIF ev.key = TUI.KPgDn THEN
         DEC(logScroll); IF logScroll < 0 THEN logScroll := 0 END
+      ELSIF (ev.key = ORD('v')) OR (ev.key = ORD('V')) THEN
+        verboseAI := ~verboseAI
       ELSIF activeSide = RED THEN
         CASE phase OF
           PH_MOVE:
