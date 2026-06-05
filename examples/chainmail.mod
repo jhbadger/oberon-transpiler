@@ -29,7 +29,7 @@ CONST
 
   NORTH = 0;  EAST = 1;  SOUTH = 2;  WEST = 3;
 
-  PH_MOVE = 0;  PH_SHOOT = 1;  PH_COMBAT = 2;  PH_ELIM = 3;
+  PH_MOVE = 0;  PH_SHOOT = 1;  PH_JOIN = 2;  PH_COMBAT = 3;  PH_ELIM = 4;
 
   (* Unit types *)
   LF = 0;   (* Light Foot — archers, levy *)
@@ -69,7 +69,13 @@ CONST
   MAPX = 3;   MAPY = 3;   SIDEX = 46;
   PANX = 29;  PANY = 4;   PANW = 16;
 
+  POINT_BUDGET_SM = 24;   (* 12 pts — skirmish *)
+  POINT_BUDGET_MD = 30;   (* 15 pts — standard *)
+  POINT_BUDGET_LG = 40;   (* 20 pts — lords of war *)
+
 TYPE
+  CompArray = ARRAY MAX_UNITS OF INTEGER;  (* unit-type list for an army *)
+
   Unit = RECORD
     utype         : INTEGER;  (* LF..HH *)
     figures       : INTEGER;  (* current count, 0 = dead *)
@@ -77,7 +83,7 @@ TYPE
     facing        : INTEGER;
     alive         : BOOLEAN;
     moved         : BOOLEAN;
-    shot          : BOOLEAN;
+    shotsLeft     : INTEGER;  (* shots remaining this shoot phase; 0 = done *)
     charged       : BOOLEAN;  (* cavalry: moved this turn — impetus in melee *)
     moraleChecked : BOOLEAN;  (* TRUE once first threshold check done *)
     fantasy       : BOOLEAN;  (* TRUE if this is a fantasy creature *)
@@ -87,6 +93,14 @@ TYPE
     consMovs      : INTEGER;  (* consecutive turns moved *)
     meleeRounds   : INTEGER;  (* consecutive turns in melee *)
     inMelee       : BOOLEAN;  (* engaged in melee this turn *)
+    wasAttacked   : BOOLEAN;  (* in melee last turn — first-turn auto-rally *)
+    retreatTurns  : INTEGER;  (* 0=active; 1=1st retreat(auto if not attacked); 2=need 3+; 3=need 6; 4+=removed *)
+    hasPikes      : BOOLEAN;  (* Swiss/Landsknecht: pike-charge morale + hedgehog eligible *)
+    hedgehog      : BOOLEAN;  (* hedgehog formation: half speed, pike-only attackable *)
+    isKnight      : BOOLEAN;  (* feudal knight: auto-charges when enemy in range *)
+    isMercenary   : BOOLEAN;  (* obedience die each turn *)
+    isReligious   : BOOLEAN;  (* +1 to all morale dice, never surrenders *)
+    stationaryTurns: INTEGER; (* consecutive turns unmoved *)
   END;
 
   Army = RECORD
@@ -151,6 +165,10 @@ VAR
 
   unitName  : ARRAY NTYPES OF ARRAY 14 OF CHAR;
   unitGlyph : ARRAY NTYPES OF CHAR;
+  unitCost  : ARRAY NTYPES OF INTEGER;  (* cost in half-points; AF=5 means 2.5 pts *)
+  unitDesc  : ARRAY NTYPES OF ARRAY 30 OF CHAR;
+
+  pointBuyBudget : INTEGER;  (* 0 = random roll; else half-point budget *)
 
   fantasyMode  : BOOLEAN;  (* game-wide: fantasy supplement enabled *)
   verboseAI    : BOOLEAN;  (* step-through mode: redraw + wait for key after each Blue action *)
@@ -339,12 +357,27 @@ PROCEDURE InitTables;
  * LF[0] HF[1] AF[2] LHT[3] MH[4] HH[5]
  *)
 BEGIN
-  COPY("Lt.Foot",  unitName[LF]);  unitGlyph[LF] := 'L';
-  COPY("Hv.Foot",  unitName[HF]);  unitGlyph[HF] := 'H';
-  COPY("Arm.Foot", unitName[AF]);  unitGlyph[AF] := 'A';
+  COPY("Lt.Foot",  unitName[LF]);  unitGlyph[LF]  := 'L';
+  COPY("Hv.Foot",  unitName[HF]);  unitGlyph[HF]  := 'H';
+  COPY("Arm.Foot", unitName[AF]);  unitGlyph[AF]  := 'A';
   COPY("Lt.Horse", unitName[LHT]); unitGlyph[LHT] := 'h';
-  COPY("Md.Horse", unitName[MH]);  unitGlyph[MH] := 'm';
-  COPY("Hv.Horse", unitName[HH]);  unitGlyph[HH] := 'K';
+  COPY("Md.Horse", unitName[MH]);  unitGlyph[MH]  := 'm';
+  COPY("Hv.Horse", unitName[HH]);  unitGlyph[HH]  := 'K';
+
+  (* Point costs in half-points (×2 to avoid fractions) *)
+  unitCost[LF]  := 2;   (* 1 pt   *)
+  unitCost[HF]  := 4;   (* 2 pts  *)
+  unitCost[AF]  := 5;   (* 2½ pts *)
+  unitCost[LHT] := 6;   (* 3 pts  *)
+  unitCost[MH]  := 8;   (* 4 pts  *)
+  unitCost[HH]  := 10;  (* 5 pts  *)
+
+  COPY("Archers / levy, range 5",    unitDesc[LF]);
+  COPY("Solid melee foot",           unitDesc[HF]);
+  COPY("Armored foot / Mil. Orders", unitDesc[AF]);
+  COPY("Fast cavalry",               unitDesc[LHT]);
+  COPY("Balanced horse",             unitDesc[MH]);
+  COPY("Knights (auto-charge)",      unitDesc[HH]);
 
   (* Movement allowance in grid cells (scale ~3" per cell) *)
   moveAllow[LF] := 3;  moveAllow[HF] := 3;  moveAllow[AF] := 2;
@@ -664,12 +697,14 @@ VAR ut, mv, srcCol, srcRow, oSide, oIdx: INTEGER;
 BEGIN
   a := ArmyOf(side); u := a.units[idx];
   IF u.frozen THEN RETURN FALSE END;
+  IF u.retreatTurns > 0 THEN RETURN FALSE END;  (* retreating units cannot move voluntarily *)
   ut := u.utype;
   IF u.fantasy THEN
     mv := ftMoveAllow[u.ftype]; canFly := ftCanFly[u.ftype]
   ELSE
     mv := moveAllow[ut]; canFly := FALSE
   END;
+  IF u.hedgehog THEN mv := mv DIV 2; IF mv < 1 THEN mv := 1 END END;
   srcCol := u.col; srcRow := u.row;
 
   IF ~u.fantasy &
@@ -706,13 +741,13 @@ BEGIN
   a := ArmyOf(side); u := a.units[idx];
   IF u.fantasy THEN
     IF ~ftHasShoot[u.ftype] THEN RETURN FALSE END;
-    IF u.shot THEN RETURN FALSE END;
+    IF u.shotsLeft <= 0 THEN RETURN FALSE END;
     IF CDist(u.col, u.row, tCol, tRow) > ftShootRange[u.ftype] THEN RETURN FALSE END;
     RETURN TRUE
   END;
   IF u.utype # LF THEN RETURN FALSE END;
-  IF u.shot THEN RETURN FALSE END;
-  IF u.moved THEN RETURN FALSE END;
+  IF u.shotsLeft <= 0 THEN RETURN FALSE END;
+  (* moved LF may fire once; stationary LF may fire twice — shotsLeft encodes the difference *)
   IF CDist(u.col, u.row, tCol, tRow) > 5 THEN RETURN FALSE END;
   IF ~InFrontArc(u.col, u.row, tCol, tRow, u.facing) THEN RETURN FALSE END;
   RETURN TRUE
@@ -1021,6 +1056,7 @@ BEGIN
   a := ArmyOf(side);
   a.units[idx].col := nc;
   a.units[idx].row := nr;
+  IF a.units[idx].retreatTurns = 0 THEN a.units[idx].retreatTurns := 1 END;
   SetArmy(side, a)
 END RetreatUnit;
 
@@ -1128,9 +1164,14 @@ BEGIN
   IntStr(diff, numStr); AppendStr(msg, numStr); AppendStr(msg, "):");
 
   IF diff >= 100 THEN
-    AppendStr(msg, "surr!");
-    IF loserSide = RED THEN red.units[loserIdx].figures := 0
-    ELSE blue.units[loserIdx].figures := 0
+    IF ~loserU.fantasy & loserU.isReligious THEN
+      AppendStr(msg, "holds!(relig)");
+      RetreatUnit(loserSide, loserIdx, 2)
+    ELSE
+      AppendStr(msg, "surr!");
+      IF loserSide = RED THEN red.units[loserIdx].figures := 0
+      ELSE blue.units[loserIdx].figures := 0
+      END
     END
   ELSIF diff >= 60 THEN
     AppendStr(msg, "rout!");
@@ -1163,8 +1204,9 @@ BEGIN
   SetArmy(side, a);
 
   roll := D6D6();
-  IF u.fatigued THEN DEC(roll) END;  (* fatigue -1 *)
-  INC(roll, CmdMoraleBonus(side, u.col, u.row));  (* commander +2 if nearby *)
+  IF u.fatigued THEN DEC(roll) END;
+  INC(roll, CmdMoraleBonus(side, u.col, u.row));
+  IF ~u.fantasy & u.isReligious THEN INC(roll) END;
   IF side = RED THEN COPY("R.", msg) ELSE COPY("B.", msg) END;
   IF u.fantasy THEN
     AppendStr(msg, ftName[u.ftype]); needScore := 7
@@ -1341,17 +1383,114 @@ BEGIN
   END
 END CheckVictory;
 
+(* Set shotsLeft for each unit of a side at the start of the shoot phase.
+   Stationary LF get 2 shots; moved LF get 1; fantasy shooters get 1. *)
+PROCEDURE SetShotsForTurn(side: INTEGER);
+VAR a: Army; i: INTEGER;
+BEGIN
+  a := ArmyOf(side);
+  FOR i := 0 TO a.count - 1 DO
+    IF ~a.units[i].alive THEN a.units[i].shotsLeft := 0
+    ELSIF a.units[i].fantasy THEN
+      IF ftHasShoot[a.units[i].ftype] THEN a.units[i].shotsLeft := 1
+      ELSE a.units[i].shotsLeft := 0
+      END
+    ELSIF a.units[i].utype = LF THEN
+      IF ~a.units[i].moved THEN a.units[i].shotsLeft := 2
+      ELSE a.units[i].shotsLeft := 1
+      END
+    ELSE a.units[i].shotsLeft := 0
+    END
+  END;
+  SetArmy(side, a)
+END SetShotsForTurn;
+
+(* Rally check at the start of each side's move phase.
+   retreatTurns=1 and not attacked last turn: auto-rally.
+   retreatTurns=2: need d6 >= 3. retreatTurns=3: need d6 >= 6.
+   retreatTurns >= 4: remove from play. *)
+PROCEDURE CheckRally(side: INTEGER);
+VAR i, roll, needScore: INTEGER;
+    msg: ARRAY 64 OF CHAR; numStr: ARRAY 8 OF CHAR;
+    a: Army;
+BEGIN
+  FOR i := 0 TO MAX_UNITS - 1 DO
+    a := ArmyOf(side);
+    IF (i < a.count) & a.units[i].alive & (a.units[i].retreatTurns > 0) THEN
+      msg[0] := 0X;
+      IF side = RED THEN COPY("R.", msg) ELSE COPY("B.", msg) END;
+      IF a.units[i].fantasy THEN AppendStr(msg, ftName[a.units[i].ftype])
+      ELSE AppendStr(msg, unitName[a.units[i].utype]) END;
+
+      IF a.units[i].retreatTurns >= 4 THEN
+        a.units[i].alive := FALSE;
+        SetArmy(side, a);
+        AppendStr(msg, " fled!"); AppendLog(msg)
+      ELSIF (a.units[i].retreatTurns = 1) & ~a.units[i].wasAttacked THEN
+        a.units[i].retreatTurns := 0;
+        SetArmy(side, a);
+        AppendStr(msg, " auto-rallies."); AppendLog(msg)
+      ELSE
+        IF a.units[i].retreatTurns <= 2 THEN needScore := 3 ELSE needScore := 6 END;
+        roll := D6();
+        AppendStr(msg, " rally>="); IntStr(needScore, numStr); AppendStr(msg, numStr);
+        AppendStr(msg, ":"); IntStr(roll, numStr); AppendStr(msg, numStr);
+        IF roll >= needScore THEN
+          a.units[i].retreatTurns := 0;
+          SetArmy(side, a);
+          AppendStr(msg, " ok!"); AppendLog(msg)
+        ELSE
+          INC(a.units[i].retreatTurns);
+          SetArmy(side, a);
+          AppendStr(msg, " routing!"); AppendLog(msg);
+          RetreatUnit(side, i, 1)
+        END
+      END
+    END
+  END
+END CheckRally;
+
+(* Pike charge morale: Swiss/Landsknecht charging forces defending unit to check
+   morale using the Loss Table thresholds. Returns FALSE if defender flees. *)
+PROCEDURE CheckPikeChargeMorale(defSide, defIdx: INTEGER;
+                                 VAR msg: ARRAY OF CHAR): BOOLEAN;
+VAR a: Army; def: Unit; roll, needScore: INTEGER;
+    numStr: ARRAY 8 OF CHAR;
+BEGIN
+  a := ArmyOf(defSide); def := a.units[defIdx];
+  IF def.fantasy & ftNoMorale[def.ftype] THEN RETURN TRUE END;
+  IF def.hasPikes THEN RETURN TRUE END;  (* pike vs pike: auto-stand *)
+  IF def.fantasy THEN needScore := 7
+  ELSE needScore := moraleScore[def.utype]
+  END;
+  roll := D6D6();
+  INC(roll, CmdMoraleBonus(defSide, def.col, def.row));
+  IF ~def.fantasy & def.isReligious THEN INC(roll) END;
+  IF defSide = RED THEN COPY("R.", msg) ELSE COPY("B.", msg) END;
+  IF def.fantasy THEN AppendStr(msg, ftName[def.ftype])
+  ELSE AppendStr(msg, unitName[def.utype]) END;
+  AppendStr(msg, " pike-chg>="); IntStr(needScore, numStr); AppendStr(msg, numStr);
+  AppendStr(msg, ":"); IntStr(roll, numStr); AppendStr(msg, numStr);
+  IF roll >= needScore THEN
+    AppendStr(msg, " stands"); RETURN TRUE
+  ELSE
+    AppendStr(msg, " flees!"); RetreatUnit(defSide, defIdx, 2); RETURN FALSE
+  END
+END CheckPikeChargeMorale;
+
 (* ═══════════════════════════════════════════════════════════════════════ *)
 (*  Combat Phase — all adjacent pairs fight simultaneously                  *)
 (* ═══════════════════════════════════════════════════════════════════════ *)
 
 PROCEDURE ResolveMeleeAll;
-VAR i, j: INTEGER;
+VAR i, j, k: INTEGER;
     att, def: Unit;
     msg: ARRAY 64 OF CHAR;
     moraleMsg: ARRAY 64 OF CHAR;
-    noCounter: BOOLEAN;
+    noCounter, skip: BOOLEAN;
     prevAttFigs, prevDefFigs, kills1pm, kills2pm: INTEGER;
+    (* join-melee: count additional supporting figures within 2 cells *)
+    redSupport, blueSupport: INTEGER;
 BEGIN
   FOR i := 0 TO red.count - 1 DO
     IF red.units[i].alive THEN
@@ -1361,36 +1500,80 @@ BEGIN
            (CDist(att.col, att.row, blue.units[j].col, blue.units[j].row) = 1) THEN
           def := blue.units[j];
           noCounter := FALSE;
+          skip := FALSE;
 
-          (* Cavalry charge morale for Blue defender *)
-          IF att.charged & (att.utype >= LHT) & (def.utype < LHT) THEN
-            IF ~CheckChargeMorale(BLUE, j, att.utype, msg) THEN
-              AppendLog(msg);
-              noCounter := TRUE
-            ELSE
+          (* Hedgehog: only pike units can attack *)
+          IF def.hedgehog & ~att.hasPikes & ~att.fantasy THEN
+            AppendLog("Hedgehog holds — non-pike repelled!");
+            skip := TRUE
+          END;
+
+          IF ~skip THEN
+            (* Pike charge morale: forces defender check before melee *)
+            IF ~att.fantasy & att.hasPikes & att.charged THEN
+              IF ~CheckPikeChargeMorale(BLUE, j, msg) THEN
+                AppendLog(msg); noCounter := TRUE
+              ELSE AppendLog(msg)
+              END
+            END;
+
+            (* Cavalry charge morale for Blue defender *)
+            IF ~noCounter & att.charged & ~att.fantasy & (att.utype >= LHT) & ~def.fantasy & (def.utype < LHT) THEN
+              IF ~CheckChargeMorale(BLUE, j, att.utype, msg) THEN
+                AppendLog(msg); noCounter := TRUE
+              ELSE AppendLog(msg)
+              END
+            END;
+
+            (* Join-melee: tally supporting figures within 2 cells not already fighting *)
+            redSupport := 0; blueSupport := 0;
+            FOR k := 0 TO red.count - 1 DO
+              IF (k # i) & red.units[k].alive & ~red.units[k].inMelee &
+                 (CDist(red.units[k].col, red.units[k].row, blue.units[j].col, blue.units[j].row) <= 2) THEN
+                INC(redSupport, red.units[k].figures DIV 2)
+              END
+            END;
+            FOR k := 0 TO blue.count - 1 DO
+              IF (k # j) & blue.units[k].alive & ~blue.units[k].inMelee &
+                 (CDist(blue.units[k].col, blue.units[k].row, att.col, att.row) <= 2) THEN
+                INC(blueSupport, blue.units[k].figures DIV 2)
+              END
+            END;
+            IF (redSupport > 0) OR (blueSupport > 0) THEN
+              COPY("join R:", msg);
+              IntStr(redSupport, moraleMsg); AppendStr(msg, moraleMsg);
+              AppendStr(msg, " B:"); IntStr(blueSupport, moraleMsg); AppendStr(msg, moraleMsg);
               AppendLog(msg)
+            END;
+            (* Temporarily boost attacker figure count with supporters for this melee *)
+            red.units[i].figures := red.units[i].figures + redSupport;
+            blue.units[j].figures := blue.units[j].figures + blueSupport;
+
+            prevAttFigs := red.units[i].figures - redSupport;
+            prevDefFigs := blue.units[j].figures - blueSupport;
+            ResolveMelee(RED, i, BLUE, j, noCounter, msg);
+            AppendLog(msg);
+
+            (* Restore base figures; support figures don't take casualties *)
+            red.units[i].figures := red.units[i].figures - redSupport;
+            IF red.units[i].figures < 0 THEN red.units[i].figures := 0 END;
+            blue.units[j].figures := blue.units[j].figures - blueSupport;
+            IF blue.units[j].figures < 0 THEN blue.units[j].figures := 0 END;
+
+            kills1pm := prevDefFigs - blue.units[j].figures;
+            kills2pm := prevAttFigs - red.units[i].figures;
+
+            IF red.units[i].alive & blue.units[j].alive THEN
+              PostMeleeMorale(RED, i, BLUE, j, kills1pm, kills2pm, moraleMsg);
+              IF moraleMsg[0] # 0X THEN AppendLog(moraleMsg) END
+            END;
+
+            IF blue.units[j].alive THEN
+              IF ~CheckUnitMorale(BLUE, j, moraleMsg) THEN AppendLog(moraleMsg) END
+            END;
+            IF red.units[i].alive THEN
+              IF ~CheckUnitMorale(RED, i, moraleMsg) THEN AppendLog(moraleMsg) END
             END
-          END;
-
-          prevAttFigs := red.units[i].figures;
-          prevDefFigs := blue.units[j].figures;
-          ResolveMelee(RED, i, BLUE, j, noCounter, msg);
-          AppendLog(msg);
-          kills1pm := prevDefFigs - blue.units[j].figures;
-          kills2pm := prevAttFigs - red.units[i].figures;
-
-          (* Post-melee morale *)
-          IF red.units[i].alive & blue.units[j].alive THEN
-            PostMeleeMorale(RED, i, BLUE, j, kills1pm, kills2pm, moraleMsg);
-            IF moraleMsg[0] # 0X THEN AppendLog(moraleMsg) END
-          END;
-
-          (* Excess-casualty morale checks *)
-          IF blue.units[j].alive THEN
-            IF ~CheckUnitMorale(BLUE, j, moraleMsg) THEN AppendLog(moraleMsg) END
-          END;
-          IF red.units[i].alive THEN
-            IF ~CheckUnitMorale(RED, i, moraleMsg) THEN AppendLog(moraleMsg) END
           END
         END
       END
@@ -1434,6 +1617,7 @@ VAR tCol, tRow, bestCol, bestRow, bestDist, dc, dr, nc, nr, newDist: INTEGER;
     ut, mv: INTEGER;
     msg: ARRAY 64 OF CHAR;
 BEGIN
+  IF blue.units[bIdx].retreatTurns > 0 THEN RETURN END;  (* retreating: no voluntary move *)
   ut := blue.units[bIdx].utype; mv := moveAllow[ut];
   AIFindClosestEnemy(bIdx, tCol, tRow);
   IF tCol < 0 THEN RETURN END;
@@ -1520,10 +1704,9 @@ BEGIN
   isShootable := FALSE;
   IF (selUnit < 0) & (phase = PH_SHOOT) & (uSide = RED) & (uIdx >= 0) THEN
     IF red.units[uIdx].fantasy THEN
-      isShootable := ftHasShoot[red.units[uIdx].ftype] & ~red.units[uIdx].shot
+      isShootable := ftHasShoot[red.units[uIdx].ftype] & (red.units[uIdx].shotsLeft > 0)
     ELSE
-      isShootable := (red.units[uIdx].utype = LF) &
-                     ~red.units[uIdx].shot & ~red.units[uIdx].moved
+      isShootable := (red.units[uIdx].utype = LF) & (red.units[uIdx].shotsLeft > 0)
     END
   END;
 
@@ -1748,11 +1931,18 @@ BEGIN
   PutPanel(PANY+4, s, TUI.White);
 
   s[0] := 0X;
-  IF u.frozen THEN COPY("FROZEN", s)
+  IF u.retreatTurns > 0 THEN
+    COPY("ROUT(", s); IntStr(u.retreatTurns, n); AppendStr(s, n); AppendStr(s, ")")
+  ELSIF u.frozen THEN COPY("FROZEN", s)
   ELSE
-    IF u.charged THEN COPY("chg!", s) END;
+    IF u.hedgehog THEN COPY("HEDGEHOG", s)
+    ELSIF u.charged THEN COPY("chg!", s)
+    END;
     IF u.moraleChecked THEN
       IF s[0] # 0X THEN AppendStr(s, " ") END; AppendStr(s, "shaken")
+    END;
+    IF u.hasPikes & ~u.hedgehog THEN
+      IF s[0] # 0X THEN AppendStr(s, " ") END; AppendStr(s, "pike")
     END
   END;
   PutPanel(PANY+5, s, TUI.Yellow)
@@ -1772,6 +1962,7 @@ BEGIN
   CASE phase OF
     PH_MOVE:   AppendStr(s, "Move Phase  ")
   | PH_SHOOT:  AppendStr(s, "Shoot Phase ")
+  | PH_JOIN:   AppendStr(s, "Join Phase  ")
   | PH_COMBAT: AppendStr(s, "Combat Phase")
   | PH_ELIM:   AppendStr(s, "Elim Phase  ")
   END;
@@ -1798,6 +1989,10 @@ BEGIN
           AppendStr(s, "  Green=target  Enter=shoot  Esc=cancel         ");
           TUI.PutStr(1, TUI.Rows - 1, s, TUI.Yellow, TUI.Black)
         END
+    | PH_JOIN:
+        TUI.PutStr(1, TUI.Rows - 1,
+          "Join Phase: move unmoved units within 2 of enemy to join melee. N=done",
+          TUI.White, TUI.Black)
     | PH_COMBAT:
         TUI.PutStr(1, TUI.Rows - 1,
           "Melee resolving... (press any key)                          ",
@@ -1848,10 +2043,27 @@ PROCEDURE DoAITurn;
 VAR i, tSide, tIdx: INTEGER;
     msg: ARRAY 64 OF CHAR;
     moraleMsg: ARRAY 64 OF CHAR;
-    noCounter, canShoot: BOOLEAN;
+    noCounter: BOOLEAN;
     prevAttFigs, prevDefFigs, kills1pm, kills2pm: INTEGER;
-    prevCol, prevRow: INTEGER;
+    prevCol, prevRow, merRoll: INTEGER;
 BEGIN
+  (* Mercenary obedience check: 1=stand, 2-5=obey, 6=special *)
+  FOR i := 0 TO blue.count - 1 DO
+    IF blue.units[i].alive & blue.units[i].isMercenary THEN
+      merRoll := D6();
+      IF merRoll = 1 THEN
+        blue.units[i].moved := TRUE;  (* counts as "did nothing" this turn *)
+        AppendLog("B.Mercenary: no pay! Stands.")
+      ELSIF merRoll = 6 THEN
+        (* Bribed: march off toward Red side *)
+        IF blue.units[i].row > 0 THEN DEC(blue.units[i].row) END;
+        blue.units[i].moved := TRUE;
+        AppendLog("B.Mercenary: bribed! Moving toward enemy.")
+      END
+      (* 2-5: obey normally — no action needed *)
+    END
+  END;
+
   (* Move Blue commander toward weakest unit *)
   prevCol := blue.cmdCol; prevRow := blue.cmdRow;
   AIMoveCmd;
@@ -1860,7 +2072,7 @@ BEGIN
     curCol := blue.cmdCol; curRow := blue.cmdRow;
     WaitKeyIfVerbose
   END;
-  (* Move — frozen units skip movement (ValidMoveTarget returns FALSE for frozen) *)
+  (* Move — frozen/retreating units skip voluntary movement *)
   FOR i := 0 TO blue.count - 1 DO
     IF blue.units[i].alive & ~blue.units[i].moved THEN
       prevCol := blue.units[i].col; prevRow := blue.units[i].row;
@@ -1873,35 +2085,32 @@ BEGIN
     END
   END;
 
-  (* Shoot: LF archers and fantasy creatures with ranged ability *)
+  (* Set shots for each Blue unit based on whether it moved *)
+  SetShotsForTurn(BLUE);
+
+  (* Shoot: fire all available shots (double-fire for stationary LF) *)
   FOR i := 0 TO blue.count - 1 DO
-    IF blue.units[i].alive & ~blue.units[i].shot THEN
-      IF blue.units[i].fantasy THEN
-        canShoot := ftHasShoot[blue.units[i].ftype]
-      ELSE
-        canShoot := (blue.units[i].utype = LF) & ~blue.units[i].moved
-      END;
-      IF canShoot THEN
-        AIFindShotTarget(i, tSide, tIdx);
-        IF tIdx >= 0 THEN
-          ResolveShot(BLUE, i, tSide, tIdx, msg);
-          AppendLog(msg);
-          blue.units[i].shot := TRUE;
-          IF verboseAI THEN
-            curCol := blue.units[i].col; curRow := blue.units[i].row;
-            WaitKeyIfVerbose
-          END;
-          (* Morale check for target *)
-          IF tSide = RED THEN
-            IF red.units[tIdx].alive THEN
-              IF ~CheckUnitMorale(RED, tIdx, moraleMsg) THEN AppendLog(moraleMsg) END
-            END
-          ELSE
-            IF blue.units[tIdx].alive THEN
-              IF ~CheckUnitMorale(BLUE, tIdx, moraleMsg) THEN AppendLog(moraleMsg) END
-            END
+    WHILE blue.units[i].alive & (blue.units[i].shotsLeft > 0) DO
+      AIFindShotTarget(i, tSide, tIdx);
+      IF tIdx >= 0 THEN
+        ResolveShot(BLUE, i, tSide, tIdx, msg);
+        AppendLog(msg);
+        DEC(blue.units[i].shotsLeft);
+        IF verboseAI THEN
+          curCol := blue.units[i].col; curRow := blue.units[i].row;
+          WaitKeyIfVerbose
+        END;
+        IF tSide = RED THEN
+          IF red.units[tIdx].alive THEN
+            IF ~CheckUnitMorale(RED, tIdx, moraleMsg) THEN AppendLog(moraleMsg) END
+          END
+        ELSE
+          IF blue.units[tIdx].alive THEN
+            IF ~CheckUnitMorale(BLUE, tIdx, moraleMsg) THEN AppendLog(moraleMsg) END
           END
         END
+      ELSE
+        blue.units[i].shotsLeft := 0  (* no targets — stop trying *)
       END
     END
   END;
@@ -1968,6 +2177,61 @@ BEGIN
   RETURN FALSE
 END HasShootTargets;
 
+(* Join phase: unmoved Red units within 2 cells of a Blue unit may be moved
+   up to 2 cells toward that enemy to join the coming melee. *)
+PROCEDURE HandleJoinPhase(key: INTEGER);
+VAR logMsg: ARRAY 64 OF CHAR;
+    prevCol, prevRow, oSide, oIdx, k: INTEGER;
+    nearEnemy: BOOLEAN;
+BEGIN
+  IF    key = TUI.KUp    THEN IF curRow > 0 THEN DEC(curRow) END
+  ELSIF key = TUI.KDown  THEN IF curRow < GRID_H - 1 THEN INC(curRow) END
+  ELSIF key = TUI.KLeft  THEN IF curCol > 0 THEN DEC(curCol) END
+  ELSIF key = TUI.KRight THEN IF curCol < GRID_W - 1 THEN INC(curCol) END
+  ELSIF key = TUI.KEnter THEN
+    IF selUnit >= 0 THEN
+      (* Move selected unit to cursor — must end adjacent to a Blue unit *)
+      nearEnemy := FALSE;
+      FOR k := 0 TO blue.count - 1 DO
+        IF blue.units[k].alive &
+           (CDist(curCol, curRow, blue.units[k].col, blue.units[k].row) = 1) THEN
+          nearEnemy := TRUE
+        END
+      END;
+      IF nearEnemy & ValidMoveTarget(RED, selUnit, curCol, curRow) &
+         (CDist(red.units[selUnit].col, red.units[selUnit].row, curCol, curRow) <= 2) THEN
+        prevCol := red.units[selUnit].col; prevRow := red.units[selUnit].row;
+        red.units[selUnit].facing := FaceToward(prevCol, prevRow, curCol, curRow);
+        red.units[selUnit].col    := curCol;
+        red.units[selUnit].row    := curRow;
+        red.units[selUnit].moved  := TRUE;
+        red.units[selUnit].charged := TRUE;
+        COPY("Red ", logMsg); AppendStr(logMsg, unitName[red.units[selUnit].utype]);
+        AppendStr(logMsg, " joins melee!"); AppendLog(logMsg);
+        selUnit := -1
+      ELSE AppendLog("Must end adjacent to an enemy (within 2 cells).")
+      END
+    ELSE
+      UnitAt(curCol, curRow, oSide, oIdx);
+      IF (oSide = RED) & ~red.units[oIdx].moved & (red.units[oIdx].retreatTurns = 0) THEN
+        (* Check it is within 2 cells of an enemy *)
+        nearEnemy := FALSE;
+        FOR k := 0 TO blue.count - 1 DO
+          IF blue.units[k].alive &
+             (CDist(red.units[oIdx].col, red.units[oIdx].row,
+                    blue.units[k].col, blue.units[k].row) <= 2) THEN
+            nearEnemy := TRUE
+          END
+        END;
+        IF nearEnemy THEN selUnit := oIdx
+        ELSE AppendLog("Unit not within join range of any enemy.")
+        END
+      END
+    END
+  ELSIF key = TUI.KEsc THEN selUnit := -1
+  END
+END HandleJoinPhase;
+
 PROCEDURE HandleMovePhase(key: INTEGER);
 VAR logMsg: ARRAY 64 OF CHAR;
     prevCol, prevRow, oSide, oIdx: INTEGER;
@@ -2009,7 +2273,8 @@ BEGIN
       END
     ELSE
       UnitAt(curCol, curRow, oSide, oIdx);
-      IF (oSide = RED) & ~red.units[oIdx].moved & ~red.units[oIdx].frozen THEN
+      IF (oSide = RED) & ~red.units[oIdx].moved & ~red.units[oIdx].frozen &
+         (red.units[oIdx].retreatTurns = 0) THEN
         selUnit := oIdx
       ELSIF red.cmdAlive & ~red.cmdMoved &
             (red.cmdCol = curCol) & (red.cmdRow = curRow) THEN
@@ -2043,10 +2308,20 @@ BEGIN
       AppendLog("Undo move");
       selUnit := -1
     END
+  ELSIF (key = ORD('h')) OR (key = ORD('H')) THEN
+    IF selUnit >= 0 THEN
+      IF red.units[selUnit].hasPikes THEN
+        red.units[selUnit].hedgehog := ~red.units[selUnit].hedgehog;
+        IF red.units[selUnit].hedgehog THEN AppendLog("Hedgehog formed!")
+        ELSE AppendLog("Hedgehog dissolved.")
+        END
+      ELSE AppendLog("Only pike units can form hedgehog.")
+      END
+    END
   ELSIF key = TUI.KEsc THEN
     selUnit := -1; cmdSelected := FALSE
   ELSIF (key = ORD('n')) OR (key = ORD('N')) THEN
-    selUnit := -1; cmdSelected := FALSE  (* deselect so next N press ends the phase *)
+    selUnit := -1; cmdSelected := FALSE
   END
 END HandleMovePhase;
 
@@ -2065,15 +2340,14 @@ BEGIN
         IF red.units[oIdx].fantasy THEN
           IF ~ftHasShoot[red.units[oIdx].ftype] THEN
             AppendLog("This creature cannot shoot.")
-          ELSIF red.units[oIdx].shot THEN
+          ELSIF red.units[oIdx].shotsLeft <= 0 THEN
             AppendLog("Already shot this turn.")
           ELSE
             selUnit := oIdx;
             IF ~HasShootTargets(RED, oIdx) THEN AppendLog("No targets in range.") END
           END
         ELSIF red.units[oIdx].utype # LF THEN AppendLog("Only Light Foot can shoot.")
-        ELSIF red.units[oIdx].shot   THEN AppendLog("Already shot this turn.")
-        ELSIF red.units[oIdx].moved  THEN AppendLog("Moved this turn - no shooting.")
+        ELSIF red.units[oIdx].shotsLeft <= 0 THEN AppendLog("Already shot this turn.")
         ELSE
           selUnit := oIdx;
           IF ~HasShootTargets(RED, oIdx) THEN AppendLog("No targets in range/arc.") END
@@ -2087,12 +2361,13 @@ BEGIN
         IF CanShootTarget(RED, selUnit, curCol, curRow) THEN
           ResolveShot(RED, selUnit, BLUE, oIdx, msg);
           AppendLog(msg);
-          red.units[selUnit].shot := TRUE;
+          DEC(red.units[selUnit].shotsLeft);
           CheckElimination;
           IF blue.units[oIdx].alive THEN
             IF ~CheckUnitMorale(BLUE, oIdx, moraleMsg) THEN AppendLog(moraleMsg) END
           END;
-          selUnit := -1
+          (* Keep unit selected if it has shots remaining (double-fire) *)
+          IF red.units[selUnit].shotsLeft <= 0 THEN selUnit := -1 END
         ELSE
           AppendLog("Target out of range or arc!")
         END
@@ -2111,24 +2386,24 @@ VAR a: Army; i: INTEGER;
 BEGIN
   a := ArmyOf(side);
   FOR i := 0 TO a.count - 1 DO
-    (* Accumulate fatigue counters before clearing flags *)
-    IF a.units[i].moved THEN INC(a.units[i].consMovs)
-    ELSE a.units[i].consMovs := 0
+    IF a.units[i].moved THEN
+      INC(a.units[i].consMovs); a.units[i].stationaryTurns := 0
+    ELSE
+      a.units[i].consMovs := 0; INC(a.units[i].stationaryTurns)
     END;
     IF a.units[i].inMelee THEN INC(a.units[i].meleeRounds)
     ELSE a.units[i].meleeRounds := 0
     END;
-    (* Fatigue conditions: 5 consecutive moves; 3 melee rounds; charged+move+melee *)
     a.units[i].fatigued :=
       (a.units[i].consMovs >= 5) OR
       (a.units[i].meleeRounds >= 3) OR
       (a.units[i].charged & a.units[i].inMelee & (a.units[i].consMovs >= 2));
-    (* Clear per-turn flags *)
-    a.units[i].moved   := FALSE;
-    a.units[i].shot    := FALSE;
-    a.units[i].charged := FALSE;
-    a.units[i].frozen  := FALSE;
-    a.units[i].inMelee := FALSE
+    a.units[i].wasAttacked := a.units[i].inMelee;
+    a.units[i].moved    := FALSE;
+    a.units[i].shotsLeft := 0;   (* set properly by SetShotsForTurn at PH_SHOOT *)
+    a.units[i].charged  := FALSE;
+    a.units[i].frozen   := FALSE;
+    a.units[i].inMelee  := FALSE
   END;
   a.cmdMoved := FALSE;
   SetArmy(side, a)
@@ -2140,8 +2415,11 @@ BEGIN
   CASE phase OF
     PH_MOVE:
       undoTop := 0;
+      SetShotsForTurn(RED);
       phase := PH_SHOOT
   | PH_SHOOT:
+      phase := PH_JOIN
+  | PH_JOIN:
       phase := PH_COMBAT
   | PH_COMBAT:
       ResolveMeleeAll;
@@ -2151,6 +2429,7 @@ BEGIN
       IF activeSide = RED THEN
         activeSide := BLUE;
         ClearTurnFlags(BLUE);
+        CheckRally(BLUE);
         phase := PH_MOVE;
         DrawScreen;
         DoAITurn;
@@ -2158,6 +2437,7 @@ BEGIN
         activeSide := RED;
         INC(turn);
         ClearTurnFlags(RED);
+        CheckRally(RED);
         phase := PH_MOVE
       END
   END
@@ -2255,13 +2535,13 @@ BEGIN
   END
 END InitScenarioRandom;
 
-PROCEDURE DeployArmy(VAR a: Army; side: INTEGER; roll: INTEGER);
+PROCEDURE DeployArmy(VAR a: Army; side, count: INTEGER; comp: CompArray);
 VAR i, col, row, t, last, ft: INTEGER; startRow: INTEGER;
 BEGIN
-  a.side  := side; a.count := MAX_UNITS;
+  a.side  := side; a.count := count;
   IF side = RED THEN startRow := 1 ELSE startRow := GRID_H - 2 END;
-  FOR i := 0 TO MAX_UNITS - 1 DO
-    a.units[i].utype         := compTable[roll][i];
+  FOR i := 0 TO count - 1 DO
+    a.units[i].utype         := comp[i];
     a.units[i].figures       := FIGS_START;
     a.units[i].fantasy       := FALSE;
     a.units[i].ftype         := 0;
@@ -2276,15 +2556,27 @@ BEGIN
     END;
     a.units[i].col           := col;
     a.units[i].row           := row;
-    a.units[i].alive         := TRUE;
-    a.units[i].moved         := FALSE;
-    a.units[i].shot          := FALSE;
-    a.units[i].charged       := FALSE;
-    a.units[i].moraleChecked := FALSE;
-    a.units[i].fatigued      := FALSE;
-    a.units[i].consMovs      := 0;
-    a.units[i].meleeRounds   := 0;
-    a.units[i].inMelee       := FALSE;
+    a.units[i].alive          := TRUE;
+    a.units[i].moved          := FALSE;
+    a.units[i].shotsLeft      := 0;
+    a.units[i].charged        := FALSE;
+    a.units[i].moraleChecked  := FALSE;
+    a.units[i].fatigued       := FALSE;
+    a.units[i].consMovs       := 0;
+    a.units[i].meleeRounds    := 0;
+    a.units[i].inMelee        := FALSE;
+    a.units[i].wasAttacked    := FALSE;
+    a.units[i].retreatTurns   := 0;
+    a.units[i].hasPikes       := FALSE;
+    a.units[i].hedgehog       := FALSE;
+    a.units[i].isKnight       := FALSE;
+    a.units[i].isMercenary    := FALSE;
+    a.units[i].isReligious    := FALSE;
+    a.units[i].stationaryTurns := 0;
+    (* Historical unit flags based on type *)
+    IF a.units[i].utype = HH THEN a.units[i].isKnight := TRUE END;
+    IF a.units[i].utype = AF THEN a.units[i].isReligious := TRUE END;  (* Armored Foot = Military Orders *)
+    IF a.units[i].utype = HF THEN a.units[i].hasPikes := (i MOD 3 = 0) END;  (* 1-in-3 HF are pike *)
     IF side = RED THEN a.units[i].facing := SOUTH
     ELSE               a.units[i].facing := NORTH
     END
@@ -2305,6 +2597,122 @@ BEGIN
   a.cmdAlive := TRUE;
   a.cmdMoved := FALSE
 END DeployArmy;
+
+(* Convert a half-point cost to a display string: 4 -> "2", 5 -> "2.5" *)
+PROCEDURE HalfPtStr(hp: INTEGER; VAR s: ARRAY OF CHAR);
+VAR n: ARRAY 8 OF CHAR;
+BEGIN
+  IntStr(hp DIV 2, n); COPY(n, s);
+  IF (hp MOD 2) = 1 THEN AppendStr(s, ".5") END
+END HalfPtStr;
+
+(* Interactive point-buy screen for one side.
+   Returns the chosen composition in comp[0..count-1]. *)
+PROCEDURE SelectArmyByPoints(side: INTEGER;
+                              VAR comp: CompArray; VAR count: INTEGER);
+VAR ev2: TUI.Event;
+    budget, spent, t, i: INTEGER;
+    fg: INTEGER;
+    hpStr, cStr: ARRAY 8 OF CHAR;
+    label: ARRAY 40 OF CHAR;
+BEGIN
+  budget := pointBuyBudget;
+  count  := 0; spent := 0;
+  FOR i := 0 TO MAX_UNITS - 1 DO comp[i] := 0 END;
+
+  LOOP
+    TUI.ClearBack(TUI.White, TUI.Black);
+    IF side = RED THEN
+      TUI.PutStr(2, 0, "CHAINMAIL — Red Army (Point Buy)", TUI.Red, TUI.Black)
+    ELSE
+      TUI.PutStr(2, 0, "CHAINMAIL — Blue Army (Point Buy)", TUI.Cyan, TUI.Black)
+    END;
+    TUI.PutStr(2, 1, "────────────────────────────────────────────────────────", TUI.White, TUI.Black);
+
+    (* Budget line *)
+    COPY("Budget: ", label); HalfPtStr(budget, hpStr); AppendStr(label, hpStr);
+    AppendStr(label, " pts   Used: "); HalfPtStr(spent, hpStr); AppendStr(label, hpStr);
+    AppendStr(label, " pts   Left: "); HalfPtStr(budget - spent, hpStr); AppendStr(label, hpStr);
+    AppendStr(label, " pts   Slots: "); IntStr(count, hpStr); AppendStr(label, hpStr);
+    AppendStr(label, "/"); IntStr(MAX_UNITS, hpStr); AppendStr(label, hpStr);
+    TUI.PutStr(2, 2, label, TUI.Yellow, TUI.Black);
+
+    (* Current army *)
+    TUI.PutStr(2, 4, "Your army:", TUI.White, TUI.Black);
+    IF count = 0 THEN
+      TUI.PutStr(4, 5, "(empty)", TUI.White, TUI.Black)
+    ELSE
+      FOR i := 0 TO count - 1 DO
+        COPY("  ", label); AppendStr(label, unitName[comp[i]]);
+        TUI.PutStr(4, 5 + i, label, TUI.White, TUI.Black)
+      END
+    END;
+
+    (* Unit menu *)
+    TUI.PutStr(2, 12, "Add unit (key 1-6), D=remove last, N=confirm:", TUI.White, TUI.Black);
+    FOR t := 0 TO NTYPES - 1 DO
+      fg := TUI.White;
+      IF (unitCost[t] > budget - spent) OR (count >= MAX_UNITS) THEN fg := TUI.White END;
+      IntStr(t + 1, cStr);
+      COPY("  ", label); label[0] := '['; label[1] := 0X;
+      AppendStr(label, cStr); AppendStr(label, "] ");
+      AppendStr(label, unitName[t]); AppendStr(label, "   ");
+      HalfPtStr(unitCost[t], hpStr); AppendStr(label, hpStr); AppendStr(label, " pt   ");
+      AppendStr(label, unitDesc[t]);
+      IF unitCost[t] > budget - spent THEN fg := TUI.White
+      ELSIF count >= MAX_UNITS         THEN fg := TUI.White
+      ELSE                                  fg := TUI.Cyan
+      END;
+      TUI.PutStr(4, 13 + t, label, fg, TUI.Black)
+    END;
+    TUI.Flush;
+
+    TUI.WaitEvent(ev2);
+    IF ev2.kind = TUI.EvKey THEN
+      IF ev2.key = 17 THEN TUI.Done; HALT(0)
+      ELSIF ev2.key = ORD('N') OR ev2.key = ORD('n') THEN
+        IF count > 0 THEN EXIT END
+      ELSIF (ev2.key = ORD('D')) OR (ev2.key = ORD('d')) THEN
+        IF count > 0 THEN
+          DEC(count);
+          DEC(spent, unitCost[comp[count]])
+        END
+      ELSIF (ev2.key >= ORD('1')) & (ev2.key <= ORD('6')) THEN
+        t := ev2.key - ORD('1');
+        IF (t >= 0) & (t < NTYPES) &
+           (unitCost[t] <= budget - spent) & (count < MAX_UNITS) THEN
+          comp[count] := t;
+          INC(spent, unitCost[t]);
+          INC(count)
+        END
+      END
+    END
+  END
+END SelectArmyByPoints;
+
+(* AI fills its army greedily: randomly pick affordable units until budget or slots run out. *)
+PROCEDURE AISelectArmyByPoints(VAR comp: CompArray; VAR count: INTEGER);
+VAR budget, spent, t, tries, i: INTEGER;
+BEGIN
+  budget := pointBuyBudget;
+  count := 0; spent := 0;
+  FOR i := 0 TO MAX_UNITS - 1 DO comp[i] := 0 END;
+  WHILE (count < MAX_UNITS) & (spent < budget) DO
+    tries := 0;
+    REPEAT
+      t := Random.Int(NTYPES);
+      INC(tries)
+    UNTIL (unitCost[t] <= budget - spent) OR (tries > 30);
+    IF unitCost[t] <= budget - spent THEN
+      comp[count] := t;
+      INC(spent, unitCost[t]);
+      INC(count)
+    ELSE
+      (* can't fit anything more *)
+      spent := budget
+    END
+  END
+END AISelectArmyByPoints;
 
 PROCEDURE ClearLog;
 VAR i: INTEGER;
@@ -2365,28 +2773,38 @@ BEGIN
   END
 END ChooseScenario;
 
-PROCEDURE ShowRoll(side: INTEGER; roll: INTEGER);
-VAR sx, sy, i: INTEGER; fg: INTEGER; a: Army; u: Unit; n: ARRAY 4 OF CHAR;
+PROCEDURE ShowArmy(side: INTEGER; label: ARRAY OF CHAR);
+VAR sx, sy, i: INTEGER; fg: INTEGER; a: Army; u: Unit;
+    hpStr, costStr: ARRAY 12 OF CHAR;
+    pts: INTEGER;
 BEGIN
   sy := 0; sx := 2;
   IF side = BLUE THEN sy := 9 END;
   fg := TUI.Red; IF side = BLUE THEN fg := TUI.Cyan END;
-  IF side = RED THEN TUI.PutStr(sx, sy, "Red army  (die: ", fg, TUI.Black)
-  ELSE               TUI.PutStr(sx, sy, "Blue army (die: ", fg, TUI.Black)
-  END;
-  IntStr(roll + 1, n); TUI.PutStr(sx + 16, sy, n, TUI.White, TUI.Black);
-  TUI.PutStr(sx + 17, sy, ")", TUI.White, TUI.Black);
+  TUI.PutStr(sx, sy, label, fg, TUI.Black);
   a := ArmyOf(side);
-  FOR i := 0 TO MAX_UNITS - 1 DO
+  pts := 0;
+  FOR i := 0 TO a.count - 1 DO
     u := a.units[i];
-    IF u.fantasy THEN TUI.PutStr(sx + 2, sy + 1 + i, ftName[u.ftype],   TUI.Magenta, TUI.Black)
-    ELSE              TUI.PutStr(sx + 2, sy + 1 + i, unitName[u.utype], TUI.White,   TUI.Black)
+    IF u.fantasy THEN
+      TUI.PutStr(sx + 2, sy + 1 + i, ftName[u.ftype], TUI.Magenta, TUI.Black)
+    ELSE
+      TUI.PutStr(sx + 2, sy + 1 + i, unitName[u.utype], TUI.White, TUI.Black);
+      INC(pts, unitCost[u.utype])
     END
+  END;
+  IF pointBuyBudget > 0 THEN
+    COPY("Total: ", costStr); HalfPtStr(pts, hpStr); AppendStr(costStr, hpStr);
+    AppendStr(costStr, " pts");
+    TUI.PutStr(sx + 2, sy + 1 + a.count, costStr, TUI.Yellow, TUI.Black)
   END
-END ShowRoll;
+END ShowArmy;
 
 PROCEDURE SetupGame;
 VAR rollR, rollB: INTEGER; ev2: TUI.Event;
+    redComp, blueComp: CompArray;
+    redCount, blueCount, i: INTEGER;
+    hdr: ARRAY 48 OF CHAR;
 BEGIN
   IF    scenario = SCEN_1 THEN InitScenario1
   ELSIF scenario = SCEN_2 THEN InitScenario2
@@ -2394,16 +2812,57 @@ BEGIN
   ELSE  InitScenarioRandom
   END;
 
-  rollR := Random.Int(6); rollB := Random.Int(6);
-  WHILE rollR = rollB DO rollB := Random.Int(6) END;
+  (* ── Army selection mode ── *)
+  TUI.ClearBack(TUI.White, TUI.Black);
+  TUI.PutStr(2, 1, "CHAINMAIL — Army Selection", TUI.Yellow, TUI.Black);
+  TUI.PutStr(2, 2, "────────────────────────────────────────────────────────", TUI.White, TUI.Black);
+  TUI.PutStr(2, 4, "R  Random roll  (classic composition tables)", TUI.White, TUI.Black);
+  TUI.PutStr(2, 5, "1  Point Buy — Skirmish  (12 pts)", TUI.White, TUI.Black);
+  TUI.PutStr(2, 6, "2  Point Buy — Standard  (15 pts)", TUI.White, TUI.Black);
+  TUI.PutStr(2, 7, "3  Point Buy — Lords of War  (20 pts)", TUI.White, TUI.Black);
+  TUI.PutStr(2, 9, "Press R / 1 / 2 / 3:", TUI.White, TUI.Black);
+  TUI.Flush;
+  pointBuyBudget := 0;
+  LOOP
+    TUI.WaitEvent(ev2);
+    IF ev2.kind = TUI.EvKey THEN
+      IF    (ev2.key = ORD('r')) OR (ev2.key = ORD('R')) THEN pointBuyBudget := 0;                EXIT
+      ELSIF ev2.key = ORD('1') THEN pointBuyBudget := POINT_BUDGET_SM; EXIT
+      ELSIF ev2.key = ORD('2') THEN pointBuyBudget := POINT_BUDGET_MD; EXIT
+      ELSIF ev2.key = ORD('3') THEN pointBuyBudget := POINT_BUDGET_LG; EXIT
+      ELSIF ev2.key = 17       THEN TUI.Done; HALT(0)
+      END
+    END
+  END;
 
-  DeployArmy(red, RED, rollR);
-  DeployArmy(blue, BLUE, rollB);
+  IF pointBuyBudget > 0 THEN
+    (* Point buy: player selects Red, AI selects Blue *)
+    SelectArmyByPoints(RED,  redComp,  redCount);
+    AISelectArmyByPoints(blueComp, blueCount);
+    DeployArmy(red,  RED,  redCount,  redComp);
+    DeployArmy(blue, BLUE, blueCount, blueComp)
+  ELSE
+    (* Classic random roll — build comp arrays from compTable *)
+    rollR := Random.Int(6); rollB := Random.Int(6);
+    WHILE rollR = rollB DO rollB := Random.Int(6) END;
+    FOR i := 0 TO MAX_UNITS - 1 DO
+      redComp[i]  := compTable[rollR][i];
+      blueComp[i] := compTable[rollB][i]
+    END;
+    DeployArmy(red,  RED,  MAX_UNITS, redComp);
+    DeployArmy(blue, BLUE, MAX_UNITS, blueComp)
+  END;
 
   TUI.ClearBack(TUI.White, TUI.Black);
-  TUI.PutStr(2, 1, "Army Compositions", TUI.Yellow, TUI.Black);
-  ShowRoll(RED, rollR); ShowRoll(BLUE, rollB);
-  TUI.PutStr(2, 16, "Press any key to begin...", TUI.White, TUI.Black);
+  IF pointBuyBudget > 0 THEN
+    COPY("Army Compositions (Point Buy)", hdr)
+  ELSE
+    COPY("Army Compositions (Random Roll)", hdr)
+  END;
+  TUI.PutStr(2, 1, hdr, TUI.Yellow, TUI.Black);
+  ShowArmy(RED,  "Red army:");
+  ShowArmy(BLUE, "Blue army:");
+  TUI.PutStr(2, 19, "Press any key to begin...", TUI.White, TUI.Black);
   TUI.Flush;
   LOOP
     TUI.WaitEvent(ev2);
@@ -2469,6 +2928,10 @@ BEGIN
         | PH_SHOOT:
             IF (ev.key = ORD('n')) OR (ev.key = ORD('N')) THEN AdvancePhase
             ELSE HandleShootPhase(ev.key)
+            END
+        | PH_JOIN:
+            IF ((ev.key = ORD('n')) OR (ev.key = ORD('N'))) & (selUnit < 0) THEN AdvancePhase
+            ELSE HandleJoinPhase(ev.key)
             END
         | PH_COMBAT:
             AdvancePhase
