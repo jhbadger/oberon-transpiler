@@ -16,6 +16,7 @@ MODULE Chainmail;
  *   N           – end current phase
  *   V           – toggle verbose AI (step through each Blue move)
  *   Q / Ctrl-Q  – quit
+ *   Ctrl-L      – force full screen redraw
  *)
 
 IMPORT TUI, Random;
@@ -3222,10 +3223,11 @@ END SetupGame;
 PROCEDURE RunGame;
 VAR mc, mr: INTEGER;
 BEGIN
+  TUI.InvalidateFront;  (* force full repaint on first game draw *)
   DrawScreen;
   LOOP
     TUI.WaitEvent(ev);
-    IF ev.kind = TUI.EvResize THEN TUI.UpdateSize
+    IF ev.kind = TUI.EvResize THEN TUI.UpdateSize; TUI.InvalidateFront
 
     ELSIF ev.kind = TUI.EvMouse THEN
       IF (ev.mb = 0) OR (ev.mb = 32) THEN
@@ -3243,6 +3245,8 @@ BEGIN
       IF ev.key = TUI.KPgUp THEN INC(logScroll)
       ELSIF ev.key = TUI.KPgDn THEN
         DEC(logScroll); IF logScroll < 0 THEN logScroll := 0 END
+      ELSIF ev.key = 12 THEN  (* Ctrl-L: force full screen redraw *)
+        TUI.InvalidateFront
       ELSIF (ev.key = ORD('v')) OR (ev.key = ORD('V')) THEN
         verboseAI := ~verboseAI
       ELSIF activeSide = RED THEN
