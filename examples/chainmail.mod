@@ -60,6 +60,13 @@ CONST
   (* Scenarios *)
   SCEN_RANDOM = 0;  SCEN_1 = 1;  SCEN_2 = 2;  SCEN_3 = 3;
 
+  (* Weather *)
+  WEATHER_CLEAR      = 0;
+  WEATHER_CLOUDY     = 1;
+  WEATHER_LIGHT_RAIN = 2;
+  WEATHER_HARD_RAIN  = 3;
+  WEATHER_MUD        = 4;
+
   CMD_MOVE = 4;   (* commander movement allowance *)
   CMD_RANGE = 4;  (* radius for commander morale bonus *)
 
@@ -172,6 +179,9 @@ VAR
 
   fantasyMode  : BOOLEAN;  (* game-wide: fantasy supplement enabled *)
   verboseAI    : BOOLEAN;  (* step-through mode: redraw + wait for key after each Blue action *)
+
+  weather       : INTEGER;  (* WEATHER_CLEAR .. WEATHER_MUD *)
+  hardRainTurns : INTEGER;  (* consecutive turns of WEATHER_HARD_RAIN for mud accumulation *)
 
   ftName       : ARRAY NFTYPES OF ARRAY 12 OF CHAR;
   ftGlyph      : ARRAY NFTYPES OF CHAR;
@@ -715,10 +725,20 @@ BEGIN
   IF (dstCol < 0) OR (dstCol >= GRID_W) OR (dstRow < 0) OR (dstRow >= GRID_H) THEN
     RETURN FALSE
   END;
-  (* Hill halves movement to enter (§Terrain Effects) *)
-  IF ~canFly & (terrain[dstRow][dstCol] = TERR_HILL) THEN
-    mv := mv DIV 2; IF mv < 1 THEN mv := 1 END
+
+  IF ~canFly THEN
+    (* Hill, wood, marsh all halve movement to enter (§Terrain Effects) *)
+    IF (terrain[dstRow][dstCol] = TERR_HILL) OR
+       (terrain[dstRow][dstCol] = TERR_WOOD) OR
+       (terrain[dstRow][dstCol] = TERR_MARSH) THEN
+      mv := mv DIV 2; IF mv < 1 THEN mv := 1 END
+    END;
+    (* Mud (3+ turns of heavy rain): halves all ground movement further *)
+    IF weather = WEATHER_MUD THEN
+      mv := mv DIV 2; IF mv < 1 THEN mv := 1 END
+    END
   END;
+
   IF CDist(srcCol, srcRow, dstCol, dstRow) > mv THEN RETURN FALSE END;
   IF (dstCol = srcCol) & (dstRow = srcRow) THEN RETURN FALSE END;
 
@@ -726,10 +746,11 @@ BEGIN
   IF oSide >= 0 THEN RETURN FALSE END;
 
   IF ~canFly THEN
-    IF terrain[dstRow][dstCol] = TERR_MARSH THEN RETURN FALSE END;
     IF terrain[dstRow][dstCol] = TERR_RIVER THEN RETURN FALSE END;
     IF RiverBlocked(srcCol, srcRow, dstCol, dstRow, mv) THEN RETURN FALSE END;
-    IF (terrain[dstRow][dstCol] = TERR_WOOD) & (ut >= LHT) THEN RETURN FALSE END
+    (* Horse cannot enter woods or marsh *)
+    IF (terrain[dstRow][dstCol] = TERR_WOOD)  & (ut >= LHT) THEN RETURN FALSE END;
+    IF (terrain[dstRow][dstCol] = TERR_MARSH) & (ut >= LHT) THEN RETURN FALSE END
   END;
 
   RETURN TRUE
@@ -776,12 +797,16 @@ PROCEDURE ResolveShot(attSide, attIdx, defSide, defIdx: INTEGER;
                       VAR msg: ARRAY OF CHAR);
 VAR att, def: Unit;
     aArmy, dArmy: Army;
-    nd, i, d, kills, roll, minScore, denType: INTEGER;
+    nd, i, d, kills, roll, minScore, denType, rainPen: INTEGER;
     numStr: ARRAY 8 OF CHAR;
     attLabel, defLabel: ARRAY 16 OF CHAR;
 BEGIN
   aArmy := ArmyOf(attSide); att := aArmy.units[attIdx];
   dArmy := ArmyOf(defSide); def := dArmy.units[defIdx];
+  IF weather = WEATHER_LIGHT_RAIN THEN rainPen := 1
+  ELSIF (weather = WEATHER_HARD_RAIN) OR (weather = WEATHER_MUD) THEN rainPen := 2
+  ELSE rainPen := 0
+  END;
 
   IF attSide = RED THEN COPY("R.", attLabel) ELSE COPY("B.", attLabel) END;
   IF att.fantasy THEN AppendStr(attLabel, ftName[att.ftype])
@@ -810,9 +835,10 @@ BEGIN
   IF att.fantasy THEN
     (* Fantasy creature fires at normal troops *)
     nd := ftShootDice[att.ftype];
+    minScore := ftShootMin[att.ftype]; INC(minScore, rainPen); IF minScore > 6 THEN minScore := 6 END;
     kills := 0;
     FOR i := 1 TO nd DO
-      d := D6(); IF d >= ftShootMin[att.ftype] THEN INC(kills) END
+      d := D6(); IF d >= minScore THEN INC(kills) END
     END;
     ReduceFigures(defSide, defIdx, kills);
     COPY(attLabel, msg); AppendStr(msg, "->"); AppendStr(msg, defLabel);
@@ -833,7 +859,7 @@ BEGIN
      (terrain[def.row][def.col] = TERR_TOWN) THEN
     nd := nd DIV 2; IF nd < 1 THEN nd := 1 END
   END;
-  minScore := shotMin[denType];
+  minScore := shotMin[denType]; INC(minScore, rainPen); IF minScore > 6 THEN minScore := 6 END;
 
   kills := 0;
   FOR i := 1 TO nd DO
@@ -933,8 +959,9 @@ BEGIN
   (* ── Attacker rolls ── *)
   nd := meleeNum[effAtype][effDtype] * attFigs DIV meleeDen[effAtype][effDtype];
   IF nd < 1 THEN nd := 1 END;
-  (* Impetus bonus: HF/AF/all Horse get extra die when charging (§Melee Optionals) *)
-  IF ~att.fantasy & att.charged & (att.utype >= HF) THEN INC(nd) END;
+  (* Impetus bonus: HF/AF/all Horse get extra die when charging; hill prevents this *)
+  IF ~att.fantasy & att.charged & (att.utype >= HF) &
+     (terrain[att.row][att.col] # TERR_HILL) THEN INC(nd) END;
   IF ~att.fantasy & ~def.fantasy & (terrain[def.row][def.col] = TERR_HILL) THEN
     nd := nd DIV 2; IF nd < 1 THEN nd := 1 END
   END;
@@ -1553,7 +1580,8 @@ BEGIN
             END;
 
             (* Cavalry charge morale for Blue defender *)
-            IF ~noCounter & att.charged & ~att.fantasy & (att.utype >= LHT) & ~def.fantasy & (def.utype < LHT) THEN
+            IF ~noCounter & att.charged & ~att.fantasy & (att.utype >= LHT) &
+               (terrain[att.row][att.col] # TERR_HILL) & ~def.fantasy & (def.utype < LHT) THEN
               IF ~CheckChargeMorale(BLUE, j, att.utype, att.col, att.row, msg) THEN
                 AppendLog(msg); noCounter := TRUE
               ELSE AppendLog(msg)
@@ -2039,6 +2067,13 @@ BEGIN
   | PH_COMBAT: AppendStr(s, "Combat Phase")
   | PH_ELIM:   AppendStr(s, "Elim Phase  ")
   END;
+  CASE weather OF
+    WEATHER_CLEAR:      AppendStr(s, " | Clear")
+  | WEATHER_CLOUDY:     AppendStr(s, " | Cloudy")
+  | WEATHER_LIGHT_RAIN: AppendStr(s, " | Rain")
+  | WEATHER_HARD_RAIN:  AppendStr(s, " | HvyRain")
+  | WEATHER_MUD:        AppendStr(s, " | MUD")
+  END;
   TUI.PutStr(1, 2, s, TUI.White, TUI.Black);
 
   IF gameOver THEN
@@ -2270,6 +2305,7 @@ BEGIN
           END;
           (* Cavalry charge morale for Red defender *)
           IF blue.units[i].charged & ~blue.units[i].fantasy & (blue.units[i].utype >= LHT) &
+             (terrain[blue.units[i].row][blue.units[i].col] # TERR_HILL) &
              ~red.units[tIdx].fantasy & (red.units[tIdx].utype < LHT) THEN
             IF ~CheckChargeMorale(RED, tIdx, blue.units[i].utype,
                                    blue.units[i].col, blue.units[i].row, msg) THEN
@@ -2562,6 +2598,46 @@ END ClearTurnFlags;
  * allowance must charge (move toward the nearest enemy) unless a 6 is rolled
  * on the obedience die.  Sets moved=TRUE and charged=TRUE on the unit.
  *)
+(*
+ * Weather update (§Weather, Optional).  Called every other turn.
+ * Transitions: Clear→Cloudy→Rain→HeavyRain→Mud and back.
+ * Effects: rain raises missile minScore; mud halves ground movement.
+ *)
+PROCEDURE UpdateWeather;
+VAR roll: INTEGER; msg: ARRAY 64 OF CHAR;
+BEGIN
+  IF turn MOD 2 # 0 THEN RETURN END;
+  roll := D6();
+  msg[0] := 0X;
+  CASE weather OF
+    WEATHER_CLEAR:
+      IF roll = 6 THEN
+        weather := WEATHER_CLOUDY; COPY("Weather: clouds rolling in.", msg) END
+  | WEATHER_CLOUDY:
+      IF    roll = 3 THEN weather := WEATHER_CLEAR;      COPY("Weather: skies clear.", msg)
+      ELSIF roll = 6 THEN weather := WEATHER_LIGHT_RAIN; COPY("Weather: light rain begins.", msg)
+      END
+  | WEATHER_LIGHT_RAIN:
+      IF    roll <= 2 THEN (* no change *)
+      ELSIF roll <= 4 THEN weather := WEATHER_CLOUDY;    COPY("Weather: rain eases.", msg)
+      ELSE                 weather := WEATHER_HARD_RAIN; COPY("Weather: HEAVY RAIN — missiles impaired!", msg)
+      END
+  | WEATHER_HARD_RAIN:
+      INC(hardRainTurns);
+      IF roll <= 2 THEN
+        weather := WEATHER_LIGHT_RAIN; hardRainTurns := 0; COPY("Weather: rain easing.", msg)
+      ELSIF hardRainTurns >= 3 THEN
+        weather := WEATHER_MUD; hardRainTurns := 0;
+        COPY("Weather: MUD — ground movement halved!", msg)
+      END
+  | WEATHER_MUD:
+      IF    roll <= 2 THEN weather := WEATHER_CLOUDY;    COPY("Weather: drying out, mud clearing.", msg)
+      ELSIF roll <= 4 THEN weather := WEATHER_HARD_RAIN; COPY("Weather: still raining over mud.", msg)
+      END
+  END;
+  IF msg[0] # 0X THEN AppendLog(msg) END
+END UpdateWeather;
+
 PROCEDURE DoKnightCharges(side: INTEGER);
 VAR cnt, eCnt, mv, i, j: INTEGER;
     uCol, uRow, tCol, tRow: INTEGER;
@@ -2683,6 +2759,7 @@ BEGIN
         CheckVictory;
         activeSide := RED;
         INC(turn);
+        UpdateWeather;
         ClearTurnFlags(RED);
         CheckRally(RED);
         DoKnightCharges(RED);
@@ -3133,6 +3210,7 @@ BEGIN
   undoTop     := 0;
   gameOver    := FALSE;
   verboseAI   := FALSE;
+  weather := WEATHER_CLEAR; hardRainTurns := 0;
   curCol   := 0; curRow := 5;
   AppendLog("Chainmail begins. Red moves first.")
 END SetupGame;
