@@ -715,6 +715,10 @@ BEGIN
   IF (dstCol < 0) OR (dstCol >= GRID_W) OR (dstRow < 0) OR (dstRow >= GRID_H) THEN
     RETURN FALSE
   END;
+  (* Hill halves movement to enter (§Terrain Effects) *)
+  IF ~canFly & (terrain[dstRow][dstCol] = TERR_HILL) THEN
+    mv := mv DIV 2; IF mv < 1 THEN mv := 1 END
+  END;
   IF CDist(srcCol, srcRow, dstCol, dstRow) > mv THEN RETURN FALSE END;
   IF (dstCol = srcCol) & (dstRow = srcRow) THEN RETURN FALSE END;
 
@@ -1108,7 +1112,7 @@ VAR attSurv, defSurv: INTEGER;
     winScore, loseScore, diff: INTEGER;
     loserSide, loserIdx: INTEGER;
     numStr: ARRAY 8 OF CHAR;
-    attMR, defMR: INTEGER;
+    attMR, defMR, prevRT: INTEGER;
     aArmy, dArmy: Army;
     attU, defU, loserU: Unit;
 BEGIN
@@ -1164,6 +1168,18 @@ BEGIN
   AppendStr(msg, " pstMel(");
   IntStr(diff, numStr); AppendStr(msg, numStr); AppendStr(msg, "):");
 
+  (*
+   * Six-band reaction table (§Post Melee Morale):
+   *   0-19   melee continues (already filtered above)
+   *   20-39  back 2, good order  — move without disruption
+   *   40-59  back 1, good order  — move without disruption
+   *   60-79  retreat 1           — disrupted
+   *   80-99  rout 2              — disrupted
+   *   100+   surrender           — eliminated (religious: rout instead)
+   *)
+  IF loserSide = RED THEN prevRT := red.units[loserIdx].retreatTurns
+  ELSE prevRT := blue.units[loserIdx].retreatTurns END;
+
   IF diff >= 100 THEN
     IF ~loserU.fantasy & loserU.isReligious THEN
       AppendStr(msg, "rout!(relig)");
@@ -1174,12 +1190,26 @@ BEGIN
       ELSE blue.units[loserIdx].figures := 0
       END
     END
-  ELSIF diff >= 60 THEN
+  ELSIF diff >= 80 THEN
     AppendStr(msg, "rout!");
     RetreatUnit(loserSide, loserIdx, 2)
-  ELSE
-    AppendStr(msg, "back");
+  ELSIF diff >= 60 THEN
+    AppendStr(msg, "retreat!");
     RetreatUnit(loserSide, loserIdx, 1)
+  ELSIF diff >= 40 THEN
+    AppendStr(msg, "back1(ord)");
+    RetreatUnit(loserSide, loserIdx, 1);
+    IF prevRT = 0 THEN  (* good order: undo the retreat flag *)
+      IF loserSide = RED THEN red.units[loserIdx].retreatTurns := 0
+      ELSE blue.units[loserIdx].retreatTurns := 0 END
+    END
+  ELSE  (* 20-39 *)
+    AppendStr(msg, "back2(ord)");
+    RetreatUnit(loserSide, loserIdx, 2);
+    IF prevRT = 0 THEN
+      IF loserSide = RED THEN red.units[loserIdx].retreatTurns := 0
+      ELSE blue.units[loserIdx].retreatTurns := 0 END
+    END
   END
 END PostMeleeMorale;
 
@@ -1232,7 +1262,7 @@ END CheckUnitMorale;
  * Returns TRUE if defender stands (melee proceeds normally).
  * If FALSE, defender retreats and should not counter-attack.
  *)
-PROCEDURE CheckChargeMorale(defSide, defIdx, cavUtype: INTEGER;
+PROCEDURE CheckChargeMorale(defSide, defIdx, cavUtype, attCol, attRow: INTEGER;
                              VAR msg: ARRAY OF CHAR): BOOLEAN;
 VAR a: Army; def: Unit;
     roll, need, cavClass: INTEGER;
@@ -1252,6 +1282,10 @@ BEGIN
   need := chargeTarget[def.utype][cavClass];
   roll := D6D6();
   INC(roll, CmdMoraleBonus(defSide, def.col, def.row));  (* commander steadies the line *)
+  (* Flank/rear charge: defender is harder pressed (§Cavalry Charge) *)
+  IF IsRearAttack(attCol, attRow, def) THEN DEC(roll, 2)
+  ELSIF IsFlankOrRear(attCol, attRow, def) THEN DEC(roll, 1)
+  END;
 
   COPY(cavLabel, msg); AppendStr(msg, "->"); AppendStr(msg, defLabel);
   AppendStr(msg, ": 2d6>="); IntStr(need, numStr); AppendStr(msg, numStr);
@@ -1520,7 +1554,7 @@ BEGIN
 
             (* Cavalry charge morale for Blue defender *)
             IF ~noCounter & att.charged & ~att.fantasy & (att.utype >= LHT) & ~def.fantasy & (def.utype < LHT) THEN
-              IF ~CheckChargeMorale(BLUE, j, att.utype, msg) THEN
+              IF ~CheckChargeMorale(BLUE, j, att.utype, att.col, att.row, msg) THEN
                 AppendLog(msg); noCounter := TRUE
               ELSE AppendLog(msg)
               END
@@ -2166,6 +2200,8 @@ BEGIN
     curCol := blue.cmdCol; curRow := blue.cmdRow;
     WaitKeyIfVerbose
   END;
+  (* Knight auto-charges happen before voluntary moves *)
+  DoKnightCharges(BLUE);
   (* Move — frozen/retreating units skip voluntary movement *)
   FOR i := 0 TO blue.count - 1 DO
     IF blue.units[i].alive & ~blue.units[i].moved THEN
@@ -2235,7 +2271,8 @@ BEGIN
           (* Cavalry charge morale for Red defender *)
           IF blue.units[i].charged & ~blue.units[i].fantasy & (blue.units[i].utype >= LHT) &
              ~red.units[tIdx].fantasy & (red.units[tIdx].utype < LHT) THEN
-            IF ~CheckChargeMorale(RED, tIdx, blue.units[i].utype, msg) THEN
+            IF ~CheckChargeMorale(RED, tIdx, blue.units[i].utype,
+                                   blue.units[i].col, blue.units[i].row, msg) THEN
               AppendLog(msg); noCounter := TRUE
             ELSE AppendLog(msg)
             END
@@ -2519,6 +2556,106 @@ BEGIN
   SetArmy(side, a)
 END ClearTurnFlags;
 
+(*
+ * Auto-charge for feudal Knights (§Historical Characteristics — Knights).
+ * Any alive HH unit with isKnight=TRUE that has an enemy within its move
+ * allowance must charge (move toward the nearest enemy) unless a 6 is rolled
+ * on the obedience die.  Sets moved=TRUE and charged=TRUE on the unit.
+ *)
+PROCEDURE DoKnightCharges(side: INTEGER);
+VAR cnt, eCnt, mv, i, j: INTEGER;
+    uCol, uRow, tCol, tRow: INTEGER;
+    bestCol, bestRow, bestDist, dc, dr, nc, nr, dist: INTEGER;
+    inRange: BOOLEAN;
+    msg: ARRAY 64 OF CHAR;
+BEGIN
+  IF side = RED THEN cnt := red.count; eCnt := blue.count
+  ELSE cnt := blue.count; eCnt := red.count END;
+  mv := moveAllow[HH];
+  FOR i := 0 TO cnt - 1 DO
+    (* Eligibility check *)
+    IF side = RED THEN
+      IF ~(red.units[i].alive & red.units[i].isKnight &
+           ~red.units[i].moved & ~red.units[i].frozen &
+           (red.units[i].retreatTurns = 0)) THEN
+        inRange := FALSE  (* sentinel: skip *)
+      ELSE
+        uCol := red.units[i].col; uRow := red.units[i].row;
+        inRange := FALSE;
+        FOR j := 0 TO eCnt - 1 DO
+          IF blue.units[j].alive &
+             (CDist(uCol, uRow, blue.units[j].col, blue.units[j].row) <= mv) THEN
+            inRange := TRUE
+          END
+        END
+      END
+    ELSE
+      IF ~(blue.units[i].alive & blue.units[i].isKnight &
+           ~blue.units[i].moved & ~blue.units[i].frozen &
+           (blue.units[i].retreatTurns = 0)) THEN
+        inRange := FALSE
+      ELSE
+        uCol := blue.units[i].col; uRow := blue.units[i].row;
+        inRange := FALSE;
+        FOR j := 0 TO eCnt - 1 DO
+          IF red.units[j].alive &
+             (CDist(uCol, uRow, red.units[j].col, red.units[j].row) <= mv) THEN
+            inRange := TRUE
+          END
+        END
+      END
+    END;
+
+    IF inRange THEN
+      IF D6() = 6 THEN
+        IF side = RED THEN COPY("R.Knight: obey-6, holds.", msg)
+        ELSE COPY("B.Knight: obey-6, holds.", msg) END;
+        AppendLog(msg)
+      ELSE
+        (* Find nearest enemy *)
+        tCol := -1; tRow := -1; bestDist := 9999;
+        FOR j := 0 TO eCnt - 1 DO
+          IF (side = RED) & blue.units[j].alive THEN
+            dist := CDist(uCol, uRow, blue.units[j].col, blue.units[j].row);
+            IF dist < bestDist THEN bestDist := dist; tCol := blue.units[j].col; tRow := blue.units[j].row END
+          END;
+          IF (side = BLUE) & red.units[j].alive THEN
+            dist := CDist(uCol, uRow, red.units[j].col, red.units[j].row);
+            IF dist < bestDist THEN bestDist := dist; tCol := red.units[j].col; tRow := red.units[j].row END
+          END
+        END;
+        IF tCol >= 0 THEN
+          bestCol := uCol; bestRow := uRow;
+          bestDist := CDist(uCol, uRow, tCol, tRow);
+          FOR dc := -mv TO mv DO
+            FOR dr := -mv TO mv DO
+              nc := uCol + dc; nr := uRow + dr;
+              IF ValidMoveTarget(side, i, nc, nr) THEN
+                dist := CDist(nc, nr, tCol, tRow);
+                IF dist < bestDist THEN bestDist := dist; bestCol := nc; bestRow := nr END
+              END
+            END
+          END;
+          IF (bestCol # uCol) OR (bestRow # uRow) THEN
+            IF side = RED THEN
+              red.units[i].facing  := FaceToward(uCol, uRow, bestCol, bestRow);
+              red.units[i].col     := bestCol; red.units[i].row     := bestRow;
+              red.units[i].moved   := TRUE;    red.units[i].charged := TRUE;
+              COPY("R.Knight charges!", msg)
+            ELSE
+              blue.units[i].facing  := FaceToward(uCol, uRow, bestCol, bestRow);
+              blue.units[i].col     := bestCol; blue.units[i].row     := bestRow;
+              blue.units[i].moved   := TRUE;    blue.units[i].charged := TRUE;
+              COPY("B.Knight charges!", msg)
+            END;
+            AppendLog(msg)
+          END
+        END
+      END
+    END
+  END
+END DoKnightCharges;
+
 PROCEDURE AdvancePhase;
 BEGIN
   selUnit := -1;
@@ -2548,6 +2685,7 @@ BEGIN
         INC(turn);
         ClearTurnFlags(RED);
         CheckRally(RED);
+        DoKnightCharges(RED);
         phase := PH_MOVE
       END
   END
