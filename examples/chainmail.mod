@@ -532,7 +532,7 @@ PROCEDURE AppendLog(msg: ARRAY OF CHAR);
 BEGIN
   COPY(msg, msgLog[logHead MOD 64]);
   INC(logHead);
-  logScroll := 0
+  IF logScroll > 0 THEN INC(logScroll) END  (* keep window on same messages when scrolled back *)
 END AppendLog;
 
 PROCEDURE IntStr(n: INTEGER; VAR s: ARRAY OF CHAR);
@@ -1600,14 +1600,26 @@ BEGIN
 END AIFindClosestEnemy;
 
 PROCEDURE AIFindShotTarget(bIdx: INTEGER; VAR tSide, tIdx: INTEGER);
-VAR i, best: INTEGER;
+VAR i, score, bestScore, nd, denType: INTEGER;
+    att: Unit;
 BEGIN
-  tSide := -1; tIdx := -1; best := -1;
+  tSide := -1; tIdx := -1; bestScore := 9999;
+  att := blue.units[bIdx];
   FOR i := 0 TO red.count - 1 DO
     IF red.units[i].alive &
        CanShootTarget(BLUE, bIdx, red.units[i].col, red.units[i].row) THEN
-      IF red.units[i].figures < best OR best < 0 THEN
-        best := red.units[i].figures; tSide := RED; tIdx := i
+      IF att.fantasy THEN nd := ftShootDice[att.ftype]
+      ELSE
+        IF red.units[i].fantasy THEN denType := ftDefType[red.units[i].ftype]
+        ELSE denType := red.units[i].utype
+        END;
+        nd := att.figures DIV shotDen[denType];
+        IF nd < 1 THEN nd := 1 END
+      END;
+      (* score = figures remaining after expected volley; lowest = closest to elimination *)
+      score := red.units[i].figures - nd;
+      IF score < bestScore THEN
+        bestScore := score; tSide := RED; tIdx := i
       END
     END
   END
@@ -1623,6 +1635,29 @@ BEGIN
   IF blue.units[bIdx].fantasy THEN mv := ftMoveAllow[blue.units[bIdx].ftype]
   ELSE mv := moveAllow[ut]
   END;
+
+  (* Self-preservation: fall back when down to 2 or fewer figures *)
+  IF blue.units[bIdx].figures <= 2 THEN
+    bestCol := blue.units[bIdx].col; bestRow := blue.units[bIdx].row;
+    FOR dc := -mv TO mv DO
+      FOR dr := -mv TO mv DO
+        nc := blue.units[bIdx].col + dc;
+        nr := blue.units[bIdx].row + dr;
+        IF ValidMoveTarget(BLUE, bIdx, nc, nr) & (nr > bestRow) THEN
+          bestRow := nr; bestCol := nc
+        END
+      END
+    END;
+    IF (bestCol # blue.units[bIdx].col) OR (bestRow # blue.units[bIdx].row) THEN
+      blue.units[bIdx].facing := FaceToward(blue.units[bIdx].col, blue.units[bIdx].row,
+                                             bestCol, bestRow);
+      blue.units[bIdx].col   := bestCol;
+      blue.units[bIdx].row   := bestRow;
+      blue.units[bIdx].moved := TRUE
+    END;
+    RETURN
+  END;
+
   AIFindClosestEnemy(bIdx, tCol, tRow);
   IF tCol < 0 THEN RETURN END;
 
@@ -2044,6 +2079,60 @@ BEGIN
   END
 END WaitKeyIfVerbose;
 
+PROCEDURE AIJoinPhase;
+VAR i, j, dc, dr, nc, nr, bestCol, bestRow: INTEGER;
+    found: BOOLEAN;
+    msg: ARRAY 64 OF CHAR;
+BEGIN
+  FOR i := 0 TO blue.count - 1 DO
+    IF blue.units[i].alive & ~blue.units[i].moved & (blue.units[i].retreatTurns = 0) THEN
+      (* Skip units already adjacent to an enemy — they'll fight in place *)
+      found := FALSE;
+      FOR j := 0 TO red.count - 1 DO
+        IF red.units[j].alive &
+           (CDist(blue.units[i].col, blue.units[i].row,
+                  red.units[j].col, red.units[j].row) = 1) THEN
+          found := TRUE
+        END
+      END;
+      IF ~found THEN
+        bestCol := -1; bestRow := -1;
+        FOR dc := -2 TO 2 DO
+          FOR dr := -2 TO 2 DO
+            nc := blue.units[i].col + dc;
+            nr := blue.units[i].row + dr;
+            IF (bestCol < 0) & ValidMoveTarget(BLUE, i, nc, nr) &
+               (CDist(blue.units[i].col, blue.units[i].row, nc, nr) <= 2) THEN
+              FOR j := 0 TO red.count - 1 DO
+                IF (bestCol < 0) & red.units[j].alive &
+                   (CDist(nc, nr, red.units[j].col, red.units[j].row) = 1) THEN
+                  bestCol := nc; bestRow := nr
+                END
+              END
+            END
+          END
+        END;
+        IF bestCol >= 0 THEN
+          blue.units[i].facing  := FaceToward(blue.units[i].col, blue.units[i].row,
+                                              bestCol, bestRow);
+          blue.units[i].col     := bestCol;
+          blue.units[i].row     := bestRow;
+          blue.units[i].moved   := TRUE;
+          blue.units[i].charged := TRUE;
+          COPY("B.", msg);
+          IF blue.units[i].fantasy THEN AppendStr(msg, ftName[blue.units[i].ftype])
+          ELSE AppendStr(msg, unitName[blue.units[i].utype]) END;
+          AppendStr(msg, " joins melee!"); AppendLog(msg);
+          IF verboseAI THEN
+            curCol := blue.units[i].col; curRow := blue.units[i].row;
+            WaitKeyIfVerbose
+          END
+        END
+      END
+    END
+  END
+END AIJoinPhase;
+
 PROCEDURE DoAITurn;
 VAR i, tSide, tIdx: INTEGER;
     msg: ARRAY 64 OF CHAR;
@@ -2120,6 +2209,9 @@ BEGIN
     END
   END;
 
+  (* Join: unmoved Blue units within 2 cells of a Red unit step into contact *)
+  AIJoinPhase;
+
   (* Melee: each Blue unit adjacent to Red *)
   FOR i := 0 TO blue.count - 1 DO
     IF blue.units[i].alive THEN
@@ -2141,8 +2233,8 @@ BEGIN
             END
           END;
           (* Cavalry charge morale for Red defender *)
-          IF blue.units[i].charged & (blue.units[i].utype >= LHT) &
-             (red.units[tIdx].utype < LHT) THEN
+          IF blue.units[i].charged & ~blue.units[i].fantasy & (blue.units[i].utype >= LHT) &
+             ~red.units[tIdx].fantasy & (red.units[tIdx].utype < LHT) THEN
             IF ~CheckChargeMorale(RED, tIdx, blue.units[i].utype, msg) THEN
               AppendLog(msg); noCounter := TRUE
             ELSE AppendLog(msg)
