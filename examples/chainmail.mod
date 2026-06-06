@@ -1031,26 +1031,27 @@ END ResolveMelee;
 
 (* Retreat unit toward own baseline (Red north, Blue south) *)
 PROCEDURE RetreatUnit(side, idx, steps: INTEGER);
-VAR nc, nr, t: INTEGER;
+VAR nc, nr, prevNr, t: INTEGER;
     a: Army; i: INTEGER;
 BEGIN
   a := ArmyOf(side);
   nc := a.units[idx].col;
   nr := a.units[idx].row;
-  FOR i := 1 TO steps DO
+  i := 0;
+  WHILE i < steps DO
+    INC(i);
+    prevNr := nr;
     IF side = RED THEN
       IF nr > 0 THEN DEC(nr) END
     ELSE
       IF nr < GRID_H - 1 THEN INC(nr) END
     END;
-    (* don't retreat into occupied or impassable cell *)
+    (* don't retreat into occupied or impassable cell; stop at last valid row *)
     t := terrain[nr][nc];
-    IF (t = TERR_MARSH) OR (t = TERR_RIVER) THEN
-      nr := a.units[idx].row; nc := a.units[idx].col; (* stay put *)
-      i := steps  (* break *)
-    ELSIF OccupiedBy(nc, nr, RED) OR OccupiedBy(nc, nr, BLUE) THEN
-      nr := a.units[idx].row; nc := a.units[idx].col;
-      i := steps
+    IF (t = TERR_MARSH) OR (t = TERR_RIVER) OR
+       OccupiedBy(nc, nr, RED) OR OccupiedBy(nc, nr, BLUE) THEN
+      nr := prevNr;
+      i := steps  (* stop *)
     END
   END;
   a := ArmyOf(side);
@@ -1165,7 +1166,7 @@ BEGIN
 
   IF diff >= 100 THEN
     IF ~loserU.fantasy & loserU.isReligious THEN
-      AppendStr(msg, "holds!(relig)");
+      AppendStr(msg, "rout!(relig)");
       RetreatUnit(loserSide, loserIdx, 2)
     ELSE
       AppendStr(msg, "surr!");
@@ -1618,7 +1619,10 @@ VAR tCol, tRow, bestCol, bestRow, bestDist, dc, dr, nc, nr, newDist: INTEGER;
     msg: ARRAY 64 OF CHAR;
 BEGIN
   IF blue.units[bIdx].retreatTurns > 0 THEN RETURN END;  (* retreating: no voluntary move *)
-  ut := blue.units[bIdx].utype; mv := moveAllow[ut];
+  ut := blue.units[bIdx].utype;
+  IF blue.units[bIdx].fantasy THEN mv := ftMoveAllow[blue.units[bIdx].ftype]
+  ELSE mv := moveAllow[ut]
+  END;
   AIFindClosestEnemy(bIdx, tCol, tRow);
   IF tCol < 0 THEN RETURN END;
 
@@ -1985,7 +1989,8 @@ BEGIN
             TUI.White, TUI.Black)
         ELSE
           COPY("Shooter: ", s);
-          AppendStr(s, unitName[red.units[selUnit].utype]);
+          IF red.units[selUnit].fantasy THEN AppendStr(s, ftName[red.units[selUnit].ftype])
+          ELSE AppendStr(s, unitName[red.units[selUnit].utype]) END;
           AppendStr(s, "  Green=target  Enter=shoot  Esc=cancel         ");
           TUI.PutStr(1, TUI.Rows - 1, s, TUI.Yellow, TUI.Black)
         END
@@ -2043,7 +2048,7 @@ PROCEDURE DoAITurn;
 VAR i, tSide, tIdx: INTEGER;
     msg: ARRAY 64 OF CHAR;
     moraleMsg: ARRAY 64 OF CHAR;
-    noCounter: BOOLEAN;
+    noCounter, skip: BOOLEAN;
     prevAttFigs, prevDefFigs, kills1pm, kills2pm: INTEGER;
     prevCol, prevRow, merRoll: INTEGER;
 BEGIN
@@ -2122,7 +2127,19 @@ BEGIN
         IF red.units[tIdx].alive &
            (CDist(blue.units[i].col, blue.units[i].row,
                   red.units[tIdx].col, red.units[tIdx].row) = 1) THEN
-          noCounter := FALSE;
+          noCounter := FALSE; skip := FALSE;
+          (* Hedgehog: only pike units can attack *)
+          IF red.units[tIdx].hedgehog & ~blue.units[i].hasPikes & ~blue.units[i].fantasy THEN
+            AppendLog("Hedgehog holds — non-pike repelled!"); skip := TRUE
+          END;
+          IF ~skip THEN
+          (* Pike charge morale: Blue pike charging forces Red defender to check *)
+          IF ~blue.units[i].fantasy & blue.units[i].hasPikes & blue.units[i].charged THEN
+            IF ~CheckPikeChargeMorale(RED, tIdx, msg) THEN
+              AppendLog(msg); noCounter := TRUE
+            ELSE AppendLog(msg)
+            END
+          END;
           (* Cavalry charge morale for Red defender *)
           IF blue.units[i].charged & (blue.units[i].utype >= LHT) &
              (red.units[tIdx].utype < LHT) THEN
@@ -2153,6 +2170,7 @@ BEGIN
           IF blue.units[i].alive THEN
             IF ~CheckUnitMorale(BLUE, i, moraleMsg) THEN AppendLog(moraleMsg) END
           END
+          END  (* ~skip *)
         END
       END
     END
@@ -2583,7 +2601,7 @@ BEGIN
   END;
   IF fantasyMode THEN
     (* Replace last unit with a random fantasy creature *)
-    last := MAX_UNITS - 1;
+    last := count - 1;
     ft   := Random.Int(NFTYPES);
     a.units[last].utype         := 0;
     a.units[last].fantasy       := TRUE;
