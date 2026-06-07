@@ -589,6 +589,7 @@ static Node *parse_term(Parser *p) {
         case TOK_SLASH: op = ND_DIVF; break;
         case TOK_DIV:   op = ND_DIVI; break;
         case TOK_MOD:   op = ND_MOD;  break;
+        case TOK_AMP:   op = ND_AND;  break;  /* & is MulOp per Oberon-07 */
         default: return left;
         }
         int ln = p->cur.line, cn = p->cur.col;
@@ -617,6 +618,7 @@ static Node *parse_simple_expr(Parser *p) {
         switch (p->cur.kind) {
         case TOK_PLUS:  op = ND_ADD; break;
         case TOK_MINUS: op = ND_SUB; break;
+        case TOK_OR:    op = ND_OR;  break;  /* OR is AddOp per Oberon-07 */
         default: return left;
         }
         int ln = p->cur.line, cn = p->cur.col;
@@ -650,31 +652,10 @@ static Node *parse_rel_expr(Parser *p) {
     return n;
 }
 
-/* AndExpr = RelExpr {"&" RelExpr} */
-static Node *parse_and_expr(Parser *p) {
-    Node *left = parse_rel_expr(p);
-    while (p->cur.kind == TOK_AMP) {
-        int ln = p->cur.line, cn = p->cur.col;
-        next_tok(p);
-        Node *n = node_new(ND_AND, ln, cn);
-        n->c0 = left; n->c1 = parse_rel_expr(p);
-        left = n;
-    }
-    return left;
-}
+/* & and OR are now handled at term/simple-expr level (MulOp/AddOp). */
+static Node *parse_and_expr(Parser *p) { return parse_rel_expr(p); }
 
-/* Expr = AndExpr {OR AndExpr} */
-static Node *parse_expr(Parser *p) {
-    Node *left = parse_and_expr(p);
-    while (p->cur.kind == TOK_OR) {
-        int ln = p->cur.line, cn = p->cur.col;
-        next_tok(p);
-        Node *n = node_new(ND_OR, ln, cn);
-        n->c0 = left; n->c1 = parse_and_expr(p);
-        left = n;
-    }
-    return left;
-}
+static Node *parse_expr(Parser *p)     { return parse_and_expr(p); }
 
 /* -----------------------------------------------------------------------
  * Statements

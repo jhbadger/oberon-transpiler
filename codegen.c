@@ -27,6 +27,7 @@ typedef struct {
     int   nested_sym_start;                  /* g_nsyms after nested push   */
     int   n_nested_procs;
     char  nested_proc_names[32][MAX_IDENT];
+    int   loop_exit_label;  /* label# of innermost active LOOP, 0 = none */
 } CG;
 
 /* -----------------------------------------------------------------------
@@ -43,6 +44,7 @@ typedef struct {
 
 static FfiMod g_ffi_mods[MAX_FFI_MODS];
 static int    g_n_ffi_mods = 0;
+static int    g_loop_seq   = 0;  /* monotone counter for LOOP exit labels */
 
 void ffi_register(const char *modname, const char *header,
                   const OBCFfiMap *maps, int nmaps)
@@ -705,6 +707,9 @@ static Node *expr_type(Node *e) {
     if (e->kind == ND_INTEGER) { static Node t={ND_TNAME}; strcpy(t.str,"INTEGER"); return &t; }
     if (e->kind == ND_REAL)    { static Node t={ND_TNAME}; strcpy(t.str,"REAL");    return &t; }
     if (e->kind == ND_CHAR)    { static Node t={ND_TNAME}; strcpy(t.str,"CHAR");    return &t; }
+    if (e->kind == ND_SET)     { static Node t={ND_TNAME}; strcpy(t.str,"SET");     return &t; }
+    if (e->kind == ND_NEG)     return expr_type(e->c0);
+    if (e->kind == ND_ADD || e->kind == ND_SUB) return expr_type(e->c0);
     if (e->kind == ND_TRUE || e->kind == ND_FALSE) {
         static Node t={ND_TNAME}; strcpy(t.str,"BOOLEAN"); return &t;
     }
@@ -1017,20 +1022,27 @@ static void emit_builtin(CG *g, const char *name, Node *args) {
     } else if (!strcasecmp(name,"EXCL")) {
         if(a0) emit_expr(g,a0); emit(g," &= ~(1u << ("); if(a1) emit_expr(g,a1); emit(g,"))");
     } else if (!strcasecmp(name,"LEN")) {
-        /* ptr^ → use _dynlen companion */
-        if (a0 && a0->kind==ND_DEREF) {
+        /* LEN(v [, n]) — n selects dimension (0-based, default 0).
+         * ptr^ → use _dynlen companion (only dimension 0 tracked). */
+        long dim = (a1 && a1->kind==ND_INTEGER) ? a1->ival : 0;
+        if (a0 && a0->kind==ND_DEREF && dim==0) {
             Node *pt = expr_type(a0->c0);
             if (pt && is_dyn_array_ptr(pt)) { emit_dynlen_ref(g, a0->c0); }
             else {
                 emit(g,"(int)(sizeof("); emit_expr(g,a0);
                 emit(g,")/sizeof("); emit_expr(g,a0); emit(g,"[0]))");
             }
-        /* Open array param → use hidden _len; fixed array → sizeof trick */
-        } else if (a0 && a0->kind==ND_IDENT && is_open_array(sym_type(a0->str))) {
+        /* Open array param dim 0 → hidden _len; all other cases → sizeof */
+        } else if (dim==0 && a0 && a0->kind==ND_IDENT && is_open_array(sym_type(a0->str))) {
             emit(g,"%s_len", a0->str);
         } else {
+            /* LEN(a, n): sizeof(a[0]...[0]) / sizeof(a[0]...[0][0])
+             *            with n [0]s in numerator and n+1 in denominator. */
             emit(g,"(int)(sizeof("); if(a0) emit_expr(g,a0);
-            emit(g,")/sizeof("); if(a0) emit_expr(g,a0); emit(g,"[0]))");
+            for (long d=0; d<dim; d++) emit(g,"[0]");
+            emit(g,")/sizeof("); if(a0) emit_expr(g,a0);
+            for (long d=0; d<=dim; d++) emit(g,"[0]");
+            emit(g,"))");
         }
     } else if (!strcasecmp(name,"WRITE")) {
         emit_write(g, a0, 1);
@@ -1516,10 +1528,37 @@ static void emit_expr(CG *g, Node *e) {
     }
     case ND_NEG:  emit(g,"(-("); emit_expr(g,e->c0); emit(g,"))"); break;
     case ND_NOT:  emit(g,"(!(");  emit_expr(g,e->c0); emit(g,"))"); break;
-    case ND_ADD: emit(g,"("); emit_expr(g,e->c0); emit(g,"+");  emit_expr(g,e->c1); emit(g,")"); break;
-    case ND_SUB: emit(g,"("); emit_expr(g,e->c0); emit(g,"-");  emit_expr(g,e->c1); emit(g,")"); break;
-    case ND_MUL: emit(g,"("); emit_expr(g,e->c0); emit(g,"*");  emit_expr(g,e->c1); emit(g,")"); break;
-    case ND_DIVF:emit(g,"("); emit_expr(g,e->c0); emit(g,"/");  emit_expr(g,e->c1); emit(g,")"); break;
+    case ND_ADD: {
+        Node *lt = expr_type(e->c0);
+        int is_set = lt && lt->kind==ND_TNAME && !strcmp(lt->str,"SET");
+        emit(g,"("); emit_expr(g,e->c0); emit(g, is_set ? "|" : "+");
+        emit_expr(g,e->c1); emit(g,")");
+        break;
+    }
+    case ND_SUB: {
+        Node *lt = expr_type(e->c0);
+        int is_set = lt && lt->kind==ND_TNAME && !strcmp(lt->str,"SET");
+        if (is_set) {
+            emit(g,"(("); emit_expr(g,e->c0); emit(g,")&~("); emit_expr(g,e->c1); emit(g,"))");
+        } else {
+            emit(g,"("); emit_expr(g,e->c0); emit(g,"-"); emit_expr(g,e->c1); emit(g,")");
+        }
+        break;
+    }
+    case ND_MUL: {
+        Node *lt = expr_type(e->c0);
+        int is_set = lt && lt->kind==ND_TNAME && !strcmp(lt->str,"SET");
+        emit(g,"("); emit_expr(g,e->c0); emit(g, is_set ? "&" : "*");
+        emit_expr(g,e->c1); emit(g,")");
+        break;
+    }
+    case ND_DIVF: {
+        Node *lt = expr_type(e->c0);
+        int is_set = lt && lt->kind==ND_TNAME && !strcmp(lt->str,"SET");
+        emit(g,"("); emit_expr(g,e->c0); emit(g, is_set ? "^" : "/");
+        emit_expr(g,e->c1); emit(g,")");
+        break;
+    }
     case ND_DIVI:emit(g,"_OBC_DIV(");emit_expr(g,e->c0);emit(g,",");emit_expr(g,e->c1);emit(g,")");break;
     case ND_MOD: emit(g,"_OBC_MOD(");emit_expr(g,e->c0);emit(g,",");emit_expr(g,e->c1);emit(g,")");break;
     case ND_AND: emit(g,"("); emit_expr(g,e->c0); emit(g,"&&"); emit_expr(g,e->c1); emit(g,")"); break;
@@ -1547,10 +1586,23 @@ static void emit_expr(CG *g, Node *e) {
         }
         break;
     }
-    case ND_LT: emit(g,"("); emit_expr(g,e->c0); emit(g,"<");  emit_expr(g,e->c1); emit(g,")"); break;
-    case ND_LE: emit(g,"("); emit_expr(g,e->c0); emit(g,"<="); emit_expr(g,e->c1); emit(g,")"); break;
-    case ND_GT: emit(g,"("); emit_expr(g,e->c0); emit(g,">");  emit_expr(g,e->c1); emit(g,")"); break;
-    case ND_GE: emit(g,"("); emit_expr(g,e->c0); emit(g,">="); emit_expr(g,e->c1); emit(g,")"); break;
+    case ND_LT: case ND_LE: case ND_GT: case ND_GE: {
+        Node *lt = expr_type(e->c0);
+        int is_str = is_char_array(lt)
+                  || (e->c0->kind==ND_STRING && strlen(e->c0->str)>1)
+                  || (e->c1->kind==ND_STRING && strlen(e->c1->str)>1);
+        if (is_str) {
+            const char *op = e->kind==ND_LT ? "<0" : e->kind==ND_LE ? "<=0"
+                           : e->kind==ND_GT ? ">0" : ">=0";
+            emit(g,"(strcmp("); emit_expr(g,e->c0); emit(g,","); emit_expr(g,e->c1);
+            emit(g,")" ); emit(g,"%s)", op);
+        } else {
+            const char *op = e->kind==ND_LT ? "<" : e->kind==ND_LE ? "<="
+                           : e->kind==ND_GT ? ">" : ">=";
+            emit(g,"("); emit_expr(g,e->c0); emit(g,"%s",op); emit_expr(g,e->c1); emit(g,")");
+        }
+        break;
+    }
     case ND_IN:
         /* x IN set — check bit x in set */
         emit(g,"(("); emit_expr(g,e->c1); emit(g,">>"); emit_expr(g,e->c0); emit(g,")&1)");
@@ -1891,16 +1943,25 @@ static void emit_stmt(CG *g, Node *s) {
         break;
     }
 
-    case ND_LOOP:
+    case ND_LOOP: {
+        int prev_lbl = g->loop_exit_label;
+        int lbl = ++g_loop_seq;
+        g->loop_exit_label = lbl;
         iemit(g,"for(;;) {\n");
         g->indent++;
         for (Node *st=s->c0;st;st=st->next) emit_stmt(g,st);
         g->indent--;
         iemit(g,"}\n");
+        iemit(g,"_loop_exit_%d:;\n", lbl);
+        g->loop_exit_label = prev_lbl;
         break;
+    }
 
     case ND_EXIT:
-        iemit(g,"break;\n");
+        if (g->loop_exit_label)
+            iemit(g,"goto _loop_exit_%d;\n", g->loop_exit_label);
+        else
+            iemit(g,"break;\n");
         break;
 
     case ND_RETURN:
@@ -2411,9 +2472,12 @@ void codegen(Node *module, FILE *out, int is_main, const char *srcfile) {
 		emit(g,"#include <ctype.h>\n");
     emit(g,"#include <math.h>\n");
     emit(g,"#include <assert.h>\n");
-    /* Floor-division and floor-mod macros (Oberon-07 semantics) */
-    emit(g,"#define _OBC_DIV(a,b) ((a)/(b)-((((a)%%(b))!=0)&&(((a)^(b))<0)))\n");
-    emit(g,"#define _OBC_MOD(a,b) ((a)%%(b)+((((a)%%(b))!=0)&&(((a)^(b))<0)?(b):0))\n");
+    /* Floor-division and floor-mod (Oberon-07 semantics): inline functions so
+     * each argument is evaluated exactly once, even if it is a function call. */
+    emit(g,"static inline long long _OBC_DIV(long long a,long long b)"
+           "{long long r=a%%b;return a/b-((r!=0)&&((r^b)<0));}\n");
+    emit(g,"static inline long long _OBC_MOD(long long a,long long b)"
+           "{long long r=a%%b;return r+((r!=0)&&((r^b)<0)?b:0);}\n");
 
     /* ── Include headers for user-imported modules ───────────────── */
     for (int i=0;i<g_nimports;i++) {

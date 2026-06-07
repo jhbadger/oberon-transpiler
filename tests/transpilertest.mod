@@ -233,6 +233,8 @@ BEGIN
   END;
   Check("2-D array assign",  (mat[2][2] = 8) & (mat[0][0] = 0));
   Check("LEN 2-D",           LEN(mat) = 3);
+  Check("LEN(a,0)",          LEN(mat, 0) = 3);
+  Check("LEN(a,1)",          LEN(mat, 1) = 3);
 
   (* ── 16. Procedure-type variable ────────────────────────────────────── *)
   fn := Double;
@@ -315,6 +317,19 @@ BEGIN
   Check("Math.clamp",  Math.clamp(15.0, 0.0, 10.0) = 10.0);
   Check("Math.min",    Math.min(3.0, 7.0) = 3.0);
   Check("Math.max",    Math.max(3.0, 7.0) = 7.0);
+
+  (* ── 24. String relational ordering ────────────────────────────────── *)
+  s := "apple";  t := "banana";
+  Check("str < true",   s < t);
+  Check("str < false",  ~(t < s));
+  Check("str > true",   t > s);
+  Check("str > false",  ~(s > t));
+  Check("str <= less",  s <= t);
+  Check("str <= equal", s <= s);
+  Check("str >= greater", t >= s);
+  Check("str >= equal",   t >= t);
+  Check("str lit <",    s < "cherry");
+  Check("str lit >",    t > "aardvark");
 
   Out.Ln;
   Out.String("Done."); Out.Ln;
