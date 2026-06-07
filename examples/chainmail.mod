@@ -2996,7 +2996,7 @@ BEGIN
     TUI.WaitEvent(ev2);
     IF ev2.kind = TUI.EvKey THEN
       IF ev2.key = 17 THEN TUI.Done; HALT(0)
-      ELSIF ev2.key = ORD('N') OR ev2.key = ORD('n') THEN
+      ELSIF (ev2.key = ORD('N')) OR (ev2.key = ORD('n')) THEN
         IF count > 0 THEN EXIT END
       ELSIF (ev2.key = ORD('D')) OR (ev2.key = ORD('d')) THEN
         IF count > 0 THEN
