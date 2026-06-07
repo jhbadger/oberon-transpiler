@@ -1042,15 +1042,17 @@ static void emit_builtin(CG *g, const char *name, Node *args) {
     } else if (!strcasecmp(name,"COPY")) {
         /* COPY(src, dst) — bounded copy; dst is ARRAY OF CHAR.
          * Open-array VAR params are char* in C so sizeof gives pointer size;
-         * use the hidden _len parameter instead. */
+         * use the hidden _len parameter instead.
+         * Source must always be a char* string, even when it is a single-character
+         * string literal that emit_expr() would normally fold to a 'x' char literal. */
         int dst_open = a1 && a1->kind==ND_IDENT && is_open_array(sym_type(a1->str));
         if (dst_open) {
             emit(g,"(strncpy("); emit_expr(g,a1); emit(g,",");
-            if(a0) emit_expr(g,a0);
+            if(a0) emit_as_string(g,a0);
             emit(g,",%s_len-1),(", a1->str); emit_expr(g,a1); emit(g,")[%s_len-1]=0)", a1->str);
         } else {
             emit(g,"(strncpy("); emit_expr(g,a1); emit(g,",");
-            if(a0) emit_expr(g,a0);
+            if(a0) emit_as_string(g,a0);
             emit(g,",sizeof("); emit_expr(g,a1); emit(g,")-1),(");
             emit_expr(g,a1); emit(g,")[sizeof("); emit_expr(g,a1); emit(g,")-1]=0)");
         }
