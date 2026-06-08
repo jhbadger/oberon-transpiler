@@ -121,8 +121,9 @@ VAR
   unitMove   : ARRAY NTYPES OF INTEGER;
   unitHpFig  : ARRAY NTYPES OF INTEGER;
   unitBaseML : ARRAY NTYPES OF INTEGER;
-  unitHasBow : ARRAY NTYPES OF BOOLEAN;
-  unitBowRng : ARRAY NTYPES OF INTEGER;
+  unitHasBow      : ARRAY NTYPES OF BOOLEAN;
+  unitBowRng      : ARRAY NTYPES OF INTEGER;
+  unitShotsPerTurn: ARRAY NTYPES OF INTEGER;
   unitIsElite : ARRAY NTYPES OF BOOLEAN;
   unitIsCav   : ARRAY NTYPES OF BOOLEAN;
   unitCost    : ARRAY NTYPES OF INTEGER;
@@ -236,6 +237,12 @@ BEGIN
   unitBowRng[PIKE]  :=0; unitBowRng[ELITE] :=0; unitBowRng[LCAV]  :=0;
   unitBowRng[HCAV]  :=0; unitBowRng[DWARF] :=0; unitBowRng[ELF]   :=7;
   unitBowRng[ORC]   :=0;
+
+  (* Book gives longbows 3 shots/turn; other bow units also 3 *)
+  unitShotsPerTurn[LEVY]  :=0; unitShotsPerTurn[SWORD] :=0; unitShotsPerTurn[ARCHER]:=3;
+  unitShotsPerTurn[PIKE]  :=0; unitShotsPerTurn[ELITE] :=0; unitShotsPerTurn[LCAV]  :=0;
+  unitShotsPerTurn[HCAV]  :=0; unitShotsPerTurn[DWARF] :=0; unitShotsPerTurn[ELF]   :=3;
+  unitShotsPerTurn[ORC]   :=0;
 
   unitIsElite[LEVY]  :=FALSE; unitIsElite[SWORD] :=FALSE;
   unitIsElite[ARCHER]:=FALSE; unitIsElite[PIKE]  :=FALSE;
@@ -444,6 +451,57 @@ BEGIN
   END
 END RetreatUnit;
 
+PROCEDURE NearbyUnitModifier(side, col, row: INTEGER): INTEGER;
+(* Nearby disordered/routed enemy = bonus; nearby disordered/routed friendly = penalty *)
+VAR i, dist, mod: INTEGER;
+BEGIN
+  mod := 0;
+  IF side = RED THEN
+    FOR i := 0 TO blue.count - 1 DO
+      IF blue.units[i].alive THEN
+        dist := CDist(col, row, blue.units[i].col, blue.units[i].row);
+        IF dist <= 6 THEN
+          IF blue.units[i].morale = ML_DISORDER THEN INC(mod, 5)
+          ELSIF blue.units[i].morale >= ML_ROUTED THEN INC(mod, 10)
+          END
+        END
+      END
+    END;
+    FOR i := 0 TO red.count - 1 DO
+      IF red.units[i].alive THEN
+        dist := CDist(col, row, red.units[i].col, red.units[i].row);
+        IF dist <= 6 THEN
+          IF red.units[i].morale = ML_DISORDER THEN DEC(mod, 5)
+          ELSIF red.units[i].morale >= ML_ROUTED THEN DEC(mod, 10)
+          END
+        END
+      END
+    END
+  ELSE
+    FOR i := 0 TO red.count - 1 DO
+      IF red.units[i].alive THEN
+        dist := CDist(col, row, red.units[i].col, red.units[i].row);
+        IF dist <= 6 THEN
+          IF red.units[i].morale = ML_DISORDER THEN INC(mod, 5)
+          ELSIF red.units[i].morale >= ML_ROUTED THEN INC(mod, 10)
+          END
+        END
+      END
+    END;
+    FOR i := 0 TO blue.count - 1 DO
+      IF blue.units[i].alive THEN
+        dist := CDist(col, row, blue.units[i].col, blue.units[i].row);
+        IF dist <= 6 THEN
+          IF blue.units[i].morale = ML_DISORDER THEN DEC(mod, 5)
+          ELSIF blue.units[i].morale >= ML_ROUTED THEN DEC(mod, 10)
+          END
+        END
+      END
+    END
+  END;
+  RETURN mod
+END NearbyUnitModifier;
+
 PROCEDURE CheckMorale(side, idx, modifier: INTEGER;
                       reason: ARRAY OF CHAR): BOOLEAN;
 VAR a: Army; u: Unit; score, roll: INTEGER;
@@ -454,6 +512,7 @@ BEGIN
   score := u.baseScore;
   INC(score, u.meleeWins * 5);
   INC(score, CmdMoraleBonus(side, u.col, u.row));
+  INC(score, NearbyUnitModifier(side, u.col, u.row));
   DEC(score, u.morale * 10);
   INC(score, modifier);
   IF score < 1 THEN score := 1 END;
@@ -610,6 +669,11 @@ BEGIN
     ELSE INC(blue.units[defIdx].meleeWins) END
   END;
 
+  (* Flank attack: morale check for defender *)
+  IF (att.col # def.col) & (att.row # def.row) THEN
+    IF ~CheckMorale(defSide, defIdx, -10, "flank") THEN END
+  END;
+
   (* Cavalry charge forces morale check on foot defenders *)
   IF att.charged & unitIsCav[att.utype] & ~unitIsCav[def.utype] THEN
     IF ~CheckMorale(defSide, defIdx, -20, "cav!") THEN END
@@ -636,6 +700,17 @@ END ResolveMeleeAll;
 (* ════════════════════════════════════════════════════════════════════════ *)
 (*  Elimination, Victory, Bookkeeping                                      *)
 (* ════════════════════════════════════════════════════════════════════════ *)
+
+PROCEDURE CheckArmyMorale(side, modifier: INTEGER; reason: ARRAY OF CHAR);
+VAR i: INTEGER; a: Army;
+BEGIN
+  a := ArmyOf(side);
+  FOR i := 0 TO a.count - 1 DO
+    IF a.units[i].alive THEN
+      IF ~CheckMorale(side, i, modifier, reason) THEN END
+    END
+  END
+END CheckArmyMorale;
 
 PROCEDURE CheckElimination;
 VAR i: INTEGER; msg: ARRAY 48 OF CHAR;
@@ -668,10 +743,12 @@ BEGIN
   END;
   (* Commander captured if enemy occupies their cell *)
   IF red.cmdAlive & OccupiedBy(red.cmdCol, red.cmdRow, BLUE) THEN
-    red.cmdAlive := FALSE; AppendLog("Red COMMANDER captured!")
+    red.cmdAlive := FALSE; AppendLog("Red COMMANDER captured!");
+    CheckArmyMorale(RED, -40, "cmd!")
   END;
   IF blue.cmdAlive & OccupiedBy(blue.cmdCol, blue.cmdRow, RED) THEN
-    blue.cmdAlive := FALSE; AppendLog("Blue COMMANDER captured!")
+    blue.cmdAlive := FALSE; AppendLog("Blue COMMANDER captured!");
+    CheckArmyMorale(BLUE, -40, "cmd!")
   END
 END CheckElimination;
 
@@ -718,7 +795,7 @@ BEGIN
   a := ArmyOf(side);
   FOR i := 0 TO a.count - 1 DO
     IF a.units[i].alive & unitHasBow[a.units[i].utype] THEN
-      a.units[i].shotsLeft := 1
+      a.units[i].shotsLeft := unitShotsPerTurn[a.units[i].utype]
     ELSE
       a.units[i].shotsLeft := 0
     END
@@ -816,19 +893,22 @@ PROCEDURE AIShootUnit(bIdx: INTEGER);
 VAR i, bestIdx, bestFigs: INTEGER; msg: ARRAY 64 OF CHAR;
 BEGIN
   IF ~unitHasBow[blue.units[bIdx].utype] THEN RETURN END;
-  IF blue.units[bIdx].shotsLeft <= 0 THEN RETURN END;
-  bestIdx := -1; bestFigs := 9999;
-  FOR i := 0 TO red.count - 1 DO
-    IF red.units[i].alive &
-       CanShootTarget(BLUE, bIdx, red.units[i].col, red.units[i].row) THEN
-      IF red.units[i].figures < bestFigs THEN
-        bestFigs := red.units[i].figures; bestIdx := i
+  WHILE blue.units[bIdx].shotsLeft > 0 DO
+    bestIdx := -1; bestFigs := 9999;
+    FOR i := 0 TO red.count - 1 DO
+      IF red.units[i].alive &
+         CanShootTarget(BLUE, bIdx, red.units[i].col, red.units[i].row) THEN
+        IF red.units[i].figures < bestFigs THEN
+          bestFigs := red.units[i].figures; bestIdx := i
+        END
       END
+    END;
+    IF bestIdx >= 0 THEN
+      ResolveShot(BLUE, bIdx, RED, bestIdx, msg);
+      AppendLog(msg)
+    ELSE
+      blue.units[bIdx].shotsLeft := 0
     END
-  END;
-  IF bestIdx >= 0 THEN
-    ResolveShot(BLUE, bIdx, RED, bestIdx, msg);
-    AppendLog(msg)
   END
 END AIShootUnit;
 
@@ -1210,6 +1290,7 @@ BEGIN
         CheckRally(RED);
         CheckRally(BLUE);
         SetShotsForTurn(RED);
+        SetShotsForTurn(BLUE);
         phase := PH_SHOOT
       END
   END
@@ -1447,6 +1528,7 @@ BEGIN
   gameOver := FALSE; verboseAI := FALSE;
   curCol := 0; curRow := GRID_H DIV 2;
   SetShotsForTurn(RED);
+  SetShotsForTurn(BLUE);
   AppendLog("Swords & Spells begins. Red (south) fires first.")
 END SetupGame;
 
