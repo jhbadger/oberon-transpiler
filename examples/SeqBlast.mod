@@ -10,7 +10,9 @@ MODULE SeqBlast;
     4. Run affine-gap Needleman-Wunsch on each ungapped HSP region
        (capped at MaxAlnRegion per axis) to produce the gapped alignment.
     5. Filter by E-value <= threshold; deduplicate overlapping HSPs.
-    6. Print tabular (-outfmt 6 style) or pairwise (-aln) output.
+    6. Chain compatible HSPs per subject (greedy DP, like real BLAST)
+       and recompute a combined score / E-value for the chain.
+    7. Print tabular (-outfmt 6 style) or pairwise (-aln) output.
 
   E-value uses Karlin-Altschul statistics.
     Lambda = 0.318, K = 0.130 (match=1, mismatch=-3, DNA).
@@ -22,12 +24,12 @@ MODULE SeqBlast;
 IMPORT BioIO, BioSeq, BioAlpha, BioPattern, Out, Args, Strings, Math, Parallel;
 
 CONST
-  MaxHSPs      = 512;
-  MaxBlastWorkers = 8;  (* parallel subject sequences; each needs ~9 MB workspace *)
-  MaxQLen      = 65536;
-  MaxW         = 32;
-  MaxAlnRegion = 512;               (* max region length per axis for gapped NW *)
-  MaxAlnStr    = MaxAlnRegion * 2 + 2;  (* max alignment string (includes gaps) *)
+  MaxHSPs         = 512;
+  MaxBlastWorkers = 8;   (* parallel subject sequences; each needs ~9 MB workspace *)
+  MaxQLen         = 65536;
+  MaxW            = 32;
+  MaxAlnRegion    = 512;               (* max region length per axis for gapped NW *)
+  MaxAlnStr       = MaxAlnRegion * 2 + 2;
 
   Lambda  = 0.318;
   KStat   = 0.130;
@@ -40,11 +42,19 @@ TYPE
     nIdent       : INTEGER;
     nMismatch    : INTEGER;
     nGapOpen     : INTEGER;
-    aLen         : INTEGER;   (* total alignment length including gaps *)
-    alnStr       : INTEGER;   (* length of qAln/sAln/mAln strings *)
+    aLen         : INTEGER;
+    alnStr       : INTEGER;
     qAln         : ARRAY MaxAlnStr OF CHAR;
     sAln         : ARRAY MaxAlnStr OF CHAR;
     mAln         : ARRAY MaxAlnStr OF CHAR
+  END;
+
+  ChainRec = RECORD
+    score    : INTEGER;
+    evalue   : REAL;
+    bitscore : REAL;
+    nHSPs    : INTEGER;
+    hspIdx   : ARRAY MaxHSPs OF INTEGER
   END;
 
 VAR
@@ -53,8 +63,8 @@ VAR
   matchScr  : INTEGER;
   mmScr     : INTEGER;
   xDrop     : INTEGER;
-  gapOpen   : INTEGER;   (* gap-open penalty, negative (default -5)  *)
-  gapExt    : INTEGER;   (* gap-extend penalty, negative (default -2) *)
+  gapOpen   : INTEGER;
+  gapExt    : INTEGER;
   alnMode   : BOOLEAN;
   queryFile : ARRAY 1024 OF CHAR;
   dbFile    : ARRAY 1024 OF CHAR;
@@ -65,11 +75,9 @@ VAR
   queryBuf  : ARRAY MaxQLen OF CHAR;
   queryLen  : INTEGER;
 
-  (* DP and traceback tables for GappedAlign — global to stay off the stack *)
   dpM, dpIX, dpIY : ARRAY MaxAlnRegion+1 OF ARRAY MaxAlnRegion+1 OF INTEGER;
   tbM, tbIX, tbIY : ARRAY MaxAlnRegion+1 OF ARRAY MaxAlnRegion+1 OF INTEGER;
 
-(* Per-worker workspace for parallel database search. *)
 VAR
   wkSubjSeq  : ARRAY MaxBlastWorkers OF BioSeq.Seq;
   wkSubjName : ARRAY MaxBlastWorkers OF ARRAY 256 OF CHAR;
@@ -151,7 +159,6 @@ BEGIN
   IF qc = sc THEN RETURN matchScr ELSE RETURN mmScr END
 END PairScore;
 
-
 (* ------------------------------------------------------------------ *)
 (*  X-drop extension                                                    *)
 (* ------------------------------------------------------------------ *)
@@ -193,12 +200,6 @@ END ExtendLeft;
 (* ------------------------------------------------------------------ *)
 
 PROCEDURE GappedAlign(subj: BioSeq.Seq; VAR rec: HSPRec);
-(*
-  Needleman-Wunsch with affine gap penalties over the region
-  [rec.qStart..rec.qEnd] x [rec.sStart..rec.sEnd], capped at
-  MaxAlnRegion per axis.  Updates rec.rawScore, .nIdent, .nMismatch,
-  .nGapOpen, .aLen, .alnStr, .qAln, .sAln, .mAln, .qEnd, .sEnd.
-*)
 CONST
   GapInf = -1000000;
   FromM  = 0; FromIX = 1; FromIY = 2;
@@ -216,13 +217,11 @@ BEGIN
   IF n > MaxAlnRegion THEN n := MaxAlnRegion; rec.qEnd := rec.qStart + n - 1 END;
   IF m > MaxAlnRegion THEN m := MaxAlnRegion; rec.sEnd := rec.sStart + m - 1 END;
 
-  go1 := gapOpen + gapExt;   (* cost of a 1-residue gap *)
+  go1 := gapOpen + gapExt;
 
-  (* Boundary: (0,0) *)
   dpM[0][0]  := 0;    dpIX[0][0] := GapInf; dpIY[0][0] := GapInf;
   tbM[0][0]  := FromM; tbIX[0][0] := GapNew; tbIY[0][0] := GapNew;
 
-  (* Left edge: query advances, subject has gaps *)
   FOR i := 1 TO n DO
     dpM[i][0]  := GapInf;
     dpIX[i][0] := go1 + (i - 1) * gapExt;
@@ -232,7 +231,6 @@ BEGIN
     tbIY[i][0] := GapNew
   END;
 
-  (* Top edge: subject advances, query has gaps *)
   FOR j := 1 TO m DO
     dpM[0][j]  := GapInf;
     dpIX[0][j] := GapInf;
@@ -242,10 +240,8 @@ BEGIN
     IF j = 1 THEN tbIY[0][j] := GapNew ELSE tbIY[0][j] := GapExt END
   END;
 
-  (* Fill DP table *)
   FOR i := 1 TO n DO
     FOR j := 1 TO m DO
-      (* Match/mismatch *)
       v1 := dpM[i-1][j-1]; v2 := dpIX[i-1][j-1]; v3 := dpIY[i-1][j-1];
       IF v1 >= v2 THEN
         IF v1 >= v3 THEN bst := v1; tbM[i][j] := FromM
@@ -265,13 +261,11 @@ BEGIN
       ELSE dpM[i][j] := GapInf
       END;
 
-      (* IX: gap in subject, query[i] consumed *)
       v1 := dpM[i-1][j] + go1; v2 := dpIX[i-1][j] + gapExt;
       IF v1 >= v2 THEN dpIX[i][j] := v1; tbIX[i][j] := GapNew
       ELSE              dpIX[i][j] := v2; tbIX[i][j] := GapExt
       END;
 
-      (* IY: gap in query, subj[j] consumed *)
       v1 := dpM[i][j-1] + go1; v2 := dpIY[i][j-1] + gapExt;
       IF v1 >= v2 THEN dpIY[i][j] := v1; tbIY[i][j] := GapNew
       ELSE              dpIY[i][j] := v2; tbIY[i][j] := GapExt
@@ -279,13 +273,11 @@ BEGIN
     END
   END;
 
-  (* Choose best final state *)
   bst := dpM[n][m]; state := FromM;
   IF dpIX[n][m] > bst THEN bst := dpIX[n][m]; state := FromIX END;
   IF dpIY[n][m] > bst THEN bst := dpIY[n][m]; state := FromIY END;
   rec.rawScore := bst;
 
-  (* Traceback — build strings in reverse *)
   pos := 0; i := n; j := m;
   rec.nIdent := 0; rec.nMismatch := 0; rec.nGapOpen := 0;
   WHILE (i > 0) OR (j > 0) DO
@@ -301,7 +293,7 @@ BEGIN
       END;
       INC(pos);
       state := tbM[i][j]; DEC(i); DEC(j)
-    ELSIF state = FromIX THEN   (* gap in subject, query advances *)
+    ELSIF state = FromIX THEN
       qc := queryBuf[rec.qStart + i - 1];
       rec.qAln[pos] := qc; rec.sAln[pos] := '-'; rec.mAln[pos] := ' ';
       INC(pos);
@@ -309,7 +301,7 @@ BEGIN
       ELSE state := FromIX
       END;
       DEC(i)
-    ELSE                        (* FromIY: gap in query, subject advances *)
+    ELSE
       sc := BioSeq.Get(subj, rec.sStart + j - 1);
       IF (sc >= 'a') & (sc <= 'z') THEN sc := CAP(sc) END;
       rec.qAln[pos] := '-'; rec.sAln[pos] := sc; rec.mAln[pos] := ' ';
@@ -322,7 +314,6 @@ BEGIN
   END;
   rec.alnStr := pos; rec.aLen := pos;
 
-  (* Reverse alignment strings in place *)
   FOR k := 0 TO pos DIV 2 - 1 DO
     tmp := rec.qAln[k]; rec.qAln[k] := rec.qAln[pos-1-k]; rec.qAln[pos-1-k] := tmp;
     tmp := rec.sAln[k]; rec.sAln[k] := rec.sAln[pos-1-k]; rec.sAln[pos-1-k] := tmp;
@@ -376,6 +367,96 @@ BEGIN
 END AddHSP;
 
 (* ------------------------------------------------------------------ *)
+(*  HSP Chaining — combine compatible HSPs per subject (like BLAST)   *)
+(*                                                                      *)
+(*  Two HSPs i→j are compatible when:                                  *)
+(*    • j.qStart > i.qEnd  (no query overlap)                          *)
+(*    • j.sStart > i.sEnd  (no subject overlap)                        *)
+(*    • diagonal skew |(qGap - sGap)| <= wordSize                      *)
+(*  Gap between HSPs is penalised with the affine gap cost so the      *)
+(*  chain score accounts for the discontinuity.                         *)
+(*  The DP finds the single best chain; evalue is recomputed from the  *)
+(*  combined raw score against the full subject length.                 *)
+(* ------------------------------------------------------------------ *)
+
+PROCEDURE SortHSPs(n: INTEGER);
+(* Insertion sort on hspList[0..n-1] by qStart ascending. *)
+VAR i, j: INTEGER; tmp: HSPRec;
+BEGIN
+  FOR i := 1 TO n - 1 DO
+    tmp := hspList[i]; j := i - 1;
+    WHILE (j >= 0) & (hspList[j].qStart > tmp.qStart) DO
+      hspList[j + 1] := hspList[j]; DEC(j)
+    END;
+    hspList[j + 1] := tmp
+  END
+END SortHSPs;
+
+PROCEDURE ChainHSPs(sLen: INTEGER; VAR best: ChainRec);
+VAR
+  dp         : ARRAY MaxHSPs OF INTEGER;
+  from       : ARRAY MaxHSPs OF INTEGER;
+  i, j       : INTEGER;
+  qGap, sGap : INTEGER;
+  diag       : INTEGER;
+  gapPenalty : INTEGER;
+  cand       : INTEGER;
+  bestJ      : INTEGER;
+  bestScore  : INTEGER;
+  lo, hi     : INTEGER;
+  tmp        : INTEGER;
+BEGIN
+  best.nHSPs := 0; best.score := 0;
+  IF hspCount = 0 THEN RETURN END;
+  SortHSPs(hspCount);
+
+  FOR j := 0 TO hspCount - 1 DO
+    dp[j] := hspList[j].rawScore; from[j] := -1
+  END;
+
+  FOR j := 1 TO hspCount - 1 DO
+    FOR i := 0 TO j - 1 DO
+      IF (hspList[j].qStart > hspList[i].qEnd) &
+         (hspList[j].sStart > hspList[i].sEnd) THEN
+        qGap := hspList[j].qStart - hspList[i].qEnd - 1;
+        sGap := hspList[j].sStart - hspList[i].sEnd - 1;
+        diag := qGap - sGap;
+        IF diag < 0 THEN diag := -diag END;
+        IF diag <= wordSize THEN
+          IF qGap > sGap THEN gapPenalty := gapOpen + qGap * gapExt
+          ELSE                 gapPenalty := gapOpen + sGap * gapExt
+          END;
+          IF gapPenalty > 0 THEN gapPenalty := 0 END;
+          cand := dp[i] + gapPenalty + hspList[j].rawScore;
+          IF cand > dp[j] THEN dp[j] := cand; from[j] := i END
+        END
+      END
+    END
+  END;
+
+  bestJ := 0; bestScore := dp[0];
+  FOR j := 1 TO hspCount - 1 DO
+    IF dp[j] > bestScore THEN bestScore := dp[j]; bestJ := j END
+  END;
+
+  best.score    := bestScore;
+  best.bitscore := BitScore(bestScore);
+  best.evalue   := CalcEvalue(bestScore, queryLen, sLen);
+  best.nHSPs    := 0;
+  j := bestJ;
+  WHILE j >= 0 DO
+    best.hspIdx[best.nHSPs] := j; INC(best.nHSPs); j := from[j]
+  END;
+
+  (* reverse traceback so indices are in ascending query order *)
+  lo := 0; hi := best.nHSPs - 1;
+  WHILE lo < hi DO
+    tmp := best.hspIdx[lo]; best.hspIdx[lo] := best.hspIdx[hi];
+    best.hspIdx[hi] := tmp; INC(lo); DEC(hi)
+  END
+END ChainHSPs;
+
+(* ------------------------------------------------------------------ *)
 (*  Parallel-safe search workers                                        *)
 (* ------------------------------------------------------------------ *)
 
@@ -415,6 +496,110 @@ BEGIN
     END
   END
 END AddHSPW;
+
+PROCEDURE SortHSPsW(wi: INTEGER; isPlus: BOOLEAN; n: INTEGER);
+VAR i, j: INTEGER; tmp: HSPRec;
+BEGIN
+  IF isPlus THEN
+    FOR i := 1 TO n - 1 DO
+      tmp := wkHspListP[wi][i]; j := i - 1;
+      WHILE (j >= 0) & (wkHspListP[wi][j].qStart > tmp.qStart) DO
+        wkHspListP[wi][j + 1] := wkHspListP[wi][j]; DEC(j)
+      END;
+      wkHspListP[wi][j + 1] := tmp
+    END
+  ELSE
+    FOR i := 1 TO n - 1 DO
+      tmp := wkHspListM[wi][i]; j := i - 1;
+      WHILE (j >= 0) & (wkHspListM[wi][j].qStart > tmp.qStart) DO
+        wkHspListM[wi][j + 1] := wkHspListM[wi][j]; DEC(j)
+      END;
+      wkHspListM[wi][j + 1] := tmp
+    END
+  END
+END SortHSPsW;
+
+PROCEDURE ChainHSPsW(wi: INTEGER; isPlus: BOOLEAN; sLen: INTEGER;
+                      VAR best: ChainRec);
+VAR
+  dp         : ARRAY MaxHSPs OF INTEGER;
+  from       : ARRAY MaxHSPs OF INTEGER;
+  n, i, j    : INTEGER;
+  qGap, sGap : INTEGER;
+  diag       : INTEGER;
+  gapPenalty : INTEGER;
+  cand       : INTEGER;
+  bestJ      : INTEGER;
+  bestScore  : INTEGER;
+  lo, hi     : INTEGER;
+  tmp        : INTEGER;
+  qsi, qei   : INTEGER;   (* qStart/qEnd of HSP i *)
+  ssi, sei   : INTEGER;   (* sStart/sEnd of HSP i *)
+  qsj, ssj   : INTEGER;   (* qStart/sStart of HSP j *)
+BEGIN
+  best.nHSPs := 0; best.score := 0;
+  IF isPlus THEN n := wkHspCntP[wi] ELSE n := wkHspCntM[wi] END;
+  IF n = 0 THEN RETURN END;
+  SortHSPsW(wi, isPlus, n);
+
+  FOR j := 0 TO n - 1 DO
+    IF isPlus THEN dp[j] := wkHspListP[wi][j].rawScore
+    ELSE            dp[j] := wkHspListM[wi][j].rawScore
+    END;
+    from[j] := -1
+  END;
+
+  FOR j := 1 TO n - 1 DO
+    IF isPlus THEN
+      qsj := wkHspListP[wi][j].qStart; ssj := wkHspListP[wi][j].sStart
+    ELSE
+      qsj := wkHspListM[wi][j].qStart; ssj := wkHspListM[wi][j].sStart
+    END;
+    FOR i := 0 TO j - 1 DO
+      IF isPlus THEN
+        qei := wkHspListP[wi][i].qEnd; sei := wkHspListP[wi][i].sEnd
+      ELSE
+        qei := wkHspListM[wi][i].qEnd; sei := wkHspListM[wi][i].sEnd
+      END;
+      IF (qsj > qei) & (ssj > sei) THEN
+        qGap := qsj - qei - 1;
+        sGap := ssj - sei - 1;
+        diag := qGap - sGap;
+        IF diag < 0 THEN diag := -diag END;
+        IF diag <= wordSize THEN
+          IF qGap > sGap THEN gapPenalty := gapOpen + qGap * gapExt
+          ELSE                 gapPenalty := gapOpen + sGap * gapExt
+          END;
+          IF gapPenalty > 0 THEN gapPenalty := 0 END;
+          IF isPlus THEN cand := dp[i] + gapPenalty + wkHspListP[wi][j].rawScore
+          ELSE            cand := dp[i] + gapPenalty + wkHspListM[wi][j].rawScore
+          END;
+          IF cand > dp[j] THEN dp[j] := cand; from[j] := i END
+        END
+      END
+    END
+  END;
+
+  bestJ := 0; bestScore := dp[0];
+  FOR j := 1 TO n - 1 DO
+    IF dp[j] > bestScore THEN bestScore := dp[j]; bestJ := j END
+  END;
+
+  best.score    := bestScore;
+  best.bitscore := BitScore(bestScore);
+  best.evalue   := CalcEvalue(bestScore, queryLen, sLen);
+  best.nHSPs    := 0;
+  j := bestJ;
+  WHILE j >= 0 DO
+    best.hspIdx[best.nHSPs] := j; INC(best.nHSPs); j := from[j]
+  END;
+
+  lo := 0; hi := best.nHSPs - 1;
+  WHILE lo < hi DO
+    tmp := best.hspIdx[lo]; best.hspIdx[lo] := best.hspIdx[hi];
+    best.hspIdx[hi] := tmp; INC(lo); DEC(hi)
+  END
+END ChainHSPsW;
 
 PROCEDURE GappedAlignW(wi: INTEGER; subj: BioSeq.Seq; VAR rec: HSPRec);
 CONST
@@ -574,133 +759,302 @@ BEGIN
   END
 END FindHSPsW;
 
+(* ------------------------------------------------------------------ *)
+(*  Output                                                              *)
+(* ------------------------------------------------------------------ *)
+
+PROCEDURE PrintEvalue(e: REAL);
+VAR exp: INTEGER; m: REAL;
+BEGIN
+  IF e >= 0.001 THEN
+    Out.Fixed(e, 0, 3)
+  ELSE
+    exp := 0; m := e;
+    WHILE m < 1.0 DO m := m * 10.0; DEC(exp) END;
+    Out.Fixed(m, 0, 2); Out.String("e"); Out.Int(exp, 0)
+  END
+END PrintEvalue;
+
+(*
+  PrintTabular: emit one -outfmt 6 row per HSP in the chain.
+  All rows in the chain share the chain's combined score and E-value,
+  matching real BLAST behaviour where the reported evalue reflects the
+  full aligned region rather than an individual HSP.
+*)
+PROCEDURE PrintTabular(subjName: ARRAY OF CHAR; sLen: INTEGER; minus: BOOLEAN);
+VAR
+  chain      : ChainRec;
+  k, idx     : INTEGER;
+  ss, se     : INTEGER;
+  pct        : REAL;
+BEGIN
+  ChainHSPs(sLen, chain);
+  IF (chain.nHSPs = 0) OR (chain.evalue > eThresh) THEN RETURN END;
+
+  FOR k := 0 TO chain.nHSPs - 1 DO
+    idx := chain.hspIdx[k];
+    pct := FLT(hspList[idx].nIdent) / FLT(hspList[idx].aLen) * 100.0;
+    IF minus THEN
+      ss := sLen - hspList[idx].sStart;
+      se := sLen - hspList[idx].sEnd
+    ELSE
+      ss := hspList[idx].sStart + 1;
+      se := hspList[idx].sEnd   + 1
+    END;
+    Out.String("query");  Out.Char(9X);
+    Out.String(subjName); Out.Char(9X);
+    Out.Fixed(pct, 0, 2); Out.Char(9X);
+    Out.Int(hspList[idx].aLen, 0);       Out.Char(9X);
+    Out.Int(hspList[idx].nMismatch, 0);  Out.Char(9X);
+    Out.Int(hspList[idx].nGapOpen, 0);   Out.Char(9X);
+    Out.Int(hspList[idx].qStart + 1, 0); Out.Char(9X);
+    Out.Int(hspList[idx].qEnd   + 1, 0); Out.Char(9X);
+    Out.Int(ss, 0); Out.Char(9X);
+    Out.Int(se, 0); Out.Char(9X);
+    PrintEvalue(chain.evalue); Out.Char(9X);
+    Out.Fixed(chain.bitscore, 0, 1); Out.Ln
+  END
+END PrintTabular;
+
+(*
+  PrintAlnFmt: pairwise output.  We compact hspList to only the chained
+  members (safe because FindHSPs resets hspCount := 0 on every new subject),
+  then walk each HSP in query order, printing the chain score/evalue in
+  the header of the first HSP and individual HSP blocks after that.
+*)
+PROCEDURE PrintAlnFmt(subj: BioSeq.Seq; subjName: ARRAY OF CHAR;
+                      sLen: INTEGER; minus: BOOLEAN);
+CONST Width = 60;
+VAR
+  chain          : ChainRec;
+  k, idx         : INTEGER;
+  p, j, w        : INTEGER;
+  qPos, sPos     : INTEGER;
+  qLo, sLo       : INTEGER;
+  qHi, sHi       : INTEGER;
+	totIdent, totAln, totGap: INTEGER;
+  pct            : REAL;
+  qline, sline, mline : ARRAY 61 OF CHAR;
+BEGIN
+  ChainHSPs(sLen, chain);
+  IF (chain.nHSPs = 0) OR (chain.evalue > eThresh) THEN RETURN END;
+
+  Out.Ln;
+  Out.String("> "); Out.String(subjName); Out.Ln;
+  Out.String("  Score = "); Out.Fixed(chain.bitscore, 0, 1);
+  Out.String(" bits ("); Out.Int(chain.score, 0); Out.String("),");
+  Out.String("  Expect = "); PrintEvalue(chain.evalue); Out.Ln;
+
+  (* Tally identities / gaps across the whole chain for the summary line. *)
+  totIdent := 0; totAln := 0; totGap := 0;
+  FOR k := 0 TO chain.nHSPs - 1 DO
+    idx := chain.hspIdx[k];
+    INC(totIdent, hspList[idx].nIdent);
+    INC(totAln,   hspList[idx].aLen);
+    INC(totGap,   hspList[idx].nGapOpen)
+  END;
+  pct := FLT(totIdent) / FLT(totAln) * 100.0;
+  Out.String("  Identities = "); Out.Int(totIdent, 0);
+  Out.String("/"); Out.Int(totAln, 0);
+  Out.String(" ("); Out.Fixed(pct, 0, 0); Out.String("%)");
+  Out.String(",  Gaps = "); Out.Int(totGap, 0);
+  IF minus THEN Out.String("  Strand: Plus/Minus")
+  ELSE          Out.String("  Strand: Plus/Plus")
+  END;
+  Out.Ln; Out.Ln;
+
+  FOR k := 0 TO chain.nHSPs - 1 DO
+    idx := chain.hspIdx[k];
+
+    qPos := hspList[idx].qStart + 1;
+    IF minus THEN sPos := sLen - hspList[idx].sStart
+    ELSE          sPos := hspList[idx].sStart + 1
+    END;
+
+    p := 0;
+    WHILE p < hspList[idx].alnStr DO
+      w := IntMin(Width, hspList[idx].alnStr - p);
+      qLo := qPos; sLo := sPos;
+
+      FOR j := 0 TO w - 1 DO
+        qline[j] := hspList[idx].qAln[p + j];
+        sline[j] := hspList[idx].sAln[p + j];
+        mline[j] := hspList[idx].mAln[p + j];
+        IF hspList[idx].qAln[p + j] # '-' THEN INC(qPos) END;
+        IF hspList[idx].sAln[p + j] # '-' THEN
+          IF minus THEN DEC(sPos) ELSE INC(sPos) END
+        END
+      END;
+      qline[w] := 0X; sline[w] := 0X; mline[w] := 0X;
+      qHi := qPos - 1;
+      IF minus THEN sHi := sPos + 1 ELSE sHi := sPos - 1 END;
+
+      Out.String("Query "); Out.Int(qLo, 6);
+      Out.String("  "); Out.String(qline);
+      Out.String("  "); Out.Int(qHi, 0); Out.Ln;
+      Out.String("              "); Out.String(mline); Out.Ln;
+      Out.String("Sbjct "); Out.Int(sLo, 6);
+      Out.String("  "); Out.String(sline);
+      Out.String("  "); Out.Int(sHi, 0); Out.Ln;
+      Out.Ln;
+
+      INC(p, w)
+    END;
+
+    (* If there are more HSPs in the chain, print a gap marker. *)
+    IF k < chain.nHSPs - 1 THEN
+      Out.String("  ..."); Out.Ln; Out.Ln
+    END
+  END
+END PrintAlnFmt;
+
+(* ------------------------------------------------------------------ *)
+(*  Parallel worker output (uses ChainHSPsW)                           *)
+(* ------------------------------------------------------------------ *)
+
 PROCEDURE PrintTabularW(wi: INTEGER; isPlus: BOOLEAN);
-VAR i, ss, se, cnt, sLen: INTEGER; pct, ev, bs: REAL;
+VAR
+  chain      : ChainRec;
+  k, idx     : INTEGER;
+  ss, se     : INTEGER;
+  sLen       : INTEGER;
+  pct        : REAL;
 BEGIN
   sLen := wkSubjLen[wi];
-  IF isPlus THEN cnt := wkHspCntP[wi] ELSE cnt := wkHspCntM[wi] END;
-  FOR i := 0 TO cnt - 1 DO
+  ChainHSPsW(wi, isPlus, sLen, chain);
+  IF (chain.nHSPs = 0) OR (chain.evalue > eThresh) THEN RETURN END;
+
+  FOR k := 0 TO chain.nHSPs - 1 DO
+    idx := chain.hspIdx[k];
     IF isPlus THEN
-      ev  := CalcEvalue(wkHspListP[wi][i].rawScore, queryLen, sLen);
-      bs  := BitScore(wkHspListP[wi][i].rawScore);
-      pct := FLT(wkHspListP[wi][i].nIdent) / FLT(wkHspListP[wi][i].aLen) * 100.0;
-      ss  := wkHspListP[wi][i].sStart + 1;
-      se  := wkHspListP[wi][i].sEnd   + 1;
+      pct := FLT(wkHspListP[wi][idx].nIdent) / FLT(wkHspListP[wi][idx].aLen) * 100.0;
+      ss  := wkHspListP[wi][idx].sStart + 1;
+      se  := wkHspListP[wi][idx].sEnd   + 1;
       Out.String("query"); Out.Char(9X); Out.String(wkSubjName[wi]); Out.Char(9X);
       Out.Fixed(pct, 0, 2); Out.Char(9X);
-      Out.Int(wkHspListP[wi][i].aLen, 0); Out.Char(9X);
-      Out.Int(wkHspListP[wi][i].nMismatch, 0); Out.Char(9X);
-      Out.Int(wkHspListP[wi][i].nGapOpen, 0); Out.Char(9X);
-      Out.Int(wkHspListP[wi][i].qStart + 1, 0); Out.Char(9X);
-      Out.Int(wkHspListP[wi][i].qEnd   + 1, 0); Out.Char(9X)
+      Out.Int(wkHspListP[wi][idx].aLen, 0);       Out.Char(9X);
+      Out.Int(wkHspListP[wi][idx].nMismatch, 0);  Out.Char(9X);
+      Out.Int(wkHspListP[wi][idx].nGapOpen, 0);   Out.Char(9X);
+      Out.Int(wkHspListP[wi][idx].qStart + 1, 0); Out.Char(9X);
+      Out.Int(wkHspListP[wi][idx].qEnd   + 1, 0); Out.Char(9X)
     ELSE
-      ev  := CalcEvalue(wkHspListM[wi][i].rawScore, queryLen, sLen);
-      bs  := BitScore(wkHspListM[wi][i].rawScore);
-      pct := FLT(wkHspListM[wi][i].nIdent) / FLT(wkHspListM[wi][i].aLen) * 100.0;
-      ss  := sLen - wkHspListM[wi][i].sStart;
-      se  := sLen - wkHspListM[wi][i].sEnd;
+      pct := FLT(wkHspListM[wi][idx].nIdent) / FLT(wkHspListM[wi][idx].aLen) * 100.0;
+      ss  := sLen - wkHspListM[wi][idx].sStart;
+      se  := sLen - wkHspListM[wi][idx].sEnd;
       Out.String("query"); Out.Char(9X); Out.String(wkSubjName[wi]); Out.Char(9X);
       Out.Fixed(pct, 0, 2); Out.Char(9X);
-      Out.Int(wkHspListM[wi][i].aLen, 0); Out.Char(9X);
-      Out.Int(wkHspListM[wi][i].nMismatch, 0); Out.Char(9X);
-      Out.Int(wkHspListM[wi][i].nGapOpen, 0); Out.Char(9X);
-      Out.Int(wkHspListM[wi][i].qStart + 1, 0); Out.Char(9X);
-      Out.Int(wkHspListM[wi][i].qEnd   + 1, 0); Out.Char(9X)
+      Out.Int(wkHspListM[wi][idx].aLen, 0);       Out.Char(9X);
+      Out.Int(wkHspListM[wi][idx].nMismatch, 0);  Out.Char(9X);
+      Out.Int(wkHspListM[wi][idx].nGapOpen, 0);   Out.Char(9X);
+      Out.Int(wkHspListM[wi][idx].qStart + 1, 0); Out.Char(9X);
+      Out.Int(wkHspListM[wi][idx].qEnd   + 1, 0); Out.Char(9X)
     END;
     Out.Int(ss, 0); Out.Char(9X); Out.Int(se, 0); Out.Char(9X);
-    PrintEvalue(ev); Out.Char(9X); Out.Fixed(bs, 0, 1); Out.Ln
+    PrintEvalue(chain.evalue); Out.Char(9X);
+    Out.Fixed(chain.bitscore, 0, 1); Out.Ln
   END
 END PrintTabularW;
 
 PROCEDURE PrintAlnFmtW(wi: INTEGER; isPlus: BOOLEAN);
 CONST Width = 60;
 VAR
-  i, p, j, w, cnt, sLen : INTEGER;
-  qPos, sPos            : INTEGER;
-  qLo, sLo, qHi, sHi   : INTEGER;
-  ev, bs, pct           : REAL;
-  qline, sline, mline   : ARRAY 61 OF CHAR;
+  chain          : ChainRec;
+  k, idx         : INTEGER;
+  p, j, w        : INTEGER;
+  sLen           : INTEGER;
+  qPos, sPos     : INTEGER;
+  qLo, sLo       : INTEGER;
+  qHi, sHi       : INTEGER;
+	alnLen         : INTEGER;
+  pct            : REAL;
+  totIdent, totAln, totGap : INTEGER;
+  qline, sline, mline : ARRAY 61 OF CHAR;
 BEGIN
   sLen := wkSubjLen[wi];
-  IF isPlus THEN cnt := wkHspCntP[wi] ELSE cnt := wkHspCntM[wi] END;
-  FOR i := 0 TO cnt - 1 DO
+  ChainHSPsW(wi, isPlus, sLen, chain);
+  IF (chain.nHSPs = 0) OR (chain.evalue > eThresh) THEN RETURN END;
+
+  Out.Ln;
+  Out.String("> "); Out.String(wkSubjName[wi]); Out.Ln;
+  Out.String("  Score = "); Out.Fixed(chain.bitscore, 0, 1);
+  Out.String(" bits ("); Out.Int(chain.score, 0); Out.String("),");
+  Out.String("  Expect = "); PrintEvalue(chain.evalue); Out.Ln;
+
+  totIdent := 0; totAln := 0; totGap := 0;
+  FOR k := 0 TO chain.nHSPs - 1 DO
+    idx := chain.hspIdx[k];
     IF isPlus THEN
-      ev  := CalcEvalue(wkHspListP[wi][i].rawScore, queryLen, sLen);
-      bs  := BitScore(wkHspListP[wi][i].rawScore);
-      pct := FLT(wkHspListP[wi][i].nIdent) / FLT(wkHspListP[wi][i].aLen) * 100.0
+      INC(totIdent, wkHspListP[wi][idx].nIdent);
+      INC(totAln,   wkHspListP[wi][idx].aLen);
+      INC(totGap,   wkHspListP[wi][idx].nGapOpen)
     ELSE
-      ev  := CalcEvalue(wkHspListM[wi][i].rawScore, queryLen, sLen);
-      bs  := BitScore(wkHspListM[wi][i].rawScore);
-      pct := FLT(wkHspListM[wi][i].nIdent) / FLT(wkHspListM[wi][i].aLen) * 100.0
-    END;
-    Out.Ln;
-    Out.String("> "); Out.String(wkSubjName[wi]); Out.Ln;
-    Out.String("  Score = "); Out.Fixed(bs, 0, 1);
-    Out.String(" bits (");
-    IF isPlus THEN Out.Int(wkHspListP[wi][i].rawScore, 0)
-    ELSE           Out.Int(wkHspListM[wi][i].rawScore, 0)
-    END;
-    Out.String("),  Expect = "); PrintEvalue(ev); Out.Ln;
-    Out.String("  Identities = ");
-    IF isPlus THEN Out.Int(wkHspListP[wi][i].nIdent, 0); Out.String("/"); Out.Int(wkHspListP[wi][i].aLen, 0)
-    ELSE           Out.Int(wkHspListM[wi][i].nIdent, 0); Out.String("/"); Out.Int(wkHspListM[wi][i].aLen, 0)
-    END;
-    Out.String(" ("); Out.Fixed(pct, 0, 0); Out.String("%)");
-    Out.String(",  Gaps = ");
-    IF isPlus THEN Out.Int(wkHspListP[wi][i].nGapOpen, 0)
-    ELSE           Out.Int(wkHspListM[wi][i].nGapOpen, 0)
-    END;
-    IF isPlus THEN Out.String("  Strand: Plus/Plus")
-    ELSE           Out.String("  Strand: Plus/Minus")
-    END;
-    Out.Ln; Out.Ln;
+      INC(totIdent, wkHspListM[wi][idx].nIdent);
+      INC(totAln,   wkHspListM[wi][idx].aLen);
+      INC(totGap,   wkHspListM[wi][idx].nGapOpen)
+    END
+  END;
+  pct := FLT(totIdent) / FLT(totAln) * 100.0;
+  Out.String("  Identities = "); Out.Int(totIdent, 0);
+  Out.String("/"); Out.Int(totAln, 0);
+  Out.String(" ("); Out.Fixed(pct, 0, 0); Out.String("%)");
+  Out.String(",  Gaps = "); Out.Int(totGap, 0);
+  IF isPlus THEN Out.String("  Strand: Plus/Plus")
+  ELSE           Out.String("  Strand: Plus/Minus")
+  END;
+  Out.Ln; Out.Ln;
+
+  FOR k := 0 TO chain.nHSPs - 1 DO
+    idx := chain.hspIdx[k];
 
     IF isPlus THEN
-      qPos := wkHspListP[wi][i].qStart + 1;
-      sPos := wkHspListP[wi][i].sStart + 1;
-      p := 0;
-      WHILE p < wkHspListP[wi][i].alnStr DO
-        w := IntMin(Width, wkHspListP[wi][i].alnStr - p);
-        qLo := qPos; sLo := sPos;
-        FOR j := 0 TO w - 1 DO
-          qline[j] := wkHspListP[wi][i].qAln[p + j];
-          sline[j] := wkHspListP[wi][i].sAln[p + j];
-          mline[j] := wkHspListP[wi][i].mAln[p + j];
-          IF wkHspListP[wi][i].qAln[p + j] # '-' THEN INC(qPos) END;
-          IF wkHspListP[wi][i].sAln[p + j] # '-' THEN INC(sPos) END
-        END;
-        qline[w] := 0X; sline[w] := 0X; mline[w] := 0X;
-        qHi := qPos - 1; sHi := sPos - 1;
-        Out.String("Query "); Out.Int(qLo, 6); Out.String("  "); Out.String(qline);
-        Out.String("  "); Out.Int(qHi, 0); Out.Ln;
-        Out.String("              "); Out.String(mline); Out.Ln;
-        Out.String("Sbjct "); Out.Int(sLo, 6); Out.String("  "); Out.String(sline);
-        Out.String("  "); Out.Int(sHi, 0); Out.Ln; Out.Ln;
-        INC(p, w)
-      END
+      qPos := wkHspListP[wi][idx].qStart + 1;
+      sPos := wkHspListP[wi][idx].sStart + 1
     ELSE
-      qPos := wkHspListM[wi][i].qStart + 1;
-      sPos := sLen - wkHspListM[wi][i].sStart;
-      p := 0;
-      WHILE p < wkHspListM[wi][i].alnStr DO
-        w := IntMin(Width, wkHspListM[wi][i].alnStr - p);
-        qLo := qPos; sLo := sPos;
-        FOR j := 0 TO w - 1 DO
-          qline[j] := wkHspListM[wi][i].qAln[p + j];
-          sline[j] := wkHspListM[wi][i].sAln[p + j];
-          mline[j] := wkHspListM[wi][i].mAln[p + j];
-          IF wkHspListM[wi][i].qAln[p + j] # '-' THEN INC(qPos) END;
-          IF wkHspListM[wi][i].sAln[p + j] # '-' THEN DEC(sPos) END
-        END;
-        qline[w] := 0X; sline[w] := 0X; mline[w] := 0X;
-        qHi := qPos - 1; sHi := sPos + 1;
-        Out.String("Query "); Out.Int(qLo, 6); Out.String("  "); Out.String(qline);
-        Out.String("  "); Out.Int(qHi, 0); Out.Ln;
-        Out.String("              "); Out.String(mline); Out.Ln;
-        Out.String("Sbjct "); Out.Int(sLo, 6); Out.String("  "); Out.String(sline);
-        Out.String("  "); Out.Int(sHi, 0); Out.Ln; Out.Ln;
-        INC(p, w)
-      END
+      qPos := wkHspListM[wi][idx].qStart + 1;
+      sPos := sLen - wkHspListM[wi][idx].sStart
+    END;
+
+    IF isPlus THEN alnLen := wkHspListP[wi][idx].alnStr
+    ELSE            alnLen := wkHspListM[wi][idx].alnStr
+    END;
+    p := 0;
+    WHILE p < alnLen DO
+      w := IntMin(Width, alnLen - p);
+      qLo := qPos; sLo := sPos;
+
+      FOR j := 0 TO w - 1 DO
+        IF isPlus THEN
+          qline[j] := wkHspListP[wi][idx].qAln[p + j];
+          sline[j] := wkHspListP[wi][idx].sAln[p + j];
+          mline[j] := wkHspListP[wi][idx].mAln[p + j];
+          IF wkHspListP[wi][idx].qAln[p + j] # '-' THEN INC(qPos) END;
+          IF wkHspListP[wi][idx].sAln[p + j] # '-' THEN INC(sPos) END
+        ELSE
+          qline[j] := wkHspListM[wi][idx].qAln[p + j];
+          sline[j] := wkHspListM[wi][idx].sAln[p + j];
+          mline[j] := wkHspListM[wi][idx].mAln[p + j];
+          IF wkHspListM[wi][idx].qAln[p + j] # '-' THEN INC(qPos) END;
+          IF wkHspListM[wi][idx].sAln[p + j] # '-' THEN DEC(sPos) END
+        END
+      END;
+      qline[w] := 0X; sline[w] := 0X; mline[w] := 0X;
+      qHi := qPos - 1;
+      IF isPlus THEN sHi := sPos - 1 ELSE sHi := sPos + 1 END;
+
+      Out.String("Query "); Out.Int(qLo, 6);
+      Out.String("  "); Out.String(qline);
+      Out.String("  "); Out.Int(qHi, 0); Out.Ln;
+      Out.String("              "); Out.String(mline); Out.Ln;
+      Out.String("Sbjct "); Out.Int(sLo, 6);
+      Out.String("  "); Out.String(sline);
+      Out.String("  "); Out.Int(sHi, 0); Out.Ln;
+      Out.Ln;
+
+      INC(p, w)
+    END;
+
+    IF k < chain.nHSPs - 1 THEN
+      Out.String("  ..."); Out.Ln; Out.Ln
     END
   END
 END PrintAlnFmtW;
@@ -758,126 +1112,6 @@ BEGIN
     INC(qi)
   END
 END FindHSPs;
-
-(* ------------------------------------------------------------------ *)
-(*  Output                                                              *)
-(* ------------------------------------------------------------------ *)
-
-PROCEDURE PrintEvalue(e: REAL);
-VAR exp: INTEGER; m: REAL;
-BEGIN
-  IF e >= 0.001 THEN
-    Out.Fixed(e, 0, 3)
-  ELSE
-    exp := 0; m := e;
-    WHILE m < 1.0 DO m := m * 10.0; DEC(exp) END;
-    Out.Fixed(m, 0, 2); Out.String("e"); Out.Int(exp, 0)
-  END
-END PrintEvalue;
-
-PROCEDURE PrintTabular(subjName: ARRAY OF CHAR; sLen: INTEGER; minus: BOOLEAN);
-(* Full -outfmt 6: qseqid sseqid pident length mismatch gapopen
-                   qstart qend sstart send evalue bitscore
-   For minus strand: sstart > send (BLAST convention). *)
-VAR i, ss, se: INTEGER; pct, ev, bs: REAL;
-BEGIN
-  FOR i := 0 TO hspCount - 1 DO
-    ev  := CalcEvalue(hspList[i].rawScore, queryLen, sLen);
-    bs  := BitScore(hspList[i].rawScore);
-    pct := FLT(hspList[i].nIdent) / FLT(hspList[i].aLen) * 100.0;
-    IF minus THEN
-      ss := sLen - hspList[i].sStart;
-      se := sLen - hspList[i].sEnd
-    ELSE
-      ss := hspList[i].sStart + 1;
-      se := hspList[i].sEnd   + 1
-    END;
-    Out.String("query"); Out.Char(9X);
-    Out.String(subjName); Out.Char(9X);
-    Out.Fixed(pct, 0, 2); Out.Char(9X);
-    Out.Int(hspList[i].aLen, 0); Out.Char(9X);
-    Out.Int(hspList[i].nMismatch, 0); Out.Char(9X);
-    Out.Int(hspList[i].nGapOpen, 0); Out.Char(9X);
-    Out.Int(hspList[i].qStart + 1, 0); Out.Char(9X);
-    Out.Int(hspList[i].qEnd   + 1, 0); Out.Char(9X);
-    Out.Int(ss, 0); Out.Char(9X);
-    Out.Int(se, 0); Out.Char(9X);
-    PrintEvalue(ev); Out.Char(9X);
-    Out.Fixed(bs, 0, 1); Out.Ln
-  END
-END PrintTabular;
-
-PROCEDURE PrintAlnFmt(subj: BioSeq.Seq; subjName: ARRAY OF CHAR;
-                      sLen: INTEGER; minus: BOOLEAN);
-(*
-  Pairwise output using the pre-computed alignment strings in each HSPRec.
-  Gap characters ('-') are included.  Query coords always increase; subject
-  coords increase (plus) or decrease (minus strand).
-*)
-CONST Width = 60;
-VAR
-  i, p, j, w    : INTEGER;
-  qPos, sPos    : INTEGER;   (* current 1-based position in query/subject *)
-  qLo, sLo      : INTEGER;
-  qHi, sHi      : INTEGER;
-  ev, bs, pct   : REAL;
-  qline, sline, mline : ARRAY 61 OF CHAR;
-BEGIN
-  FOR i := 0 TO hspCount - 1 DO
-    ev  := CalcEvalue(hspList[i].rawScore, queryLen, sLen);
-    bs  := BitScore(hspList[i].rawScore);
-    pct := FLT(hspList[i].nIdent) / FLT(hspList[i].aLen) * 100.0;
-
-    Out.Ln;
-    Out.String("> "); Out.String(subjName); Out.Ln;
-    Out.String("  Score = "); Out.Fixed(bs, 0, 1);
-    Out.String(" bits ("); Out.Int(hspList[i].rawScore, 0); Out.String("),");
-    Out.String("  Expect = "); PrintEvalue(ev); Out.Ln;
-    Out.String("  Identities = "); Out.Int(hspList[i].nIdent, 0);
-    Out.String("/"); Out.Int(hspList[i].aLen, 0);
-    Out.String(" ("); Out.Fixed(pct, 0, 0); Out.String("%)");
-    Out.String(",  Gaps = "); Out.Int(hspList[i].nGapOpen, 0);
-    IF minus THEN Out.String("  Strand: Plus/Minus")
-    ELSE          Out.String("  Strand: Plus/Plus")
-    END;
-    Out.Ln; Out.Ln;
-
-    qPos := hspList[i].qStart + 1;
-    IF minus THEN sPos := sLen - hspList[i].sStart
-    ELSE          sPos := hspList[i].sStart + 1
-    END;
-
-    p := 0;
-    WHILE p < hspList[i].alnStr DO
-      w := IntMin(Width, hspList[i].alnStr - p);
-      qLo := qPos; sLo := sPos;
-
-      FOR j := 0 TO w - 1 DO
-        qline[j] := hspList[i].qAln[p + j];
-        sline[j] := hspList[i].sAln[p + j];
-        mline[j] := hspList[i].mAln[p + j];
-        IF hspList[i].qAln[p + j] # '-' THEN INC(qPos) END;
-        IF hspList[i].sAln[p + j] # '-' THEN
-          IF minus THEN DEC(sPos) ELSE INC(sPos) END
-        END
-      END;
-      qline[w] := 0X; sline[w] := 0X; mline[w] := 0X;
-      qHi := qPos - 1;
-      IF minus THEN sHi := sPos + 1 ELSE sHi := sPos - 1 END;
-
-      Out.String("Query "); Out.Int(qLo, 6);
-      Out.String("  "); Out.String(qline);
-      Out.String("  "); Out.Int(qHi, 0); Out.Ln;
-      Out.String("              "); Out.String(mline); Out.Ln;
-      Out.String("Sbjct "); Out.Int(sLo, 6);
-      Out.String("  "); Out.String(sline);
-      Out.String("  "); Out.Int(sHi, 0); Out.Ln;
-      Out.Ln;
-
-      INC(p, w)
-    END
-  END
-END PrintAlnFmt;
 
 (* ------------------------------------------------------------------ *)
 (*  Query loading                                                       *)
@@ -997,7 +1231,7 @@ BEGIN
       INC(i); Args.Get(i, next); IF ~Strings.StrToInt(next, xDrop) THEN xDrop := 20 END
     ELSIF Strings.Compare(arg, "-G") = 0 THEN
       INC(i); Args.Get(i, next); IF ~Strings.StrToInt(next, gapOpen) THEN gapOpen := -5 END;
-      IF gapOpen > 0 THEN gapOpen := -gapOpen END   (* accept positive or negative *)
+      IF gapOpen > 0 THEN gapOpen := -gapOpen END
     ELSIF Strings.Compare(arg, "-E") = 0 THEN
       INC(i); Args.Get(i, next); IF ~Strings.StrToInt(next, gapExt) THEN gapExt := -2 END;
       IF gapExt > 0 THEN gapExt := -gapExt END
@@ -1031,7 +1265,7 @@ BEGIN
     RETURN FALSE
   END;
 
-  IF wordSize < 4   THEN wordSize := 4   END;
+  IF wordSize < 4    THEN wordSize := 4   END;
   IF wordSize > MaxW THEN wordSize := MaxW END;
   RETURN TRUE
 END ParseArgs;
@@ -1042,7 +1276,6 @@ END ParseArgs;
 
 BEGIN
   IF ~ParseArgs() THEN RETURN END;
-
   IF ~LoadQuery(queryFile) THEN RETURN END;
 
   IF ~alnMode THEN
