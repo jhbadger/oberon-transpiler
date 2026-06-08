@@ -12,6 +12,7 @@ MODULE Swords;
  *   Enter      – select unit / confirm move or fire
  *   Esc        – cancel selection / deselect commander
  *   N          – next phase
+ *   R          – rotate unit facing (move phase, unit selected)
  *   V          – toggle verbose AI
  *   Q / Ctrl-Q – quit
  *   Ctrl-L     – force screen redraw
@@ -20,7 +21,7 @@ MODULE Swords;
 IMPORT TUI, Random;
 
 CONST
-  GRID_W = 14;  GRID_H = 10;
+  GRID_W = 18;  GRID_H = 14;
   MAX_UNITS = 8;
   TURNS = 20;
   RED = 0;  BLUE = 1;
@@ -52,6 +53,12 @@ CONST
   NBANDS    = 5;
   N_AC      = 10;  (* AC 9 .. AC 0; acIdx = 9 - AC *)
 
+  (* Facing *)
+  FACE_N = 0;  FACE_E = 1;  FACE_S = 2;  FACE_W = 3;
+
+  (* Attack arc relative to defender's facing *)
+  ARC_FRONT = 0;  ARC_FLANK = 1;  ARC_REAR = 2;
+
   (* Morale levels (5 progressive) *)
   ML_ELITE    = 0;
   ML_REGULAR  = 1;
@@ -75,7 +82,7 @@ CONST
   CMD_MOVE   = 4;
 
   MAPX = 4;  MAPY = 2;
-  SIDEX = 34;
+  SIDEX = 42;
 
 TYPE
   Unit = RECORD
@@ -92,6 +99,7 @@ TYPE
     shotsLeft  : INTEGER;
     charged    : BOOLEAN;
     inMelee    : BOOLEAN;
+    facing     : INTEGER;  (* FACE_N .. FACE_W *)
   END;
 
   Army = RECORD
@@ -128,6 +136,7 @@ VAR
   unitIsCav   : ARRAY NTYPES OF BOOLEAN;
   unitCost    : ARRAY NTYPES OF INTEGER;
   unitDesc   : ARRAY NTYPES OF ARRAY 32 OF CHAR;
+  facingGlyph: ARRAY 4 OF CHAR;
 
   msgLog    : ARRAY 64 OF ARRAY 72 OF CHAR;
   logHead   : INTEGER;
@@ -259,7 +268,12 @@ BEGIN
   unitCost[LEVY]  :=1; unitCost[SWORD] :=2; unitCost[ARCHER]:=3;
   unitCost[PIKE]  :=2; unitCost[ELITE] :=5; unitCost[LCAV]  :=4;
   unitCost[HCAV]  :=7; unitCost[DWARF] :=4; unitCost[ELF]   :=5;
-  unitCost[ORC]   :=1
+  unitCost[ORC]   :=1;
+
+  facingGlyph[FACE_N] := '^';
+  facingGlyph[FACE_E] := '>';
+  facingGlyph[FACE_S] := 'v';
+  facingGlyph[FACE_W] := '<'
 END InitTables;
 
 (* ════════════════════════════════════════════════════════════════════════ *)
@@ -343,6 +357,32 @@ BEGIN
   END;
   dst[i] := 0X
 END AppendStr;
+
+PROCEDURE FacingFromDelta(dc, dr: INTEGER): INTEGER;
+BEGIN
+  IF Abs(dr) > Abs(dc) THEN
+    IF dr < 0 THEN RETURN FACE_N ELSE RETURN FACE_S END
+  ELSE
+    IF dc >= 0 THEN RETURN FACE_E ELSE RETURN FACE_W END
+  END
+END FacingFromDelta;
+
+(* AttackArc: from defender's facing, where is the attacker?
+   dc = attCol - defCol, dr = attRow - defRow *)
+PROCEDURE AttackArc(facing, dc, dr: INTEGER): INTEGER;
+VAR fwdC, fwdR, dot: INTEGER;
+BEGIN
+  IF    facing = FACE_N THEN fwdC := 0; fwdR := -1
+  ELSIF facing = FACE_E THEN fwdC := 1; fwdR :=  0
+  ELSIF facing = FACE_S THEN fwdC := 0; fwdR :=  1
+  ELSE                       fwdC := -1; fwdR := 0
+  END;
+  dot := dc * fwdC + dr * fwdR;
+  IF dot > 0 THEN RETURN ARC_FRONT
+  ELSIF dot = 0 THEN RETURN ARC_FLANK
+  ELSE RETURN ARC_REAR
+  END
+END AttackArc;
 
 (* ════════════════════════════════════════════════════════════════════════ *)
 (*  Movement Validity                                                       *)
@@ -618,7 +658,7 @@ END ResolveShot;
 PROCEDURE ResolveMelee(attSide, attIdx, defSide, defIdx: INTEGER;
                        VAR msg: ARRAY OF CHAR);
 VAR att, def: Unit; aArmy, dArmy: Army;
-    atkBand, defBand: INTEGER;
+    atkBand, defBand, arc: INTEGER;
     dmg1, dmg2: INTEGER;
     numStr: ARRAY 8 OF CHAR;
     attLabel, defLabel: ARRAY 16 OF CHAR;
@@ -637,8 +677,12 @@ BEGIN
   atkBand := unitBand[att.utype];
   defBand := unitBand[def.utype];
 
-  (* Flank: attacker and defender not aligned cardinal -> +1 attack band *)
-  IF (att.col # def.col) & (att.row # def.row) THEN
+  (* Arc from defender's facing: flank +1 band, rear +2 bands *)
+  arc := AttackArc(def.facing, att.col - def.col, att.row - def.row);
+  IF arc = ARC_FLANK THEN
+    IF atkBand < BND_FOUR THEN INC(atkBand) END
+  ELSIF arc = ARC_REAR THEN
+    IF atkBand < BND_FOUR THEN INC(atkBand) END;
     IF atkBand < BND_FOUR THEN INC(atkBand) END
   END;
 
@@ -647,7 +691,7 @@ BEGIN
   IF terrain[def.row][def.col] = TERR_HILL THEN dmg1 := dmg1 DIV 2 END;
 
   dmg2 := 0;
-  IF def.morale < ML_DISORDER THEN
+  IF (def.morale < ML_DISORDER) & (arc # ARC_REAR) THEN
     dmg2 := CalcDamage(defBand, unitAC[att.utype], def.figures, unitDmgCat[def.utype]);
     IF terrain[att.row][att.col] = TERR_HILL THEN dmg2 := dmg2 DIV 2 END
   END;
@@ -657,6 +701,9 @@ BEGIN
   AppendStr(msg, "/"); IntStr(dmg2, numStr); AppendStr(msg, numStr);
   AppendStr(msg, " hp");
   IF att.charged & unitIsCav[att.utype] THEN AppendStr(msg, " CHG") END;
+  IF arc = ARC_FLANK THEN AppendStr(msg, " FLK")
+  ELSIF arc = ARC_REAR THEN AppendStr(msg, " RER")
+  END;
 
   ApplyDamage(defSide, defIdx, dmg1);
   IF dmg2 > 0 THEN ApplyDamage(attSide, attIdx, dmg2) END;
@@ -669,9 +716,10 @@ BEGIN
     ELSE INC(blue.units[defIdx].meleeWins) END
   END;
 
-  (* Flank attack: morale check for defender *)
-  IF (att.col # def.col) & (att.row # def.row) THEN
+  IF arc = ARC_FLANK THEN
     IF ~CheckMorale(defSide, defIdx, -10, "flank") THEN END
+  ELSIF arc = ARC_REAR THEN
+    IF ~CheckMorale(defSide, defIdx, -20, "rear!") THEN END
   END;
 
   (* Cavalry charge forces morale check on foot defenders *)
@@ -862,6 +910,8 @@ BEGIN
       END
     END;
     IF (bestCol # blue.units[bIdx].col) OR (bestRow # blue.units[bIdx].row) THEN
+      blue.units[bIdx].facing :=
+        FacingFromDelta(bestCol - blue.units[bIdx].col, bestRow - blue.units[bIdx].row);
       blue.units[bIdx].col := bestCol; blue.units[bIdx].row := bestRow;
       blue.units[bIdx].moved := TRUE
     END;
@@ -883,6 +933,8 @@ BEGIN
     END
   END;
   IF (bestCol # blue.units[bIdx].col) OR (bestRow # blue.units[bIdx].row) THEN
+    blue.units[bIdx].facing :=
+      FacingFromDelta(bestCol - blue.units[bIdx].col, bestRow - blue.units[bIdx].row);
     blue.units[bIdx].col := bestCol; blue.units[bIdx].row := bestRow;
     blue.units[bIdx].moved := TRUE;
     IF unitIsCav[blue.units[bIdx].utype] THEN blue.units[bIdx].charged := TRUE END
@@ -1009,7 +1061,7 @@ BEGIN
       IF blue.cmdAlive & (blue.cmdCol = col) & (blue.cmdRow = row) THEN c0 := '*'
       ELSE c0 := 'B' END
     END;
-    c1 := unitGlyph[u.utype]
+    c1 := facingGlyph[u.facing]
   ELSIF red.cmdAlive & (red.cmdCol = col) & (red.cmdRow = row) THEN
     IF ~isCursor & ~(cmdSelected & isCmdCell) THEN fg := TUI.Red ELSE fg := TUI.Black END;
     c0 := 'R'; c1 := 'C'
@@ -1140,7 +1192,7 @@ BEGIN
       ELSE COPY("SHOOT: Select archer/elf to fire  N=done", prompt)
       END
   | PH_MOVE:
-      IF selUnit >= 0 THEN COPY("Select destination (Enter=move, Esc=cancel)", prompt)
+      IF selUnit >= 0 THEN COPY("Select destination (Enter=move, R=rotate, Esc=cancel)", prompt)
       ELSIF cmdSelected THEN COPY("Select commander destination (Esc=cancel)", prompt)
       ELSE COPY("MOVE: Select unit or commander (C)  N=done", prompt)
       END
@@ -1150,6 +1202,49 @@ BEGIN
   END;
   TUI.PutStr(0, 1, prompt, TUI.White, TUI.Black)
 END DrawPrompt;
+
+PROCEDURE DrawCursorInfo;
+VAR uSide, uIdx: INTEGER; u: Unit; fg: INTEGER;
+    line: ARRAY 60 OF CHAR; num: ARRAY 8 OF CHAR;
+BEGIN
+  UnitAt(curCol, curRow, uSide, uIdx);
+  IF uSide >= 0 THEN
+    IF uSide = RED THEN
+      u := red.units[uIdx]; fg := TUI.Red; COPY("[Red] ", line)
+    ELSE
+      u := blue.units[uIdx]; fg := TUI.Cyan; COPY("[Blue] ", line)
+    END;
+    AppendStr(line, unitName[u.utype]);
+    AppendStr(line, "  AC:"); IntStr(unitAC[u.utype], num); AppendStr(line, num);
+    AppendStr(line, "  figs:"); IntStr(u.figures, num); AppendStr(line, num);
+    AppendStr(line, "/"); IntStr(FIGS_START, num); AppendStr(line, num);
+    AppendStr(line, "  ");
+    IF    u.morale = ML_ELITE    THEN AppendStr(line, "Elt")
+    ELSIF u.morale = ML_REGULAR  THEN AppendStr(line, "Reg")
+    ELSIF u.morale = ML_SHAKEN   THEN AppendStr(line, "Shk")
+    ELSIF u.morale = ML_DISORDER THEN AppendStr(line, "Dis")
+    ELSE                              AppendStr(line, "Rut")
+    END;
+    AppendStr(line, "  ");
+    IF    u.facing = FACE_N THEN AppendStr(line, "N")
+    ELSIF u.facing = FACE_E THEN AppendStr(line, "E")
+    ELSIF u.facing = FACE_S THEN AppendStr(line, "S")
+    ELSE                         AppendStr(line, "W")
+    END;
+    IF unitHasBow[u.utype] THEN
+      AppendStr(line, "  shots:"); IntStr(u.shotsLeft, num); AppendStr(line, num)
+    END;
+    TUI.PutStr(0, MAPY + GRID_H, line, fg, TUI.Black)
+  ELSIF red.cmdAlive & (red.cmdCol = curCol) & (red.cmdRow = curRow) THEN
+    COPY("[Red] Commander  ", line);
+    IF red.cmdMoved THEN AppendStr(line, "moved") ELSE AppendStr(line, "ready") END;
+    TUI.PutStr(0, MAPY + GRID_H, line, TUI.Red, TUI.Black)
+  ELSIF blue.cmdAlive & (blue.cmdCol = curCol) & (blue.cmdRow = curRow) THEN
+    COPY("[Blue] Commander  ", line);
+    IF blue.cmdMoved THEN AppendStr(line, "moved") ELSE AppendStr(line, "ready") END;
+    TUI.PutStr(0, MAPY + GRID_H, line, TUI.Cyan, TUI.Black)
+  END
+END DrawCursorInfo;
 
 PROCEDURE DrawHpBar(col, row: INTEGER; unit: Unit);
 VAR sx, sy, full, cur, i: INTEGER; c: CHAR;
@@ -1175,6 +1270,7 @@ BEGIN
   DrawPrompt;
   DrawMap;
   DrawUnitList;
+  DrawCursorInfo;
   DrawLog;
   IF selUnit >= 0 THEN
     selU := red.units[selUnit];
@@ -1229,6 +1325,12 @@ BEGIN
   IF key = TUI.KEsc THEN
     selUnit := -1; cmdSelected := FALSE; RETURN
   END;
+  IF (key = ORD('r')) OR (key = ORD('R')) THEN
+    IF selUnit >= 0 THEN
+      red.units[selUnit].facing := (red.units[selUnit].facing + 1) MOD 4
+    END;
+    RETURN
+  END;
   MoveCursor(key);
   IF key = TUI.KEnter THEN
     UnitAt(curCol, curRow, uSide, uIdx);
@@ -1249,6 +1351,9 @@ BEGIN
     ELSE
       IF uSide < 0 THEN
         IF ValidMoveTarget(RED, selUnit, curCol, curRow) THEN
+          red.units[selUnit].facing :=
+            FacingFromDelta(curCol - red.units[selUnit].col,
+                            curRow - red.units[selUnit].row);
           red.units[selUnit].col  := curCol;
           red.units[selUnit].row  := curRow;
           red.units[selUnit].moved := TRUE;
@@ -1364,7 +1469,8 @@ BEGIN
   a.units[i].meleeWins := 0;
   a.units[i].shotsLeft := 0;
   a.units[i].charged   := FALSE;
-  a.units[i].inMelee   := FALSE
+  a.units[i].inMelee   := FALSE;
+  a.units[i].facing    := FACE_N
 END DeployUnit;
 
 PROCEDURE DeployArmy(VAR a: Army; side, count: INTEGER;
@@ -1381,7 +1487,8 @@ BEGIN
     WHILE (terrain[row][col] = TERR_MARSH) & (row >= 1) & (row <= GRID_H - 2) DO
       IF side = RED THEN DEC(row) ELSE INC(row) END
     END;
-    DeployUnit(a, i, comp[i], col, row)
+    DeployUnit(a, i, comp[i], col, row);
+    IF side = BLUE THEN a.units[i].facing := FACE_S END
   END;
   IF side = RED THEN
     a.cmdRow := GRID_H - 1; a.cmdCol := GRID_W DIV 2
