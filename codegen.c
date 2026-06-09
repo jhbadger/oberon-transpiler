@@ -1358,7 +1358,7 @@ static int try_emit_import(CG *g, Node *fa, Node *args) {
         if (!strcmp(proc,"ReadBool"))    { emit(g,"Files_ReadBool(");    emit_addr_of(g,a0); emit(g,","); emit_addr_of(g,a1); emit(g,")"); return 1; }
         if (!strcmp(proc,"ReadReal"))    { emit(g,"Files_ReadReal(");    emit_addr_of(g,a0); emit(g,","); emit_addr_of(g,a1); emit(g,")"); return 1; }
         if (!strcmp(proc,"ReadString"))  { emit(g,"Files_ReadString(");  emit_addr_of(g,a0); emit(g,","); emit_expr(g,a1); emit(g,")"); return 1; }
-        if (!strcmp(proc,"ReadLine"))    { emit(g,"Files_ReadLine(");    emit_addr_of(g,a0); emit(g,","); emit_expr(g,a1); emit(g,")"); return 1; }
+        if (!strcmp(proc,"ReadLine"))    { emit(g,"Files_ReadLine(");    emit_addr_of(g,a0); emit(g,","); emit_expr(g,a1); emit(g,","); emit_string_capacity(g,a1); emit(g,")"); return 1; }
         if (!strcmp(proc,"ReadNum"))     { emit(g,"Files_ReadNum(");     emit_addr_of(g,a0); emit(g,","); emit_addr_of(g,a1); emit(g,")"); return 1; }
         /* Write procedures — VAR r, x by value  (string: const char*) */
         if (!strcmp(proc,"Write"))       { emit(g,"Files_Write(");       emit_addr_of(g,a0); emit(g,","); emit_expr(g,a1); emit(g,")"); return 1; }
@@ -3269,10 +3269,10 @@ void codegen(Node *module, FILE *out, int is_main, const char *srcfile) {
         emit(g,"    do{unsigned char b=n&0x7F;n>>=7;if(n)b|=0x80;Files_Write(r,b);}while(n);\n");
         emit(g,"}\n");
         /* ReadLine(VAR r, VAR x: ARRAY OF CHAR) — reads until \n or EOF, strips \n */
-        emit(g,"static void Files_ReadLine(Files_Rider *r, char *x) {\n");
+        emit(g,"static void Files_ReadLine(Files_Rider *r, char *x, int cap) {\n");
         emit(g,"    int i=0,c;\n");
         emit(g,"    if(!r->f||r->eof){x[0]=0;r->eof=1;return;}\n");
-        emit(g,"    while((c=fgetc(r->f->fp))!=EOF&&c!='\\n'){x[i++]=(char)c;r->pos++;}\n");
+        emit(g,"    while((c=fgetc(r->f->fp))!=EOF&&c!='\\n'){if(i<cap-1){x[i]=(char)c;i++;}r->pos++;}\n");
         emit(g,"    if(c=='\\n')r->pos++;else if(i==0)r->eof=1;\n");
         emit(g,"    x[i]=0;\n");
         emit(g,"}\n");
