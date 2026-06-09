@@ -2,19 +2,24 @@ MODULE PeptideContext;
 
 (*
   PeptideContext - Extract genomic neighbourhood context for protein IDs.
+  Uses BioIO for FASTA reading and BioSeq for sequence storage.
 
   Usage:
     PeptideContext <n> <ids_file> <fasta1> [<fasta2> ...]
+
+  Output: peptide_context.csv
+    Columns: ID, -n, ..., -1, 0 (query), +1, ..., +n
+    Each cell contains the annotation extracted from between << >> in the
+    FASTA header, or the bare header description if no << >> markers are found.
 *)
 
-IMPORT Args, Out, Files, Strings;
+IMPORT Args, Out, Files, Strings, BioIO, BioSeq, Dict;
 
 CONST
   MAXPROT  = 65536;
   MAXIDS   = 4096;
   NAMELEN  = 128;
   ANNOTLEN = 256;
-  LINELEN  = 1024;
 
 TYPE
   ProtRec = RECORD
@@ -25,9 +30,10 @@ TYPE
 VAR
   prots  : ARRAY MAXPROT OF ProtRec;
   nProt  : INTEGER;
-  ids    : ARRAY MAXIDS  OF ARRAY NAMELEN OF CHAR;
+  ids    : ARRAY MAXIDS OF ARRAY NAMELEN OF CHAR;
   nIds   : INTEGER;
   radius : INTEGER;
+  idIndex: Dict.Table;   (* id -> integer index in prots[], stored as decimal string *)
 
 (* ------------------------------------------------------------------ *)
 
@@ -41,63 +47,28 @@ BEGIN
       s[len - 1] := 0X;
       DEC(len)
     ELSE
-      len := 0   (* break *)
+      len := 0
     END
   END
 END TrimRight;
 
-(* Copy at most dstLen-1 chars from src starting at pos into dst *)
-PROCEDURE SafeExtract(src : ARRAY OF CHAR; pos, len : INTEGER;
-                      VAR dst : ARRAY OF CHAR);
-  VAR i, slen, dlim : INTEGER;
-BEGIN
-  slen := Strings.Length(src);
-  dlim := LEN(dst) - 1;
-  IF dlim < 0 THEN dlim := 0 END;
-  i := 0;
-  WHILE (i < len) & (i < dlim) & (pos + i < slen) DO
-    dst[i] := src[pos + i];
-    INC(i)
-  END;
-  dst[i] := 0X
-END SafeExtract;
-
-(* Copy first whitespace-delimited token from s into tok *)
-PROCEDURE FirstToken(s : ARRAY OF CHAR; VAR tok : ARRAY OF CHAR);
-  VAR i, j, slen, dlim : INTEGER;
-BEGIN
-  tok[0] := 0X;
-  slen := Strings.Length(s);
-  dlim := LEN(tok) - 1;
-  i := 0; j := 0;
-  WHILE (i < slen) & (s[i] # 0X) & (s[i] # ' ') & (s[i] # 09X) DO
-    IF j < dlim THEN
-      tok[j] := s[i];
-      INC(j)
-    END;
-    INC(i)
-  END;
-  tok[j] := 0X
-END FirstToken;
-
-(* Extract text between first << and >> in src *)
+(* Extract text between first << and >> in src into dst.
+   Returns TRUE if found, FALSE otherwise (dst set to desc fallback). *)
 PROCEDURE ExtractAnnot(src : ARRAY OF CHAR; VAR dst : ARRAY OF CHAR) : BOOLEAN;
-  VAR i, lo, slen : INTEGER;
-      found : BOOLEAN;
-      tmp : ARRAY LINELEN OF CHAR;
+  VAR i, lo, slen, dlim : INTEGER; found : BOOLEAN;
 BEGIN
   dst[0] := 0X;
-  slen := Strings.Length(src);
-  lo := -1;
-  found := FALSE;
-  i := 0;
+  slen   := Strings.Length(src);
+  lo     := -1;
+  found  := FALSE;
+  i      := 0;
+  dlim   := LEN(dst) - 1;
   WHILE (i < slen) & ~found DO
     IF (i + 1 < slen) & (src[i] = '<') & (src[i+1] = '<') THEN
       lo := i + 2;
       INC(i, 2)
     ELSIF (i + 1 < slen) & (src[i] = '>') & (src[i+1] = '>') & (lo >= 0) THEN
-      SafeExtract(src, lo, i - lo, tmp);
-      SafeExtract(tmp, 0, Strings.Length(tmp), dst);
+      Strings.Extract(src, lo, i - lo, dst);
       found := TRUE
     ELSE
       INC(i)
@@ -110,45 +81,55 @@ END ExtractAnnot;
 
 PROCEDURE LoadFasta(path : ARRAY OF CHAR);
   VAR
-    f    : Files.File;
-    r    : Files.Rider;
-    line : ARRAY LINELEN OF CHAR;
-    body : ARRAY LINELEN OF CHAR;  (* without '>' *)
-    tok  : ARRAY NAMELEN  OF CHAR;
+    rdr  : BioIO.FastaReader;
+    rec  : BioIO.FastaRecord;
     ann  : ARRAY ANNOTLEN OF CHAR;
+    desc : ARRAY ANNOTLEN OF CHAR;
+    idxStr : ARRAY 16 OF CHAR;
 BEGIN
-  f := Files.Old(path);
-  IF f = NIL THEN
+  IF ~BioIO.OpenFasta(rdr, path) THEN
     Out.String("Warning: cannot open "); Out.String(path); Out.Ln;
     RETURN
   END;
-  Files.Set(r, f, 0);
 
-  WHILE ~r.eof DO
-    Files.ReadLine(r, line);
-    TrimRight(line);
-    IF (Strings.Length(line) > 0) & (line[0] = '>') THEN
-      IF nProt >= MAXPROT THEN
-        Out.String("Warning: MAXPROT reached, truncating."); Out.Ln;
-        Files.Close(f);
-        RETURN
-      END;
-      (* strip leading '>' into body *)
-      SafeExtract(line, 1, Strings.Length(line) - 1, body);
-      (* first token = protein id *)
-      FirstToken(body, tok);
-      SafeExtract(tok, 0, Strings.Length(tok), prots[nProt].id);
-      (* annotation between << >> *)
-      IF ExtractAnnot(line, ann) THEN
-        SafeExtract(ann, 0, Strings.Length(ann), prots[nProt].annot)
+  rec.seq   := NIL;
+  rec.name[0] := 0X;
+  rec.desc[0] := 0X;
+  WHILE BioIO.ReadFasta(rdr, rec) DO
+    IF nProt >= MAXPROT THEN
+      Out.String("Warning: MAXPROT reached, truncating."); Out.Ln;
+      BioIO.CloseFasta(rdr);
+      RETURN
+    END;
+
+    (* rec.name is already the first whitespace-delimited token (no '>') *)
+    Strings.Copy(rec.name, prots[nProt].id);
+
+    (* Try to extract << >> annotation from desc; fall back to name if desc empty *)
+    IF Strings.Length(rec.desc) > 0 THEN
+      IF ExtractAnnot(rec.desc, ann) THEN
+        Strings.Copy(ann, prots[nProt].annot)
+      ELSE
+        Strings.Copy(rec.desc, desc);
+        TrimRight(desc);
+        Strings.Copy(desc, prots[nProt].annot)
+      END
+    ELSE
+      IF ExtractAnnot(rec.name, ann) THEN
+        Strings.Copy(ann, prots[nProt].annot)
       ELSE
         prots[nProt].annot[0] := 0X
-      END;
-      INC(nProt)
-    END
-    (* sequence lines ignored *)
+      END
+    END;
+
+    (* Index id -> position for O(1) lookup *)
+    Strings.IntToStr(nProt, idxStr);
+    Dict.Put(idIndex, prots[nProt].id, idxStr);
+
+    INC(nProt)
   END;
-  Files.Close(f)
+
+  BioIO.CloseFasta(rdr)
 END LoadFasta;
 
 (* ------------------------------------------------------------------ *)
@@ -171,12 +152,24 @@ BEGIN
     TrimRight(line);
     len := Strings.Length(line);
     IF (len > 0) & (nIds < MAXIDS) THEN
-      SafeExtract(line, 0, len, ids[nIds]);
+      Strings.Copy(line, ids[nIds]);
       INC(nIds)
     END
   END;
   Files.Close(f)
 END LoadIds;
+
+(* ------------------------------------------------------------------ *)
+
+PROCEDURE FindProt(id : ARRAY OF CHAR) : INTEGER;
+  VAR val : ARRAY 16 OF CHAR; n : INTEGER; ok : BOOLEAN;
+BEGIN
+  IF Dict.Get(idIndex, id, val) THEN
+    ok := Strings.StrToInt(val, n);
+    IF ok THEN RETURN n END
+  END;
+  RETURN -1
+END FindProt;
 
 (* ------------------------------------------------------------------ *)
 
@@ -203,19 +196,6 @@ BEGIN Files.Write(wr, ORD(0AX)) END WriteNewline;
 
 (* ------------------------------------------------------------------ *)
 
-PROCEDURE FindProt(id : ARRAY OF CHAR) : INTEGER;
-  VAR i : INTEGER;
-BEGIN
-  i := 0;
-  WHILE i < nProt DO
-    IF Strings.Compare(prots[i].id, id) = 0 THEN RETURN i END;
-    INC(i)
-  END;
-  RETURN -1
-END FindProt;
-
-(* ------------------------------------------------------------------ *)
-
 VAR
   outFile : Files.File;
   wr      : Files.Rider;
@@ -229,9 +209,11 @@ BEGIN
   nProt := 0;
   nIds  := 0;
   empty[0] := 0X;
+  Dict.Init(idIndex);
 
   IF Args.Count() < 3 THEN
-    Out.String("Usage: PeptideContext <n> <ids_file> <fasta1> [<fasta2> ...]"); Out.Ln;
+    Out.String("Usage: PeptideContext <n> <ids_file> <fasta1> [<fasta2> ...]");
+    Out.Ln;
     HALT(1)
   END;
 
@@ -253,7 +235,8 @@ BEGIN
   END;
 
   Out.String("Loaded "); Out.Int(nProt, 0);
-  Out.String(" proteins, "); Out.Int(nIds, 0); Out.String(" query IDs."); Out.Ln;
+  Out.String(" proteins, "); Out.Int(nIds, 0);
+  Out.String(" query IDs."); Out.Ln;
 
   outFile := Files.New("peptide_context.csv");
   IF outFile = NIL THEN
@@ -262,7 +245,7 @@ BEGIN
   END;
   Files.Set(wr, outFile, 0);
 
-  (* header *)
+  (* header row *)
   WriteQuoted(wr, "ID");
   col := -radius;
   WHILE col <= radius DO
@@ -277,11 +260,16 @@ BEGIN
   END;
   WriteNewline(wr);
 
-  (* rows *)
+  (* data rows *)
   i := 0;
   WHILE i < nIds DO
     WriteQuoted(wr, ids[i]);
     qi := FindProt(ids[i]);
+
+    IF qi < 0 THEN
+      Out.String("Warning: ID '"); Out.String(ids[i]);
+      Out.String("' not found."); Out.Ln
+    END;
 
     col := -radius;
     WHILE col <= radius DO
@@ -297,8 +285,7 @@ BEGIN
     WriteNewline(wr);
     INC(i)
   END;
-
-  Files.Register(outFile);
   Files.Close(outFile);
   Out.String("Written: peptide_context.csv"); Out.Ln
 END PeptideContext.
+
