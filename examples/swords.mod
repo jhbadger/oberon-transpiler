@@ -876,83 +876,115 @@ END CheckRally;
 (*  AI (Blue)                                                              *)
 (* ════════════════════════════════════════════════════════════════════════ *)
 
-PROCEDURE AIFindClosestEnemy(bIdx: INTEGER; VAR tCol, tRow: INTEGER);
-VAR i, dist, best: INTEGER;
+PROCEDURE AIThreatScore(utype, figures: INTEGER): INTEGER;
+(* Higher = more dangerous: big units of elite types score highest *)
+BEGIN RETURN figures * (unitBand[utype] + 1) END AIThreatScore;
+
+PROCEDURE AIFindBestEnemy(bIdx: INTEGER; VAR tCol, tRow: INTEGER);
+(* Pick the highest-threat living red unit as the primary target *)
+VAR i, score, best: INTEGER;
 BEGIN
-  best := 9999; tCol := -1; tRow := -1;
+  best := -1; tCol := -1; tRow := -1;
   FOR i := 0 TO red.count - 1 DO
     IF red.units[i].alive THEN
-      dist := CDist(blue.units[bIdx].col, blue.units[bIdx].row,
-                    red.units[i].col, red.units[i].row);
-      IF dist < best THEN best := dist; tCol := red.units[i].col; tRow := red.units[i].row END
+      score := AIThreatScore(red.units[i].utype, red.units[i].figures);
+      IF score > best THEN
+        best := score; tCol := red.units[i].col; tRow := red.units[i].row
+      END
     END
   END
-END AIFindClosestEnemy;
+END AIFindBestEnemy;
 
 PROCEDURE AIMoveUnit(bIdx: INTEGER);
-VAR tCol, tRow, bestCol, bestRow, bestDist, nc, nr, newDist, mv, dc, dr: INTEGER;
-    msg: ARRAY 48 OF CHAR;
+VAR tCol, tRow, bestCol, bestRow, bestScore, curScore: INTEGER;
+    nc, nr, mv, dc, dr, dist, arc, i, tgtFacing: INTEGER;
+    u: Unit;
 BEGIN
   IF blue.units[bIdx].morale >= ML_DISORDER THEN RETURN END;
-  mv := unitMove[blue.units[bIdx].utype];
-  IF blue.units[bIdx].morale = ML_SHAKEN THEN mv := mv DIV 2; IF mv < 1 THEN mv := 1 END END;
+  u := blue.units[bIdx];
+  mv := unitMove[u.utype];
+  IF u.morale = ML_SHAKEN THEN mv := mv DIV 2; IF mv < 1 THEN mv := 1 END END;
 
-  (* Self-preservation: retreat when down to 2 or fewer figures *)
-  IF blue.units[bIdx].figures <= 2 THEN
-    bestCol := blue.units[bIdx].col; bestRow := blue.units[bIdx].row;
+  (* Retreat when critically weak: flee south, prefer hills *)
+  IF u.figures <= 2 THEN
+    bestCol := u.col; bestRow := u.row; bestScore := -9999;
     FOR dc := -mv TO mv DO
       FOR dr := -mv TO mv DO
-        nc := blue.units[bIdx].col + dc;
-        nr := blue.units[bIdx].row + dr;
-        IF ValidMoveTarget(BLUE, bIdx, nc, nr) & (nr > bestRow) THEN
-          bestRow := nr; bestCol := nc
+        nc := u.col + dc; nr := u.row + dr;
+        IF ValidMoveTarget(BLUE, bIdx, nc, nr) THEN
+          curScore := nr;
+          IF terrain[nr][nc] = TERR_HILL THEN INC(curScore, 3) END;
+          IF curScore > bestScore THEN bestScore := curScore; bestCol := nc; bestRow := nr END
         END
       END
     END;
-    IF (bestCol # blue.units[bIdx].col) OR (bestRow # blue.units[bIdx].row) THEN
-      blue.units[bIdx].facing :=
-        FacingFromDelta(bestCol - blue.units[bIdx].col, bestRow - blue.units[bIdx].row);
+    IF (bestCol # u.col) OR (bestRow # u.row) THEN
+      blue.units[bIdx].facing := FacingFromDelta(bestCol - u.col, bestRow - u.row);
       blue.units[bIdx].col := bestCol; blue.units[bIdx].row := bestRow;
       blue.units[bIdx].moved := TRUE
     END;
     RETURN
   END;
 
-  AIFindClosestEnemy(bIdx, tCol, tRow);
+  AIFindBestEnemy(bIdx, tCol, tRow);
   IF tCol < 0 THEN RETURN END;
-  bestCol := blue.units[bIdx].col; bestRow := blue.units[bIdx].row;
-  bestDist := CDist(bestCol, bestRow, tCol, tRow);
+
+  (* Look up current facing of the target for arc scoring *)
+  tgtFacing := FACE_S;
+  FOR i := 0 TO red.count - 1 DO
+    IF red.units[i].alive & (red.units[i].col = tCol) & (red.units[i].row = tRow) THEN
+      tgtFacing := red.units[i].facing
+    END
+  END;
+
+  bestCol := u.col; bestRow := u.row; bestScore := -9999;
   FOR dc := -mv TO mv DO
     FOR dr := -mv TO mv DO
-      nc := blue.units[bIdx].col + dc;
-      nr := blue.units[bIdx].row + dr;
+      nc := u.col + dc; nr := u.row + dr;
       IF ValidMoveTarget(BLUE, bIdx, nc, nr) THEN
-        newDist := CDist(nc, nr, tCol, tRow);
-        IF newDist < bestDist THEN bestDist := newDist; bestCol := nc; bestRow := nr END
+        dist := CDist(nc, nr, tCol, tRow);
+        IF unitHasBow[u.utype] THEN
+          (* Archers: stay at mid-range; penalty for closing to melee *)
+          IF dist <= 1 THEN curScore := -50
+          ELSIF dist <= 2 THEN curScore := dist * 5 - 20
+          ELSIF dist <= unitBowRng[u.utype] THEN curScore := 60 - dist * 5
+          ELSE curScore := -dist * 10
+          END
+        ELSE
+          (* Melee: close in, bonus for flank/rear attack arc *)
+          curScore := 50 - dist * 8;
+          IF dist <= 1 THEN
+            arc := AttackArc(tgtFacing, nc - tCol, nr - tRow);
+            IF arc = ARC_FLANK THEN INC(curScore, 20) END;
+            IF arc = ARC_REAR  THEN INC(curScore, 40) END
+          END
+        END;
+        (* Hill gives defender halved incoming melee damage *)
+        IF terrain[nr][nc] = TERR_HILL THEN INC(curScore, 10) END;
+        IF curScore > bestScore THEN bestScore := curScore; bestCol := nc; bestRow := nr END
       END
     END
   END;
-  IF (bestCol # blue.units[bIdx].col) OR (bestRow # blue.units[bIdx].row) THEN
-    blue.units[bIdx].facing :=
-      FacingFromDelta(bestCol - blue.units[bIdx].col, bestRow - blue.units[bIdx].row);
+  IF (bestCol # u.col) OR (bestRow # u.row) THEN
+    blue.units[bIdx].facing := FacingFromDelta(bestCol - u.col, bestRow - u.row);
     blue.units[bIdx].col := bestCol; blue.units[bIdx].row := bestRow;
     blue.units[bIdx].moved := TRUE;
-    IF unitIsCav[blue.units[bIdx].utype] THEN blue.units[bIdx].charged := TRUE END
+    IF unitIsCav[u.utype] THEN blue.units[bIdx].charged := TRUE END
   END
 END AIMoveUnit;
 
 PROCEDURE AIShootUnit(bIdx: INTEGER);
-VAR i, bestIdx, bestFigs: INTEGER; msg: ARRAY 64 OF CHAR;
+(* Target the highest-threat unit in range rather than the weakest *)
+VAR i, bestIdx, bestScore, score: INTEGER; msg: ARRAY 64 OF CHAR;
 BEGIN
   IF ~unitHasBow[blue.units[bIdx].utype] THEN RETURN END;
   WHILE blue.units[bIdx].shotsLeft > 0 DO
-    bestIdx := -1; bestFigs := 9999;
+    bestIdx := -1; bestScore := -1;
     FOR i := 0 TO red.count - 1 DO
       IF red.units[i].alive &
          CanShootTarget(BLUE, bIdx, red.units[i].col, red.units[i].row) THEN
-        IF red.units[i].figures < bestFigs THEN
-          bestFigs := red.units[i].figures; bestIdx := i
-        END
+        score := AIThreatScore(red.units[i].utype, red.units[i].figures);
+        IF score > bestScore THEN bestScore := score; bestIdx := i END
       END
     END;
     IF bestIdx >= 0 THEN
@@ -965,18 +997,19 @@ BEGIN
 END AIShootUnit;
 
 PROCEDURE AIMoveCmd;
-VAR i, tCol, tRow, weakFigs, bestCol, bestRow, bestDist, newDist, dc, dr: INTEGER;
-    nc, nr: INTEGER;
+(* Move commander toward the centroid of the blue army for broad morale coverage *)
+VAR i, tCol, tRow, sumC, sumR, cnt: INTEGER;
+    bestCol, bestRow, bestDist, newDist, dc, dr, nc, nr: INTEGER;
 BEGIN
   IF ~blue.cmdAlive OR blue.cmdMoved THEN RETURN END;
-  weakFigs := 9999; tCol := -1; tRow := -1;
+  sumC := 0; sumR := 0; cnt := 0;
   FOR i := 0 TO blue.count - 1 DO
-    IF blue.units[i].alive & (blue.units[i].figures < weakFigs) THEN
-      weakFigs := blue.units[i].figures;
-      tCol := blue.units[i].col; tRow := blue.units[i].row
+    IF blue.units[i].alive THEN
+      INC(sumC, blue.units[i].col); INC(sumR, blue.units[i].row); INC(cnt)
     END
   END;
-  IF tCol < 0 THEN RETURN END;
+  IF cnt = 0 THEN RETURN END;
+  tCol := sumC DIV cnt; tRow := sumR DIV cnt;
   bestCol := blue.cmdCol; bestRow := blue.cmdRow;
   bestDist := CDist(bestCol, bestRow, tCol, tRow);
   FOR dc := -CMD_MOVE TO CMD_MOVE DO
@@ -1003,7 +1036,6 @@ BEGIN
   FOR i := 0 TO blue.count - 1 DO
     IF blue.units[i].alive THEN AIMoveUnit(i) END
   END;
-  IF verboseAI THEN END
 END DoAITurn;
 
 (* ════════════════════════════════════════════════════════════════════════ *)
