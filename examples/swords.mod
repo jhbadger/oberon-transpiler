@@ -81,7 +81,7 @@ CONST
   FIGS_START = 10;
   CMD_MOVE   = 4;
 
-  MAPX = 4;  MAPY = 2;
+  MAPX = 4;  MAPY = 3;
   SIDEX = 42;
 
 TYPE
@@ -1061,7 +1061,7 @@ BEGIN
       IF blue.cmdAlive & (blue.cmdCol = col) & (blue.cmdRow = row) THEN c0 := '*'
       ELSE c0 := 'B' END
     END;
-    c1 := facingGlyph[u.facing]
+    c1 := unitGlyph[u.utype]
   ELSIF red.cmdAlive & (red.cmdCol = col) & (red.cmdRow = row) THEN
     IF ~isCursor & ~(cmdSelected & isCmdCell) THEN fg := TUI.Red ELSE fg := TUI.Black END;
     c0 := 'R'; c1 := 'C'
@@ -1180,7 +1180,7 @@ BEGIN
   | PH_ELIM:   AppendStr(hdr, "END  ")
   ELSE         AppendStr(hdr, "?    ")
   END;
-  TUI.PutStr(0, 0, hdr, TUI.Yellow, TUI.Black)
+  TUI.PutStr(1, 1, hdr, TUI.Yellow, TUI.Black)
 END DrawHeader;
 
 PROCEDURE DrawPrompt;
@@ -1200,7 +1200,7 @@ BEGIN
   | PH_ELIM:   COPY("END: Press N for next turn", prompt)
   ELSE COPY("", prompt)
   END;
-  TUI.PutStr(0, 1, prompt, TUI.White, TUI.Black)
+  TUI.PutStr(1, MAPY + GRID_H, prompt, TUI.White, TUI.Black)
 END DrawPrompt;
 
 PROCEDURE DrawCursorInfo;
@@ -1234,7 +1234,7 @@ BEGIN
     IF unitHasBow[u.utype] THEN
       AppendStr(line, "  shots:"); IntStr(u.shotsLeft, num); AppendStr(line, num)
     END;
-    TUI.PutStr(0, MAPY + GRID_H, line, fg, TUI.Black)
+    TUI.PutStr(1, MAPY + GRID_H, line, fg, TUI.Black)
   ELSIF red.cmdAlive & (red.cmdCol = curCol) & (red.cmdRow = curRow) THEN
     COPY("[Red] Commander  ", line);
     IF red.cmdMoved THEN AppendStr(line, "moved") ELSE AppendStr(line, "ready") END;
