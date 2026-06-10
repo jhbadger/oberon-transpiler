@@ -13,10 +13,10 @@ MODULE PeptideContext;
     FASTA header, or the bare header description if no << >> markers are found.
 *)
 
-IMPORT Args, Out, Files, Strings, BioIO, BioSeq, Dict;
+IMPORT Args, Out, Files, Strings, BioIO, BioSeq;
 
 CONST
-  MAXPROT  = 65536;
+  MAXPROT  = 100000;
   MAXIDS   = 4096;
   NAMELEN  = 128;
   ANNOTLEN = 256;
@@ -33,7 +33,6 @@ VAR
   ids    : ARRAY MAXIDS OF ARRAY NAMELEN OF CHAR;
   nIds   : INTEGER;
   radius : INTEGER;
-  idIndex: Dict.Table;   (* id -> integer index in prots[], stored as decimal string *)
 
 (* ------------------------------------------------------------------ *)
 
@@ -124,8 +123,6 @@ BEGIN
 
     (* Index id -> position for O(1) lookup *)
     Strings.IntToStr(nProt, idxStr);
-    Dict.Put(idIndex, prots[nProt].id, idxStr);
-
     INC(nProt)
   END;
 
@@ -162,14 +159,17 @@ END LoadIds;
 (* ------------------------------------------------------------------ *)
 
 PROCEDURE FindProt(id : ARRAY OF CHAR) : INTEGER;
-  VAR val : ARRAY 16 OF CHAR; n : INTEGER; ok : BOOLEAN;
-BEGIN
-  IF Dict.Get(idIndex, id, val) THEN
-    ok := Strings.StrToInt(val, n);
-    IF ok THEN RETURN n END
-  END;
-  RETURN -1
-END FindProt;
+  VAR i : INTEGER;
+  BEGIN
+      i := 0;
+        WHILE i < nProt DO
+              IF Strings.Compare(prots[i].id, id) = 0 THEN
+                      RETURN i
+                        END;
+                            INC(i)
+                            END;
+                              RETURN -1
+                            END FindProt;
 
 (* ------------------------------------------------------------------ *)
 
@@ -209,8 +209,7 @@ BEGIN
   nProt := 0;
   nIds  := 0;
   empty[0] := 0X;
-  Dict.Init(idIndex);
-
+  
   IF Args.Count() < 3 THEN
     Out.String("Usage: PeptideContext <n> <ids_file> <fasta1> [<fasta2> ...]");
     Out.Ln;
@@ -288,4 +287,7 @@ BEGIN
   Files.Close(outFile);
   Out.String("Written: peptide_context.csv"); Out.Ln
 END PeptideContext.
+
+
+
 
