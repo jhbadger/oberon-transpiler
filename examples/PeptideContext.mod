@@ -16,28 +16,28 @@ MODULE PeptideContext;
 IMPORT Args, Out, Files, Strings, BioIO, BioSeq;
 
 CONST
-  MAXPROT  = 100000;
-  MAXIDS   = 4096;
-  NAMELEN  = 128;
-  ANNOTLEN = 256;
+MAXPROT  = 100000;
+MAXIDS   = 4096;
+NAMELEN  = 128;
+ANNOTLEN = 256;
 
 TYPE
-  ProtRec = RECORD
-    id    : ARRAY NAMELEN  OF CHAR;
-    annot : ARRAY ANNOTLEN OF CHAR;
-  END;
+ProtRec = RECORD
+  id    : ARRAY NAMELEN  OF CHAR;
+  annot : ARRAY ANNOTLEN OF CHAR;
+END;
 
 VAR
-  prots  : ARRAY MAXPROT OF ProtRec;
-  nProt  : INTEGER;
-  ids    : ARRAY MAXIDS OF ARRAY NAMELEN OF CHAR;
-  nIds   : INTEGER;
-  radius : INTEGER;
+prots  : ARRAY MAXPROT OF ProtRec;
+nProt  : INTEGER;
+ids    : ARRAY MAXIDS OF ARRAY NAMELEN OF CHAR;
+nIds   : INTEGER;
+radius : INTEGER;
 
 (* ------------------------------------------------------------------ *)
 
 PROCEDURE TrimRight(VAR s : ARRAY OF CHAR);
-  VAR len : INTEGER; c : CHAR;
+VAR len : INTEGER; c : CHAR;
 BEGIN
   len := Strings.Length(s);
   WHILE len > 0 DO
@@ -54,7 +54,7 @@ END TrimRight;
 (* Extract text between first << and >> in src into dst.
    Returns TRUE if found, FALSE otherwise (dst set to desc fallback). *)
 PROCEDURE ExtractAnnot(src : ARRAY OF CHAR; VAR dst : ARRAY OF CHAR) : BOOLEAN;
-  VAR i, lo, slen, dlim : INTEGER; found : BOOLEAN;
+VAR i, lo, slen, dlim : INTEGER; found : BOOLEAN;
 BEGIN
   dst[0] := 0X;
   slen   := Strings.Length(src);
@@ -79,12 +79,12 @@ END ExtractAnnot;
 (* ------------------------------------------------------------------ *)
 
 PROCEDURE LoadFasta(path : ARRAY OF CHAR);
-  VAR
-    rdr  : BioIO.FastaReader;
-    rec  : BioIO.FastaRecord;
-    ann  : ARRAY ANNOTLEN OF CHAR;
-    desc : ARRAY ANNOTLEN OF CHAR;
-    idxStr : ARRAY 16 OF CHAR;
+VAR
+rdr  : BioIO.FastaReader;
+rec  : BioIO.FastaRecord;
+ann  : ARRAY ANNOTLEN OF CHAR;
+desc : ARRAY ANNOTLEN OF CHAR;
+idxStr : ARRAY 16 OF CHAR;
 BEGIN
   IF ~BioIO.OpenFasta(rdr, path) THEN
     Out.String("Warning: cannot open "); Out.String(path); Out.Ln;
@@ -132,11 +132,11 @@ END LoadFasta;
 (* ------------------------------------------------------------------ *)
 
 PROCEDURE LoadIds(path : ARRAY OF CHAR);
-  VAR
-    f    : Files.File;
-    r    : Files.Rider;
-    line : ARRAY NAMELEN OF CHAR;
-    len  : INTEGER;
+VAR
+f    : Files.File;
+r    : Files.Rider;
+line : ARRAY NAMELEN OF CHAR;
+len  : INTEGER;
 BEGIN
   f := Files.Old(path);
   IF f = NIL THEN
@@ -159,22 +159,22 @@ END LoadIds;
 (* ------------------------------------------------------------------ *)
 
 PROCEDURE FindProt(id : ARRAY OF CHAR) : INTEGER;
-  VAR i : INTEGER;
-  BEGIN
-      i := 0;
-        WHILE i < nProt DO
-              IF Strings.Compare(prots[i].id, id) = 0 THEN
-                      RETURN i
-                        END;
-                            INC(i)
-                            END;
-                              RETURN -1
-                            END FindProt;
+VAR i : INTEGER;
+BEGIN
+  i := 0;
+  WHILE i < nProt DO
+    IF Strings.Compare(prots[i].id, id) = 0 THEN
+      RETURN i
+    END;
+    INC(i)
+  END;
+  RETURN -1
+END FindProt;
 
 (* ------------------------------------------------------------------ *)
 
 PROCEDURE WriteQuoted(VAR wr : Files.Rider; s : ARRAY OF CHAR);
-  VAR i, len : INTEGER; c : CHAR;
+VAR i, len : INTEGER; c : CHAR;
 BEGIN
   Files.Write(wr, ORD('"'));
   len := Strings.Length(s);
@@ -197,13 +197,13 @@ BEGIN Files.Write(wr, ORD(0AX)) END WriteNewline;
 (* ------------------------------------------------------------------ *)
 
 VAR
-  outFile : Files.File;
-  wr      : Files.Rider;
-  argBuf  : ARRAY 512 OF CHAR;
-  nBuf    : ARRAY 16 OF CHAR;
-  i, j, qi, col : INTEGER;
-  ok      : BOOLEAN;
-  empty   : ARRAY 2 OF CHAR;
+outFile : Files.File;
+wr      : Files.Rider;
+argBuf  : ARRAY 512 OF CHAR;
+nBuf    : ARRAY 16 OF CHAR;
+i, j, qi, col : INTEGER;
+ok      : BOOLEAN;
+empty   : ARRAY 2 OF CHAR;
 
 BEGIN
   nProt := 0;
@@ -287,7 +287,4 @@ BEGIN
   Files.Close(outFile);
   Out.String("Written: peptide_context.csv"); Out.Ln
 END PeptideContext.
-
-
-
 
