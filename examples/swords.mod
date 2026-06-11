@@ -881,13 +881,17 @@ PROCEDURE AIThreatScore(utype, figures: INTEGER): INTEGER;
 BEGIN RETURN figures * (unitBand[utype] + 1) END AIThreatScore;
 
 PROCEDURE AIFindBestEnemy(bIdx: INTEGER; VAR tCol, tRow: INTEGER);
-(* Pick the highest-threat living red unit as the primary target *)
-VAR i, score, best: INTEGER;
+(* Proximity-weighted targeting: score = threat*10/(dist+1); bonus for shaken/disordered *)
+VAR i, score, best, dist: INTEGER;
 BEGIN
   best := -1; tCol := -1; tRow := -1;
   FOR i := 0 TO red.count - 1 DO
     IF red.units[i].alive THEN
-      score := AIThreatScore(red.units[i].utype, red.units[i].figures);
+      dist  := CDist(blue.units[bIdx].col, blue.units[bIdx].row,
+                     red.units[i].col,     red.units[i].row);
+      score := AIThreatScore(red.units[i].utype, red.units[i].figures) * 10 DIV (dist + 1);
+      IF red.units[i].morale = ML_SHAKEN   THEN INC(score, 30) END;
+      IF red.units[i].morale >= ML_DISORDER THEN INC(score, 50) END;
       IF score > best THEN
         best := score; tCol := red.units[i].col; tRow := red.units[i].row
       END
@@ -897,7 +901,8 @@ END AIFindBestEnemy;
 
 PROCEDURE AIMoveUnit(bIdx: INTEGER);
 VAR tCol, tRow, bestCol, bestRow, bestScore, curScore: INTEGER;
-    nc, nr, mv, dc, dr, dist, arc, i, tgtFacing: INTEGER;
+    nc, nr, mv, dc, dr, dist, arc, i, j, tgtFacing, tgtMorale: INTEGER;
+    meleeRow, meleeCnt: INTEGER;
     u: Unit;
 BEGIN
   IF blue.units[bIdx].morale >= ML_DISORDER THEN RETURN END;
@@ -929,13 +934,22 @@ BEGIN
   AIFindBestEnemy(bIdx, tCol, tRow);
   IF tCol < 0 THEN RETURN END;
 
-  (* Look up current facing of the target for arc scoring *)
-  tgtFacing := FACE_S;
+  (* Look up facing and morale of target for arc/finish-off scoring *)
+  tgtFacing := FACE_S; tgtMorale := ML_REGULAR;
   FOR i := 0 TO red.count - 1 DO
     IF red.units[i].alive & (red.units[i].col = tCol) & (red.units[i].row = tRow) THEN
-      tgtFacing := red.units[i].facing
+      tgtFacing := red.units[i].facing; tgtMorale := red.units[i].morale
     END
   END;
+
+  (* Average row of friendly non-ranged units — archers should stay south of this *)
+  meleeRow := 0; meleeCnt := 0;
+  FOR j := 0 TO blue.count - 1 DO
+    IF blue.units[j].alive & ~unitHasBow[blue.units[j].utype] THEN
+      INC(meleeRow, blue.units[j].row); INC(meleeCnt)
+    END
+  END;
+  IF meleeCnt > 0 THEN meleeRow := meleeRow DIV meleeCnt END;
 
   bestCol := u.col; bestRow := u.row; bestScore := -9999;
   FOR dc := -mv TO mv DO
@@ -949,14 +963,25 @@ BEGIN
           ELSIF dist <= 2 THEN curScore := dist * 5 - 20
           ELSIF dist <= unitBowRng[u.utype] THEN curScore := 60 - dist * 5
           ELSE curScore := -dist * 10
-          END
+          END;
+          (* Stay behind the melee screen *)
+          IF (meleeCnt > 0) & (nr < meleeRow) THEN DEC(curScore, 25) END
         ELSE
           (* Melee: close in, bonus for flank/rear attack arc *)
           curScore := 50 - dist * 8;
+          (* Cavalry: extra incentive to approach from flank/rear at charge range *)
+          IF unitIsCav[u.utype] & (dist <= 2) THEN
+            arc := AttackArc(tgtFacing, nc - tCol, nr - tRow);
+            IF arc = ARC_FLANK THEN INC(curScore, 15) END;
+            IF arc = ARC_REAR  THEN INC(curScore, 25) END
+          END;
           IF dist <= 1 THEN
             arc := AttackArc(tgtFacing, nc - tCol, nr - tRow);
             IF arc = ARC_FLANK THEN INC(curScore, 20) END;
-            IF arc = ARC_REAR  THEN INC(curScore, 40) END
+            IF arc = ARC_REAR  THEN INC(curScore, 40) END;
+            (* Prioritise finishing off already-wavering enemies *)
+            IF tgtMorale = ML_SHAKEN   THEN INC(curScore, 25) END;
+            IF tgtMorale >= ML_DISORDER THEN INC(curScore, 40) END
           END
         END;
         (* Hill gives defender halved incoming melee damage *)
@@ -974,7 +999,7 @@ BEGIN
 END AIMoveUnit;
 
 PROCEDURE AIShootUnit(bIdx: INTEGER);
-(* Target the highest-threat unit in range rather than the weakest *)
+(* Target by threat; bonus for shaken/disordered targets to finish them off *)
 VAR i, bestIdx, bestScore, score: INTEGER; msg: ARRAY 64 OF CHAR;
 BEGIN
   IF ~unitHasBow[blue.units[bIdx].utype] THEN RETURN END;
@@ -984,6 +1009,8 @@ BEGIN
       IF red.units[i].alive &
          CanShootTarget(BLUE, bIdx, red.units[i].col, red.units[i].row) THEN
         score := AIThreatScore(red.units[i].utype, red.units[i].figures);
+        IF red.units[i].morale = ML_SHAKEN   THEN INC(score, 15) END;
+        IF red.units[i].morale >= ML_DISORDER THEN INC(score, 25) END;
         IF score > bestScore THEN bestScore := score; bestIdx := i END
       END
     END;
@@ -997,19 +1024,33 @@ BEGIN
 END AIShootUnit;
 
 PROCEDURE AIMoveCmd;
-(* Move commander toward the centroid of the blue army for broad morale coverage *)
-VAR i, tCol, tRow, sumC, sumR, cnt: INTEGER;
+(* Move toward the most degraded blue unit to maximise rally chance;
+   fall back to army centroid when all units are healthy *)
+VAR i, tCol, tRow, worstMorale, sumC, sumR, cnt: INTEGER;
     bestCol, bestRow, bestDist, newDist, dc, dr, nc, nr: INTEGER;
 BEGIN
   IF ~blue.cmdAlive OR blue.cmdMoved THEN RETURN END;
-  sumC := 0; sumR := 0; cnt := 0;
+  (* Seek the most degraded (highest morale level) unit *)
+  tCol := -1; tRow := -1; worstMorale := -1;
   FOR i := 0 TO blue.count - 1 DO
-    IF blue.units[i].alive THEN
-      INC(sumC, blue.units[i].col); INC(sumR, blue.units[i].row); INC(cnt)
+    IF blue.units[i].alive & (blue.units[i].morale > ML_REGULAR) THEN
+      IF blue.units[i].morale > worstMorale THEN
+        worstMorale := blue.units[i].morale;
+        tCol := blue.units[i].col; tRow := blue.units[i].row
+      END
     END
   END;
-  IF cnt = 0 THEN RETURN END;
-  tCol := sumC DIV cnt; tRow := sumR DIV cnt;
+  (* No degraded units: use army centroid *)
+  IF tCol < 0 THEN
+    sumC := 0; sumR := 0; cnt := 0;
+    FOR i := 0 TO blue.count - 1 DO
+      IF blue.units[i].alive THEN
+        INC(sumC, blue.units[i].col); INC(sumR, blue.units[i].row); INC(cnt)
+      END
+    END;
+    IF cnt = 0 THEN RETURN END;
+    tCol := sumC DIV cnt; tRow := sumR DIV cnt
+  END;
   bestCol := blue.cmdCol; bestRow := blue.cmdRow;
   bestDist := CDist(bestCol, bestRow, tCol, tRow);
   FOR dc := -CMD_MOVE TO CMD_MOVE DO
@@ -1027,6 +1068,8 @@ BEGIN
 END AIMoveCmd;
 
 PROCEDURE DoAITurn;
+(* Move order: cavalry first (set up charges), then melee infantry, archers last
+   (so archers can shelter behind whichever melee units just advanced) *)
 VAR i: INTEGER;
 BEGIN
   AIMoveCmd;
@@ -1034,8 +1077,15 @@ BEGIN
     IF blue.units[i].alive THEN AIShootUnit(i) END
   END;
   FOR i := 0 TO blue.count - 1 DO
-    IF blue.units[i].alive THEN AIMoveUnit(i) END
+    IF blue.units[i].alive & unitIsCav[blue.units[i].utype] THEN AIMoveUnit(i) END
   END;
+  FOR i := 0 TO blue.count - 1 DO
+    IF blue.units[i].alive & ~unitIsCav[blue.units[i].utype] &
+       ~unitHasBow[blue.units[i].utype] THEN AIMoveUnit(i) END
+  END;
+  FOR i := 0 TO blue.count - 1 DO
+    IF blue.units[i].alive & unitHasBow[blue.units[i].utype] THEN AIMoveUnit(i) END
+  END
 END DoAITurn;
 
 (* ════════════════════════════════════════════════════════════════════════ *)
@@ -1536,18 +1586,47 @@ END DeployArmy;
 
 PROCEDURE AISelectArmy(VAR comp: ARRAY OF INTEGER; VAR count: INTEGER);
 (*
- * Blue prefers cheap numbers (ORC, LEVY) plus a melee threat (HCAV or PIKE).
- * Randomly vary each game.
+ * Balanced composition: 1 ranged unit, 1 strong melee, fill with cheaper units.
+ * ARCHER (3pt) or ELF (5pt) for ranged; HCAV/ELITE/DWARF/LCAV for heavy melee.
  *)
-VAR budget, spent, t, tries: INTEGER;
+VAR budget, spent, t, tries, r: INTEGER;
 BEGIN
   budget := 12; count := 0; spent := 0;
+
+  (* Guaranteed ranged unit *)
+  IF Random.Int(2) = 0 THEN t := ARCHER ELSE t := ELF END;
+  IF (unitCost[t] <= budget - spent) & (count < MAX_UNITS) THEN
+    comp[count] := t; INC(spent, unitCost[t]); INC(count)
+  END;
+
+  (* Guaranteed heavy melee unit *)
+  tries := 0;
+  REPEAT
+    r := Random.Int(4);
+    IF    r = 0 THEN t := HCAV
+    ELSIF r = 1 THEN t := ELITE
+    ELSIF r = 2 THEN t := DWARF
+    ELSE              t := LCAV
+    END;
+    INC(tries)
+  UNTIL (unitCost[t] <= budget - spent) OR (tries > 20);
+  IF (unitCost[t] <= budget - spent) & (count < MAX_UNITS) THEN
+    comp[count] := t; INC(spent, unitCost[t]); INC(count)
+  END;
+
+  (* Fill remaining budget with cheaper units *)
   WHILE (count < MAX_UNITS) & (spent < budget) DO
     tries := 0;
     REPEAT
-      t := Random.Int(NTYPES); INC(tries)
+      r := Random.Int(4);
+      IF    r = 0 THEN t := ORC
+      ELSIF r = 1 THEN t := LEVY
+      ELSIF r = 2 THEN t := SWORD
+      ELSE              t := PIKE
+      END;
+      INC(tries)
     UNTIL (unitCost[t] <= budget - spent) OR (tries > 40);
-    IF unitCost[t] <= budget - spent THEN
+    IF (unitCost[t] <= budget - spent) & (count < MAX_UNITS) THEN
       comp[count] := t; INC(spent, unitCost[t]); INC(count)
     ELSE spent := budget
     END
