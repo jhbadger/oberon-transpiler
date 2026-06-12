@@ -1,6 +1,6 @@
 MODULE Cloj;
 
-IMPORT Out, Strings, Math, History, Files, Args;
+IMPORT Out, Strings, Math, Random, History, Files, Args;
 
 CONST
   (* Value tags *)
@@ -40,6 +40,7 @@ TYPE
     closure*: Env;
     builtin*: Builtin;
     name*: ARRAY 32 OF CHAR;
+    doc*: ARRAY MaxStr OF CHAR;
   END;
 
   BindingDesc = RECORD
@@ -64,6 +65,10 @@ VAR
 
   err*: BOOLEAN;
   errMsg*: ARRAY 256 OF CHAR;
+
+  doRecur: BOOLEAN;
+  recurArgs: Value;
+  gensymCount: INTEGER;
 
   EvalRef: EvalProc;  (* forward indirection *)
 
@@ -465,10 +470,17 @@ END EvalList;
 
 PROCEDURE Apply*(fn, args: Value; env: Env): Value;
 VAR newEnv: Env; params, a: Value; isRest: BOOLEAN;
-  restList, rLast, c, result, body: Value;
+  restList, rLast, c, result, body, expanded: Value;
 BEGIN
   IF IsNil(fn) THEN Error("cannot call nil"); RETURN NilV END;
   IF fn.tag = tBuiltin THEN RETURN fn.builtin(args, env) END;
+  IF fn.tag = tMacro THEN
+    fn.tag := tFn;
+    expanded := Apply(fn, args, env);
+    fn.tag := tMacro;
+    IF err THEN RETURN NilV END;
+    RETURN EvalRef(expanded, env)
+  END;
   IF fn.tag # tFn THEN Error("not a function"); RETURN NilV END;
   newEnv := NewEnv(fn.closure);
   params := fn.params; a := args; isRest := FALSE;
@@ -613,11 +625,196 @@ PROCEDURE Eval*(expr: Value; env: Env): Value;
     IF IsNil(args) OR (args.head.tag # tSym) THEN
       Error("defn needs name"); RETURN NilV
     END;
-    fnVal := DoFn(args.tail);
-    IF err THEN RETURN NilV END;
+    (* support optional docstring: (defn name "doc" [params] body) *)
+    IF ~IsNil(args.tail) & ~IsNil(args.tail.head) & (args.tail.head.tag = tStr) THEN
+      fnVal := DoFn(args.tail.tail);
+      IF err THEN RETURN NilV END;
+      Strings.Copy(args.tail.head.s, fnVal.doc)
+    ELSE
+      fnVal := DoFn(args.tail);
+      IF err THEN RETURN NilV END
+    END;
     Define(GlobalEnv, args.head.s, fnVal);
     RETURN fnVal
   END DoDefn;
+
+  PROCEDURE DoCond(args: Value): Value;
+  VAR test, result: Value;
+  BEGIN
+    WHILE ~IsNil(args) & ~err DO
+      test := args.head; args := args.tail;
+      IF IsNil(args) THEN Error("cond: odd clauses"); RETURN NilV END;
+      IF (test.tag = tSym) & (test.s = "else") OR IsTruthy(EvalRef(test, env)) THEN
+        RETURN EvalRef(args.head, env)
+      END;
+      args := args.tail
+    END;
+    RETURN NilV
+  END DoCond;
+
+  PROCEDURE DoWhenNot(args: Value): Value;
+  VAR cond, result, body: Value;
+  BEGIN
+    cond := EvalRef(args.head, env);
+    IF err THEN RETURN NilV END;
+    IF IsTruthy(cond) THEN RETURN NilV END;
+    body := args.tail; result := NilV;
+    WHILE ~IsNil(body) & ~err DO
+      result := EvalRef(body.head, env); body := body.tail
+    END;
+    RETURN result
+  END DoWhenNot;
+
+  PROCEDURE DoCase(args: Value): Value;
+  VAR val, clauses, test: Value;
+  BEGIN
+    val := EvalRef(args.head, env);
+    IF err THEN RETURN NilV END;
+    clauses := args.tail;
+    WHILE ~IsNil(clauses) & ~err DO
+      test := clauses.head; clauses := clauses.tail;
+      IF IsNil(clauses) THEN RETURN EvalRef(test, env) END;
+      IF ValueEqual(val, test) THEN RETURN EvalRef(clauses.head, env) END;
+      clauses := clauses.tail
+    END;
+    RETURN NilV
+  END DoCase;
+
+  PROCEDURE DoDotimes(args: Value): Value;
+  VAR bindVec, body, result, nameV, countV: Value; newEnv: Env; i, n: INTEGER;
+  BEGIN
+    bindVec := args.head; body := args.tail;
+    IF IsNil(bindVec) OR (bindVec.tag # tVec) THEN
+      Error("dotimes: needs binding vector"); RETURN NilV
+    END;
+    nameV := bindVec.head;
+    countV := EvalRef(bindVec.tail.head, env);
+    IF err THEN RETURN NilV END;
+    IF nameV.tag # tSym THEN Error("dotimes: needs symbol"); RETURN NilV END;
+    n := countV.i;
+    newEnv := NewEnv(env);
+    result := NilV; i := 0;
+    WHILE (i < n) & ~err DO
+      Define(newEnv, nameV.s, MkInt(i));
+      result := NilV;
+      body := args.tail;
+      WHILE ~IsNil(body) & ~err DO
+        result := EvalRef(body.head, newEnv); body := body.tail
+      END;
+      INC(i)
+    END;
+    RETURN NilV
+  END DoDotimes;
+
+  PROCEDURE DoDoseq(args: Value): Value;
+  VAR bindVec, body, nameV, seqV, elem: Value; newEnv: Env;
+  BEGIN
+    bindVec := args.head; body := args.tail;
+    IF IsNil(bindVec) OR (bindVec.tag # tVec) THEN
+      Error("doseq: needs binding vector"); RETURN NilV
+    END;
+    nameV := bindVec.head;
+    seqV := EvalRef(bindVec.tail.head, env);
+    IF err THEN RETURN NilV END;
+    IF nameV.tag # tSym THEN Error("doseq: needs symbol"); RETURN NilV END;
+    newEnv := NewEnv(env);
+    WHILE ~IsNil(seqV) & ~err DO
+      elem := seqV.head;
+      Define(newEnv, nameV.s, elem);
+      body := args.tail;
+      WHILE ~IsNil(body) & ~err DO
+        EvalRef(body.head, newEnv); body := body.tail
+      END;
+      seqV := seqV.tail
+    END;
+    RETURN NilV
+  END DoDoseq;
+
+  PROCEDURE DoLoop(args: Value): Value;
+  VAR bindVec, body, p, symV, valV, result, rp: Value;
+    newEnv: Env; names: ARRAY 16 OF ARRAY MaxStr OF CHAR;
+    numB, i: INTEGER;
+  BEGIN
+    bindVec := args.head; body := args.tail;
+    IF IsNil(bindVec) OR ((bindVec.tag # tVec) & (bindVec.tag # tList)) THEN
+      Error("loop: needs binding vector"); RETURN NilV
+    END;
+    newEnv := NewEnv(env);
+    p := bindVec; numB := 0;
+    WHILE ~IsNil(p) & (numB < 16) DO
+      symV := p.head; p := p.tail;
+      IF IsNil(p) THEN Error("loop: odd bindings"); RETURN NilV END;
+      valV := EvalRef(p.head, newEnv);
+      IF err THEN RETURN NilV END;
+      IF symV.tag # tSym THEN Error("loop: not a symbol"); RETURN NilV END;
+      Strings.Copy(symV.s, names[numB]); INC(numB);
+      Define(newEnv, symV.s, valV);
+      p := p.tail
+    END;
+    LOOP
+      result := NilV; p := body;
+      WHILE ~IsNil(p) & ~err & ~doRecur DO
+        result := EvalRef(p.head, newEnv); p := p.tail
+      END;
+      IF err THEN RETURN NilV END;
+      IF ~doRecur THEN EXIT END;
+      doRecur := FALSE;
+      rp := recurArgs; i := 0;
+      WHILE (i < numB) & ~IsNil(rp) DO
+        Define(newEnv, names[i], rp.head);
+        rp := rp.tail; INC(i)
+      END
+    END;
+    RETURN result
+  END DoLoop;
+
+  PROCEDURE DoRecur(args: Value): Value;
+  VAR first, last, cell: Value;
+  BEGIN
+    first := NilV; last := NIL;
+    WHILE ~IsNil(args) & ~err DO
+      cell := Cons(EvalRef(args.head, env), NilV);
+      IF err THEN RETURN NilV END;
+      IF last = NIL THEN first := cell ELSE last.tail := cell END;
+      last := cell; args := args.tail
+    END;
+    recurArgs := first; doRecur := TRUE;
+    RETURN NilV
+  END DoRecur;
+
+  PROCEDURE DoDefmacro(args: Value): Value;
+  VAR macV: Value;
+  BEGIN
+    IF IsNil(args) OR (args.head.tag # tSym) THEN
+      Error("defmacro: needs name"); RETURN NilV
+    END;
+    NEW(macV); macV.tag := tMacro;
+    macV.params := args.tail.head;
+    macV.body := args.tail.tail;
+    macV.closure := env;
+    Define(GlobalEnv, args.head.s, macV);
+    RETURN macV
+  END DoDefmacro;
+
+  PROCEDURE DoDocForm(args: Value): Value;
+  VAR v: Value;
+  BEGIN
+    IF IsNil(args) OR (args.head.tag # tSym) THEN
+      Error("doc: needs a symbol"); RETURN NilV
+    END;
+    v := Lookup(env, args.head.s);
+    Out.String("-------------------------"); Out.Ln;
+    Out.String(args.head.s); Out.Ln;
+    IF v = NIL THEN
+      Out.String("  Not found."); Out.Ln
+    ELSIF (v.tag = tBuiltin) OR (v.tag = tFn) OR (v.tag = tMacro) THEN
+      IF v.doc[0] # 0X THEN Out.String("  "); Out.String(v.doc); Out.Ln
+      ELSE Out.String("  No documentation available."); Out.Ln END
+    ELSE
+      Out.String("  "); PrintValue(v, TRUE); Out.Ln
+    END;
+    RETURN NilV
+  END DoDocForm;
 
 VAR head: Value; sym: ARRAY MaxStr OF CHAR; fn, evArgs, looked: Value;
   vec, first, last, cell, v: Value;
@@ -660,6 +857,15 @@ BEGIN
         ELSIF sym = "and" THEN RETURN DoAnd(expr.tail)
         ELSIF sym = "or" THEN RETURN DoOr(expr.tail)
         ELSIF sym = "when" THEN RETURN DoWhen(expr.tail)
+        ELSIF sym = "when-not" THEN RETURN DoWhenNot(expr.tail)
+        ELSIF sym = "cond" THEN RETURN DoCond(expr.tail)
+        ELSIF sym = "case" THEN RETURN DoCase(expr.tail)
+        ELSIF sym = "dotimes" THEN RETURN DoDotimes(expr.tail)
+        ELSIF sym = "doseq" THEN RETURN DoDoseq(expr.tail)
+        ELSIF sym = "loop" THEN RETURN DoLoop(expr.tail)
+        ELSIF sym = "recur" THEN RETURN DoRecur(expr.tail)
+        ELSIF sym = "defmacro" THEN RETURN DoDefmacro(expr.tail)
+        ELSIF sym = "doc" THEN RETURN DoDocForm(expr.tail)
         END
       END;
       fn := EvalRef(head, env);
@@ -1218,6 +1424,1076 @@ BEGIN
   RETURN Apply(fn, allArgs, env)
 END BApplyFn;
 
+(* ---------- New builtins ---------- *)
+
+(* Arithmetic *)
+PROCEDURE BQuot(args: Value; env: Env): Value;
+VAR a, b: Value;
+BEGIN
+  a := args.head; b := args.tail.head;
+  IF (a.tag # tInt) OR (b.tag # tInt) THEN Error("quot: needs ints"); RETURN NilV END;
+  IF b.i = 0 THEN Error("quot: division by zero"); RETURN NilV END;
+  RETURN MkInt(a.i DIV b.i)
+END BQuot;
+
+PROCEDURE BRem(args: Value; env: Env): Value;
+VAR a, b: Value;
+BEGIN
+  a := args.head; b := args.tail.head;
+  IF (a.tag # tInt) OR (b.tag # tInt) THEN Error("rem: needs ints"); RETURN NilV END;
+  IF b.i = 0 THEN Error("rem: division by zero"); RETURN NilV END;
+  RETURN MkInt(a.i - (a.i DIV b.i) * b.i)
+END BRem;
+
+PROCEDURE BMax(args: Value; env: Env): Value;
+VAR best, a: Value;
+BEGIN
+  IF IsNil(args) THEN Error("max: needs args"); RETURN NilV END;
+  best := args.head; args := args.tail;
+  WHILE ~IsNil(args) DO
+    a := args.head;
+    IF NumReal(a) > NumReal(best) THEN best := a END;
+    args := args.tail
+  END;
+  RETURN best
+END BMax;
+
+PROCEDURE BMin(args: Value; env: Env): Value;
+VAR best, a: Value;
+BEGIN
+  IF IsNil(args) THEN Error("min: needs args"); RETURN NilV END;
+  best := args.head; args := args.tail;
+  WHILE ~IsNil(args) DO
+    a := args.head;
+    IF NumReal(a) < NumReal(best) THEN best := a END;
+    args := args.tail
+  END;
+  RETURN best
+END BMin;
+
+PROCEDURE BAbs(args: Value; env: Env): Value;
+VAR v: Value;
+BEGIN
+  v := args.head;
+  IF v.tag = tInt THEN
+    IF v.i < 0 THEN RETURN MkInt(-v.i) ELSE RETURN v END
+  END;
+  IF v.tag = tReal THEN RETURN MkReal(Math.abs(v.r)) END;
+  Error("abs: needs number"); RETURN NilV
+END BAbs;
+
+PROCEDURE BEvenQ(args: Value; env: Env): Value;
+BEGIN
+  IF args.head.tag # tInt THEN Error("even?: needs int"); RETURN NilV END;
+  RETURN MkBool(args.head.i MOD 2 = 0)
+END BEvenQ;
+
+PROCEDURE BOddQ(args: Value; env: Env): Value;
+BEGIN
+  IF args.head.tag # tInt THEN Error("odd?: needs int"); RETURN NilV END;
+  RETURN MkBool(args.head.i MOD 2 # 0)
+END BOddQ;
+
+PROCEDURE BZeroQ(args: Value; env: Env): Value;
+BEGIN RETURN MkBool(IsNum(args.head) & (NumReal(args.head) = 0.0)) END BZeroQ;
+
+PROCEDURE BPosQ(args: Value; env: Env): Value;
+BEGIN RETURN MkBool(IsNum(args.head) & (NumReal(args.head) > 0.0)) END BPosQ;
+
+PROCEDURE BNegQ(args: Value; env: Env): Value;
+BEGIN RETURN MkBool(IsNum(args.head) & (NumReal(args.head) < 0.0)) END BNegQ;
+
+(* Math *)
+PROCEDURE BFloor(args: Value; env: Env): Value;
+BEGIN RETURN MkInt(Math.entier(Math.floor(NumReal(args.head)))) END BFloor;
+
+PROCEDURE BCeil(args: Value; env: Env): Value;
+BEGIN RETURN MkInt(Math.entier(Math.ceil(NumReal(args.head)))) END BCeil;
+
+PROCEDURE BRound(args: Value; env: Env): Value;
+BEGIN RETURN MkInt(Math.entier(Math.round(NumReal(args.head)))) END BRound;
+
+PROCEDURE BPow(args: Value; env: Env): Value;
+BEGIN RETURN MkReal(Math.power(NumReal(args.head), NumReal(args.tail.head))) END BPow;
+
+PROCEDURE BLog(args: Value; env: Env): Value;
+BEGIN RETURN MkReal(Math.ln(NumReal(args.head))) END BLog;
+
+PROCEDURE BExp(args: Value; env: Env): Value;
+BEGIN RETURN MkReal(Math.exp(NumReal(args.head))) END BExp;
+
+PROCEDURE BSin(args: Value; env: Env): Value;
+BEGIN RETURN MkReal(Math.sin(NumReal(args.head))) END BSin;
+
+PROCEDURE BCos(args: Value; env: Env): Value;
+BEGIN RETURN MkReal(Math.cos(NumReal(args.head))) END BCos;
+
+PROCEDURE BTan(args: Value; env: Env): Value;
+BEGIN RETURN MkReal(Math.tan(NumReal(args.head))) END BTan;
+
+PROCEDURE BAtan(args: Value; env: Env): Value;
+BEGIN RETURN MkReal(Math.arctan(NumReal(args.head))) END BAtan;
+
+PROCEDURE BAtan2(args: Value; env: Env): Value;
+BEGIN RETURN MkReal(Math.arctan2(NumReal(args.head), NumReal(args.tail.head))) END BAtan2;
+
+PROCEDURE BRand(args: Value; env: Env): Value;
+BEGIN RETURN MkReal(Random.Real()) END BRand;
+
+PROCEDURE BRandInt(args: Value; env: Env): Value;
+VAR n: INTEGER;
+BEGIN
+  IF IsNil(args) THEN RETURN MkInt(Random.Int(1000000)) END;
+  n := args.head.i;
+  IF n <= 0 THEN Error("rand-int: needs positive n"); RETURN NilV END;
+  RETURN MkInt(Random.Int(n))
+END BRandInt;
+
+(* Type predicates *)
+PROCEDURE BNumberQ(args: Value; env: Env): Value;
+BEGIN RETURN MkBool(IsNum(args.head)) END BNumberQ;
+
+PROCEDURE BIntegerQ(args: Value; env: Env): Value;
+BEGIN RETURN MkBool(~IsNil(args.head) & (args.head.tag = tInt)) END BIntegerQ;
+
+PROCEDURE BFloatQ(args: Value; env: Env): Value;
+BEGIN RETURN MkBool(~IsNil(args.head) & (args.head.tag = tReal)) END BFloatQ;
+
+PROCEDURE BStringQ(args: Value; env: Env): Value;
+BEGIN RETURN MkBool(~IsNil(args.head) & (args.head.tag = tStr)) END BStringQ;
+
+PROCEDURE BBooleanQ(args: Value; env: Env): Value;
+BEGIN RETURN MkBool(~IsNil(args.head) & (args.head.tag = tBool)) END BBooleanQ;
+
+PROCEDURE BKeywordQ(args: Value; env: Env): Value;
+BEGIN RETURN MkBool(~IsNil(args.head) & (args.head.tag = tKey)) END BKeywordQ;
+
+PROCEDURE BSymbolQ(args: Value; env: Env): Value;
+BEGIN RETURN MkBool(~IsNil(args.head) & (args.head.tag = tSym)) END BSymbolQ;
+
+PROCEDURE BFnQ(args: Value; env: Env): Value;
+VAR v: Value;
+BEGIN
+  v := args.head;
+  RETURN MkBool(~IsNil(v) & ((v.tag = tFn) OR (v.tag = tBuiltin)))
+END BFnQ;
+
+PROCEDURE BCollQ(args: Value; env: Env): Value;
+VAR v: Value;
+BEGIN
+  v := args.head;
+  IF IsNil(v) THEN RETURN TrueV END;
+  RETURN MkBool((v.tag = tList) OR (v.tag = tVec) OR (v.tag = tMap))
+END BCollQ;
+
+PROCEDURE BSeqQ(args: Value; env: Env): Value;
+VAR v: Value;
+BEGIN
+  v := args.head;
+  IF IsNil(v) THEN RETURN FalseV END;
+  RETURN MkBool((v.tag = tList) OR (v.tag = tVec))
+END BSeqQ;
+
+PROCEDURE BListQ(args: Value; env: Env): Value;
+BEGIN RETURN MkBool(IsNil(args.head) OR (~IsNil(args.head) & (args.head.tag = tList))) END BListQ;
+
+PROCEDURE BVectorQ(args: Value; env: Env): Value;
+BEGIN RETURN MkBool(~IsNil(args.head) & (args.head.tag = tVec)) END BVectorQ;
+
+PROCEDURE BMapQ(args: Value; env: Env): Value;
+BEGIN RETURN MkBool(~IsNil(args.head) & (args.head.tag = tMap)) END BMapQ;
+
+PROCEDURE BTrueQ(args: Value; env: Env): Value;
+BEGIN RETURN MkBool(~IsNil(args.head) & (args.head.tag = tBool) & args.head.b) END BTrueQ;
+
+PROCEDURE BFalseQ(args: Value; env: Env): Value;
+BEGIN RETURN MkBool(~IsNil(args.head) & (args.head.tag = tBool) & ~args.head.b) END BFalseQ;
+
+(* Sequence operations *)
+PROCEDURE BSecond(args: Value; env: Env): Value;
+VAR v: Value;
+BEGIN
+  v := args.head;
+  IF IsNil(v) OR IsNil(v.tail) THEN RETURN NilV END;
+  RETURN v.tail.head
+END BSecond;
+
+PROCEDURE BLast(args: Value; env: Env): Value;
+VAR v: Value;
+BEGIN
+  v := args.head;
+  IF IsNil(v) THEN RETURN NilV END;
+  WHILE ~IsNil(v.tail) DO v := v.tail END;
+  RETURN v.head
+END BLast;
+
+PROCEDURE BNext(args: Value; env: Env): Value;
+VAR v: Value;
+BEGIN
+  v := args.head;
+  IF IsNil(v) OR IsNil(v.tail) THEN RETURN NilV END;
+  RETURN v.tail
+END BNext;
+
+PROCEDURE BButlast(args: Value; env: Env): Value;
+VAR v, first, last, cell: Value;
+BEGIN
+  v := args.head;
+  IF IsNil(v) OR IsNil(v.tail) THEN RETURN NilV END;
+  first := NilV; last := NIL;
+  WHILE ~IsNil(v.tail) DO
+    cell := Cons(v.head, NilV);
+    IF last = NIL THEN first := cell ELSE last.tail := cell END;
+    last := cell; v := v.tail
+  END;
+  RETURN first
+END BButlast;
+
+PROCEDURE BTake(args: Value; env: Env): Value;
+VAR n: INTEGER; coll, first, last, cell: Value;
+BEGIN
+  n := args.head.i; coll := args.tail.head;
+  first := NilV; last := NIL;
+  WHILE (n > 0) & ~IsNil(coll) DO
+    cell := Cons(coll.head, NilV);
+    IF last = NIL THEN first := cell ELSE last.tail := cell END;
+    last := cell; coll := coll.tail; DEC(n)
+  END;
+  RETURN first
+END BTake;
+
+PROCEDURE BDrop(args: Value; env: Env): Value;
+VAR n: INTEGER; coll: Value;
+BEGIN
+  n := args.head.i; coll := args.tail.head;
+  WHILE (n > 0) & ~IsNil(coll) DO coll := coll.tail; DEC(n) END;
+  RETURN coll
+END BDrop;
+
+PROCEDURE BTakeWhile(args: Value; env: Env): Value;
+VAR fn, coll, first, last, cell, callArgs, result: Value;
+BEGIN
+  fn := args.head; coll := args.tail.head;
+  first := NilV; last := NIL;
+  WHILE ~IsNil(coll) & ~err DO
+    callArgs := Cons(coll.head, NilV);
+    result := Apply(fn, callArgs, env);
+    IF err OR ~IsTruthy(result) THEN EXIT END;
+    cell := Cons(coll.head, NilV);
+    IF last = NIL THEN first := cell ELSE last.tail := cell END;
+    last := cell; coll := coll.tail
+  END;
+  RETURN first
+END BTakeWhile;
+
+PROCEDURE BDropWhile(args: Value; env: Env): Value;
+VAR fn, coll, callArgs, result: Value;
+BEGIN
+  fn := args.head; coll := args.tail.head;
+  WHILE ~IsNil(coll) & ~err DO
+    callArgs := Cons(coll.head, NilV);
+    result := Apply(fn, callArgs, env);
+    IF err OR ~IsTruthy(result) THEN EXIT END;
+    coll := coll.tail
+  END;
+  IF err THEN RETURN NilV END;
+  RETURN coll
+END BDropWhile;
+
+PROCEDURE BConcat(args: Value; env: Env): Value;
+VAR first, last, cell, coll: Value;
+BEGIN
+  first := NilV; last := NIL;
+  WHILE ~IsNil(args) DO
+    coll := args.head;
+    WHILE ~IsNil(coll) DO
+      cell := Cons(coll.head, NilV);
+      IF last = NIL THEN first := cell ELSE last.tail := cell END;
+      last := cell; coll := coll.tail
+    END;
+    args := args.tail
+  END;
+  RETURN first
+END BConcat;
+
+PROCEDURE BReverse(args: Value; env: Env): Value;
+VAR v, result: Value;
+BEGIN
+  v := args.head; result := NilV;
+  WHILE ~IsNil(v) DO result := Cons(v.head, result); v := v.tail END;
+  RETURN result
+END BReverse;
+
+PROCEDURE ValLT(a, b: Value): BOOLEAN;
+BEGIN
+  IF IsNum(a) & IsNum(b) THEN RETURN NumReal(a) < NumReal(b) END;
+  IF (a.tag = tStr) & (b.tag = tStr) THEN RETURN Strings.Compare(a.s, b.s) < 0 END;
+  IF (a.tag = tKey) & (b.tag = tKey) THEN RETURN Strings.Compare(a.s, b.s) < 0 END;
+  RETURN FALSE
+END ValLT;
+
+PROCEDURE BSort(args: Value; env: Env): Value;
+VAR coll, tmp: Value; n, i, j: INTEGER;
+  arr: ARRAY 1024 OF Value;
+BEGIN
+  coll := args.head; n := 0;
+  WHILE ~IsNil(coll) & (n < 1024) DO arr[n] := coll.head; INC(n); coll := coll.tail END;
+  i := 1;
+  WHILE i < n DO
+    tmp := arr[i]; j := i - 1;
+    WHILE (j >= 0) & ValLT(tmp, arr[j]) DO
+      arr[j+1] := arr[j]; DEC(j)
+    END;
+    arr[j+1] := tmp; INC(i)
+  END;
+  coll := NilV; i := n - 1;
+  WHILE i >= 0 DO coll := Cons(arr[i], coll); DEC(i) END;
+  RETURN coll
+END BSort;
+
+PROCEDURE BSortBy(args: Value; env: Env): Value;
+VAR fn, coll: Value; n, i, j: INTEGER;
+  arr: ARRAY 1024 OF Value; tmp, ka, kb: Value; cont: BOOLEAN;
+BEGIN
+  fn := args.head; coll := args.tail.head; n := 0;
+  WHILE ~IsNil(coll) & (n < 1024) DO arr[n] := coll.head; INC(n); coll := coll.tail END;
+  i := 1;
+  WHILE i < n DO
+    tmp := arr[i]; j := i - 1; cont := TRUE;
+    WHILE (j >= 0) & cont DO
+      ka := Apply(fn, Cons(arr[j], NilV), env);
+      kb := Apply(fn, Cons(tmp, NilV), env);
+      IF err THEN RETURN NilV END;
+      IF ValLT(kb, ka) THEN arr[j+1] := arr[j]; DEC(j)
+      ELSE cont := FALSE END
+    END;
+    arr[j+1] := tmp; INC(i)
+  END;
+  coll := NilV; i := n - 1;
+  WHILE i >= 0 DO coll := Cons(arr[i], coll); DEC(i) END;
+  RETURN coll
+END BSortBy;
+
+PROCEDURE BEveryQ(args: Value; env: Env): Value;
+VAR fn, coll, result: Value;
+BEGIN
+  fn := args.head; coll := args.tail.head;
+  WHILE ~IsNil(coll) & ~err DO
+    result := Apply(fn, Cons(coll.head, NilV), env);
+    IF err THEN RETURN NilV END;
+    IF ~IsTruthy(result) THEN RETURN FalseV END;
+    coll := coll.tail
+  END;
+  RETURN TrueV
+END BEveryQ;
+
+PROCEDURE BSome(args: Value; env: Env): Value;
+VAR fn, coll, result: Value;
+BEGIN
+  fn := args.head; coll := args.tail.head;
+  WHILE ~IsNil(coll) & ~err DO
+    result := Apply(fn, Cons(coll.head, NilV), env);
+    IF err THEN RETURN NilV END;
+    IF IsTruthy(result) THEN RETURN result END;
+    coll := coll.tail
+  END;
+  RETURN NilV
+END BSome;
+
+PROCEDURE BNotAnyQ(args: Value; env: Env): Value;
+VAR fn, coll, result: Value;
+BEGIN
+  fn := args.head; coll := args.tail.head;
+  WHILE ~IsNil(coll) & ~err DO
+    result := Apply(fn, Cons(coll.head, NilV), env);
+    IF err THEN RETURN NilV END;
+    IF IsTruthy(result) THEN RETURN FalseV END;
+    coll := coll.tail
+  END;
+  RETURN TrueV
+END BNotAnyQ;
+
+PROCEDURE BNotEveryQ(args: Value; env: Env): Value;
+VAR fn, coll, result: Value;
+BEGIN
+  fn := args.head; coll := args.tail.head;
+  WHILE ~IsNil(coll) & ~err DO
+    result := Apply(fn, Cons(coll.head, NilV), env);
+    IF err THEN RETURN NilV END;
+    IF ~IsTruthy(result) THEN RETURN TrueV END;
+    coll := coll.tail
+  END;
+  RETURN FalseV
+END BNotEveryQ;
+
+PROCEDURE BInto(args: Value; env: Env): Value;
+VAR dst, src, p, cell, first, last: Value; isVec: BOOLEAN;
+BEGIN
+  dst := args.head; src := args.tail.head;
+  isVec := ~IsNil(dst) & (dst.tag = tVec);
+  first := NilV; last := NIL;
+  (* copy dst *)
+  p := dst;
+  WHILE ~IsNil(p) DO
+    IF isVec THEN cell := MkVec(p.head, NilV) ELSE cell := Cons(p.head, NilV) END;
+    IF last = NIL THEN first := cell ELSE last.tail := cell END;
+    last := cell; p := p.tail
+  END;
+  (* append src *)
+  p := src;
+  WHILE ~IsNil(p) DO
+    IF isVec THEN cell := MkVec(p.head, NilV) ELSE cell := Cons(p.head, NilV) END;
+    IF last = NIL THEN first := cell ELSE last.tail := cell END;
+    last := cell; p := p.tail
+  END;
+  RETURN first
+END BInto;
+
+PROCEDURE BSeq(args: Value; env: Env): Value;
+VAR v: Value; i: INTEGER; first, last, cell: Value; buf: ARRAY 2 OF CHAR;
+BEGIN
+  v := args.head;
+  IF IsNil(v) THEN RETURN NilV END;
+  IF (v.tag = tList) OR (v.tag = tVec) THEN
+    IF ListLen(v) = 0 THEN RETURN NilV END;
+    RETURN v
+  END;
+  IF v.tag = tStr THEN
+    i := 0; first := NilV; last := NIL; buf[1] := 0X;
+    WHILE v.s[i] # 0X DO
+      buf[0] := v.s[i];
+      cell := Cons(MkStr(buf), NilV);
+      IF last = NIL THEN first := cell ELSE last.tail := cell END;
+      last := cell; INC(i)
+    END;
+    RETURN first
+  END;
+  RETURN NilV
+END BSeq;
+
+PROCEDURE FlattenInto(v: Value; VAR first, last: Value);
+VAR cell: Value;
+BEGIN
+  IF IsNil(v) THEN RETURN END;
+  IF (v.tag = tList) OR (v.tag = tVec) THEN
+    WHILE ~IsNil(v) DO FlattenInto(v.head, first, last); v := v.tail END
+  ELSE
+    cell := Cons(v, NilV);
+    IF last = NIL THEN first := cell ELSE last.tail := cell END;
+    last := cell
+  END
+END FlattenInto;
+
+PROCEDURE BFlatten(args: Value; env: Env): Value;
+VAR first, last: Value;
+BEGIN
+  first := NilV; last := NIL;
+  FlattenInto(args.head, first, last);
+  RETURN first
+END BFlatten;
+
+PROCEDURE BDistinct(args: Value; env: Env): Value;
+VAR coll, p, first, last, cell: Value; found: BOOLEAN;
+BEGIN
+  coll := args.head; first := NilV; last := NIL;
+  WHILE ~IsNil(coll) DO
+    (* check if already in result *)
+    p := first; found := FALSE;
+    WHILE ~IsNil(p) DO
+      IF ValueEqual(p.head, coll.head) THEN found := TRUE END;
+      p := p.tail
+    END;
+    IF ~found THEN
+      cell := Cons(coll.head, NilV);
+      IF last = NIL THEN first := cell ELSE last.tail := cell END;
+      last := cell
+    END;
+    coll := coll.tail
+  END;
+  RETURN first
+END BDistinct;
+
+PROCEDURE BMapcat(args: Value; env: Env): Value;
+VAR fn, coll, first, last, cell, subList, callArgs: Value;
+BEGIN
+  fn := args.head; coll := args.tail.head;
+  first := NilV; last := NIL;
+  WHILE ~IsNil(coll) & ~err DO
+    callArgs := Cons(coll.head, NilV);
+    subList := Apply(fn, callArgs, env);
+    IF err THEN RETURN NilV END;
+    WHILE ~IsNil(subList) DO
+      cell := Cons(subList.head, NilV);
+      IF last = NIL THEN first := cell ELSE last.tail := cell END;
+      last := cell; subList := subList.tail
+    END;
+    coll := coll.tail
+  END;
+  RETURN first
+END BMapcat;
+
+PROCEDURE BKeep(args: Value; env: Env): Value;
+VAR fn, coll, first, last, cell, callArgs, result: Value;
+BEGIN
+  fn := args.head; coll := args.tail.head;
+  first := NilV; last := NIL;
+  WHILE ~IsNil(coll) & ~err DO
+    callArgs := Cons(coll.head, NilV);
+    result := Apply(fn, callArgs, env);
+    IF err THEN RETURN NilV END;
+    IF ~IsNil(result) & IsTruthy(result) THEN
+      cell := Cons(result, NilV);
+      IF last = NIL THEN first := cell ELSE last.tail := cell END;
+      last := cell
+    END;
+    coll := coll.tail
+  END;
+  RETURN first
+END BKeep;
+
+PROCEDURE BRemove(args: Value; env: Env): Value;
+VAR fn, coll, first, last, cell, callArgs, result: Value;
+BEGIN
+  fn := args.head; coll := args.tail.head;
+  first := NilV; last := NIL;
+  WHILE ~IsNil(coll) & ~err DO
+    callArgs := Cons(coll.head, NilV);
+    result := Apply(fn, callArgs, env);
+    IF err THEN RETURN NilV END;
+    IF ~IsTruthy(result) THEN
+      cell := Cons(coll.head, NilV);
+      IF last = NIL THEN first := cell ELSE last.tail := cell END;
+      last := cell
+    END;
+    coll := coll.tail
+  END;
+  RETURN first
+END BRemove;
+
+PROCEDURE BPartition(args: Value; env: Env): Value;
+VAR n: INTEGER; coll, first, last, grpFirst, grpLast, cell, group: Value; count: INTEGER;
+BEGIN
+  n := args.head.i; coll := args.tail.head;
+  first := NilV; last := NIL;
+  WHILE ~IsNil(coll) DO
+    grpFirst := NilV; grpLast := NIL; count := 0;
+    WHILE (count < n) & ~IsNil(coll) DO
+      cell := Cons(coll.head, NilV);
+      IF grpLast = NIL THEN grpFirst := cell ELSE grpLast.tail := cell END;
+      grpLast := cell; INC(count); coll := coll.tail
+    END;
+    IF count = n THEN
+      group := Cons(grpFirst, NilV);
+      IF last = NIL THEN first := group ELSE last.tail := group END;
+      last := group
+    END
+  END;
+  RETURN first
+END BPartition;
+
+PROCEDURE BInterpose(args: Value; env: Env): Value;
+VAR sep, coll, first, last, cell: Value;
+BEGIN
+  sep := args.head; coll := args.tail.head;
+  first := NilV; last := NIL;
+  WHILE ~IsNil(coll) DO
+    cell := Cons(coll.head, NilV);
+    IF last = NIL THEN first := cell ELSE last.tail := cell END;
+    last := cell; coll := coll.tail;
+    IF ~IsNil(coll) THEN
+      cell := Cons(sep, NilV); last.tail := cell; last := cell
+    END
+  END;
+  RETURN first
+END BInterpose;
+
+PROCEDURE BFrequencies(args: Value; env: Env): Value;
+VAR coll, ks, vs, kp, vp, c: Value; found: BOOLEAN;
+BEGIN
+  coll := args.head;
+  ks := NilV; vs := NilV;
+  WHILE ~IsNil(coll) DO
+    kp := ks; vp := vs; found := FALSE;
+    WHILE ~IsNil(kp) DO
+      IF ValueEqual(kp.head, coll.head) THEN
+        vp.head := MkInt(vp.head.i + 1); found := TRUE
+      END;
+      kp := kp.tail; vp := vp.tail
+    END;
+    IF ~found THEN
+      c := Cons(coll.head, NilV); ks := Cons(c.head, ks);
+      vs := Cons(MkInt(1), vs)
+    END;
+    coll := coll.tail
+  END;
+  RETURN MkMap(ks, vs)
+END BFrequencies;
+
+PROCEDURE BZipmap(args: Value; env: Env): Value;
+VAR keys, vals: Value;
+BEGIN
+  keys := args.head; vals := args.tail.head;
+  RETURN MkMap(keys, vals)
+END BZipmap;
+
+PROCEDURE BShuffle(args: Value; env: Env): Value;
+VAR coll: Value; n, i, j: INTEGER;
+  arr: ARRAY 1024 OF Value; tmp: Value;
+BEGIN
+  coll := args.head; n := 0;
+  WHILE ~IsNil(coll) & (n < 1024) DO arr[n] := coll.head; INC(n); coll := coll.tail END;
+  i := n - 1;
+  WHILE i > 0 DO
+    j := Random.Int(i + 1);
+    tmp := arr[i]; arr[i] := arr[j]; arr[j] := tmp;
+    DEC(i)
+  END;
+  coll := NilV; i := n - 1;
+  WHILE i >= 0 DO coll := Cons(arr[i], coll); DEC(i) END;
+  RETURN coll
+END BShuffle;
+
+(* Map operations *)
+PROCEDURE BDissoc(args: Value; env: Env): Value;
+VAR m, k, ks, vs, nks, nvs, c: Value; nkLast, nvLast: Value;
+BEGIN
+  m := args.head; k := args.tail.head;
+  IF IsNil(m) OR (m.tag # tMap) THEN RETURN m END;
+  ks := m.head; vs := m.tail;
+  nks := NilV; nvs := NilV; nkLast := NIL; nvLast := NIL;
+  WHILE ~IsNil(ks) DO
+    IF ~ValueEqual(ks.head, k) THEN
+      c := Cons(ks.head, NilV);
+      IF nkLast = NIL THEN nks := c ELSE nkLast.tail := c END;
+      nkLast := c;
+      c := Cons(vs.head, NilV);
+      IF nvLast = NIL THEN nvs := c ELSE nvLast.tail := c END;
+      nvLast := c
+    END;
+    ks := ks.tail; vs := vs.tail
+  END;
+  RETURN MkMap(nks, nvs)
+END BDissoc;
+
+PROCEDURE BMerge(args: Value; env: Env): Value;
+VAR result, m, ks, vs: Value;
+BEGIN
+  result := NilV;
+  WHILE ~IsNil(args) DO
+    m := args.head;
+    IF ~IsNil(m) & (m.tag = tMap) THEN
+      ks := m.head; vs := m.tail;
+      WHILE ~IsNil(ks) DO
+        result := BAssoc(Cons(result, Cons(ks.head, Cons(vs.head, NilV))), env);
+        ks := ks.tail; vs := vs.tail
+      END
+    END;
+    args := args.tail
+  END;
+  RETURN result
+END BMerge;
+
+PROCEDURE BContainsQ(args: Value; env: Env): Value;
+VAR m, k, ks: Value;
+BEGIN
+  m := args.head; k := args.tail.head;
+  IF IsNil(m) THEN RETURN FalseV END;
+  IF m.tag = tMap THEN
+    ks := m.head;
+    WHILE ~IsNil(ks) DO
+      IF ValueEqual(ks.head, k) THEN RETURN TrueV END;
+      ks := ks.tail
+    END;
+    RETURN FalseV
+  END;
+  IF (m.tag = tVec) & (k.tag = tInt) THEN
+    RETURN MkBool((k.i >= 0) & (k.i < ListLen(m)))
+  END;
+  RETURN FalseV
+END BContainsQ;
+
+PROCEDURE BHashMap(args: Value; env: Env): Value;
+VAR ks, vs, kLast, vLast, c: Value;
+BEGIN
+  ks := NilV; vs := NilV; kLast := NIL; vLast := NIL;
+  WHILE ~IsNil(args) & ~IsNil(args.tail) DO
+    c := Cons(args.head, NilV);
+    IF kLast = NIL THEN ks := c ELSE kLast.tail := c END;
+    kLast := c;
+    c := Cons(args.tail.head, NilV);
+    IF vLast = NIL THEN vs := c ELSE vLast.tail := c END;
+    vLast := c;
+    args := args.tail.tail
+  END;
+  RETURN MkMap(ks, vs)
+END BHashMap;
+
+PROCEDURE BUpdate(args: Value; env: Env): Value;
+VAR m, k, fn, oldVal, newVal: Value;
+BEGIN
+  m := args.head; k := args.tail.head; fn := args.tail.tail.head;
+  oldVal := BGet(Cons(m, Cons(k, NilV)), env);
+  newVal := Apply(fn, Cons(oldVal, NilV), env);
+  IF err THEN RETURN NilV END;
+  RETURN BAssoc(Cons(m, Cons(k, Cons(newVal, NilV))), env)
+END BUpdate;
+
+PROCEDURE BSelectKeys(args: Value; env: Env): Value;
+VAR m, keyList, ks, vs, nks, nvs, c, v: Value; nkLast, nvLast: Value;
+BEGIN
+  m := args.head; keyList := args.tail.head;
+  IF IsNil(m) OR (m.tag # tMap) THEN RETURN MkMap(NilV, NilV) END;
+  nks := NilV; nvs := NilV; nkLast := NIL; nvLast := NIL;
+  WHILE ~IsNil(keyList) DO
+    v := BGet(Cons(m, Cons(keyList.head, NilV)), env);
+    IF ~IsNil(v) THEN
+      c := Cons(keyList.head, NilV);
+      IF nkLast = NIL THEN nks := c ELSE nkLast.tail := c END; nkLast := c;
+      c := Cons(v, NilV);
+      IF nvLast = NIL THEN nvs := c ELSE nvLast.tail := c END; nvLast := c
+    END;
+    keyList := keyList.tail
+  END;
+  RETURN MkMap(nks, nvs)
+END BSelectKeys;
+
+(* String operations *)
+PROCEDURE BSubs(args: Value; env: Env): Value;
+VAR s, start, end_: Value; buf: ARRAY MaxStr OF CHAR; len: INTEGER;
+BEGIN
+  s := args.head; start := args.tail.head;
+  IF s.tag # tStr THEN Error("subs: needs string"); RETURN NilV END;
+  len := Strings.Length(s.s);
+  IF IsNil(args.tail.tail) THEN
+    Strings.Extract(s.s, start.i, len - start.i, buf)
+  ELSE
+    end_ := args.tail.tail.head;
+    Strings.Extract(s.s, start.i, end_.i - start.i, buf)
+  END;
+  RETURN MkStr(buf)
+END BSubs;
+
+PROCEDURE BSplit(args: Value; env: Env): Value;
+VAR s, sep: Value; first, last, cell: Value; part: ARRAY MaxStr OF CHAR; n: INTEGER;
+BEGIN
+  s := args.head; sep := args.tail.head;
+  IF (s.tag # tStr) OR (sep.tag # tStr) THEN Error("split: needs strings"); RETURN NilV END;
+  first := NilV; last := NIL; n := 0;
+  WHILE Strings.Split(s.s, sep.s[0], n, part) DO
+    cell := Cons(MkStr(part), NilV);
+    IF last = NIL THEN first := cell ELSE last.tail := cell END;
+    last := cell; INC(n)
+  END;
+  RETURN first
+END BSplit;
+
+PROCEDURE BJoin(args: Value; env: Env): Value;
+VAR sep, coll: Value; buf: ARRAY MaxStr OF CHAR; n: INTEGER; first: BOOLEAN;
+    tmp: ARRAY 64 OF CHAR;
+BEGIN
+  sep := args.head; coll := args.tail.head;
+  buf[0] := 0X; n := 0; first := TRUE;
+  WHILE ~IsNil(coll) DO
+    IF ~first & (sep.tag = tStr) THEN AppendCStr(buf, n, sep.s) END;
+    IF coll.head.tag = tStr THEN AppendCStr(buf, n, coll.head.s)
+    ELSIF coll.head.tag = tInt THEN
+      Strings.IntToStr(coll.head.i, tmp); AppendCStr(buf, n, tmp)
+    ELSIF coll.head.tag = tReal THEN
+      Strings.RealToStr(coll.head.r, tmp); AppendCStr(buf, n, tmp)
+    END;
+    first := FALSE; coll := coll.tail
+  END;
+  buf[n] := 0X;
+  RETURN MkStr(buf)
+END BJoin;
+
+PROCEDURE BUpperCase(args: Value; env: Env): Value;
+VAR v: Value; buf: ARRAY MaxStr OF CHAR;
+BEGIN
+  v := args.head;
+  IF v.tag # tStr THEN Error("upper-case: needs string"); RETURN NilV END;
+  Strings.Copy(v.s, buf); Strings.ToUpper(buf);
+  RETURN MkStr(buf)
+END BUpperCase;
+
+PROCEDURE BLowerCase(args: Value; env: Env): Value;
+VAR v: Value; buf: ARRAY MaxStr OF CHAR;
+BEGIN
+  v := args.head;
+  IF v.tag # tStr THEN Error("lower-case: needs string"); RETURN NilV END;
+  Strings.Copy(v.s, buf); Strings.ToLower(buf);
+  RETURN MkStr(buf)
+END BLowerCase;
+
+PROCEDURE BTrim(args: Value; env: Env): Value;
+VAR v: Value; buf: ARRAY MaxStr OF CHAR;
+BEGIN
+  v := args.head;
+  IF v.tag # tStr THEN Error("trim: needs string"); RETURN NilV END;
+  Strings.Copy(v.s, buf); Strings.Trim(buf);
+  RETURN MkStr(buf)
+END BTrim;
+
+PROCEDURE BStartsWithQ(args: Value; env: Env): Value;
+VAR s, pre: Value;
+BEGIN
+  s := args.head; pre := args.tail.head;
+  IF (s.tag # tStr) OR (pre.tag # tStr) THEN Error("starts-with?: needs strings"); RETURN NilV END;
+  RETURN MkBool(Strings.StartsWith(s.s, pre.s))
+END BStartsWithQ;
+
+PROCEDURE BEndsWithQ(args: Value; env: Env): Value;
+VAR s, suf: Value;
+BEGIN
+  s := args.head; suf := args.tail.head;
+  IF (s.tag # tStr) OR (suf.tag # tStr) THEN Error("ends-with?: needs strings"); RETURN NilV END;
+  RETURN MkBool(Strings.EndsWith(s.s, suf.s))
+END BEndsWithQ;
+
+PROCEDURE BIncludesQ(args: Value; env: Env): Value;
+VAR s, sub: Value;
+BEGIN
+  s := args.head; sub := args.tail.head;
+  IF (s.tag # tStr) OR (sub.tag # tStr) THEN Error("includes?: needs strings"); RETURN NilV END;
+  RETURN MkBool(Strings.Pos(sub.s, s.s) >= 0)
+END BIncludesQ;
+
+PROCEDURE BStrlen(args: Value; env: Env): Value;
+VAR v: Value;
+BEGIN
+  v := args.head;
+  IF v.tag # tStr THEN Error("string-length: needs string"); RETURN NilV END;
+  RETURN MkInt(Strings.Length(v.s))
+END BStrlen;
+
+PROCEDURE BStrCompare(args: Value; env: Env): Value;
+VAR a, b: Value;
+BEGIN
+  a := args.head; b := args.tail.head;
+  IF (a.tag # tStr) OR (b.tag # tStr) THEN Error("compare: needs strings"); RETURN NilV END;
+  RETURN MkInt(Strings.Compare(a.s, b.s))
+END BStrCompare;
+
+(* Functional *)
+PROCEDURE BIdentity(args: Value; env: Env): Value;
+BEGIN RETURN args.head END BIdentity;
+
+(* I/O *)
+PROCEDURE BPrint(args: Value; env: Env): Value;
+VAR first: BOOLEAN;
+BEGIN
+  first := TRUE;
+  WHILE ~IsNil(args) DO
+    IF ~first THEN Out.Char(' ') END;
+    PrintValue(args.head, FALSE);
+    first := FALSE; args := args.tail
+  END;
+  RETURN NilV
+END BPrint;
+
+PROCEDURE BPr(args: Value; env: Env): Value;
+VAR first: BOOLEAN;
+BEGIN
+  first := TRUE;
+  WHILE ~IsNil(args) DO
+    IF ~first THEN Out.Char(' ') END;
+    PrintValue(args.head, TRUE);
+    first := FALSE; args := args.tail
+  END;
+  RETURN NilV
+END BPr;
+
+PROCEDURE BNewline(args: Value; env: Env): Value;
+BEGIN Out.Ln; RETURN NilV END BNewline;
+
+PROCEDURE BFlush(args: Value; env: Env): Value;
+BEGIN RETURN NilV END BFlush;
+
+(* Misc *)
+PROCEDURE BGensym(args: Value; env: Env): Value;
+VAR buf: ARRAY MaxStr OF CHAR; n: ARRAY 16 OF CHAR;
+BEGIN
+  INC(gensymCount);
+  Strings.Copy("G__", buf);
+  Strings.IntToStr(gensymCount, n);
+  Strings.Append(n, buf);
+  RETURN MkSym(buf)
+END BGensym;
+
+PROCEDURE BReadString(args: Value; env: Env): Value;
+VAR v: Value;
+BEGIN
+  v := args.head;
+  IF v.tag # tStr THEN Error("read-string: needs string"); RETURN NilV END;
+  RETURN ReadStr(v.s)
+END BReadString;
+
+PROCEDURE BPrintStr(args: Value; env: Env): Value;
+VAR buf: ARRAY MaxStr OF CHAR; n: INTEGER;
+    tmp: ARRAY 64 OF CHAR; first: BOOLEAN; v: Value;
+BEGIN
+  buf[0] := 0X; n := 0; first := TRUE;
+  WHILE ~IsNil(args) DO
+    IF ~first THEN
+      IF n < LEN(buf)-1 THEN buf[n] := ' '; INC(n) END
+    END;
+    v := args.head;
+    IF IsNil(v) THEN (* skip *)
+    ELSIF v.tag = tStr THEN AppendCStr(buf, n, v.s)
+    ELSIF v.tag = tInt THEN Strings.IntToStr(v.i, tmp); AppendCStr(buf, n, tmp)
+    ELSIF v.tag = tReal THEN Strings.RealToStr(v.r, tmp); AppendCStr(buf, n, tmp)
+    ELSIF v.tag = tBool THEN
+      IF v.b THEN AppendCStr(buf, n, "true") ELSE AppendCStr(buf, n, "false") END
+    ELSIF v.tag = tKey THEN
+      IF n < LEN(buf)-1 THEN buf[n] := ':'; INC(n) END;
+      AppendCStr(buf, n, v.s)
+    END;
+    first := FALSE; args := args.tail
+  END;
+  buf[n] := 0X;
+  RETURN MkStr(buf)
+END BPrintStr;
+
+PROCEDURE BName(args: Value; env: Env): Value;
+VAR v: Value;
+BEGIN
+  v := args.head;
+  IF v.tag = tKey THEN RETURN MkStr(v.s) END;
+  IF v.tag = tSym THEN RETURN MkStr(v.s) END;
+  IF v.tag = tStr THEN RETURN v END;
+  Error("name: needs keyword, symbol, or string"); RETURN NilV
+END BName;
+
+PROCEDURE BKeyword(args: Value; env: Env): Value;
+VAR v: Value;
+BEGIN
+  v := args.head;
+  IF v.tag = tKey THEN RETURN v END;
+  IF (v.tag = tStr) OR (v.tag = tSym) THEN RETURN MkKey(v.s) END;
+  Error("keyword: needs string or symbol"); RETURN NilV
+END BKeyword;
+
+PROCEDURE BSymbol(args: Value; env: Env): Value;
+VAR v: Value;
+BEGIN
+  v := args.head;
+  IF v.tag = tSym THEN RETURN v END;
+  IF (v.tag = tStr) OR (v.tag = tKey) THEN RETURN MkSym(v.s) END;
+  Error("symbol: needs string or keyword"); RETURN NilV
+END BSymbol;
+
+PROCEDURE BInt(args: Value; env: Env): Value;
+VAR v: Value; n: INTEGER; ok: BOOLEAN;
+BEGIN
+  v := args.head;
+  IF v.tag = tInt THEN RETURN v END;
+  IF v.tag = tReal THEN RETURN MkInt(Math.entier(v.r)) END;
+  IF v.tag = tStr THEN
+    ok := Strings.StrToInt(v.s, n);
+    IF ok THEN RETURN MkInt(n) END
+  END;
+  Error("int: cannot convert"); RETURN NilV
+END BInt;
+
+PROCEDURE BFloat(args: Value; env: Env): Value;
+VAR v: Value; x: REAL; ok: BOOLEAN;
+BEGIN
+  v := args.head;
+  IF v.tag = tReal THEN RETURN v END;
+  IF v.tag = tInt THEN RETURN MkReal(FLT(v.i)) END;
+  IF v.tag = tStr THEN
+    ok := Strings.StrToReal(v.s, x);
+    IF ok THEN RETURN MkReal(x) END
+  END;
+  Error("float: cannot convert"); RETURN NilV
+END BFloat;
+
+PROCEDURE BChar(args: Value; env: Env): Value;
+VAR v: Value; buf: ARRAY 2 OF CHAR;
+BEGIN
+  v := args.head;
+  IF v.tag = tInt THEN
+    buf[0] := CHR(v.i); buf[1] := 0X;
+    RETURN MkStr(buf)
+  END;
+  Error("char: needs int"); RETURN NilV
+END BChar;
+
+PROCEDURE BCharCode(args: Value; env: Env): Value;
+VAR v: Value;
+BEGIN
+  v := args.head;
+  IF v.tag = tStr THEN RETURN MkInt(ORD(v.s[0])) END;
+  Error("char-code: needs string"); RETURN NilV
+END BCharCode;
+
+PROCEDURE BMapIndexed(args: Value; env: Env): Value;
+VAR fn, coll, first, last, cell, callArgs, result: Value; i: INTEGER;
+BEGIN
+  fn := args.head; coll := args.tail.head;
+  first := NilV; last := NIL; i := 0;
+  WHILE ~IsNil(coll) & ~err DO
+    callArgs := Cons(coll.head, Cons(MkInt(i), NilV));
+    result := Apply(fn, callArgs, env);
+    IF err THEN RETURN NilV END;
+    cell := Cons(result, NilV);
+    IF last = NIL THEN first := cell ELSE last.tail := cell END;
+    last := cell; coll := coll.tail; INC(i)
+  END;
+  RETURN first
+END BMapIndexed;
+
+PROCEDURE BGroupBy(args: Value; env: Env): Value;
+VAR fn, coll, k, ks, vs, kp, vp, c, existing, newList: Value; found: BOOLEAN;
+BEGIN
+  fn := args.head; coll := args.tail.head;
+  ks := NilV; vs := NilV;
+  WHILE ~IsNil(coll) & ~err DO
+    k := Apply(fn, Cons(coll.head, NilV), env);
+    IF err THEN RETURN NilV END;
+    kp := ks; vp := vs; found := FALSE;
+    WHILE ~IsNil(kp) DO
+      IF ValueEqual(kp.head, k) THEN
+        vp.head := Cons(coll.head, vp.head); found := TRUE
+      END;
+      kp := kp.tail; vp := vp.tail
+    END;
+    IF ~found THEN
+      ks := Cons(k, ks);
+      vs := Cons(Cons(coll.head, NilV), vs)
+    END;
+    coll := coll.tail
+  END;
+  RETURN MkMap(ks, vs)
+END BGroupBy;
+
+
+PROCEDURE BAssocIn(args: Value; env: Env): Value;
+VAR m, path, v, sub: Value;
+BEGIN
+  m := args.head; path := args.tail.head; v := args.tail.tail.head;
+  IF IsNil(path) THEN RETURN v END;
+  IF IsNil(path.tail) THEN
+    RETURN BAssoc(Cons(m, Cons(path.head, Cons(v, NilV))), env)
+  END;
+  sub := BGet(Cons(m, Cons(path.head, NilV)), env);
+  sub := BAssocIn(Cons(sub, Cons(path.tail, Cons(v, NilV))), env);
+  RETURN BAssoc(Cons(m, Cons(path.head, Cons(sub, NilV))), env)
+END BAssocIn;
+
+PROCEDURE BGetIn(args: Value; env: Env): Value;
+VAR m, path, notFound: Value;
+BEGIN
+  m := args.head; path := args.tail.head;
+  IF ~IsNil(args.tail.tail) THEN notFound := args.tail.tail.head ELSE notFound := NilV END;
+  WHILE ~IsNil(path) & ~IsNil(m) DO
+    m := BGet(Cons(m, Cons(path.head, NilV)), env);
+    path := path.tail
+  END;
+  IF IsNil(m) THEN RETURN notFound END;
+  RETURN m
+END BGetIn;
+
 (* ---------- File loading ---------- *)
 
 PROCEDURE LoadFile*(path: ARRAY OF CHAR; verbose: BOOLEAN): BOOLEAN;
@@ -1276,55 +2552,245 @@ END BLoadFile;
 PROCEDURE Register(name: ARRAY OF CHAR; fn: Builtin);
 BEGIN Define(GlobalEnv, name, MkBuiltin(name, fn)) END Register;
 
+PROCEDURE RegisterDoc(name: ARRAY OF CHAR; fn: Builtin; doc: ARRAY OF CHAR);
+VAR v: Value;
+BEGIN
+  v := MkBuiltin(name, fn);
+  Strings.Copy(doc, v.doc);
+  Define(GlobalEnv, name, v)
+END RegisterDoc;
+
+PROCEDURE Eval1(s: ARRAY OF CHAR);
+VAR expr: Value;
+BEGIN
+  expr := ReadStr(s);
+  IF ~err THEN expr := Eval(expr, GlobalEnv) END;
+  err := FALSE
+END Eval1;
+
 PROCEDURE Init;
 BEGIN
   NEW(NilV); NilV.tag := tNil;
   NEW(TrueV); TrueV.tag := tBool; TrueV.b := TRUE;
   NEW(FalseV); FalseV.tag := tBool; FalseV.b := FALSE;
+  doRecur := FALSE; recurArgs := NIL; gensymCount := 0;
 
   EvalRef := Eval;
-
   GlobalEnv := NewEnv(NIL);
 
-  Register("+", BAdd);
-  Register("-", BSub);
-  Register("*", BMul);
-  Register("/", BDiv);
-  Register("mod", BMod);
-  Register("<", BLT);
-  Register(">", BGT);
-  Register("<=", BLE);
-  Register(">=", BGE);
-  Register("=", BEq);
-  Register("list", BList);
-  Register("vector", BVector);
-  Register("vec", BVector);
-  Register("cons", BCons);
-  Register("first", BFirst);
-  Register("rest", BRest);
-  Register("count", BCount);
-  Register("nth", BNth);
-  Register("conj", BConj);
-  Register("map", BMap);
-  Register("filter", BFilter);
-  Register("reduce", BReduce);
-  Register("range", BRange);
-  Register("prn", BPrn);
-  Register("println", BPrintln);
-  Register("str", BStr);
-  Register("type", BType);
-  Register("nil?", BNilQ);
-  Register("empty?", BEmptyQ);
-  Register("not", BNot);
-  Register("inc", BInc);
-  Register("dec", BDec);
-  Register("get", BGet);
-  Register("assoc", BAssoc);
-  Register("keys", BKeys);
-  Register("vals", BVals);
-  Register("sqrt", BSqrt);
-  Register("apply", BApplyFn);
-  Register("load-file", BLoadFile);
+  (* Core arithmetic *)
+  RegisterDoc("+", BAdd, "Returns the sum of nums. (+) returns 0.");
+  RegisterDoc("-", BSub, "If one arg, negates. Otherwise subtracts the rest from first.");
+  RegisterDoc("*", BMul, "Returns the product of nums. (*) returns 1.");
+  RegisterDoc("/", BDiv, "Divides. (/ x) returns 1/x.");
+  RegisterDoc("mod", BMod, "Modulus of num and div. Truncates toward negative infinity.");
+  RegisterDoc("quot", BQuot, "Quotient of dividing num by div. Truncates toward zero.");
+  RegisterDoc("rem", BRem, "Remainder of dividing num by div. Sign matches numerator.");
+  RegisterDoc("inc", BInc, "Returns a number one greater than num.");
+  RegisterDoc("dec", BDec, "Returns a number one less than num.");
+  RegisterDoc("max", BMax, "Returns the greatest of its arguments.");
+  RegisterDoc("min", BMin, "Returns the least of its arguments.");
+  RegisterDoc("abs", BAbs, "Returns the absolute value of a.");
+  RegisterDoc("even?", BEvenQ, "Returns true if n is even.");
+  RegisterDoc("odd?", BOddQ, "Returns true if n is odd.");
+  RegisterDoc("zero?", BZeroQ, "Returns true if num is zero.");
+  RegisterDoc("pos?", BPosQ, "Returns true if num is greater than zero.");
+  RegisterDoc("neg?", BNegQ, "Returns true if num is less than zero.");
+
+  (* Comparison *)
+  RegisterDoc("<", BLT, "Returns true if nums are in monotonically increasing order.");
+  RegisterDoc(">", BGT, "Returns true if nums are in monotonically decreasing order.");
+  RegisterDoc("<=", BLE, "Returns true if nums are in monotonically non-decreasing order.");
+  RegisterDoc(">=", BGE, "Returns true if nums are in monotonically non-increasing order.");
+  RegisterDoc("=", BEq, "Equality. Returns true if all args are equal.");
+  RegisterDoc("not=", BEq, "Returns true if args are not all equal."); (* overridden below *)
+  RegisterDoc("compare", BStrCompare, "Comparator. Returns neg, zero, or pos.");
+
+  (* Math *)
+  RegisterDoc("sqrt", BSqrt, "Returns the square root of num.");
+  RegisterDoc("floor", BFloor, "Returns the floor of num.");
+  RegisterDoc("ceil", BCeil, "Returns the ceiling of num.");
+  RegisterDoc("round", BRound, "Rounds to nearest integer.");
+  RegisterDoc("pow", BPow, "Returns base raised to exponent.");
+  RegisterDoc("log", BLog, "Returns the natural logarithm of num.");
+  RegisterDoc("exp", BExp, "Returns e raised to the power of num.");
+  RegisterDoc("sin", BSin, "Returns the sine of angle in radians.");
+  RegisterDoc("cos", BCos, "Returns the cosine of angle in radians.");
+  RegisterDoc("tan", BTan, "Returns the tangent of angle in radians.");
+  RegisterDoc("atan", BAtan, "Returns the arc tangent of x.");
+  RegisterDoc("atan2", BAtan2, "Returns the angle theta from polar coordinates.");
+  RegisterDoc("rand", BRand, "Returns a random float between 0 and 1.");
+  RegisterDoc("rand-int", BRandInt, "Returns a random integer between 0 (inclusive) and n (exclusive).");
+
+  (* Type predicates *)
+  RegisterDoc("nil?", BNilQ, "Returns true if x is nil.");
+  RegisterDoc("true?", BTrueQ, "Returns true if x is exactly true.");
+  RegisterDoc("false?", BFalseQ, "Returns true if x is exactly false.");
+  RegisterDoc("boolean?", BBooleanQ, "Returns true if x is a boolean.");
+  RegisterDoc("number?", BNumberQ, "Returns true if x is a number.");
+  RegisterDoc("integer?", BIntegerQ, "Returns true if x is an integer.");
+  RegisterDoc("int?", BIntegerQ, "Returns true if x is an integer.");
+  RegisterDoc("float?", BFloatQ, "Returns true if x is a floating-point number.");
+  RegisterDoc("string?", BStringQ, "Returns true if x is a string.");
+  RegisterDoc("keyword?", BKeywordQ, "Returns true if x is a keyword.");
+  RegisterDoc("symbol?", BSymbolQ, "Returns true if x is a symbol.");
+  RegisterDoc("fn?", BFnQ, "Returns true if x is a function.");
+  RegisterDoc("coll?", BCollQ, "Returns true if x is a collection.");
+  RegisterDoc("seq?", BSeqQ, "Returns true if x is a sequential collection.");
+  RegisterDoc("list?", BListQ, "Returns true if x is a list.");
+  RegisterDoc("vector?", BVectorQ, "Returns true if x is a vector.");
+  RegisterDoc("map?", BMapQ, "Returns true if x is a map.");
+  RegisterDoc("empty?", BEmptyQ, "Returns true if coll has no items.");
+  RegisterDoc("not", BNot, "Returns true if x is logical false.");
+
+  (* Sequence constructors *)
+  RegisterDoc("list", BList, "Creates a list with supplied items.");
+  RegisterDoc("vector", BVector, "Creates a vector with supplied items.");
+  RegisterDoc("vec", BVector, "Creates a vector from a collection.");
+  RegisterDoc("hash-map", BHashMap, "Creates a hash map with supplied key/value pairs.");
+  RegisterDoc("seq", BSeq, "Returns a seq on the collection. Returns nil if empty.");
+
+  (* Sequence operations *)
+  RegisterDoc("cons", BCons, "Returns a new seq where x is the first item and seq is the rest.");
+  RegisterDoc("first", BFirst, "Returns the first item in a collection.");
+  RegisterDoc("second", BSecond, "Returns the second item in a collection.");
+  RegisterDoc("last", BLast, "Returns the last item in a collection.");
+  RegisterDoc("rest", BRest, "Returns items after the first. Returns nil if empty.");
+  RegisterDoc("next", BNext, "Returns items after first, or nil if only one.");
+  RegisterDoc("butlast", BButlast, "Returns all but the last item in coll.");
+  RegisterDoc("count", BCount, "Returns the number of items in the collection.");
+  RegisterDoc("nth", BNth, "Returns the value at index. 0-indexed.");
+  RegisterDoc("get", BGet, "Returns value mapped to key, or not-found if absent.");
+  RegisterDoc("conj", BConj, "Conjoins item onto collection.");
+  RegisterDoc("concat", BConcat, "Returns lazy seq of concatenation of colls.");
+  RegisterDoc("reverse", BReverse, "Returns seq of items in reversed order.");
+  RegisterDoc("flatten", BFlatten, "Takes nested collections and returns flat seq.");
+  RegisterDoc("distinct", BDistinct, "Returns seq with duplicates removed.");
+  RegisterDoc("sort", BSort, "Returns sorted sequence of items.");
+  RegisterDoc("sort-by", BSortBy, "Returns sorted sequence of items, using keyfn.");
+  RegisterDoc("shuffle", BShuffle, "Returns a random permutation of coll.");
+  RegisterDoc("take", BTake, "Returns the first n items in coll.");
+  RegisterDoc("drop", BDrop, "Returns all but the first n items in coll.");
+  RegisterDoc("take-while", BTakeWhile, "Returns items while pred returns logical true.");
+  RegisterDoc("drop-while", BDropWhile, "Drops items while pred returns logical true.");
+  RegisterDoc("into", BInto, "Returns coll with all items of from conjoined.");
+  RegisterDoc("map", BMap, "Returns a list of applying f to each item in coll.");
+  RegisterDoc("map-indexed", BMapIndexed, "Returns map(fn [idx item]) over indexed collection.");
+  RegisterDoc("mapcat", BMapcat, "Applies f to each value of coll, concatenates results.");
+  RegisterDoc("filter", BFilter, "Returns items of coll for which pred is true.");
+  RegisterDoc("remove", BRemove, "Returns items of coll for which pred is false.");
+  RegisterDoc("keep", BKeep, "Returns non-nil results of applying f to items in coll.");
+  RegisterDoc("reduce", BReduce, "Reduces coll using f. Optional initial value.");
+  RegisterDoc("every?", BEveryQ, "Returns true if pred is true for all items in coll.");
+  RegisterDoc("some", BSome, "Returns first true value of pred applied to items.");
+  RegisterDoc("not-any?", BNotAnyQ, "Returns true if pred is false for all items in coll.");
+  RegisterDoc("not-every?", BNotEveryQ, "Returns true if pred is false for some item.");
+  RegisterDoc("partition", BPartition, "Returns list of lists of n items each.");
+  RegisterDoc("interpose", BInterpose, "Returns seq with sep between each item in coll.");
+  RegisterDoc("frequencies", BFrequencies, "Returns map of item to frequency count.");
+  RegisterDoc("group-by", BGroupBy, "Returns map of keyfn(item) to list of items.");
+  RegisterDoc("zipmap", BZipmap, "Returns map with keys and corresponding vals.");
+  RegisterDoc("range", BRange, "Returns lazy seq of integers from start to end.");
+
+  (* Map operations *)
+  RegisterDoc("assoc", BAssoc, "Returns map with key associated to val.");
+  RegisterDoc("assoc-in", BAssocIn, "Associates a value in a nested map at path.");
+  RegisterDoc("dissoc", BDissoc, "Returns map without key.");
+  RegisterDoc("merge", BMerge, "Returns map that is the merge of maps. Right wins.");
+  RegisterDoc("keys", BKeys, "Returns a sequence of the map's keys.");
+  RegisterDoc("vals", BVals, "Returns a sequence of the map's values.");
+  RegisterDoc("contains?", BContainsQ, "Returns true if key is present in coll.");
+  RegisterDoc("get-in", BGetIn, "Returns value in nested map via sequence of keys.");
+  RegisterDoc("select-keys", BSelectKeys, "Returns map with only the selected keys.");
+  RegisterDoc("update", BUpdate, "Updates a key in map by applying fn to its old value.");
+
+  (* String operations *)
+  RegisterDoc("str", BStr, "Converts args to strings and concatenates them.");
+  RegisterDoc("subs", BSubs, "Returns substring from start to end (exclusive).");
+  RegisterDoc("split", BSplit, "Splits string on delimiter char.");
+  RegisterDoc("join", BJoin, "Joins collection with separator.");
+  RegisterDoc("upper-case", BUpperCase, "Converts string to upper case.");
+  RegisterDoc("lower-case", BLowerCase, "Converts string to lower case.");
+  RegisterDoc("trim", BTrim, "Removes whitespace from both ends of string.");
+  RegisterDoc("starts-with?", BStartsWithQ, "True if s starts with prefix.");
+  RegisterDoc("ends-with?", BEndsWithQ, "True if s ends with suffix.");
+  RegisterDoc("includes?", BIncludesQ, "True if s includes substr.");
+  RegisterDoc("string-length", BStrlen, "Returns the length of string s.");
+
+  (* Conversion *)
+  RegisterDoc("int", BInt, "Converts to integer.");
+  RegisterDoc("float", BFloat, "Converts to floating-point.");
+  RegisterDoc("char", BChar, "Returns single-char string for integer codepoint.");
+  RegisterDoc("char-code", BCharCode, "Returns integer codepoint of first char.");
+  RegisterDoc("name", BName, "Returns string name of keyword, symbol, or string.");
+  RegisterDoc("keyword", BKeyword, "Returns keyword from string or symbol.");
+  RegisterDoc("symbol", BSymbol, "Returns symbol from string or keyword.");
+  RegisterDoc("type", BType, "Returns keyword describing the type of x.");
+
+  (* I/O *)
+  RegisterDoc("prn", BPrn, "Prints args, separated by spaces, with newline (readable).");
+  RegisterDoc("pr", BPr, "Prints args, separated by spaces (readable).");
+  RegisterDoc("println", BPrintln, "Prints args, separated by spaces, with newline.");
+  RegisterDoc("print", BPrint, "Prints args, separated by spaces, without newline.");
+  RegisterDoc("newline", BNewline, "Prints a newline.");
+  RegisterDoc("flush", BFlush, "Flushes output (no-op).");
+  RegisterDoc("pr-str", BPrintStr, "Returns string of printed representation.");
+  RegisterDoc("print-str", BPrintStr, "Returns string of printed representation.");
+  RegisterDoc("read-string", BReadString, "Reads one object from a string.");
+
+  (* Functional *)
+  RegisterDoc("identity", BIdentity, "Returns its argument.");
+  RegisterDoc("apply", BApplyFn, "Applies fn to args, with last arg as a seq.");
+  RegisterDoc("gensym", BGensym, "Returns a unique symbol.");
+  RegisterDoc("load-file", BLoadFile, "Loads Clojure source from a file.");
+
+  (* Define PI and E as constants *)
+  Define(GlobalEnv, "PI", MkReal(Math.pi));
+  Define(GlobalEnv, "E", MkReal(Math.e));
+
+  (* Fix not= *)
+  Eval1("(defn not= [& args] (not (apply = args)))");
+
+  (* Higher-order functions as Clojure *)
+  Eval1("(defn constantly [x] (fn [& _] x))");
+  Eval1("(defn complement [f] (fn [& args] (not (apply f args))))");
+  Eval1("(defn comp [& fns] (fn [& args] (reduce (fn [v f] (f v)) (apply (last fns) args) (butlast fns))))");
+  Eval1("(defn partial [f & pargs] (fn [& args] (apply f (concat pargs args))))");
+  Eval1("(defn juxt [& fns] (fn [& args] (map (fn [f] (apply f args)) fns)))");
+  Eval1("(defn max-key [f & xs] (reduce (fn [a b] (if (> (f a) (f b)) a b)) xs))");
+  Eval1("(defn min-key [f & xs] (reduce (fn [a b] (if (< (f a) (f b)) a b)) xs))");
+
+  (* Convenience aliases and standard predicates *)
+  Eval1("(defn pos-int? [x] (and (integer? x) (pos? x)))");
+  Eval1("(defn neg-int? [x] (and (integer? x) (neg? x)))");
+  Eval1("(defn nat-int? [x] (and (integer? x) (not (neg? x))))");
+  Eval1("(defn string/split [s re] (split s re))");
+  Eval1('(defn string/join ([sep coll] (join sep coll)) ([coll] (join "" coll)))');
+  Eval1("(defn string/upper-case [s] (upper-case s))");
+  Eval1("(defn string/lower-case [s] (lower-case s))");
+  Eval1("(defn string/trim [s] (trim s))");
+  Eval1("(defn string/starts-with? [s prefix] (starts-with? s prefix))");
+  Eval1("(defn string/ends-with? [s suffix] (ends-with? s suffix))");
+  Eval1("(defn string/includes? [s sub] (includes? s sub))");
+  Eval1("(defn string/replace [s from to] (join to (split s (str (first from)))))");
+  Eval1("(defn update-in [m path f & args] (assoc-in m path (apply f (get-in m path) args)))");
+  Eval1("(defn merge-with [f & maps] (reduce (fn [acc m] (reduce (fn [a [k v]] (assoc a k (if (contains? a k) (f (get a k) v) v))) acc (map (fn [k] [k (get m k)]) (keys m)))) {} maps))");
+  Eval1("(defn take-last [n coll] (drop (- (count coll) n) coll))");
+  Eval1("(defn drop-last [n coll] (take (- (count coll) n) coll))");
+  Eval1("(defn split-at [n coll] [(take n coll) (drop n coll)])");
+  Eval1("(defn split-with [f coll] [(take-while f coll) (drop-while f coll)])");
+  Eval1("(defn interleave [& colls] (apply concat (apply map list colls)))");
+  Eval1("(defn repeat [n x] (map (fn [_] x) (range n)))");
+  Eval1("(defn repeatedly [n f] (map (fn [_] (f)) (range n)))");
+  Eval1("(defn iterate [f x] (take 1000 (loop [cur x acc []] (recur (f cur) (conj acc cur)))))");
+  Eval1("(defn cycle [coll] (take 1000 (loop [c coll acc []] (if (empty? c) (recur coll acc) (recur (rest c) (conj acc (first c)))))))");
+  Eval1("(defn flatten-1 [coll] (apply concat coll))");
+  Eval1("(defn indexed [coll] (map list (range (count coll)) coll))");
+  Eval1("(defn any? [pred coll] (not (nil? (some pred coll))))");
+  Eval1("(defn every-pred [& preds] (fn [x] (every? (fn [p] (p x)) preds)))");
+  Eval1("(defn some-fn [& preds] (fn [x] (some (fn [p] (p x)) preds)))");
+  Eval1("(defn fnil [f default] (fn [x & args] (apply f (if (nil? x) default x) args)))");
+  Eval1("(defn nil-safe [f default] (fn [x] (if (nil? x) default (f x))))");
 END Init;
 
 (* ---------- REPL loop ---------- *)
