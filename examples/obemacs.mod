@@ -46,6 +46,8 @@ MODULE obemacs;
     KLeft  = 0A2X;  KRight = 0A3X;
     KUp    = 0A0X;  KDown  = 0A1X; 
     KNul   = 00X;  (* C-SPC / C-@ on many terminals *)
+    KMouse = 0A4X; (* mouse event *)
+    KF5    = 8DX;  (* F5 – run buffer *)
 
     (* Syntax modes *)
     SynNone   = 0;
@@ -1172,51 +1174,32 @@ MODULE obemacs;
      incremental search
      =================================================================== *)
 
-  PROCEDURE IsearchUpdate(direction: INTEGER; VAR needle: ARRAY OF CHAR;
-                          startPos: INTEGER);
-    VAR found, best: INTEGER;
-  BEGIN
-    Editor.GotoPos(curBuf.ed, startPos);
-    IF needle[0] = 0X THEN RETURN END;
-    IF direction >= 0 THEN
-      found := Editor.Find(curBuf.ed, needle, 0, 0)
-    ELSE
-      best := -1;
-      Editor.GotoPos(curBuf.ed, 0);
-      WHILE Editor.Find(curBuf.ed, needle, 0, 0) = 1 DO
-        IF Editor.CursorPos(curBuf.ed) <= startPos THEN
-          best := Editor.CursorPos(curBuf.ed)
-        ELSE
-          IF best >= 0 THEN Editor.GotoPos(curBuf.ed, best) END;
-          RETURN
-        END;
-        Editor.MoveRight(curBuf.ed)
-      END;
-      IF best >= 0 THEN Editor.GotoPos(curBuf.ed, best)
-      ELSE Editor.GotoPos(curBuf.ed, startPos) END
-    END
-  END IsearchUpdate;
-
   PROCEDURE Isearch(direction: INTEGER);
     VAR needle: ARRAY MaxStr OF CHAR;
-        prompt: ARRAY MaxStr OF CHAR;
-        startPos, len, found: INTEGER;
+        startPos, anchor, best, p: INTEGER;
+        len, found: INTEGER;
+        failing, done: BOOLEAN;
         ch: CHAR;
   BEGIN
     startPos := PointPos();
-    needle[0] := 0X; len := 0;
+    anchor    := startPos;   (* search base; updated by C-s/C-r *)
+    needle[0] := 0X; len := 0; failing := FALSE;
     LOOP
       Redraw;
-      Terminal.Color(ColDefault, 0);
       Terminal.Goto(1, rows);
       Terminal.HLine(1, rows, cols, " ");
       Terminal.Goto(1, rows);
-      IF direction >= 0 THEN Strings.Copy("I-search: ", prompt)
-      ELSE Strings.Copy("I-search backward: ", prompt) END;
-      Strings.Append(needle, prompt);
-      Out.String(prompt);
+      IF failing THEN
+        Terminal.Color(ColComment, 0);
+        Out.String("Failing ")
+      END;
+      Terminal.Color(ColDefault, 0);
+      IF direction >= 0 THEN Out.String("I-search: ")
+      ELSE Out.String("I-search backward: ") END;
+      Out.String(needle);
       Terminal.ShowCursor;
       ch := Terminal.ReadKey();
+
       IF (ch = KEnter) OR (ch = KEsc) THEN
         SetEcho("Search done"); RETURN
       ELSIF ch = KCtrlG THEN
@@ -1227,22 +1210,58 @@ MODULE obemacs;
         IF len > 0 THEN
           Editor.MoveRight(curBuf.ed);
           found := Editor.FindAgain(curBuf.ed);
-          IF found = 0 THEN
+          IF found = 0 THEN  (* wrap around *)
             Editor.GotoPos(curBuf.ed, 0);
             found := Editor.Find(curBuf.ed, needle, 0, 0)
+          END;
+          IF found # 0 THEN
+            anchor := PointPos(); failing := FALSE
+          ELSE
+            Editor.GotoPos(curBuf.ed, anchor); failing := TRUE
           END
         END
       ELSIF ch = KCtrlR THEN
         direction := -1;
-        IF len > 0 THEN IsearchUpdate(-1, needle, PointPos() - 1) END
+        IF len > 0 THEN
+          p := PointPos(); best := -1; done := FALSE;
+          Editor.GotoPos(curBuf.ed, 0);
+          WHILE ~done & (Editor.Find(curBuf.ed, needle, 0, 0) = 1) DO
+            IF Editor.CursorPos(curBuf.ed) < p THEN
+              best := Editor.CursorPos(curBuf.ed);
+              Editor.MoveRight(curBuf.ed)
+            ELSE done := TRUE
+            END
+          END;
+          IF best >= 0 THEN
+            Editor.GotoPos(curBuf.ed, best);
+            anchor := best; failing := FALSE
+          ELSE
+            Editor.GotoPos(curBuf.ed, anchor); failing := TRUE
+          END
+        END
       ELSIF (ch = KBackspace) OR (ch = KDel) THEN
         IF len > 0 THEN
           DEC(len); needle[len] := 0X;
-          IsearchUpdate(direction, needle, startPos)
+          anchor := startPos;
+          Editor.GotoPos(curBuf.ed, startPos);
+          IF needle[0] # 0X THEN
+            found := Editor.Find(curBuf.ed, needle, 0, 0);
+            IF found # 0 THEN anchor := PointPos(); failing := FALSE
+            ELSE Editor.GotoPos(curBuf.ed, startPos); failing := TRUE
+            END
+          ELSE
+            failing := FALSE
+          END
         END
       ELSIF (ch >= " ") & (ch < 7FX) & (len < LEN(needle) - 1) THEN
         needle[len] := ch; INC(len); needle[len] := 0X;
-        IsearchUpdate(direction, needle, startPos)
+        Editor.GotoPos(curBuf.ed, anchor);
+        found := Editor.Find(curBuf.ed, needle, 0, 0);
+        IF found # 0 THEN
+          anchor := PointPos(); failing := FALSE
+        ELSE
+          failing := TRUE
+        END
       END
     END
   END Isearch;
@@ -1364,6 +1383,130 @@ MODULE obemacs;
   END HandleMeta;
 
   (* ===================================================================
+     mouse support
+     =================================================================== *)
+
+  PROCEDURE WinAtRow(y: INTEGER): Window;
+    VAR w: Window;
+  BEGIN
+    w := rootWin;
+    WHILE w # NIL DO
+      IF (y >= w.top) & (y < w.top + w.height) THEN RETURN w END;
+      w := w.next
+    END;
+    RETURN NIL
+  END WinAtRow;
+
+  (* Map a screen column (0-based) to a 0-based char index within line,
+     accounting for tab stops every 8 columns. *)
+  PROCEDURE ScreenColToCharIdx(VAR line: ARRAY OF CHAR; len, targetSC: INTEGER): INTEGER;
+    VAR i, sc: INTEGER;
+  BEGIN
+    i := 0; sc := 0;
+    WHILE (i < len) & (sc < targetSC) DO
+      IF line[i] = 09X THEN
+        REPEAT INC(sc) UNTIL (sc MOD 8 = 0) OR (sc >= targetSC)
+      ELSE INC(sc) END;
+      INC(i)
+    END;
+    RETURN i
+  END ScreenColToCharIdx;
+
+  PROCEDURE HandleMouse;
+    VAR mx, my, btn, targetLine, curLine, delta, i: INTEGER;
+        lineLen, charIdx: INTEGER;
+        line: ARRAY 4096 OF CHAR;
+        w: Window;
+  BEGIN
+    mx  := Terminal.MouseX();
+    my  := Terminal.MouseY();
+    btn := Terminal.MouseBtn();
+
+    w := WinAtRow(my);
+    IF w = NIL THEN RETURN END;
+
+    IF btn = 64 THEN  (* wheel up: move cursor up 3 lines *)
+      i := 0; WHILE i < 3 DO Editor.MoveUp(w.buf.ed); INC(i) END; RETURN
+    ELSIF btn = 65 THEN  (* wheel down: move cursor down 3 lines *)
+      i := 0; WHILE i < 3 DO Editor.MoveDown(w.buf.ed); INC(i) END; RETURN
+    END;
+
+    IF btn # 0 THEN RETURN END;  (* only left click from here *)
+
+    (* Switch focus to clicked window *)
+    curWin := w; curBuf := w.buf;
+
+    (* Click on mode line: just switch window, don't move cursor *)
+    IF my = w.top + w.height - 1 THEN RETURN END;
+
+    (* Compute target line in the buffer *)
+    targetLine := w.buf.scroll + (my - w.top);
+    IF targetLine < 1 THEN targetLine := 1 END;
+    IF targetLine > Editor.LineCount(curBuf.ed) THEN
+      targetLine := Editor.LineCount(curBuf.ed)
+    END;
+
+    (* Move cursor vertically to target line *)
+    curLine := Editor.CursorLine(curBuf.ed);
+    delta := targetLine - curLine;
+    IF delta > 0 THEN
+      i := 0; WHILE i < delta  DO Editor.MoveDown(curBuf.ed); INC(i) END
+    ELSIF delta < 0 THEN
+      i := 0; delta := -delta;
+      WHILE i < delta DO Editor.MoveUp(curBuf.ed); INC(i) END
+    END;
+
+    (* Move cursor to clicked column, honouring tab stops *)
+    Editor.MoveLineStart(curBuf.ed);
+    lineLen := Editor.GetLine(curBuf.ed, targetLine, LEN(line), line);
+    charIdx := ScreenColToCharIdx(line, lineLen, mx - 1);
+    i := 0; WHILE i < charIdx DO Editor.MoveRight(curBuf.ed); INC(i) END
+  END HandleMouse;
+
+  (* ===================================================================
+     F5: run buffer
+     =================================================================== *)
+
+  PROCEDURE CmdRunBuffer;
+    VAR ch: CHAR; cmd: ARRAY MaxStr OF CHAR;
+        binName: ARRAY 64 OF CHAR; n: INTEGER;
+  BEGIN
+    IF curBuf.file[0] = 0X THEN
+      SetEcho("Buffer has no associated file"); RETURN
+    END;
+    IF Editor.IsModified(curBuf.ed) # 0 THEN
+      Terminal.Color(ColDefault, 0);
+      Terminal.Goto(1, rows);
+      Terminal.HLine(1, rows, cols, " ");
+      Terminal.Goto(1, rows);
+      Out.String("Save before running? (y or n) ");
+      ch := Terminal.ReadKey();
+      IF (ch = "y") OR (ch = "Y") THEN SaveBuffer END
+    END;
+    CASE curBuf.syntax OF
+      SynOberon:
+        BaseName(curBuf.file, binName);
+        n := Strings.Length(binName);
+        IF (n > 4) & Strings.EndsWith(binName, ".mod") THEN
+          binName[n - 4] := 0X
+        END;
+        Strings.Copy("obc ", cmd);
+        Strings.Append(curBuf.file, cmd);
+        Strings.Append(" && ./", cmd);
+        Strings.Append(binName, cmd)
+    | SynRuby:
+        Strings.Copy("ruby ", cmd);
+        Strings.Append(curBuf.file, cmd)
+    | SynR:
+        Strings.Copy("Rscript ", cmd);
+        Strings.Append(curBuf.file, cmd)
+    ELSE
+      SetEcho("No run command for this file type"); RETURN
+    END;
+    Terminal.Shell(cmd)
+  END CmdRunBuffer;
+
+  (* ===================================================================
      main dispatch
      =================================================================== *)
 
@@ -1404,6 +1547,8 @@ MODULE obemacs;
     | KHome:  CmdBeginningOfLine
     | KEnd:   CmdEndOfLine
     | KDel:   CmdDeleteChar
+    | KMouse: HandleMouse
+    | KF5:   CmdRunBuffer
     ELSE
       IF (ch >= " ") & (ch < 7FX) THEN CmdSelfInsert(ch) END
     END;
@@ -1515,7 +1660,9 @@ BEGIN
   IF rows < 5 THEN rows := 5 END;
 
   InitialBuffer;
+  Terminal.MouseOn();
   MainLoop;
+  Terminal.MouseOff();
 
   Terminal.Restore;
   Out.String("Bye."); Out.Ln
