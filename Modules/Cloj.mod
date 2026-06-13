@@ -572,6 +572,15 @@ BEGIN
     IF err THEN RETURN NilV END;
     RETURN EvalRef(expanded, env)
   END;
+  IF fn.tag = tMap THEN
+    IF IsNil(args) THEN Error("map: needs key arg"); RETURN NilV END;
+    RETURN MapGet(fn, args.head)
+  END;
+  IF fn.tag = tKey THEN
+    IF IsNil(args) THEN Error("keyword: needs map arg"); RETURN NilV END;
+    IF args.head.tag # tMap THEN RETURN NilV END;
+    RETURN MapGet(args.head, fn)
+  END;
   IF fn.tag # tFn THEN Error("not a function"); RETURN NilV END;
   newEnv := NewEnv(fn.closure);
   params := fn.params; a := args; isRest := FALSE;
