@@ -304,6 +304,58 @@ BEGIN
   Check("not=",         "(not= 1 2)");
   Check("true!/false! strict","(and (true? true) (not (true? 1)))");
 
+  (* ── 21. Sets ───────────────────────────────────────────────────────── *)
+  Section("Sets");
+  E("(def s (hash-set 1 2 3 2 1))");
+  Check("set dedup",      "(= (count s) 3)");
+  Check("set?",           "(set? s)");
+  Check("set contains",   "(contains? s 2)");
+  Check("set missing",    "(not (contains? s 9))");
+  Check("set as fn",      "(= (s 3) 3)");
+  Check("set as fn miss", "(nil? (s 9))");
+  Check("conj set",       "(= (count (conj s 4)) 4)");
+  Check("conj dup",       "(= (count (conj s 1)) 3)");
+  Check("disj",           "(not (contains? (disj s 2) 2))");
+  Check("set from coll",  "(= (count (set [1 2 3 2 1])) 3)");
+  Check("union",          "(= (count (union (hash-set 1 2) (hash-set 2 3))) 3)");
+  Check("intersection",   "(= (intersection (hash-set 1 2 3) (hash-set 2 3 4)) (hash-set 2 3))");
+  Check("difference",     "(= (difference (hash-set 1 2 3) (hash-set 2 3)) (hash-set 1))");
+  Check("subset?",        "(subset? (hash-set 1 2) (hash-set 1 2 3))");
+  Check("superset?",      "(superset? (hash-set 1 2 3) (hash-set 2 3))");
+  Check("sorted-set ord", "(= (first (seq (sorted-set 3 1 2))) 1)");
+  Check("sorted-set?",    "(sorted-set? (sorted-set 1 2))");
+  Check("set seq",        "(= (count (seq s)) 3)");
+
+  (* ── 22. Multi-arity functions ──────────────────────────────────────── *)
+  Section("Multi-arity");
+  E('(defn greet ([] "hello") ([name] (str "hello " name)))');
+  Check("0-arity",        '(= (greet) "hello")');
+  Check("1-arity",        '(= (greet "world") "hello world")');
+  E("(defn add ([] 0) ([x] x) ([x y] (+ x y)) ([x y z] (+ x y z)))");
+  Check("add/0",          "(= (add) 0)");
+  Check("add/1",          "(= (add 7) 7)");
+  Check("add/2",          "(= (add 3 4) 7)");
+  Check("add/3",          "(= (add 1 2 3) 6)");
+  E("(def g (fn ([] :zero) ([x] :one) ([x y] :two)))");
+  Check("fn multi 0",     "(= (g) :zero)");
+  Check("fn multi 1",     "(= (g 42) :one)");
+  Check("fn multi 2",     "(= (g 1 2) :two)");
+  Check("wrong arity err","(try (g 1 2 3) (catch Exception e true))");
+
+  (* ── 23. Variadic functions ─────────────────────────────────────────── *)
+  Section("Variadic");
+  E("(defn vsum [& xs] (reduce + 0 xs))");
+  Check("varargs 0",      "(= (vsum) 0)");
+  Check("varargs 1",      "(= (vsum 5) 5)");
+  Check("varargs many",   "(= (vsum 1 2 3 4 5) 15)");
+  E("(defn vhead [x & rest] (list x (count rest)))");
+  Check("required+rest",  "(= (vhead 10 20 30) (list 10 2))");
+  Check("required only",  "(= (vhead 99) (list 99 0))");
+  E("(defn dispatch ([x] (* x x)) ([x & more] (apply + x more)))");
+  Check("multi+varadic 1","(= (dispatch 5) 25)");
+  Check("multi+varadic 3","(= (dispatch 1 2 3) 6)");
+  Check("apply variadic", "(= (apply vsum [1 2 3]) 6)");
+
   (* ── Summary ────────────────────────────────────────────────────────── *)
   Out.Ln;
   Out.String("Results: ");

@@ -663,6 +663,7 @@ END EvalList;
 PROCEDURE Apply*(fn, args: Value; env: Env): Value;
 VAR newEnv: Env; params, a: Value; isRest: BOOLEAN;
   restList, rLast, c, result, body, expanded: Value;
+  nArgs, nParams: INTEGER; arities, clause, p: Value; clauseHasRest: BOOLEAN;
 BEGIN
   IF IsNil(fn) THEN Error("cannot call nil"); RETURN NilV END;
   IF fn.tag = tBuiltin THEN RETURN fn.builtin(args, env) END;
@@ -687,6 +688,29 @@ BEGIN
     RETURN MapGet(args.head, fn)
   END;
   IF fn.tag # tFn THEN Error("not a function"); RETURN NilV END;
+  (* multi-arity dispatch: fn.head holds a cons list of per-arity tFn clauses *)
+  IF IsNil(fn.params) & (fn.head # NIL) THEN
+    nArgs := 0; a := args;
+    WHILE ~IsNil(a) DO INC(nArgs); a := a.tail END;
+    arities := fn.head;
+    WHILE ~IsNil(arities) DO
+      clause := arities.head;
+      nParams := 0; clauseHasRest := FALSE; p := clause.params;
+      WHILE ~IsNil(p) DO
+        IF (p.head # NIL) & (p.head.tag = tSym)
+           & (p.head.s[0] = "&") & (p.head.s[1] = 0X) THEN
+          clauseHasRest := TRUE; p := NilV
+        ELSE
+          INC(nParams); p := p.tail
+        END
+      END;
+      IF (clauseHasRest & (nArgs >= nParams)) OR (~clauseHasRest & (nArgs = nParams)) THEN
+        RETURN Apply(clause, args, env)
+      END;
+      arities := arities.tail
+    END;
+    Error("Wrong number of args"); RETURN NilV
+  END;
   newEnv := NewEnv(fn.closure);
   params := fn.params; a := args; isRest := FALSE;
   WHILE ~IsNil(params) & ~isRest DO
@@ -885,12 +909,29 @@ PROCEDURE Eval*(expr: Value; env: Env): Value;
   END DoIf;
 
   PROCEDURE DoFn(args: Value): Value;
-  VAR v: Value;
+  VAR v, clause, arList, arLast, c: Value;
   BEGIN
     NEW(v); v.tag := tFn;
-    v.params := args.head;
-    v.body := args.tail;
     v.closure := env;
+    (* multi-arity: (fn ([] body) ([x] body) ...) — first arg is a list, not a vector *)
+    IF ~IsNil(args) & ~IsNil(args.head) & (args.head.tag = tList) THEN
+      arList := NilV; arLast := NIL;
+      WHILE ~IsNil(args) DO
+        NEW(clause); clause.tag := tFn;
+        clause.params := args.head.head;
+        clause.body   := args.head.tail;
+        clause.closure := env;
+        c := Cons(clause, NilV);
+        IF arLast = NIL THEN arList := c ELSE arLast.tail := c END;
+        arLast := c;
+        args := args.tail
+      END;
+      v.params := NilV;
+      v.head := arList
+    ELSE
+      v.params := args.head;
+      v.body := args.tail
+    END;
     RETURN v
   END DoFn;
 
