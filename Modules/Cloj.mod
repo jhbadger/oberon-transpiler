@@ -19,6 +19,7 @@ CONST
   tMacro*  = 12;
   tAtom*   = 13;
   tDelay*  = 14;
+  tSet*    = 15;
 
   MaxTok   = 65536;
   MaxStr   = 256;
@@ -128,6 +129,66 @@ BEGIN
   NEW(v); v.tag := tMap; v.head := keys; v.tail := vals;
   RETURN v
 END MkMap;
+
+(* Set: head = linked Cons list of elements, tail unused.
+   b = TRUE marks a sorted-set (elements kept in ValLT order). *)
+PROCEDURE MkSet(elems: Value): Value;
+VAR v: Value;
+BEGIN NEW(v); v.tag := tSet; v.b := FALSE; v.head := elems; RETURN v END MkSet;
+
+PROCEDURE MkSortedSet(elems: Value): Value;
+VAR v: Value;
+BEGIN NEW(v); v.tag := tSet; v.b := TRUE; v.head := elems; RETURN v END MkSortedSet;
+
+PROCEDURE SetContains(s, elem: Value): BOOLEAN;
+VAR p: Value;
+BEGIN
+  p := s.head;
+  WHILE ~IsNil(p) DO
+    IF ValueEqual(p.head, elem) THEN RETURN TRUE END;
+    p := p.tail
+  END;
+  RETURN FALSE
+END SetContains;
+
+(* Insert elem into sorted-set s in ValLT order; forward call to ValLT is ok. *)
+PROCEDURE SortedSetConj(s, elem: Value): Value;
+VAR first, last, p, cell: Value; inserted: BOOLEAN;
+BEGIN
+  IF SetContains(s, elem) THEN RETURN s END;
+  first := NilV; last := NIL; inserted := FALSE; p := s.head;
+  WHILE ~IsNil(p) DO
+    IF ~inserted & ValLT(elem, p.head) THEN
+      cell := Cons(elem, NilV);
+      IF last = NIL THEN first := cell ELSE last.tail := cell END;
+      last := cell; inserted := TRUE
+    END;
+    cell := Cons(p.head, NilV);
+    IF last = NIL THEN first := cell ELSE last.tail := cell END;
+    last := cell; p := p.tail
+  END;
+  IF ~inserted THEN
+    cell := Cons(elem, NilV);
+    IF last = NIL THEN first := cell ELSE last.tail := cell END
+  END;
+  RETURN MkSortedSet(first)
+END SortedSetConj;
+
+PROCEDURE SetConj(s, elem: Value): Value;
+VAR first, last, p, cell: Value;
+BEGIN
+  IF s.b THEN RETURN SortedSetConj(s, elem) END;
+  IF SetContains(s, elem) THEN RETURN s END;
+  first := NilV; last := NIL; p := s.head;
+  WHILE ~IsNil(p) DO
+    cell := Cons(p.head, NilV);
+    IF last = NIL THEN first := cell ELSE last.tail := cell END;
+    last := cell; p := p.tail
+  END;
+  cell := Cons(elem, NilV);
+  IF last = NIL THEN first := cell ELSE last.tail := cell END;
+  RETURN MkSet(first)
+END SetConj;
 
 PROCEDURE MkBuiltin(name: ARRAY OF CHAR; fn: Builtin): Value;
 VAR v: Value;
@@ -239,6 +300,16 @@ BEGIN
     IF (srcPos < srcLen) & (src[srcPos] = '@') THEN tokKind := 12; INC(srcPos)
     ELSE tokKind := 11 END
   ELSIF c = '@' THEN tokKind := 13; INC(srcPos)
+  ELSIF c = '#' THEN
+    IF (srcPos + 1 < srcLen) & (src[srcPos + 1] = '{') THEN
+      tokKind := 14; srcPos := srcPos + 2
+    ELSE
+      tokKind := 8; i := 0;
+      WHILE (srcPos < srcLen) & ~IsDelim(src[srcPos]) & (i < MaxStr-1) DO
+        tok[i] := src[srcPos]; INC(i); INC(srcPos)
+      END;
+      tok[i] := 0X
+    END
   ELSIF c = '"' THEN
     tokKind := 9; INC(srcPos); i := 0;
     WHILE (srcPos < srcLen) & (src[srcPos] # '"') & (i < MaxStr-1) DO
@@ -349,6 +420,27 @@ PROCEDURE ParseExpr(): Value;
     RETURN MkMap(keys, vals)
   END ParseMap;
 
+  PROCEDURE ParseSet(): Value;
+  VAR first, last, cell, elem: Value; s: Value;
+  BEGIN
+    first := NilV; last := NIL;
+    s := MkSet(NilV);
+    NextTok;
+    WHILE (tokKind # 6) & (tokKind # 0) & ~err DO
+      elem := ParseExpr();
+      IF err THEN RETURN NilV END;
+      IF ~SetContains(s, elem) THEN
+        cell := Cons(elem, NilV);
+        IF last = NIL THEN first := cell ELSE last.tail := cell END;
+        last := cell;
+        s.head := first
+      END;
+      NextTok
+    END;
+    IF tokKind # 6 THEN Error("unbalanced set") END;
+    RETURN MkSet(first)
+  END ParseSet;
+
 VAR v, q: Value;
 BEGIN
   CASE tokKind OF
@@ -368,6 +460,7 @@ BEGIN
         q := Cons(MkSym("unquote-splicing"), Cons(v, NilV)); RETURN q
   | 13: NextTok; v := ParseExpr();
         q := Cons(MkSym("deref"), Cons(v, NilV)); RETURN q
+  | 14: RETURN ParseSet()
   ELSE Error("unexpected token"); RETURN NilV
   END
 END ParseExpr;
@@ -460,6 +553,14 @@ BEGIN
         IF ~first THEN Out.Char(' ') END;
         PrintValue(k.head, readable); Out.Char(' '); PrintValue(val.head, readable);
         first := FALSE; k := k.tail; val := val.tail
+      END;
+      Out.Char('}')
+  | tSet:
+      Out.Char('#'); Out.Char('{'); p := v.head; first := TRUE;
+      WHILE ~IsNil(p) DO
+        IF ~first THEN Out.Char(' ') END;
+        PrintValue(p.head, readable);
+        first := FALSE; p := p.tail
       END;
       Out.Char('}')
   | tFn: WriteStr("#<fn>")
@@ -575,6 +676,10 @@ BEGIN
   IF fn.tag = tMap THEN
     IF IsNil(args) THEN Error("map: needs key arg"); RETURN NilV END;
     RETURN MapGet(fn, args.head)
+  END;
+  IF fn.tag = tSet THEN
+    IF IsNil(args) THEN Error("set: needs arg"); RETURN NilV END;
+    IF SetContains(fn, args.head) THEN RETURN args.head ELSE RETURN NilV END
   END;
   IF fn.tag = tKey THEN
     IF IsNil(args) THEN Error("keyword: needs map arg"); RETURN NilV END;
@@ -1632,6 +1737,15 @@ BEGIN
     END;
     RETURN IsNil(pa) & IsNil(pb)
   END;
+  IF (a.tag = tSet) & (b.tag = tSet) THEN
+    IF ListLen(a.head) # ListLen(b.head) THEN RETURN FALSE END;
+    pa := a.head;
+    WHILE ~IsNil(pa) DO
+      IF ~SetContains(b, pa.head) THEN RETURN FALSE END;
+      pa := pa.tail
+    END;
+    RETURN TRUE
+  END;
   IF a.tag # b.tag THEN RETURN FALSE END;
   CASE a.tag OF
     tBool: RETURN a.b = b.b
@@ -1696,6 +1810,7 @@ BEGIN
   IF IsNil(v) THEN RETURN MkInt(0) END;
   IF (v.tag = tList) OR (v.tag = tVec) THEN RETURN MkInt(ListLen(v)) END;
   IF v.tag = tMap THEN RETURN MkInt(ListLen(v.head)) END;
+  IF v.tag = tSet THEN RETURN MkInt(ListLen(v.head)) END;
   IF v.tag = tStr THEN
     n := 0; WHILE v.s[n] # 0X DO INC(n) END;
     RETURN MkInt(n)
@@ -1729,6 +1844,7 @@ BEGIN
     IF last = NIL THEN first := cell ELSE last.tail := cell END;
     RETURN first
   END;
+  IF coll.tag = tSet THEN RETURN SetConj(coll, item) END;
   Error("conj: unsupported collection"); RETURN NilV
 END BConj;
 
@@ -1736,6 +1852,7 @@ PROCEDURE BMap(args: Value; env: Env): Value;
 VAR fn, coll, first, last, cell, callArgs, result: Value;
 BEGIN
   fn := args.head; coll := args.tail.head;
+  IF ~IsNil(coll) & (coll.tag = tSet) THEN coll := coll.head END;
   first := NilV; last := NIL;
   WHILE ~IsNil(coll) & ~err DO
     callArgs := Cons(coll.head, NilV);
@@ -1752,6 +1869,7 @@ PROCEDURE BFilter(args: Value; env: Env): Value;
 VAR fn, coll, first, last, cell, callArgs, result: Value;
 BEGIN
   fn := args.head; coll := args.tail.head;
+  IF ~IsNil(coll) & (coll.tag = tSet) THEN coll := coll.head END;
   first := NilV; last := NIL;
   WHILE ~IsNil(coll) & ~err DO
     callArgs := Cons(coll.head, NilV);
@@ -1773,10 +1891,12 @@ BEGIN
   fn := args.head;
   IF IsNil(args.tail.tail) THEN
     coll := args.tail.head;
+    IF ~IsNil(coll) & (coll.tag = tSet) THEN coll := coll.head END;
     IF IsNil(coll) THEN RETURN NilV END;
     acc := coll.head; coll := coll.tail
   ELSE
-    acc := args.tail.head; coll := args.tail.tail.head
+    acc := args.tail.head; coll := args.tail.tail.head;
+    IF ~IsNil(coll) & (coll.tag = tSet) THEN coll := coll.head END
   END;
   WHILE ~IsNil(coll) & ~err DO
     callArgs := Cons(acc, Cons(coll.head, NilV));
@@ -1883,6 +2003,7 @@ BEGIN
   | tList: RETURN MkKey("list")
   | tVec: RETURN MkKey("vector")
   | tMap: RETURN MkKey("map")
+  | tSet: RETURN MkKey("set")
   | tFn: RETURN MkKey("fn")
   | tBuiltin: RETURN MkKey("builtin")
   ELSE RETURN MkKey("unknown")
@@ -1900,6 +2021,8 @@ BEGIN
   IF (v.tag = tList) OR (v.tag = tVec) THEN
     RETURN MkBool(ListLen(v) = 0)
   END;
+  IF v.tag = tSet THEN RETURN MkBool(IsNil(v.head)) END;
+  IF v.tag = tMap THEN RETURN MkBool(IsNil(v.head)) END;
   RETURN FalseV
 END BEmptyQ;
 
@@ -2174,7 +2297,7 @@ VAR v: Value;
 BEGIN
   v := args.head;
   IF IsNil(v) THEN RETURN TrueV END;
-  RETURN MkBool((v.tag = tList) OR (v.tag = tVec) OR (v.tag = tMap))
+  RETURN MkBool((v.tag = tList) OR (v.tag = tVec) OR (v.tag = tMap) OR (v.tag = tSet))
 END BCollQ;
 
 PROCEDURE BSeqQ(args: Value; env: Env): Value;
@@ -2327,7 +2450,9 @@ PROCEDURE BSort(args: Value; env: Env): Value;
 VAR coll, tmp: Value; n, i, j: INTEGER;
   arr: ARRAY 1024 OF Value;
 BEGIN
-  coll := args.head; n := 0;
+  coll := args.head;
+  IF ~IsNil(coll) & (coll.tag = tSet) THEN coll := coll.head END;
+  n := 0;
   WHILE ~IsNil(coll) & (n < 1024) DO arr[n] := coll.head; INC(n); coll := coll.tail END;
   i := 1;
   WHILE i < n DO
@@ -2346,7 +2471,9 @@ PROCEDURE BSortBy(args: Value; env: Env): Value;
 VAR fn, coll: Value; n, i, j: INTEGER;
   arr: ARRAY 1024 OF Value; tmp, ka, kb: Value; cont: BOOLEAN;
 BEGIN
-  fn := args.head; coll := args.tail.head; n := 0;
+  fn := args.head; coll := args.tail.head;
+  IF ~IsNil(coll) & (coll.tag = tSet) THEN coll := coll.head END;
+  n := 0;
   WHILE ~IsNil(coll) & (n < 1024) DO arr[n] := coll.head; INC(n); coll := coll.tail END;
   i := 1;
   WHILE i < n DO
@@ -2369,6 +2496,7 @@ PROCEDURE BEveryQ(args: Value; env: Env): Value;
 VAR fn, coll, result: Value;
 BEGIN
   fn := args.head; coll := args.tail.head;
+  IF ~IsNil(coll) & (coll.tag = tSet) THEN coll := coll.head END;
   WHILE ~IsNil(coll) & ~err DO
     result := Apply(fn, Cons(coll.head, NilV), env);
     IF err THEN RETURN NilV END;
@@ -2382,6 +2510,7 @@ PROCEDURE BSome(args: Value; env: Env): Value;
 VAR fn, coll, result: Value;
 BEGIN
   fn := args.head; coll := args.tail.head;
+  IF ~IsNil(coll) & (coll.tag = tSet) THEN coll := coll.head END;
   WHILE ~IsNil(coll) & ~err DO
     result := Apply(fn, Cons(coll.head, NilV), env);
     IF err THEN RETURN NilV END;
@@ -2395,6 +2524,7 @@ PROCEDURE BNotAnyQ(args: Value; env: Env): Value;
 VAR fn, coll, result: Value;
 BEGIN
   fn := args.head; coll := args.tail.head;
+  IF ~IsNil(coll) & (coll.tag = tSet) THEN coll := coll.head END;
   WHILE ~IsNil(coll) & ~err DO
     result := Apply(fn, Cons(coll.head, NilV), env);
     IF err THEN RETURN NilV END;
@@ -2408,6 +2538,7 @@ PROCEDURE BNotEveryQ(args: Value; env: Env): Value;
 VAR fn, coll, result: Value;
 BEGIN
   fn := args.head; coll := args.tail.head;
+  IF ~IsNil(coll) & (coll.tag = tSet) THEN coll := coll.head END;
   WHILE ~IsNil(coll) & ~err DO
     result := Apply(fn, Cons(coll.head, NilV), env);
     IF err THEN RETURN NilV END;
@@ -2418,9 +2549,14 @@ BEGIN
 END BNotEveryQ;
 
 PROCEDURE BInto(args: Value; env: Env): Value;
-VAR dst, src, p, cell, first, last: Value; isVec: BOOLEAN;
+VAR dst, src, p, cell, first, last: Value; isVec: BOOLEAN; s: Value;
 BEGIN
   dst := args.head; src := args.tail.head;
+  IF ~IsNil(dst) & (dst.tag = tSet) THEN
+    s := dst; p := src;
+    WHILE ~IsNil(p) DO s := SetConj(s, p.head); p := p.tail END;
+    RETURN s
+  END;
   isVec := ~IsNil(dst) & (dst.tag = tVec);
   first := NilV; last := NIL;
   (* copy dst *)
@@ -2468,6 +2604,10 @@ BEGIN
       last := cell; INC(i)
     END;
     RETURN first
+  END;
+  IF v.tag = tSet THEN
+    IF IsNil(v.head) THEN RETURN NilV END;
+    RETURN v.head
   END;
   RETURN NilV
 END BSeq;
@@ -2707,6 +2847,7 @@ BEGIN
     END;
     RETURN FalseV
   END;
+  IF m.tag = tSet THEN RETURN MkBool(SetContains(m, k)) END;
   IF (m.tag = tVec) & (k.tag = tInt) THEN
     RETURN MkBool((k.i >= 0) & (k.i < ListLen(m)))
   END;
@@ -2757,6 +2898,145 @@ BEGIN
   END;
   RETURN MkMap(nks, nvs)
 END BSelectKeys;
+
+(* Set operations *)
+PROCEDURE BHashSet(args: Value; env: Env): Value;
+VAR s, p: Value;
+BEGIN
+  s := MkSet(NilV); p := args;
+  WHILE ~IsNil(p) DO s := SetConj(s, p.head); p := p.tail END;
+  RETURN s
+END BHashSet;
+
+PROCEDURE BSortedSet(args: Value; env: Env): Value;
+VAR s, p: Value;
+BEGIN
+  s := MkSortedSet(NilV); p := args;
+  WHILE ~IsNil(p) DO s := SetConj(s, p.head); p := p.tail END;
+  RETURN s
+END BSortedSet;
+
+PROCEDURE BSortedSetQ(args: Value; env: Env): Value;
+VAR v: Value;
+BEGIN
+  v := args.head;
+  RETURN MkBool((v # NIL) & (v.tag = tSet) & v.b)
+END BSortedSetQ;
+
+PROCEDURE BSetFn(args: Value; env: Env): Value;
+VAR coll, s, p: Value;
+BEGIN
+  coll := args.head;
+  IF IsNil(coll) THEN RETURN MkSet(NilV) END;
+  IF coll.tag = tSet THEN RETURN coll END;
+  IF coll.tag = tMap THEN coll := coll.head END;
+  s := MkSet(NilV); p := coll;
+  WHILE ~IsNil(p) DO s := SetConj(s, p.head); p := p.tail END;
+  RETURN s
+END BSetFn;
+
+PROCEDURE BSetQ(args: Value; env: Env): Value;
+BEGIN RETURN MkBool(~IsNil(args.head) & (args.head.tag = tSet)) END BSetQ;
+
+PROCEDURE BDisj(args: Value; env: Env): Value;
+VAR s, elem, p, first, last, cell: Value; sorted: BOOLEAN;
+BEGIN
+  s := args.head;
+  IF IsNil(s) OR (s.tag # tSet) THEN Error("disj: needs a set"); RETURN NilV END;
+  sorted := s.b;
+  args := args.tail;
+  WHILE ~IsNil(args) DO
+    elem := args.head;
+    first := NilV; last := NIL; p := s.head;
+    WHILE ~IsNil(p) DO
+      IF ~ValueEqual(p.head, elem) THEN
+        cell := Cons(p.head, NilV);
+        IF last = NIL THEN first := cell ELSE last.tail := cell END;
+        last := cell
+      END;
+      p := p.tail
+    END;
+    IF sorted THEN s := MkSortedSet(first) ELSE s := MkSet(first) END;
+    args := args.tail
+  END;
+  RETURN s
+END BDisj;
+
+PROCEDURE BUnion(args: Value; env: Env): Value;
+VAR s, p: Value;
+BEGIN
+  s := MkSet(NilV);
+  WHILE ~IsNil(args) DO
+    IF ~IsNil(args.head) & (args.head.tag = tSet) THEN
+      p := args.head.head;
+      WHILE ~IsNil(p) DO s := SetConj(s, p.head); p := p.tail END
+    END;
+    args := args.tail
+  END;
+  RETURN s
+END BUnion;
+
+PROCEDURE BIntersection(args: Value; env: Env): Value;
+VAR s, other, p: Value;
+BEGIN
+  IF IsNil(args) OR (args.head.tag # tSet) THEN RETURN MkSet(NilV) END;
+  s := args.head; args := args.tail;
+  WHILE ~IsNil(args) DO
+    other := args.head;
+    IF IsNil(other) OR (other.tag # tSet) THEN
+      Error("intersection: needs sets"); RETURN NilV
+    END;
+    p := s.head; s := MkSet(NilV);
+    WHILE ~IsNil(p) DO
+      IF SetContains(other, p.head) THEN s := SetConj(s, p.head) END;
+      p := p.tail
+    END;
+    args := args.tail
+  END;
+  RETURN s
+END BIntersection;
+
+PROCEDURE BDifference(args: Value; env: Env): Value;
+VAR s, other, p: Value; keep: BOOLEAN;
+BEGIN
+  IF IsNil(args) OR (args.head.tag # tSet) THEN RETURN MkSet(NilV) END;
+  s := args.head; args := args.tail;
+  WHILE ~IsNil(args) DO
+    other := args.head;
+    IF IsNil(other) OR (other.tag # tSet) THEN
+      Error("difference: needs sets"); RETURN NilV
+    END;
+    p := s.head; s := MkSet(NilV);
+    WHILE ~IsNil(p) DO
+      IF ~SetContains(other, p.head) THEN s := SetConj(s, p.head) END;
+      p := p.tail
+    END;
+    args := args.tail
+  END;
+  RETURN s
+END BDifference;
+
+PROCEDURE BSubsetQ(args: Value; env: Env): Value;
+VAR s1, s2, p: Value;
+BEGIN
+  s1 := args.head; s2 := args.tail.head;
+  IF IsNil(s1) OR (s1.tag # tSet) OR IsNil(s2) OR (s2.tag # tSet) THEN
+    Error("subset?: needs two sets"); RETURN NilV
+  END;
+  p := s1.head;
+  WHILE ~IsNil(p) DO
+    IF ~SetContains(s2, p.head) THEN RETURN FalseV END;
+    p := p.tail
+  END;
+  RETURN TrueV
+END BSubsetQ;
+
+PROCEDURE BSupersetQ(args: Value; env: Env): Value;
+VAR s1, s2: Value;
+BEGIN
+  s1 := args.head; s2 := args.tail.head;
+  RETURN BSubsetQ(Cons(s2, Cons(s1, NilV)), env)
+END BSupersetQ;
 
 (* String operations *)
 PROCEDURE BSubs(args: Value; env: Env): Value;
@@ -3435,6 +3715,19 @@ BEGIN
   RegisterDoc("get-in", BGetIn, "Returns value in nested map via sequence of keys.");
   RegisterDoc("select-keys", BSelectKeys, "Returns map with only the selected keys.");
   RegisterDoc("update", BUpdate, "Updates a key in map by applying fn to its old value.");
+
+  (* Set operations *)
+  RegisterDoc("hash-set", BHashSet, "Returns a set with supplied items.");
+  RegisterDoc("sorted-set", BSortedSet, "Returns a sorted set with supplied items.");
+  RegisterDoc("sorted-set?", BSortedSetQ, "Returns true if x is a sorted set.");
+  RegisterDoc("set", BSetFn, "Returns a set of the distinct elements of coll.");
+  RegisterDoc("set?", BSetQ, "Returns true if x is a set.");
+  RegisterDoc("disj", BDisj, "Returns a set with items removed.");
+  RegisterDoc("union", BUnion, "Returns the union of the sets.");
+  RegisterDoc("intersection", BIntersection, "Returns the intersection of the sets.");
+  RegisterDoc("difference", BDifference, "Returns the set of elements in s1 not in s2.");
+  RegisterDoc("subset?", BSubsetQ, "Returns true if s1 is a subset of s2.");
+  RegisterDoc("superset?", BSupersetQ, "Returns true if s1 is a superset of s2.");
 
   (* String operations *)
   RegisterDoc("str", BStr, "Converts args to strings and concatenates them.");
