@@ -451,6 +451,75 @@ BEGIN
   END
 END PrintValue;
 
+(* ---------- Destructuring ---------- *)
+
+PROCEDURE MapGet(m, k: Value): Value;
+VAR ks, vs: Value;
+BEGIN
+  IF IsNil(m) OR (m.tag # tMap) THEN RETURN NilV END;
+  ks := m.head; vs := m.tail;
+  WHILE ~IsNil(ks) DO
+    IF ValueEqual(ks.head, k) THEN RETURN vs.head END;
+    ks := ks.tail; vs := vs.tail
+  END;
+  RETURN NilV
+END MapGet;
+
+PROCEDURE DestructureBind(pat, val: Value; e: Env);
+VAR p, v, ks, vs: Value;
+BEGIN
+  IF pat = NIL THEN RETURN END;
+  IF pat.tag = tSym THEN
+    IF ~((pat.s[0] = "_") & (pat.s[1] = 0X)) THEN Define(e, pat.s, val) END
+  ELSIF (pat.tag = tList) OR (pat.tag = tVec) THEN
+    p := pat; v := val;
+    WHILE ~IsNil(p) DO
+      IF (p.head.tag = tKey) & (p.head.s = "as") THEN
+        p := p.tail;
+        IF ~IsNil(p) & (p.head.tag = tSym) THEN Define(e, p.head.s, val) END;
+        p := p.tail
+      ELSIF (p.head.tag = tSym) & (p.head.s[0] = "&") & (p.head.s[1] = 0X) THEN
+        p := p.tail;
+        IF ~IsNil(p) THEN DestructureBind(p.head, v, e) END;
+        p := NilV
+      ELSE
+        IF IsNil(v) THEN DestructureBind(p.head, NilV, e)
+        ELSE DestructureBind(p.head, v.head, e); v := v.tail END;
+        p := p.tail
+      END
+    END
+  ELSIF pat.tag = tMap THEN
+    ks := pat.head; vs := pat.tail;
+    WHILE ~IsNil(ks) DO
+      IF (ks.head.tag = tKey) & (ks.head.s = "keys") THEN
+        p := vs.head;
+        WHILE ~IsNil(p) DO
+          IF p.head.tag = tSym THEN
+            Define(e, p.head.s, MapGet(val, MkKey(p.head.s)))
+          END;
+          p := p.tail
+        END
+      ELSIF (ks.head.tag = tKey) & (ks.head.s = "strs") THEN
+        p := vs.head;
+        WHILE ~IsNil(p) DO
+          IF p.head.tag = tSym THEN
+            Define(e, p.head.s, MapGet(val, MkStr(p.head.s)))
+          END;
+          p := p.tail
+        END
+      ELSIF (ks.head.tag = tKey) & (ks.head.s = "as") THEN
+        IF ~IsNil(vs) & (vs.head.tag = tSym) THEN Define(e, vs.head.s, val) END
+      ELSIF (ks.head.tag = tKey) & (ks.head.s = "or") THEN
+        (* defaults not yet supported *)
+      ELSIF ks.head.tag = tSym THEN
+        Define(e, ks.head.s, MapGet(val, vs.head))
+      END;
+      ks := ks.tail;
+      IF ~IsNil(vs) THEN vs := vs.tail END
+    END
+  END
+END DestructureBind;
+
 (* ---------- Apply (used by Eval and by higher-order builtins) ---------- *)
 
 PROCEDURE EvalList(lst: Value; env: Env): Value;
@@ -499,7 +568,7 @@ BEGIN
       params := NilV
     ELSE
       IF IsNil(a) THEN Error("too few args"); RETURN NilV END;
-      Define(newEnv, params.head.s, a.head);
+      DestructureBind(params.head, a.head, newEnv);
       params := params.tail; a := a.tail
     END
   END;
@@ -511,6 +580,61 @@ BEGIN
   END;
   RETURN result
 END Apply;
+
+(* ---------- for comprehension helper (recursive, needs EvalRef at runtime) ---------- *)
+
+PROCEDURE ForExpand(binds, body: Value; env: Env): Value;
+VAR sym, coll, sub, result, resLast, cell, letP, v, p: Value;
+    newEnv: Env;
+BEGIN
+  IF IsNil(binds) THEN
+    v := EvalRef(body, env);
+    IF err THEN RETURN NilV END;
+    RETURN Cons(v, NilV)
+  END;
+  IF binds.head.tag = tKey THEN
+    IF (binds.head.s = "when") OR (binds.head.s = "while") THEN
+      IF IsNil(binds.tail) THEN Error("for: modifier needs expr"); RETURN NilV END;
+      v := EvalRef(binds.tail.head, env);
+      IF err THEN RETURN NilV END;
+      IF ~IsTruthy(v) THEN RETURN NilV END;
+      RETURN ForExpand(binds.tail.tail, body, env)
+    ELSIF binds.head.s = "let" THEN
+      IF IsNil(binds.tail) THEN Error("for :let needs bindings"); RETURN NilV END;
+      newEnv := NewEnv(env);
+      letP := binds.tail.head;
+      WHILE ~IsNil(letP) & ~err DO
+        sym := letP.head; letP := letP.tail;
+        IF IsNil(letP) THEN Error("for :let odd bindings"); RETURN NilV END;
+        v := EvalRef(letP.head, newEnv);
+        IF err THEN RETURN NilV END;
+        DestructureBind(sym, v, newEnv);
+        letP := letP.tail
+      END;
+      IF err THEN RETURN NilV END;
+      RETURN ForExpand(binds.tail.tail, body, newEnv)
+    END
+  END;
+  sym := binds.head;
+  IF IsNil(binds.tail) THEN Error("for: missing collection"); RETURN NilV END;
+  coll := EvalRef(binds.tail.head, env);
+  IF err THEN RETURN NilV END;
+  result := NilV; resLast := NIL;
+  WHILE ~IsNil(coll) & ~err DO
+    newEnv := NewEnv(env);
+    DestructureBind(sym, coll.head, newEnv);
+    sub := ForExpand(binds.tail.tail, body, newEnv);
+    IF err THEN RETURN NilV END;
+    p := sub;
+    WHILE ~IsNil(p) DO
+      cell := Cons(p.head, NilV);
+      IF resLast = NIL THEN result := cell ELSE resLast.tail := cell END;
+      resLast := cell; p := p.tail
+    END;
+    coll := coll.tail
+  END;
+  RETURN result
+END ForExpand;
 
 (* ---------- Evaluator ---------- *)
 
@@ -561,8 +685,7 @@ PROCEDURE Eval*(expr: Value; env: Env): Value;
       IF IsNil(bindings) THEN Error("let: odd bindings"); RETURN NilV END;
       val := EvalRef(bindings.head, newEnv);
       IF err THEN RETURN NilV END;
-      IF sym.tag # tSym THEN Error("let: not a symbol"); RETURN NilV END;
-      Define(newEnv, sym.s, val);
+      DestructureBind(sym, val, newEnv);
       bindings := bindings.tail
     END;
     body := args.tail; result := NilV;
@@ -716,11 +839,10 @@ PROCEDURE Eval*(expr: Value; env: Env): Value;
     nameV := bindVec.head;
     seqV := EvalRef(bindVec.tail.head, env);
     IF err THEN RETURN NilV END;
-    IF nameV.tag # tSym THEN Error("doseq: needs symbol"); RETURN NilV END;
-    newEnv := NewEnv(env);
     WHILE ~IsNil(seqV) & ~err DO
       elem := seqV.head;
-      Define(newEnv, nameV.s, elem);
+      newEnv := NewEnv(env);
+      DestructureBind(nameV, elem, newEnv);
       body := args.tail;
       WHILE ~IsNil(body) & ~err DO
         EvalRef(body.head, newEnv); body := body.tail
@@ -816,6 +938,59 @@ PROCEDURE Eval*(expr: Value; env: Env): Value;
     RETURN NilV
   END DoDocForm;
 
+  PROCEDURE DoThread(args: Value; threadFirst: BOOLEAN): Value;
+  VAR acc, forms, form, fn, evArgs, callArgs, p, lst, cell: Value;
+  BEGIN
+    IF IsNil(args) THEN RETURN NilV END;
+    acc := EvalRef(args.head, env);
+    IF err THEN RETURN NilV END;
+    forms := args.tail;
+    WHILE ~IsNil(forms) & ~err DO
+      form := forms.head;
+      IF form.tag = tSym THEN
+        fn := EvalRef(form, env);
+        IF err THEN RETURN NilV END;
+        acc := Apply(fn, Cons(acc, NilV), env)
+      ELSIF (form.tag = tList) OR (form.tag = tVec) THEN
+        fn := EvalRef(form.head, env);
+        IF err THEN RETURN NilV END;
+        evArgs := EvalList(form.tail, env);
+        IF err THEN RETURN NilV END;
+        IF threadFirst THEN
+          callArgs := Cons(acc, evArgs)
+        ELSE
+          p := evArgs; lst := NIL; callArgs := NilV;
+          WHILE ~IsNil(p) DO
+            cell := Cons(p.head, NilV);
+            IF lst = NIL THEN callArgs := cell ELSE lst.tail := cell END;
+            lst := cell; p := p.tail
+          END;
+          cell := Cons(acc, NilV);
+          IF lst = NIL THEN callArgs := cell ELSE lst.tail := cell END
+        END;
+        acc := Apply(fn, callArgs, env)
+      ELSE
+        Error("->: invalid threading form"); RETURN NilV
+      END;
+      IF err THEN RETURN NilV END;
+      forms := forms.tail
+    END;
+    RETURN acc
+  END DoThread;
+
+  PROCEDURE DoFor(args: Value): Value;
+  VAR bindVec, body: Value;
+  BEGIN
+    IF IsNil(args) OR IsNil(args.tail) THEN
+      Error("for: needs bindings and body"); RETURN NilV
+    END;
+    bindVec := args.head; body := args.tail.head;
+    IF IsNil(bindVec) OR ((bindVec.tag # tVec) & (bindVec.tag # tList)) THEN
+      Error("for: needs binding vector"); RETURN NilV
+    END;
+    RETURN ForExpand(bindVec, body, env)
+  END DoFor;
+
 VAR head: Value; sym: ARRAY MaxStr OF CHAR; fn, evArgs, looked: Value;
   vec, first, last, cell, v: Value;
 BEGIN
@@ -866,6 +1041,9 @@ BEGIN
         ELSIF sym = "recur" THEN RETURN DoRecur(expr.tail)
         ELSIF sym = "defmacro" THEN RETURN DoDefmacro(expr.tail)
         ELSIF sym = "doc" THEN RETURN DoDocForm(expr.tail)
+        ELSIF sym = "->" THEN RETURN DoThread(expr.tail, TRUE)
+        ELSIF sym = "->>" THEN RETURN DoThread(expr.tail, FALSE)
+        ELSIF sym = "for" THEN RETURN DoFor(expr.tail)
         END
       END;
       fn := EvalRef(head, env);
