@@ -19,6 +19,7 @@ MODULE obemacs;
                  C-x o other-window
      Search:     C-s isearch-forward, C-r isearch-backward
      Clojure:    C-x C-e eval-last-sexp (inserts result as ; => comment)
+                 F1        show doc for symbol at point (popup)
      Misc:       C-g keyboard-quit, C-x C-c save-buffers-kill-emacs
                  M-x execute-extended-command
 
@@ -29,7 +30,7 @@ MODULE obemacs;
      .clj .cljs .cljc          -> Clojure
 *)
 
-  IMPORT Terminal, Editor, Strings, Files, Args, Out, OS;
+  IMPORT Terminal, Editor, Strings, Files, Args, Out, OS, Env;
 
   CONST
     MaxBuffers   = 32;
@@ -49,6 +50,7 @@ MODULE obemacs;
     KUp    = 0A0X;  KDown  = 0A1X; 
     KNul   = 00X;  (* C-SPC / C-@ on many terminals *)
     KMouse = 0A4X; (* mouse event *)
+    KF1    = 89X;  (* F1 – Clojure doc *)
     KF5    = 8DX;  (* F5 – run buffer *)
 
     (* Syntax modes *)
@@ -150,6 +152,15 @@ MODULE obemacs;
     i := 0;
     WHILE s[i] # 0X DO Files.Write(r, ORD(s[i])); INC(i) END
   END WriteChars;
+
+  PROCEDURE TmpPath(name: ARRAY OF CHAR; VAR dst: ARRAY OF CHAR);
+    VAR dir: ARRAY 128 OF CHAR;
+  BEGIN
+    IF ~Env.Get("TMPDIR", dir) OR (dir[0] = 0X) THEN dir := "/tmp" END;
+    Strings.Copy(dir, dst);
+    Strings.Append("/", dst);
+    Strings.Append(name, dst)
+  END TmpPath;
 
   PROCEDURE EndsWithAny(s: ARRAY OF CHAR; a, b, c: ARRAY OF CHAR): BOOLEAN;
   BEGIN
@@ -1757,8 +1768,8 @@ MODULE obemacs;
     IF ~FindSexprBefore(start, finish) THEN RETURN END;
     ExtractBuf(start, finish, sexpr);
 
-    sessFile := "/tmp/obecloj_sess.clj";
-    outFile  := "/tmp/obecloj_out.txt";
+    TmpPath("obecloj_sess.clj", sessFile);
+    TmpPath("obecloj_out.txt", outFile);
 
     (* Write session file: accumulated history then eval wrapper *)
     f := Files.New(sessFile);
@@ -1830,6 +1841,115 @@ MODULE obemacs;
   END CmdEvalSexpr;
 
   (* ===================================================================
+     F1: show (doc symbol-at-point) in a popup (Clojure mode only)
+     =================================================================== *)
+
+  PROCEDURE CmdClojureDoc;
+    VAR p, start, finish, len, i, rc: INTEGER;
+        ch, key: CHAR;
+        sym: ARRAY 256 OF CHAR;
+        inFile, outFile: ARRAY 64 OF CHAR;
+        cmd: ARRAY MaxStr OF CHAR;
+        f, fw: Files.File; r, rw: Files.Rider;
+        line: ARRAY 1024 OF CHAR;
+        lines: ARRAY 16 OF ARRAY 128 OF CHAR;
+        nLines, maxW, llen: INTEGER;
+        bx, by, bw, bh, row: INTEGER;
+  BEGIN
+    IF curBuf.syntax # SynClojure THEN
+      SetEcho("F1: not in Clojure mode"); RETURN
+    END;
+
+    (* Collect symbol chars around point *)
+    p := PointPos(); len := BufLen();
+    (* step back to start of symbol *)
+    WHILE (p > 0) & CharAt(p - 1, ch) & IsClojureSymbolChar(ch) DO DEC(p) END;
+    start := p;
+    (* step forward to end of symbol *)
+    WHILE (p < len) & CharAt(p, ch) & IsClojureSymbolChar(ch) DO INC(p) END;
+    finish := p;
+    IF finish <= start THEN SetEcho("F1: no symbol at point"); RETURN END;
+    ExtractBuf(start, finish, sym);
+
+    TmpPath("obecloj_doc.txt",    outFile);
+    TmpPath("obecloj_doc_in.clj", inFile);
+    Files.Delete(outFile);
+
+    (* Write (doc sym) to a temp file and feed it to clojrepl *)
+    fw := Files.New(inFile);
+    IF fw = NIL THEN SetEcho("F1: cannot write temp file"); RETURN END;
+    Files.Set(rw, fw, 0);
+    IF replHistory[0] # 0X THEN WriteChars(rw, replHistory) END;
+    WriteChars(rw, "(doc "); WriteChars(rw, sym); WriteChars(rw, ")");
+    Files.Write(rw, 10);
+    Files.Register(fw); Files.Close(fw);
+
+    Strings.Copy("clojrepl ", cmd);
+    Strings.Append(inFile, cmd);
+    Strings.Append(" > ", cmd);
+    Strings.Append(outFile, cmd);
+    Strings.Append(" 2>&1", cmd);
+    rc := OS.Exec(cmd);
+
+    (* Read output into lines array *)
+    nLines := 0; maxW := 0;
+    f := Files.Old(outFile);
+    IF f # NIL THEN
+      Files.Set(r, f, 0);
+      WHILE ~r.eof & (nLines < LEN(lines)) DO
+        Files.ReadLine(r, line);
+        IF ~r.eof OR (line[0] # 0X) THEN
+          llen := Strings.Length(line);
+          IF llen > LEN(lines[0]) - 1 THEN llen := LEN(lines[0]) - 1 END;
+          IF llen > 0 THEN
+            i := 0;
+            WHILE i < llen DO lines[nLines][i] := line[i]; INC(i) END;
+            lines[nLines][llen] := 0X;
+            IF llen > maxW THEN maxW := llen END;
+            INC(nLines)
+          END
+        END
+      END;
+      Files.Close(f)
+    END;
+    IF nLines = 0 THEN
+      Strings.Copy("No doc for: ", lines[0]); Strings.Append(sym, lines[0]);
+      nLines := 1; maxW := Strings.Length(lines[0])
+    END;
+
+    (* Draw popup box centred on screen *)
+    bw := maxW + 4;
+    bh := nLines + 2;
+    IF bw > cols - 2 THEN bw := cols - 2 END;
+    IF bh > rows - 4 THEN bh := rows - 4 END;
+    bx := (cols - bw) DIV 2 + 1;
+    by := (rows - bh) DIV 2;
+
+    Terminal.HideCursor;
+    Terminal.Color(7, 4);  (* white on blue *)
+    Terminal.Fill(bx, by, bw, bh, " ");
+    Terminal.Box(bx, by, bw, bh);
+    Terminal.Color(7, 4);
+    Terminal.Goto(bx + 2, by);
+    Out.String(" doc: "); Out.String(sym); Out.String(" ");
+    row := 0;
+    WHILE row < nLines DO
+      i := 0;
+      Terminal.Goto(bx + 2, by + 1 + row);
+      WHILE (lines[row][i] # 0X) & (i < bw - 4) DO
+        Out.Char(lines[row][i]); INC(i)
+      END;
+      INC(row)
+    END;
+    Terminal.Reset;
+    Terminal.ShowCursor;
+
+    (* Wait for any keypress to dismiss *)
+    key := Terminal.ReadKey();
+    IF key = key THEN END  (* suppress unused warning *)
+  END CmdClojureDoc;
+
+  (* ===================================================================
      main dispatch
      =================================================================== *)
 
@@ -1871,6 +1991,7 @@ MODULE obemacs;
     | KEnd:   CmdEndOfLine
     | KDel:   CmdDeleteChar
     | KMouse: HandleMouse
+    | KF1:   CmdClojureDoc
     | KF5:   CmdRunBuffer
     ELSE
       IF (ch >= " ") & (ch < 7FX) THEN CmdSelfInsert(ch) END
