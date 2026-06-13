@@ -17,15 +17,17 @@ CONST
   tFn*     = 10;
   tBuiltin*= 11;
   tMacro*  = 12;
+  tAtom*   = 13;
+  tDelay*  = 14;
 
   MaxTok   = 65536;
   MaxStr   = 256;
 
 TYPE
-  Value*  = POINTER TO ValueDesc;
-  Env*    = POINTER TO EnvDesc;
-  Binding = POINTER TO BindingDesc;
-  Builtin = PROCEDURE(args: Value; env: Env): Value;
+  Value*   = POINTER TO ValueDesc;
+  Env*     = POINTER TO EnvDesc;
+  Binding* = POINTER TO BindingDesc;
+  Builtin* = PROCEDURE(args: Value; env: Env): Value;
   EvalProc = PROCEDURE(expr: Value; env: Env): Value;
 
   ValueDesc* = RECORD
@@ -69,6 +71,9 @@ VAR
   doRecur: BOOLEAN;
   recurArgs: Value;
   gensymCount: INTEGER;
+
+  isThrown*: BOOLEAN;
+  thrownVal*: Value;
 
   EvalRef: EvalProc;  (* forward indirection *)
 
@@ -228,6 +233,12 @@ BEGIN
   ELSIF c = '{' THEN tokKind := 5; INC(srcPos)
   ELSIF c = '}' THEN tokKind := 6; INC(srcPos)
   ELSIF c = "'" THEN tokKind := 7; INC(srcPos)
+  ELSIF c = '`' THEN tokKind := 10; INC(srcPos)
+  ELSIF c = '~' THEN
+    INC(srcPos);
+    IF (srcPos < srcLen) & (src[srcPos] = '@') THEN tokKind := 12; INC(srcPos)
+    ELSE tokKind := 11 END
+  ELSIF c = '@' THEN tokKind := 13; INC(srcPos)
   ELSIF c = '"' THEN
     tokKind := 9; INC(srcPos); i := 0;
     WHILE (srcPos < srcLen) & (src[srcPos] # '"') & (i < MaxStr-1) DO
@@ -345,11 +356,18 @@ BEGIN
   | 1: RETURN ParseSeq(2)
   | 3: RETURN ParseSeq(4)
   | 5: RETURN ParseMap()
-  | 7: NextTok; v := ParseExpr();
-       q := Cons(MkSym("quote"), Cons(v, NilV));
-       RETURN q
-  | 8: RETURN ParseAtom()
-  | 9: RETURN MkStr(tok)
+  | 7:  NextTok; v := ParseExpr();
+        q := Cons(MkSym("quote"), Cons(v, NilV)); RETURN q
+  | 8:  RETURN ParseAtom()
+  | 9:  RETURN MkStr(tok)
+  | 10: NextTok; v := ParseExpr();
+        q := Cons(MkSym("quasiquote"), Cons(v, NilV)); RETURN q
+  | 11: NextTok; v := ParseExpr();
+        q := Cons(MkSym("unquote"), Cons(v, NilV)); RETURN q
+  | 12: NextTok; v := ParseExpr();
+        q := Cons(MkSym("unquote-splicing"), Cons(v, NilV)); RETURN q
+  | 13: NextTok; v := ParseExpr();
+        q := Cons(MkSym("deref"), Cons(v, NilV)); RETURN q
   ELSE Error("unexpected token"); RETURN NilV
   END
 END ParseExpr;
@@ -447,6 +465,10 @@ BEGIN
   | tFn: WriteStr("#<fn>")
   | tBuiltin: WriteStr("#<builtin "); WriteStr(v.name); Out.Char('>')
   | tMacro: WriteStr("#<macro>")
+  | tAtom: WriteStr("#<Atom: "); PrintValue(v.head, readable); Out.Char('>')
+  | tDelay:
+      IF v.head # NIL THEN WriteStr("#<Delay: "); PrintValue(v.head, readable); Out.Char('>')
+      ELSE WriteStr("#<Delay (pending)>") END
   ELSE WriteStr("#<?>")
   END
 END PrintValue;
@@ -635,6 +657,92 @@ BEGIN
   END;
   RETURN result
 END ForExpand;
+
+(* ---------- Protocol dispatch fn builder (module-level, no env capture) ---------- *)
+
+PROCEDURE MakeDispatchFn(mname: ARRAY OF CHAR): Value;
+VAR fnVal, params: Value;
+    getDisp, getType, nameType, orExpr, getImpl: Value;
+    letBinds, applyExpr, ifExpr, letExpr: Value;
+BEGIN
+  getDisp := Cons(MkSym("get"),
+               Cons(MkSym("__proto_dispatch__"), Cons(MkStr(mname), NilV)));
+  getType := Cons(MkSym("get"),
+               Cons(MkSym("__this__"), Cons(MkKey("__type__"), NilV)));
+  nameType := Cons(MkSym("name"),
+                Cons(Cons(MkSym("type"), Cons(MkSym("__this__"), NilV)), NilV));
+  orExpr := Cons(MkSym("or"), Cons(getType, Cons(nameType, NilV)));
+  getImpl := Cons(MkSym("get"), Cons(getDisp, Cons(orExpr, NilV)));
+  letBinds := MkVec(MkSym("__impl__"), MkVec(getImpl, NilV));
+  applyExpr := Cons(MkSym("apply"),
+                 Cons(MkSym("__impl__"),
+                   Cons(MkSym("__this__"), Cons(MkSym("__args__"), NilV))));
+  ifExpr := Cons(MkSym("if"),
+              Cons(MkSym("__impl__"), Cons(applyExpr, Cons(NilV, NilV))));
+  letExpr := Cons(MkSym("let"), Cons(letBinds, Cons(ifExpr, NilV)));
+  params := MkVec(MkSym("__this__"),
+              MkVec(MkSym("&"), MkVec(MkSym("__args__"), NilV)));
+  NEW(fnVal); fnVal.tag := tFn;
+  fnVal.params := params;
+  fnVal.body := Cons(letExpr, NilV);
+  fnVal.closure := GlobalEnv;
+  RETURN fnVal
+END MakeDispatchFn;
+
+(* ---------- Quasiquote expansion (AST transform, no eval) ---------- *)
+
+PROCEDURE ExpandQQ(form: Value): Value;
+VAR p, parts, partsLast, cell, expanded: Value; hasSplice: BOOLEAN;
+BEGIN
+  IF IsNil(form) THEN RETURN Cons(MkSym("quote"), Cons(NilV, NilV)) END;
+  IF form.tag = tSym THEN RETURN Cons(MkSym("quote"), Cons(form, NilV)) END;
+  IF (form.tag # tList) & (form.tag # tVec) THEN RETURN form END;
+  IF form.tag = tVec THEN
+    (* Convert vec spine to list, expand as list, then unpack into (apply vector ...) *)
+    p := form; parts := NilV; partsLast := NIL;
+    WHILE ~IsNil(p) DO
+      cell := Cons(p.head, NilV);
+      IF partsLast = NIL THEN parts := cell ELSE partsLast.tail := cell END;
+      partsLast := cell; p := p.tail
+    END;
+    RETURN Cons(MkSym("apply"),
+             Cons(MkSym("vector"),
+               Cons(ExpandQQ(parts), NilV)))
+  END;
+  IF ~IsNil(form.head) & (form.head.tag = tSym) & (form.head.s = "unquote") THEN
+    IF IsNil(form.tail) THEN RETURN NilV END;
+    RETURN form.tail.head
+  END;
+  hasSplice := FALSE; p := form;
+  WHILE ~IsNil(p) DO
+    IF (p.head # NIL) & (p.head.tag = tList) & ~IsNil(p.head.head)
+       & (p.head.head.tag = tSym) & (p.head.head.s = "unquote-splicing") THEN
+      hasSplice := TRUE
+    END;
+    p := p.tail
+  END;
+  IF ~hasSplice THEN
+    parts := Cons(MkSym("list"), NilV); partsLast := parts; p := form;
+    WHILE ~IsNil(p) DO
+      cell := Cons(ExpandQQ(p.head), NilV);
+      partsLast.tail := cell; partsLast := cell; p := p.tail
+    END;
+    RETURN parts
+  ELSE
+    parts := Cons(MkSym("concat"), NilV); partsLast := parts; p := form;
+    WHILE ~IsNil(p) DO
+      IF (p.head.tag = tList) & ~IsNil(p.head.head) & (p.head.head.tag = tSym)
+         & (p.head.head.s = "unquote-splicing") THEN
+        cell := Cons(p.head.tail.head, NilV)
+      ELSE
+        expanded := ExpandQQ(p.head);
+        cell := Cons(Cons(MkSym("list"), Cons(expanded, NilV)), NilV)
+      END;
+      partsLast.tail := cell; partsLast := cell; p := p.tail
+    END;
+    RETURN parts
+  END
+END ExpandQQ;
 
 (* ---------- Evaluator ---------- *)
 
@@ -918,6 +1026,283 @@ PROCEDURE Eval*(expr: Value; env: Env): Value;
     RETURN macV
   END DoDefmacro;
 
+  PROCEDURE DoThrow(args: Value): Value;
+  VAR v: Value;
+  BEGIN
+    v := EvalRef(args.head, env);
+    IF err THEN RETURN NilV END;
+    thrownVal := v; isThrown := TRUE; err := TRUE;
+    RETURN NilV
+  END DoThrow;
+
+  PROCEDURE IsCatchOrFinally(v: Value): BOOLEAN;
+  BEGIN
+    RETURN (v.tag = tList) & ~IsNil(v.head) & (v.head.tag = tSym)
+           & ((v.head.s = "catch") OR (v.head.s = "finally"))
+  END IsCatchOrFinally;
+
+  PROCEDURE DoTry(args: Value): Value;
+  VAR clause, result, catchSym, catchBody, p, finallyForms: Value;
+      hasCatch, hasFinally, wasErr, wasThrown: BOOLEAN;
+      newEnv: Env; savedMsg: ARRAY 256 OF CHAR; savedThrown: Value;
+  BEGIN
+    hasCatch := FALSE; hasFinally := FALSE;
+    catchSym := NilV; catchBody := NilV; finallyForms := NilV; result := NilV;
+    wasErr := FALSE; wasThrown := FALSE; savedThrown := NilV;
+    p := args;
+    WHILE ~IsNil(p) DO
+      IF IsCatchOrFinally(p.head) THEN EXIT END;
+      IF ~err THEN result := EvalRef(p.head, env) END;
+      p := p.tail
+    END;
+    WHILE ~IsNil(p) & ~IsCatchOrFinally(p.head) DO p := p.tail END;
+    WHILE ~IsNil(p) DO
+      clause := p.head;
+      IF IsCatchOrFinally(clause) THEN
+        IF clause.head.s = "catch" THEN
+          hasCatch := TRUE;
+          IF ~IsNil(clause.tail) & ~IsNil(clause.tail.tail) THEN
+            catchSym := clause.tail.tail.head;
+            catchBody := clause.tail.tail.tail
+          END
+        ELSIF clause.head.s = "finally" THEN
+          hasFinally := TRUE; finallyForms := clause.tail
+        END
+      END;
+      p := p.tail
+    END;
+    wasErr := err;
+    IF wasErr THEN
+      wasThrown := isThrown;
+      IF wasThrown THEN savedThrown := thrownVal
+      ELSE Strings.Copy(errMsg, savedMsg); savedThrown := MkStr(savedMsg) END
+    END;
+    IF wasErr & hasCatch THEN
+      err := FALSE; isThrown := FALSE;
+      newEnv := NewEnv(env);
+      IF ~IsNil(catchSym) & (catchSym.tag = tSym) THEN
+        Define(newEnv, catchSym.s, savedThrown)
+      END;
+      result := NilV;
+      WHILE ~IsNil(catchBody) & ~err DO
+        result := EvalRef(catchBody.head, newEnv); catchBody := catchBody.tail
+      END
+    END;
+    IF hasFinally THEN
+      wasErr := err; Strings.Copy(errMsg, savedMsg);
+      wasThrown := isThrown; savedThrown := thrownVal;
+      err := FALSE;
+      WHILE ~IsNil(finallyForms) DO
+        EvalRef(finallyForms.head, env); finallyForms := finallyForms.tail
+      END;
+      IF wasErr THEN
+        err := TRUE; Strings.Copy(savedMsg, errMsg);
+        isThrown := wasThrown; thrownVal := savedThrown
+      ELSE err := FALSE END
+    END;
+    RETURN result
+  END DoTry;
+
+  PROCEDURE DoQuasiquote(args: Value): Value;
+  VAR expanded: Value;
+  BEGIN
+    IF IsNil(args) THEN RETURN NilV END;
+    expanded := ExpandQQ(args.head);
+    RETURN EvalRef(expanded, env)
+  END DoQuasiquote;
+
+  PROCEDURE DoLetfn(args: Value): Value;
+  VAR fnDefs, body, def, name, fnVal, result: Value; newEnv: Env;
+  BEGIN
+    fnDefs := args.head; body := args.tail;
+    newEnv := NewEnv(env);
+    def := fnDefs;
+    WHILE ~IsNil(def) DO
+      IF ~IsNil(def.head) & ~IsNil(def.head.head) & (def.head.head.tag = tSym) THEN
+        Define(newEnv, def.head.head.s, NilV)
+      END;
+      def := def.tail
+    END;
+    def := fnDefs;
+    WHILE ~IsNil(def) DO
+      IF ~IsNil(def.head) & ~IsNil(def.head.head) & (def.head.head.tag = tSym) THEN
+        name := def.head.head;
+        NEW(fnVal); fnVal.tag := tFn;
+        fnVal.params := def.head.tail.head;
+        fnVal.body := def.head.tail.tail;
+        fnVal.closure := newEnv;
+        Define(newEnv, name.s, fnVal)
+      END;
+      def := def.tail
+    END;
+    result := NilV;
+    WHILE ~IsNil(body) & ~err DO
+      result := EvalRef(body.head, newEnv); body := body.tail
+    END;
+    RETURN result
+  END DoLetfn;
+
+  PROCEDURE DoDelay(args: Value): Value;
+  VAR v: Value;
+  BEGIN
+    NEW(v); v.tag := tDelay; v.head := NIL;
+    v.body := Cons(MkSym("do"), args);
+    v.closure := env;
+    RETURN v
+  END DoDelay;
+
+  PROCEDURE DoFuture(args: Value): Value;
+  VAR v, result: Value;
+  BEGIN
+    result := EvalRef(args.head, env);
+    IF err THEN RETURN NilV END;
+    NEW(v); v.tag := tAtom; v.head := result;
+    RETURN v
+  END DoFuture;
+
+  PROCEDURE DoDefrecord(args: Value): Value;
+  VAR typeName, fields, p: Value;
+      fnVal, mapKeys, mapVals, kLast, vLast, c: Value;
+      buf: ARRAY MaxStr OF CHAR;
+  BEGIN
+    typeName := args.head; fields := args.tail.head;
+    IF IsNil(typeName) OR (typeName.tag # tSym) THEN
+      Error("defrecord: needs name"); RETURN NilV
+    END;
+    IF IsNil(fields) OR ((fields.tag # tVec) & (fields.tag # tList)) THEN
+      Error("defrecord: needs fields vector"); RETURN NilV
+    END;
+    (* ->TypeName constructor — use (hash-map ...) so field syms get evaluated *)
+    NEW(fnVal); fnVal.tag := tFn; fnVal.params := fields;
+    mapKeys := Cons(MkSym("hash-map"), NilV); kLast := mapKeys;
+    (* first pair: :__type__ "TypeName" *)
+    c := Cons(MkKey("__type__"), NilV); kLast.tail := c; kLast := c;
+    c := Cons(MkStr(typeName.s), NilV); kLast.tail := c; kLast := c;
+    p := fields;
+    WHILE ~IsNil(p) DO
+      IF (p.head # NIL) & (p.head.tag = tSym) THEN
+        c := Cons(MkKey(p.head.s), NilV); kLast.tail := c; kLast := c;
+        c := Cons(MkSym(p.head.s), NilV); kLast.tail := c; kLast := c
+      END;
+      p := p.tail
+    END;
+    fnVal.body := Cons(mapKeys, NilV);  (* mapKeys is now the (hash-map ...) call *)
+    fnVal.closure := GlobalEnv;
+    Strings.Copy("->", buf); Strings.Append(typeName.s, buf);
+    Define(GlobalEnv, buf, fnVal);
+    (* TypeName? predicate: (fn [x] (= (get x :__type__) "TypeName")) *)
+    NEW(fnVal); fnVal.tag := tFn;
+    fnVal.params := Cons(MkSym("x"), NilV);
+    fnVal.body := Cons(
+      Cons(MkSym("="),
+        Cons(Cons(MkSym("get"), Cons(MkSym("x"), Cons(MkKey("__type__"), NilV))),
+             Cons(MkStr(typeName.s), NilV))), NilV);
+    fnVal.closure := GlobalEnv;
+    Strings.Copy(typeName.s, buf); Strings.Append("?", buf);
+    Define(GlobalEnv, buf, fnVal);
+    (* map->TypeName: (fn [m] (assoc m :__type__ "TypeName")) *)
+    NEW(fnVal); fnVal.tag := tFn;
+    fnVal.params := Cons(MkSym("m"), NilV);
+    fnVal.body := Cons(
+      Cons(MkSym("assoc"),
+        Cons(MkSym("m"), Cons(MkKey("__type__"), Cons(MkStr(typeName.s), NilV)))), NilV);
+    fnVal.closure := GlobalEnv;
+    Strings.Copy("map->", buf); Strings.Append(typeName.s, buf);
+    Define(GlobalEnv, buf, fnVal);
+    RETURN MkSym(typeName.s)
+  END DoDefrecord;
+
+  PROCEDURE DoDefprotocol(args: Value): Value;
+  VAR protoName, methods, method, p: Value;
+      mname: ARRAY MaxStr OF CHAR;
+      protoMethods, last, c: Value;
+  BEGIN
+    protoName := args.head; methods := args.tail;
+    IF IsNil(protoName) OR (protoName.tag # tSym) THEN
+      Error("defprotocol: needs name"); RETURN NilV
+    END;
+    p := Lookup(GlobalEnv, "__proto_dispatch__");
+    IF p = NIL THEN Define(GlobalEnv, "__proto_dispatch__", MkMap(NilV, NilV)) END;
+    p := Lookup(GlobalEnv, "__protocols__");
+    IF p = NIL THEN Define(GlobalEnv, "__protocols__", MkMap(NilV, NilV)) END;
+    protoMethods := NilV; last := NIL;
+    WHILE ~IsNil(methods) DO
+      method := methods.head;
+      IF (method.tag = tList) & ~IsNil(method.head) & (method.head.tag = tSym) THEN
+        Strings.Copy(method.head.s, mname);
+        c := Cons(MkStr(mname), NilV);
+        IF last = NIL THEN protoMethods := c ELSE last.tail := c END;
+        last := c;
+        Define(GlobalEnv, mname, MakeDispatchFn(mname))
+      END;
+      methods := methods.tail
+    END;
+    p := Lookup(GlobalEnv, "__protocols__");
+    p := BAssoc(Cons(p, Cons(MkStr(protoName.s), Cons(protoMethods, NilV))), GlobalEnv);
+    Define(GlobalEnv, "__protocols__", p);
+    RETURN MkSym(protoName.s)
+  END DoDefprotocol;
+
+  PROCEDURE RegisterMethodImpl(tname, mname: ARRAY OF CHAR; fnVal: Value);
+  VAR p: Value;
+  BEGIN
+    p := Lookup(GlobalEnv, "__proto_dispatch__");
+    IF p = NIL THEN p := MkMap(NilV, NilV); Define(GlobalEnv, "__proto_dispatch__", p) END;
+    p := BAssocIn(Cons(p,
+      Cons(Cons(MkStr(mname), Cons(MkStr(tname), NilV)),
+           Cons(fnVal, NilV))), GlobalEnv);
+    Define(GlobalEnv, "__proto_dispatch__", p)
+  END RegisterMethodImpl;
+
+  PROCEDURE DoExtendType(args: Value): Value;
+  VAR typeName, methods, method, fnVal: Value;
+      tname, mname: ARRAY MaxStr OF CHAR;
+  BEGIN
+    typeName := args.head; methods := args.tail.tail; (* skip protocol name *)
+    IF IsNil(typeName) OR (typeName.tag # tSym) THEN
+      Error("extend-type: needs type name"); RETURN NilV
+    END;
+    Strings.Copy(typeName.s, tname);
+    WHILE ~IsNil(methods) DO
+      method := methods.head;
+      IF (method.tag = tList) & ~IsNil(method.head) & (method.head.tag = tSym) THEN
+        Strings.Copy(method.head.s, mname);
+        NEW(fnVal); fnVal.tag := tFn;
+        fnVal.params := method.tail.head;
+        fnVal.body := method.tail.tail;
+        fnVal.closure := env;
+        RegisterMethodImpl(tname, mname, fnVal)
+      END;
+      methods := methods.tail
+    END;
+    RETURN NilV
+  END DoExtendType;
+
+  PROCEDURE DoExtendProtocol(args: Value): Value;
+  VAR rest, typeName, method, fnVal: Value;
+      tname, mname: ARRAY MaxStr OF CHAR;
+  BEGIN
+    rest := args.tail; (* skip protocol name *)
+    WHILE ~IsNil(rest) DO
+      typeName := rest.head; rest := rest.tail;
+      IF IsNil(typeName) OR (typeName.tag # tSym) THEN EXIT END;
+      Strings.Copy(typeName.s, tname);
+      WHILE ~IsNil(rest) & (rest.head.tag = tList) DO
+        method := rest.head;
+        IF ~IsNil(method.head) & (method.head.tag = tSym) THEN
+          Strings.Copy(method.head.s, mname);
+          NEW(fnVal); fnVal.tag := tFn;
+          fnVal.params := method.tail.head;
+          fnVal.body := method.tail.tail;
+          fnVal.closure := env;
+          RegisterMethodImpl(tname, mname, fnVal)
+        END;
+        rest := rest.tail
+      END
+    END;
+    RETURN NilV
+  END DoExtendProtocol;
+
   PROCEDURE DoDocForm(args: Value): Value;
   VAR v: Value;
   BEGIN
@@ -1040,6 +1425,17 @@ BEGIN
         ELSIF sym = "loop" THEN RETURN DoLoop(expr.tail)
         ELSIF sym = "recur" THEN RETURN DoRecur(expr.tail)
         ELSIF sym = "defmacro" THEN RETURN DoDefmacro(expr.tail)
+        ELSIF sym = "throw" THEN RETURN DoThrow(expr.tail)
+        ELSIF sym = "try" THEN RETURN DoTry(expr.tail)
+        ELSIF sym = "quasiquote" THEN RETURN DoQuasiquote(expr.tail)
+        ELSIF sym = "letfn" THEN RETURN DoLetfn(expr.tail)
+        ELSIF sym = "delay" THEN RETURN DoDelay(expr.tail)
+        ELSIF sym = "future" THEN RETURN DoFuture(expr.tail)
+        ELSIF sym = "dosync" THEN RETURN DoDo(expr.tail)
+        ELSIF sym = "defrecord" THEN RETURN DoDefrecord(expr.tail)
+        ELSIF sym = "defprotocol" THEN RETURN DoDefprotocol(expr.tail)
+        ELSIF sym = "extend-type" THEN RETURN DoExtendType(expr.tail)
+        ELSIF sym = "extend-protocol" THEN RETURN DoExtendProtocol(expr.tail)
         ELSIF sym = "doc" THEN RETURN DoDocForm(expr.tail)
         ELSIF sym = "->" THEN RETURN DoThread(expr.tail, TRUE)
         ELSIF sym = "->>" THEN RETURN DoThread(expr.tail, FALSE)
@@ -1048,6 +1444,9 @@ BEGIN
       END;
       fn := EvalRef(head, env);
       IF err THEN RETURN NilV END;
+      IF (fn # NIL) & (fn.tag = tMacro) THEN
+        RETURN Apply(fn, expr.tail, env)
+      END;
       evArgs := EvalList(expr.tail, env);
       IF err THEN RETURN NilV END;
       RETURN Apply(fn, evArgs, env)
@@ -1209,22 +1608,25 @@ BEGIN
 END BGE;
 
 PROCEDURE ValueEqual(a, b: Value): BOOLEAN;
-VAR pa, pb: Value;
+VAR pa, pb: Value; isSeqA, isSeqB: BOOLEAN;
 BEGIN
   IF IsNil(a) & IsNil(b) THEN RETURN TRUE END;
   IF IsNil(a) OR IsNil(b) THEN RETURN FALSE END;
   IF IsNum(a) & IsNum(b) THEN RETURN NumsEqual(a, b) END;
+  isSeqA := (a.tag = tList) OR (a.tag = tVec);
+  isSeqB := (b.tag = tList) OR (b.tag = tVec);
+  IF isSeqA & isSeqB THEN
+    pa := a; pb := b;
+    WHILE ~IsNil(pa) & ~IsNil(pb) DO
+      IF ~ValueEqual(pa.head, pb.head) THEN RETURN FALSE END;
+      pa := pa.tail; pb := pb.tail
+    END;
+    RETURN IsNil(pa) & IsNil(pb)
+  END;
   IF a.tag # b.tag THEN RETURN FALSE END;
   CASE a.tag OF
     tBool: RETURN a.b = b.b
   | tStr, tSym, tKey: RETURN a.s = b.s
-  | tList, tVec:
-      pa := a; pb := b;
-      WHILE ~IsNil(pa) & ~IsNil(pb) DO
-        IF ~ValueEqual(pa.head, pb.head) THEN RETURN FALSE END;
-        pa := pa.tail; pb := pb.tail
-      END;
-      RETURN IsNil(pa) & IsNil(pb)
   ELSE RETURN FALSE
   END
 END ValueEqual;
@@ -1615,12 +2017,14 @@ BEGIN
 END BQuot;
 
 PROCEDURE BRem(args: Value; env: Env): Value;
-VAR a, b: Value;
+VAR a, b, r: Value; ri: INTEGER;
 BEGIN
   a := args.head; b := args.tail.head;
   IF (a.tag # tInt) OR (b.tag # tInt) THEN Error("rem: needs ints"); RETURN NilV END;
   IF b.i = 0 THEN Error("rem: division by zero"); RETURN NilV END;
-  RETURN MkInt(a.i - (a.i DIV b.i) * b.i)
+  ri := a.i - (a.i DIV b.i) * b.i;  (* floor remainder *)
+  IF (ri # 0) & ((a.i < 0) # (b.i < 0)) THEN ri := ri - b.i END;  (* truncate toward zero *)
+  RETURN MkInt(ri)
 END BRem;
 
 PROCEDURE BMax(args: Value; env: Env): Value;
@@ -2032,9 +2436,19 @@ VAR v: Value; i: INTEGER; first, last, cell: Value; buf: ARRAY 2 OF CHAR;
 BEGIN
   v := args.head;
   IF IsNil(v) THEN RETURN NilV END;
-  IF (v.tag = tList) OR (v.tag = tVec) THEN
+  IF v.tag = tList THEN
     IF ListLen(v) = 0 THEN RETURN NilV END;
     RETURN v
+  END;
+  IF v.tag = tVec THEN
+    IF ListLen(v) = 0 THEN RETURN NilV END;
+    first := NilV; last := NIL;
+    WHILE ~IsNil(v) DO
+      cell := Cons(v.head, NilV);
+      IF last = NIL THEN first := cell ELSE last.tail := cell END;
+      last := cell; v := v.tail
+    END;
+    RETURN first
   END;
   IF v.tag = tStr THEN
     i := 0; first := NilV; last := NIL; buf[1] := 0X;
@@ -2456,6 +2870,128 @@ END BStrCompare;
 PROCEDURE BIdentity(args: Value; env: Env): Value;
 BEGIN RETURN args.head END BIdentity;
 
+(* Atoms and concurrency *)
+PROCEDURE BAtom(args: Value; env: Env): Value;
+VAR v: Value;
+BEGIN
+  NEW(v); v.tag := tAtom;
+  IF IsNil(args) THEN v.head := NilV ELSE v.head := args.head END;
+  RETURN v
+END BAtom;
+
+PROCEDURE BAtomQ(args: Value; env: Env): Value;
+BEGIN RETURN MkBool(~IsNil(args.head) & (args.head.tag = tAtom)) END BAtomQ;
+
+PROCEDURE BDeref(args: Value; env: Env): Value;
+VAR v: Value;
+BEGIN
+  v := args.head;
+  IF IsNil(v) THEN Error("deref: nil"); RETURN NilV END;
+  IF v.tag = tAtom THEN RETURN v.head END;
+  IF v.tag = tDelay THEN
+    IF v.head = NIL THEN
+      v.head := EvalRef(v.body, v.closure);
+      IF err THEN v.head := NIL; RETURN NilV END
+    END;
+    RETURN v.head
+  END;
+  Error("deref: not an atom or delay"); RETURN NilV
+END BDeref;
+
+PROCEDURE BResetBang(args: Value; env: Env): Value;
+VAR atom, newVal: Value;
+BEGIN
+  atom := args.head; newVal := args.tail.head;
+  IF IsNil(atom) OR (atom.tag # tAtom) THEN Error("reset!: not an atom"); RETURN NilV END;
+  atom.head := newVal;
+  RETURN newVal
+END BResetBang;
+
+PROCEDURE BSwapBang(args: Value; env: Env): Value;
+VAR atom, fn, newVal, fnArgs: Value;
+BEGIN
+  atom := args.head; fn := args.tail.head;
+  IF IsNil(atom) OR (atom.tag # tAtom) THEN Error("swap!: not an atom"); RETURN NilV END;
+  fnArgs := Cons(atom.head, args.tail.tail);
+  newVal := Apply(fn, fnArgs, env);
+  IF err THEN RETURN NilV END;
+  atom.head := newVal;
+  RETURN newVal
+END BSwapBang;
+
+PROCEDURE BForce(args: Value; env: Env): Value;
+VAR v: Value;
+BEGIN
+  v := args.head;
+  IF IsNil(v) THEN RETURN NilV END;
+  IF v.tag = tDelay THEN
+    IF v.head = NIL THEN
+      v.head := EvalRef(v.body, v.closure);
+      IF err THEN v.head := NIL; RETURN NilV END
+    END;
+    RETURN v.head
+  END;
+  RETURN v
+END BForce;
+
+PROCEDURE BPromise(args: Value; env: Env): Value;
+VAR v: Value;
+BEGIN NEW(v); v.tag := tAtom; v.head := NilV; RETURN v END BPromise;
+
+PROCEDURE BDeliver(args: Value; env: Env): Value;
+VAR promise, val: Value;
+BEGIN
+  promise := args.head; val := args.tail.head;
+  IF IsNil(promise) OR (promise.tag # tAtom) THEN Error("deliver: not a promise"); RETURN NilV END;
+  promise.head := val;
+  RETURN promise
+END BDeliver;
+
+PROCEDURE BFutureQ(args: Value; env: Env): Value;
+BEGIN RETURN MkBool(~IsNil(args.head) & (args.head.tag = tAtom)) END BFutureQ;
+
+PROCEDURE BFutureDoneQ(args: Value; env: Env): Value;
+BEGIN RETURN TrueV END BFutureDoneQ;
+
+PROCEDURE BSatisfiesQ(args: Value; env: Env): Value;
+VAR proto, obj, methods, p, tname, disp, impl: Value;
+BEGIN
+  proto := args.head; obj := args.tail.head;
+  IF IsNil(proto) THEN RETURN FalseV END;
+  tname := MapGet(obj, MkKey("__type__"));
+  IF IsNil(tname) THEN RETURN FalseV END;
+  p := Lookup(GlobalEnv, "__protocols__");
+  IF p = NIL THEN RETURN FalseV END;
+  methods := MapGet(p, MkStr(proto.s));
+  IF IsNil(methods) THEN RETURN FalseV END;
+  disp := Lookup(GlobalEnv, "__proto_dispatch__");
+  IF disp = NIL THEN RETURN FalseV END;
+  WHILE ~IsNil(methods) DO
+    impl := MapGet(MapGet(disp, methods.head), tname);
+    IF IsNil(impl) THEN RETURN FalseV END;
+    methods := methods.tail
+  END;
+  RETURN TrueV
+END BSatisfiesQ;
+
+PROCEDURE BInstanceQ(args: Value; env: Env): Value;
+VAR typeName, obj, t: Value;
+BEGIN
+  typeName := args.head; obj := args.tail.head;
+  IF IsNil(typeName) OR (typeName.tag # tSym) THEN RETURN FalseV END;
+  t := MapGet(obj, MkKey("__type__"));
+  IF IsNil(t) THEN RETURN FalseV END;
+  RETURN MkBool(t.s = typeName.s)
+END BInstanceQ;
+
+PROCEDURE BThrow(args: Value; env: Env): Value;
+VAR v: Value;
+BEGIN
+  v := args.head;
+  thrownVal := v; isThrown := TRUE; err := TRUE;
+  RETURN NilV
+END BThrow;
+
 (* I/O *)
 PROCEDURE BPrint(args: Value; env: Env): Value;
 VAR first: BOOLEAN;
@@ -2611,7 +3147,7 @@ BEGIN
   fn := args.head; coll := args.tail.head;
   first := NilV; last := NIL; i := 0;
   WHILE ~IsNil(coll) & ~err DO
-    callArgs := Cons(coll.head, Cons(MkInt(i), NilV));
+    callArgs := Cons(MkInt(i), Cons(coll.head, NilV));
     result := Apply(fn, callArgs, env);
     IF err THEN RETURN NilV END;
     cell := Cons(result, NilV);
@@ -2714,6 +3250,14 @@ BEGIN
   RETURN TRUE
 END LoadFile;
 
+PROCEDURE EvalStr*(s: ARRAY OF CHAR): Value;
+VAR v: Value;
+BEGIN
+  v := ReadStr(s);
+  IF err THEN RETURN NilV END;
+  RETURN Eval(v, GlobalEnv)
+END EvalStr;
+
 PROCEDURE BLoadFile(args: Value; env: Env): Value;
 VAR path: Value; ok: BOOLEAN;
 BEGIN
@@ -2746,12 +3290,13 @@ BEGIN
   err := FALSE
 END Eval1;
 
-PROCEDURE Init;
+PROCEDURE Init*;
 BEGIN
   NEW(NilV); NilV.tag := tNil;
   NEW(TrueV); TrueV.tag := tBool; TrueV.b := TRUE;
   NEW(FalseV); FalseV.tag := tBool; FalseV.b := FALSE;
   doRecur := FALSE; recurArgs := NIL; gensymCount := 0;
+  isThrown := FALSE; thrownVal := NIL;
 
   EvalRef := Eval;
   GlobalEnv := NewEnv(NIL);
@@ -2922,6 +3467,27 @@ BEGIN
   RegisterDoc("gensym", BGensym, "Returns a unique symbol.");
   RegisterDoc("load-file", BLoadFile, "Loads Clojure source from a file.");
 
+  (* Atoms and concurrency *)
+  RegisterDoc("atom", BAtom, "Creates an atom with initial value.");
+  RegisterDoc("atom?", BAtomQ, "Returns true if x is an atom.");
+  RegisterDoc("deref", BDeref, "Returns the current value of an atom or forces a delay.");
+  RegisterDoc("reset!", BResetBang, "Sets the value of atom to newval without applying a fn.");
+  RegisterDoc("swap!", BSwapBang, "Atomically swaps value of atom to (f current-val & args).");
+  RegisterDoc("force", BForce, "Forces a delay. If not a delay, returns the value.");
+  RegisterDoc("promise", BPromise, "Returns a promise object that can be set once with deliver.");
+  RegisterDoc("deliver", BDeliver, "Delivers the supplied value to the promise.");
+  RegisterDoc("future?", BFutureQ, "Returns true if x is a future.");
+  RegisterDoc("future-done?", BFutureDoneQ, "Returns true if future f has a value (always true here).");
+  RegisterDoc("satisfies?", BSatisfiesQ, "Returns true if x satisfies the protocol.");
+  RegisterDoc("instance?", BInstanceQ, "Returns true if x is an instance of the named record type.");
+  RegisterDoc("throw", BThrow, "Throws an exception (builtin form; prefer (throw x) special form).");
+
+  (* Single-threaded STM stubs *)
+  Eval1("(def ref atom)");
+  Eval1("(defn alter [r f & args] (apply swap! r f args))");
+  Eval1("(defn commute [r f & args] (apply swap! r f args))");
+  Eval1("(defn ref-set [r v] (reset! r v))");
+
   (* Define PI and E as constants *)
   Define(GlobalEnv, "PI", MkReal(Math.pi));
   Define(GlobalEnv, "E", MkReal(Math.e));
@@ -2957,11 +3523,11 @@ BEGIN
   Eval1("(defn drop-last [n coll] (take (- (count coll) n) coll))");
   Eval1("(defn split-at [n coll] [(take n coll) (drop n coll)])");
   Eval1("(defn split-with [f coll] [(take-while f coll) (drop-while f coll)])");
-  Eval1("(defn interleave [& colls] (apply concat (apply map list colls)))");
+  Eval1("(defn interleave [& colls] (loop [cs colls acc []] (if (some empty? cs) (seq acc) (recur (map rest cs) (into acc (map first cs))))))");
   Eval1("(defn repeat [n x] (map (fn [_] x) (range n)))");
   Eval1("(defn repeatedly [n f] (map (fn [_] (f)) (range n)))");
-  Eval1("(defn iterate [f x] (take 1000 (loop [cur x acc []] (recur (f cur) (conj acc cur)))))");
-  Eval1("(defn cycle [coll] (take 1000 (loop [c coll acc []] (if (empty? c) (recur coll acc) (recur (rest c) (conj acc (first c)))))))");
+  Eval1("(defn iterate [f x] (loop [cur x acc [] n 0] (if (>= n 1000) acc (recur (f cur) (conj acc cur) (+ n 1)))))");
+  Eval1("(defn cycle [coll] (loop [c coll acc [] n 0] (if (>= n 1000) (seq acc) (if (empty? c) (recur coll acc n) (recur (rest c) (conj acc (first c)) (+ n 1))))))");
   Eval1("(defn flatten-1 [coll] (apply concat coll))");
   Eval1("(defn indexed [coll] (map list (range (count coll)) coll))");
   Eval1("(defn any? [pred coll] (not (nil? (some pred coll))))");
@@ -3065,5 +3631,5 @@ BEGIN
 END Main;
 
 BEGIN
-  Main
+  Init
 END Cloj.
