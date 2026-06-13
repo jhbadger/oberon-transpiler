@@ -1686,7 +1686,7 @@ MODULE obemacs;
         Strings.Copy("Rscript ", cmd);
         Strings.Append(curBuf.file, cmd)
     | SynClojure:
-        Strings.Copy("cloj ", cmd);
+        Strings.Copy("clojrepl ", cmd);
         Strings.Append(curBuf.file, cmd)
     ELSE
       SetEcho("No run command for this file type"); RETURN
@@ -1778,7 +1778,7 @@ MODULE obemacs;
 
     (* Run cloj, redirect all output to the output file *)
     Files.Delete(outFile);
-    Strings.Copy("cloj ", cmd);
+    Strings.Copy("clojrepl ", cmd);
     Strings.Append(sessFile, cmd);
     Strings.Append(" > ", cmd);
     Strings.Append(outFile, cmd);
