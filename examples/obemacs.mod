@@ -18,6 +18,7 @@ MODULE obemacs;
      Windows:    C-x 1 only-window, C-x 2 split-window,
                  C-x o other-window
      Search:     C-s isearch-forward, C-r isearch-backward
+     Clojure:    C-x C-e eval-last-sexp (inserts result as ; => comment)
      Misc:       C-g keyboard-quit, C-x C-c save-buffers-kill-emacs
                  M-x execute-extended-command
 
@@ -25,9 +26,10 @@ MODULE obemacs;
      .mod .obn .oberon         -> Oberon
      .rb                       -> Ruby
      .r .R                     -> R
+     .clj .cljs .cljc          -> Clojure
 *)
 
-  IMPORT Terminal, Editor, Strings, Files, Args, Out;
+  IMPORT Terminal, Editor, Strings, Files, Args, Out, OS;
 
   CONST
     MaxBuffers   = 32;
@@ -54,6 +56,7 @@ MODULE obemacs;
     SynOberon = 1;
     SynRuby   = 2;
     SynR      = 3;
+    SynClojure = 4;
 
     (* ANSI colors used by the highlighter *)
     ColDefault = 7;   (* white   - identifier / default *)
@@ -109,6 +112,12 @@ MODULE obemacs;
     inBlockComment: BOOLEAN;  (* Oberon  (* ... *)  spans lines *)
     blockDepth:     INTEGER;
 
+    showParenLine:  INTEGER;  (* 1-based line of matching paren; -1 = none *)
+    showParenCol:   INTEGER;  (* 1-based col  of matching paren *)
+
+    (* Clojure eval REPL session state: all previously evaluated forms. *)
+    replHistory:    ARRAY 65536 OF CHAR;
+
   (* ===================================================================
      small helpers
      =================================================================== *)
@@ -135,6 +144,13 @@ MODULE obemacs;
   BEGIN Strings.IntToStr(n, s)
   END IntToStr;
 
+  PROCEDURE WriteChars(VAR r: Files.Rider; s: ARRAY OF CHAR);
+    VAR i: INTEGER;
+  BEGIN
+    i := 0;
+    WHILE s[i] # 0X DO Files.Write(r, ORD(s[i])); INC(i) END
+  END WriteChars;
+
   PROCEDURE EndsWithAny(s: ARRAY OF CHAR; a, b, c: ARRAY OF CHAR): BOOLEAN;
   BEGIN
     RETURN Strings.EndsWith(s, a)
@@ -149,6 +165,7 @@ MODULE obemacs;
     IF Strings.EndsWith(path, ".r") OR Strings.EndsWith(path, ".R") THEN
       RETURN SynR
     END;
+    IF EndsWithAny(path, ".clj", ".cljs", ".cljc") THEN RETURN SynClojure END;
     RETURN SynNone
   END DetectSyntax;
 
@@ -373,13 +390,50 @@ MODULE obemacs;
     RETURN -1
   END RKeyword;
 
+  PROCEDURE IsClojureSymbolChar(c: CHAR): BOOLEAN;
+  BEGIN
+    RETURN IsIdent(c) OR (c = "-") OR (c = "?") OR (c = "!") OR (c = "*")
+  END IsClojureSymbolChar;
+
+  PROCEDURE ClojureKeyword(VAR w: ARRAY OF CHAR): INTEGER;
+  BEGIN
+    IF StrEq(w, "def")        OR StrEq(w, "defn")       OR StrEq(w, "defn-")
+    OR StrEq(w, "defmacro")   OR StrEq(w, "defmulti")   OR StrEq(w, "defmethod")
+    OR StrEq(w, "defprotocol") OR StrEq(w, "defrecord")  OR StrEq(w, "deftype")
+    OR StrEq(w, "ns")         OR StrEq(w, "fn")          OR StrEq(w, "fn*")
+    OR StrEq(w, "if")         OR StrEq(w, "if-not")      OR StrEq(w, "if-let")
+    OR StrEq(w, "when")       OR StrEq(w, "when-not")    OR StrEq(w, "when-let")
+    OR StrEq(w, "cond")       OR StrEq(w, "condp")       OR StrEq(w, "case")
+    OR StrEq(w, "let")        OR StrEq(w, "let*")        OR StrEq(w, "letfn")
+    OR StrEq(w, "loop")       OR StrEq(w, "recur")
+    OR StrEq(w, "do")         OR StrEq(w, "for")         OR StrEq(w, "doseq")
+    OR StrEq(w, "dotimes")    OR StrEq(w, "while")
+    OR StrEq(w, "try")        OR StrEq(w, "catch")       OR StrEq(w, "finally")
+    OR StrEq(w, "throw")      OR StrEq(w, "set!")
+    OR StrEq(w, "require")    OR StrEq(w, "use")         OR StrEq(w, "import")
+    OR StrEq(w, "and")        OR StrEq(w, "or")          OR StrEq(w, "not")
+    OR StrEq(w, "new")        OR StrEq(w, "quote")       OR StrEq(w, "var")
+    OR StrEq(w, "apply")      OR StrEq(w, "map")         OR StrEq(w, "filter")
+    OR StrEq(w, "reduce")     OR StrEq(w, "println")     OR StrEq(w, "print")
+    THEN RETURN ColKeyword END;
+    IF StrEq(w, "nil") OR StrEq(w, "true") OR StrEq(w, "false")
+    THEN RETURN ColConst END;
+    IF StrEq(w, "String")  OR StrEq(w, "Integer") OR StrEq(w, "Long")
+    OR StrEq(w, "Double")  OR StrEq(w, "Float")   OR StrEq(w, "Boolean")
+    OR StrEq(w, "List")    OR StrEq(w, "Map")      OR StrEq(w, "Set")
+    OR StrEq(w, "Vector")  OR StrEq(w, "Object")
+    THEN RETURN ColType END;
+    RETURN -1
+  END ClojureKeyword;
+
   (* Look up a keyword for the active syntax mode. *)
   PROCEDURE LookupKeyword(syntax: INTEGER; VAR w: ARRAY OF CHAR): INTEGER;
   BEGIN
     CASE syntax OF
-      SynOberon: RETURN OberonKeyword(w)
-    | SynRuby:   RETURN RubyKeyword(w)
-    | SynR:      RETURN RKeyword(w)
+      SynOberon:  RETURN OberonKeyword(w)
+    | SynRuby:    RETURN RubyKeyword(w)
+    | SynR:       RETURN RKeyword(w)
+    | SynClojure: RETURN ClojureKeyword(w)
     ELSE RETURN -1
     END
   END LookupKeyword;
@@ -463,6 +517,13 @@ MODULE obemacs;
           IF ~ok THEN RETURN END
         END;
         RETURN
+      ELSIF (syntax = SynClojure) & (ch = ";") THEN
+        WHILE (i < len) & (screenCol < cols) DO
+          ok := Emit(screenCol, row, line[i], ColComment);
+          INC(i);
+          IF ~ok THEN RETURN END
+        END;
+        RETURN
 
       (* --- Oberon block comment (* ... *) --------------------------- *)
       ELSIF (syntax = SynOberon) & (ch = "(") & (i + 1 < len) & (line[i+1] = "*") THEN
@@ -525,22 +586,41 @@ MODULE obemacs;
           IF ~ok THEN RETURN END
         END
 
+      (* --- Clojure keyword literals (:foo) -------------------------- *)
+      ELSIF (syntax = SynClojure) & (ch = ":") & (i + 1 < len) & IsAlpha(line[i + 1]) THEN
+        ok := Emit(screenCol, row, ":", ColConst);
+        INC(i);
+        IF ~ok THEN RETURN END;
+        WHILE (i < len) & IsClojureSymbolChar(line[i]) DO
+          ok := Emit(screenCol, row, line[i], ColConst);
+          INC(i);
+          IF ~ok THEN RETURN END
+        END
+
       (* --- identifiers / keywords ------------------------------------ *)
       ELSIF IsAlpha(ch) THEN
         wlen := 0;
-        WHILE (i < len) & IsIdent(line[i]) & (wlen < LEN(word) - 1) DO
-          word[wlen] := line[i]; INC(wlen); INC(i)
+        IF syntax = SynClojure THEN
+          WHILE (i < len) & IsClojureSymbolChar(line[i]) & (wlen < LEN(word) - 1) DO
+            word[wlen] := line[i]; INC(wlen); INC(i)
+          END
+        ELSE
+          WHILE (i < len) & IsIdent(line[i]) & (wlen < LEN(word) - 1) DO
+            word[wlen] := line[i]; INC(wlen); INC(i)
+          END
         END;
         word[wlen] := 0X;
         kc := LookupKeyword(syntax, word);
         IF kc < 0 THEN kc := ColDefault END;
         EmitWord(screenCol, row, word, kc);
         IF screenCol >= cols THEN RETURN END;
-        (* skip any remaining tail (e.g., colons after Ruby symbols) *)
-        WHILE (i < len) & IsIdent(line[i]) DO
-          ok := Emit(screenCol, row, line[i], ColDefault);
-          INC(i);
-          IF ~ok THEN RETURN END
+        (* skip any remaining tail for non-Clojure modes *)
+        IF syntax # SynClojure THEN
+          WHILE (i < len) & IsIdent(line[i]) DO
+            ok := Emit(screenCol, row, line[i], ColDefault);
+            INC(i);
+            IF ~ok THEN RETURN END
+          END
         END
 
       ELSE
@@ -550,6 +630,19 @@ MODULE obemacs;
       END
     END
   END RenderLine;
+
+  PROCEDURE CharIndexToScreenCol(VAR line: ARRAY OF CHAR; len, idx: INTEGER): INTEGER;
+    VAR i, sc: INTEGER;
+  BEGIN
+    i := 0; sc := 0;
+    WHILE (i < idx) & (i < len) DO
+      IF line[i] = 09X THEN
+        REPEAT INC(sc) UNTIL sc MOD 8 = 0
+      ELSE INC(sc) END;
+      INC(i)
+    END;
+    RETURN sc
+  END CharIndexToScreenCol;
 
   (* ===================================================================
      drawing
@@ -604,7 +697,17 @@ MODULE obemacs;
       Terminal.Goto(1, w.top + rowIdx);
       IF lineNo <= total THEN
         len := Editor.GetLine(w.buf.ed, lineNo, LEN(line), line);
-        RenderLine(w.buf.syntax, line, len, w.top + rowIdx)
+        RenderLine(w.buf.syntax, line, len, w.top + rowIdx);
+        IF (showParenLine >= 0) & (lineNo = showParenLine)
+           & (showParenCol >= 1) & (showParenCol - 1 < len) THEN
+          i := CharIndexToScreenCol(line, len, showParenCol - 1);
+          IF i < cols THEN
+            Terminal.Color(0, ColKeyword);
+            Terminal.Goto(i + 1, w.top + rowIdx);
+            Out.Char(line[showParenCol - 1]);
+            Terminal.Reset
+          END
+        END
       ELSE
         Terminal.Color(ColDefault, 0);
         Out.Char("~")
@@ -635,10 +738,11 @@ MODULE obemacs;
     END;
     Strings.Append("   (", modeLine);
     CASE w.buf.syntax OF
-      SynOberon: Strings.Append("Oberon", modeLine)
-    | SynRuby:   Strings.Append("Ruby", modeLine)
-    | SynR:      Strings.Append("R", modeLine)
-    ELSE         Strings.Append("Fundamental", modeLine)
+      SynOberon:  Strings.Append("Oberon", modeLine)
+    | SynRuby:    Strings.Append("Ruby", modeLine)
+    | SynR:       Strings.Append("R", modeLine)
+    | SynClojure: Strings.Append("Clojure", modeLine)
+    ELSE          Strings.Append("Fundamental", modeLine)
     END;
     Strings.Append(")", modeLine);
     Out.String(modeLine);
@@ -676,9 +780,87 @@ MODULE obemacs;
     Terminal.Goto(screenCol + 1, screenRow)
   END PlaceCursor;
 
+  PROCEDURE FindMatchingOpen(fromPos: INTEGER; open, close: CHAR): INTEGER;
+    VAR p, depth: INTEGER; ch: CHAR;
+  BEGIN
+    depth := 1; p := fromPos - 1;
+    WHILE p >= 0 DO
+      IF CharAt(p, ch) THEN
+        IF ch = close THEN INC(depth)
+        ELSIF ch = open THEN
+          DEC(depth);
+          IF depth = 0 THEN RETURN p END
+        END
+      END;
+      DEC(p)
+    END;
+    RETURN -1
+  END FindMatchingOpen;
+
+  PROCEDURE FindMatchingClose(fromPos: INTEGER; open, close: CHAR): INTEGER;
+    VAR p, depth, blen: INTEGER; ch: CHAR;
+  BEGIN
+    depth := 1; p := fromPos + 1; blen := BufLen();
+    WHILE p < blen DO
+      IF CharAt(p, ch) THEN
+        IF ch = open THEN INC(depth)
+        ELSIF ch = close THEN
+          DEC(depth);
+          IF depth = 0 THEN RETURN p END
+        END
+      END;
+      INC(p)
+    END;
+    RETURN -1
+  END FindMatchingClose;
+
+  PROCEDURE UpdateShowParen;
+    VAR pos, matchPos, savPos: INTEGER; ch: CHAR; open, close: CHAR;
+  BEGIN
+    showParenLine := -1; showParenCol := -1;
+    IF curBuf.syntax # SynClojure THEN RETURN END;
+    pos := PointPos();
+    (* cursor just after a close paren *)
+    IF pos > 0 THEN
+      IF CharAt(pos - 1, ch) THEN
+        IF (ch = ")") OR (ch = "]") OR (ch = "}") THEN
+          IF    ch = ")" THEN open := "("; close := ")"
+          ELSIF ch = "]" THEN open := "["; close := "]"
+          ELSE               open := "{"; close := "}" END;
+          matchPos := FindMatchingOpen(pos - 1, open, close);
+          IF matchPos >= 0 THEN
+            savPos := pos;
+            Editor.GotoPos(curBuf.ed, matchPos);
+            showParenLine := Editor.CursorLine(curBuf.ed);
+            showParenCol  := Editor.CursorCol(curBuf.ed);
+            Editor.GotoPos(curBuf.ed, savPos)
+          END;
+          RETURN
+        END
+      END
+    END;
+    (* cursor on an open paren *)
+    IF CharAt(pos, ch) THEN
+      IF (ch = "(") OR (ch = "[") OR (ch = "{") THEN
+        IF    ch = "(" THEN open := "("; close := ")"
+        ELSIF ch = "[" THEN open := "["; close := "]"
+        ELSE               open := "{"; close := "}" END;
+        matchPos := FindMatchingClose(pos, open, close);
+        IF matchPos >= 0 THEN
+          savPos := pos;
+          Editor.GotoPos(curBuf.ed, matchPos);
+          showParenLine := Editor.CursorLine(curBuf.ed);
+          showParenCol  := Editor.CursorCol(curBuf.ed);
+          Editor.GotoPos(curBuf.ed, savPos)
+        END
+      END
+    END
+  END UpdateShowParen;
+
   PROCEDURE Redraw;
     VAR w: Window;
   BEGIN
+    UpdateShowParen;
     Terminal.HideCursor;
     Terminal.Clear;
     w := rootWin;
@@ -1312,6 +1494,8 @@ MODULE obemacs;
         curBuf.syntax := SynRuby; SetEcho("Ruby mode")
     ELSIF Strings.Compare(name, "r-mode")           = 0 THEN
         curBuf.syntax := SynR; SetEcho("R mode")
+    ELSIF Strings.Compare(name, "clojure-mode")     = 0 THEN
+        curBuf.syntax := SynClojure; SetEcho("Clojure mode")
     ELSIF (Strings.Compare(name, "fundamental-mode") = 0)
        OR (Strings.Compare(name, "text-mode")        = 0) THEN
         curBuf.syntax := SynNone; SetEcho("Fundamental mode")
@@ -1337,6 +1521,7 @@ MODULE obemacs;
     ch := Terminal.ReadKey();
     CASE ch OF
       KCtrlC: SaveSomeBuffers; quitFlag := TRUE
+    | KCtrlE: CmdEvalSexpr
     | KCtrlF: FindFile
     | KCtrlS: SaveBuffer
     | KCtrlB: ListBuffers
@@ -1500,11 +1685,149 @@ MODULE obemacs;
     | SynR:
         Strings.Copy("Rscript ", cmd);
         Strings.Append(curBuf.file, cmd)
+    | SynClojure:
+        Strings.Copy("cloj ", cmd);
+        Strings.Append(curBuf.file, cmd)
     ELSE
       SetEcho("No run command for this file type"); RETURN
     END;
     Terminal.Shell(cmd)
   END CmdRunBuffer;
+
+  (* ===================================================================
+     C-x C-e: eval Clojure s-expression before cursor
+     =================================================================== *)
+
+  (* Extract buffer characters [start, finish) into dst. *)
+  PROCEDURE ExtractBuf(start, finish: INTEGER; VAR dst: ARRAY OF CHAR);
+    VAR i, n: INTEGER; ch: CHAR;
+  BEGIN
+    n := 0; i := start;
+    WHILE (i < finish) & (n < LEN(dst) - 1) DO
+      IF CharAt(i, ch) THEN dst[n] := ch; INC(n) END;
+      INC(i)
+    END;
+    dst[n] := 0X
+  END ExtractBuf;
+
+  (* Walk backward from the cursor to find the s-expression ending just
+     before it (cursor must be after a closing paren).  Returns the
+     inclusive start position and exclusive finish position. *)
+  PROCEDURE FindSexprBefore(VAR start, finish: INTEGER): BOOLEAN;
+    VAR p, depth: INTEGER; ch: CHAR;
+  BEGIN
+    p := PointPos() - 1;
+    WHILE (p >= 0) & CharAt(p, ch) & ((ch = " ") OR (ch = 0AX) OR (ch = 09X)) DO
+      DEC(p)
+    END;
+    IF (p < 0) OR ~CharAt(p, ch) OR (ch # ")") THEN
+      SetEcho("C-x C-e: point not after )"); RETURN FALSE
+    END;
+    finish := p + 1;
+    depth := 1; DEC(p);
+    WHILE (p >= 0) & (depth > 0) DO
+      IF CharAt(p, ch) THEN
+        IF ch = ")" THEN INC(depth)
+        ELSIF ch = "(" THEN DEC(depth)
+        END
+      END;
+      IF depth > 0 THEN DEC(p) END
+    END;
+    IF depth # 0 THEN SetEcho("C-x C-e: unbalanced parens"); RETURN FALSE END;
+    start := p;
+    RETURN TRUE
+  END FindSexprBefore;
+
+  (* Evaluate the Clojure s-expression immediately before the cursor.
+     Runs cloj with accumulated session history so prior definitions
+     remain visible.  Inserts the result as a "; =>" comment. *)
+  PROCEDURE CmdEvalSexpr;
+    VAR start, finish, rlen, i, rc: INTEGER;
+        sexpr: ARRAY 4096 OF CHAR;
+        sessFile, outFile: ARRAY 64 OF CHAR;
+        cmd, msg: ARRAY MaxStr OF CHAR;
+        f: Files.File; r: Files.Rider;
+        line, result: ARRAY 1024 OF CHAR;
+        inResult: BOOLEAN;
+        nl: ARRAY 2 OF CHAR;
+  BEGIN
+    IF curBuf.syntax # SynClojure THEN
+      SetEcho("C-x C-e: not in Clojure mode"); RETURN
+    END;
+    IF ~FindSexprBefore(start, finish) THEN RETURN END;
+    ExtractBuf(start, finish, sexpr);
+
+    sessFile := "/tmp/obecloj_sess.clj";
+    outFile  := "/tmp/obecloj_out.txt";
+
+    (* Write session file: accumulated history then eval wrapper *)
+    f := Files.New(sessFile);
+    IF f = NIL THEN SetEcho("C-x C-e: cannot write temp file"); RETURN END;
+    Files.Set(r, f, 0);
+    IF replHistory[0] # 0X THEN
+      WriteChars(r, replHistory)   (* history already ends with LF *)
+    END;
+    WriteChars(r, '(println ";;OBEMACS_SEP;;")');
+    Files.Write(r, 10);
+    WriteChars(r, "(println (do ");
+    WriteChars(r, sexpr);
+    WriteChars(r, "))");
+    Files.Write(r, 10);
+    Files.Register(f);
+    Files.Close(f);
+
+    (* Run cloj, redirect all output to the output file *)
+    Files.Delete(outFile);
+    Strings.Copy("cloj ", cmd);
+    Strings.Append(sessFile, cmd);
+    Strings.Append(" > ", cmd);
+    Strings.Append(outFile, cmd);
+    Strings.Append(" 2>&1", cmd);
+    rc := OS.Exec(cmd);
+
+    (* Collect output lines that follow the sentinel *)
+    result[0] := 0X; rlen := 0; inResult := FALSE;
+    f := Files.Old(outFile);
+    IF f # NIL THEN
+      Files.Set(r, f, 0);
+      WHILE ~r.eof DO
+        Files.ReadLine(r, line);
+        IF ~r.eof OR (line[0] # 0X) THEN
+          IF inResult THEN
+            IF rlen > 0 THEN result[rlen] := " "; INC(rlen) END;
+            i := 0;
+            WHILE (line[i] # 0X) & (rlen < LEN(result) - 1) DO
+              result[rlen] := line[i]; INC(rlen); INC(i)
+            END;
+            result[rlen] := 0X
+          ELSIF Strings.Compare(line, ";;OBEMACS_SEP;;") = 0 THEN
+            inResult := TRUE
+          END
+        END
+      END;
+      Files.Close(f)
+    END;
+
+    (* Insert "; => <result>" comment after the s-expression *)
+    GotoP(finish);
+    Editor.InsertStr(curBuf.ed, " ; => ");
+    IF result[0] # 0X THEN
+      Editor.InsertStr(curBuf.ed, result)
+    ELSE
+      Editor.InsertStr(curBuf.ed, "(no output)")
+    END;
+
+    (* Accumulate this form in history so future evals see its definitions *)
+    nl[0] := 0AX; nl[1] := 0X;
+    IF Strings.Length(replHistory) + Strings.Length(sexpr) + 2 < LEN(replHistory) THEN
+      Strings.Append(sexpr, replHistory);
+      Strings.Append(nl, replHistory)
+    END;
+
+    Strings.Copy("=> ", msg);
+    Strings.Append(result, msg);
+    SetEcho(msg)
+  END CmdEvalSexpr;
 
   (* ===================================================================
      main dispatch
@@ -1654,6 +1977,9 @@ BEGIN
   echoMsg[0]  := 0X;
   inBlockComment := FALSE;
   blockDepth  := 0;
+  showParenLine := -1;
+  showParenCol  := -1;
+  replHistory[0] := 0X;
 
   cols := Terminal.Cols();
   rows := Terminal.Rows();
