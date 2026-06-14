@@ -144,7 +144,7 @@ static int sym_is_var(const char *name) {
  * call sites can decide whether to pass an argument by address (VAR param)
  * or by value.
  * ----------------------------------------------------------------------- */
-#define MAX_PROCSIGS 256
+#define MAX_PROCSIGS 512
 typedef struct { char name[MAX_IDENT]; Node *params; Node *rettype; } ProcSig;
 static ProcSig g_procsigs[MAX_PROCSIGS];
 static int g_nprocsigs = 0;

@@ -1,6 +1,6 @@
 MODULE Cloj;
 
-IMPORT Out, Strings, Math, Random, History, Files, Args;
+IMPORT Out, Strings, Math, Random, History, Files, Args, Regex;
 
 CONST
   (* Value tags *)
@@ -20,6 +20,7 @@ CONST
   tAtom*   = 13;
   tDelay*  = 14;
   tSet*    = 15;
+  tRegex*  = 16;
 
   MaxTok   = 65536;
   MaxStr   = 256;
@@ -108,6 +109,10 @@ BEGIN NEW(v); v.tag := tSym; Strings.Copy(s, v.s); RETURN v END MkSym;
 PROCEDURE MkKey*(s: ARRAY OF CHAR): Value;
 VAR v: Value;
 BEGIN NEW(v); v.tag := tKey; Strings.Copy(s, v.s); RETURN v END MkKey;
+
+PROCEDURE MkRegex*(s: ARRAY OF CHAR): Value;
+VAR v: Value;
+BEGIN NEW(v); v.tag := tRegex; Strings.Copy(s, v.s); RETURN v END MkRegex;
 
 PROCEDURE Cons*(h, t: Value): Value;
 VAR v: Value;
@@ -303,6 +308,16 @@ BEGIN
   ELSIF c = '#' THEN
     IF (srcPos + 1 < srcLen) & (src[srcPos + 1] = '{') THEN
       tokKind := 14; srcPos := srcPos + 2
+    ELSIF (srcPos + 1 < srcLen) & (src[srcPos + 1] = '"') THEN
+      tokKind := 15; srcPos := srcPos + 2; i := 0;
+      WHILE (srcPos < srcLen) & (src[srcPos] # '"') & (i < MaxStr-1) DO
+        IF (src[srcPos] = '\') & (srcPos+1 < srcLen) & (src[srcPos+1] = '"') THEN
+          tok[i] := '"'; INC(i); INC(srcPos); INC(srcPos)
+        ELSE tok[i] := src[srcPos]; INC(i); INC(srcPos) END
+      END;
+      tok[i] := 0X;
+      IF (srcPos < srcLen) & (src[srcPos] = '"') THEN INC(srcPos)
+      ELSE Error("unterminated regex literal") END
     ELSE
       tokKind := 8; i := 0;
       WHILE (srcPos < srcLen) & ~IsDelim(src[srcPos]) & (i < MaxStr-1) DO
@@ -461,6 +476,7 @@ BEGIN
   | 13: NextTok; v := ParseExpr();
         q := Cons(MkSym("deref"), Cons(v, NilV)); RETURN q
   | 14: RETURN ParseSet()
+  | 15: RETURN MkRegex(tok)
   ELSE Error("unexpected token"); RETURN NilV
   END
 END ParseExpr;
@@ -563,6 +579,15 @@ BEGIN
         first := FALSE; p := p.tail
       END;
       Out.Char('}')
+  | tRegex:
+      Out.Char('#'); Out.Char('"');
+      i := 0;
+      WHILE v.s[i] # 0X DO
+        IF v.s[i] = '"' THEN Out.Char('\'); Out.Char('"')
+        ELSE Out.Char(v.s[i]) END;
+        INC(i)
+      END;
+      Out.Char('"')
   | tFn: WriteStr("#<fn>")
   | tBuiltin: WriteStr("#<builtin "); WriteStr(v.name); Out.Char('>')
   | tMacro: WriteStr("#<macro>")
@@ -2045,6 +2070,7 @@ BEGIN
   | tVec: RETURN MkKey("vector")
   | tMap: RETURN MkKey("map")
   | tSet: RETURN MkKey("set")
+  | tRegex: RETURN MkKey("regex")
   | tFn: RETURN MkKey("fn")
   | tBuiltin: RETURN MkKey("builtin")
   ELSE RETURN MkKey("unknown")
@@ -3538,6 +3564,160 @@ BEGIN
   RETURN m
 END BGetIn;
 
+(* ---------- Regex operations ---------- *)
+
+PROCEDURE BRePattern(args: Value; env: Env): Value;
+VAR v, r: Value;
+BEGIN
+  v := args.head;
+  IF v.tag = tRegex THEN RETURN v END;
+  IF v.tag = tStr THEN
+    NEW(r); r.tag := tRegex; Strings.Copy(v.s, r.s); RETURN r
+  END;
+  Error("re-pattern: needs string or regex"); RETURN NilV
+END BRePattern;
+
+PROCEDURE BReFind(args: Value; env: Env): Value;
+VAR re, str, first, last, cell: Value;
+    start, mlen, ng, i, gs: INTEGER;
+    buf: ARRAY MaxStr OF CHAR;
+BEGIN
+  re := args.head; str := args.tail.head;
+  IF (re.tag # tRegex) OR (str.tag # tStr) THEN
+    Error("re-find: needs regex and string"); RETURN NilV
+  END;
+  start := Regex.FindAt(re.s, str.s, 0);
+  IF start < 0 THEN RETURN NilV END;
+  mlen := Regex.MatchLen();
+  ng := Regex.NumGroups(re.s);
+  IF ng = 0 THEN
+    Strings.Extract(str.s, start, mlen, buf);
+    RETURN MkStr(buf)
+  ELSE
+    first := NilV; last := NIL;
+    Strings.Extract(str.s, start, mlen, buf);
+    cell := MkVec(MkStr(buf), NilV); first := cell; last := cell;
+    i := 1;
+    WHILE i <= ng DO
+      gs := Regex.GroupStart(i);
+      IF gs >= 0 THEN
+        Regex.GetGroup(i, buf); cell := MkVec(MkStr(buf), NilV)
+      ELSE
+        cell := MkVec(NilV, NilV)
+      END;
+      last.tail := cell; last := cell; INC(i)
+    END;
+    RETURN first
+  END
+END BReFind;
+
+PROCEDURE BReMatches(args: Value; env: Env): Value;
+VAR re, str, first, last, cell: Value;
+    start, mlen, ng, i, gs, slen: INTEGER;
+    buf: ARRAY MaxStr OF CHAR;
+BEGIN
+  re := args.head; str := args.tail.head;
+  IF (re.tag # tRegex) OR (str.tag # tStr) THEN
+    Error("re-matches: needs regex and string"); RETURN NilV
+  END;
+  slen := Strings.Length(str.s);
+  start := Regex.FindAt(re.s, str.s, 0);
+  IF (start # 0) OR (Regex.MatchLen() # slen) THEN RETURN NilV END;
+  ng := Regex.NumGroups(re.s);
+  IF ng = 0 THEN RETURN MkStr(str.s) END;
+  first := NilV; last := NIL;
+  cell := MkVec(MkStr(str.s), NilV); first := cell; last := cell;
+  i := 1;
+  WHILE i <= ng DO
+    gs := Regex.GroupStart(i);
+    IF gs >= 0 THEN
+      Regex.GetGroup(i, buf); cell := MkVec(MkStr(buf), NilV)
+    ELSE
+      cell := MkVec(NilV, NilV)
+    END;
+    last.tail := cell; last := cell; INC(i)
+  END;
+  RETURN first
+END BReMatches;
+
+PROCEDURE BReSeq(args: Value; env: Env): Value;
+VAR re, str, result, rlast, item, itemLast, cell: Value;
+    start, mlen, ng, i, gs, pos, slen: INTEGER;
+    buf: ARRAY MaxStr OF CHAR;
+BEGIN
+  re := args.head; str := args.tail.head;
+  IF (re.tag # tRegex) OR (str.tag # tStr) THEN
+    Error("re-seq: needs regex and string"); RETURN NilV
+  END;
+  ng := Regex.NumGroups(re.s);
+  pos := 0; slen := Strings.Length(str.s);
+  result := NilV; rlast := NIL;
+  WHILE pos <= slen DO
+    start := Regex.FindAt(re.s, str.s, pos);
+    IF start < 0 THEN EXIT END;
+    mlen := Regex.MatchLen();
+    IF ng = 0 THEN
+      Strings.Extract(str.s, start, mlen, buf);
+      cell := Cons(MkStr(buf), NilV)
+    ELSE
+      item := NilV; itemLast := NIL;
+      Strings.Extract(str.s, start, mlen, buf);
+      cell := MkVec(MkStr(buf), NilV); item := cell; itemLast := cell;
+      i := 1;
+      WHILE i <= ng DO
+        gs := Regex.GroupStart(i);
+        IF gs >= 0 THEN
+          Regex.GetGroup(i, buf); cell := MkVec(MkStr(buf), NilV)
+        ELSE
+          cell := MkVec(NilV, NilV)
+        END;
+        itemLast.tail := cell; itemLast := cell; INC(i)
+      END;
+      cell := Cons(item, NilV)
+    END;
+    IF rlast = NIL THEN result := cell ELSE rlast.tail := cell END;
+    rlast := cell;
+    IF mlen = 0 THEN INC(pos) ELSE pos := start + mlen END
+  END;
+  RETURN result
+END BReSeq;
+
+PROCEDURE BReReplace(args: Value; env: Env): Value;
+VAR str, re, repl: Value;
+    result: ARRAY MaxStr OF CHAR;
+    pos, start, mlen, n, j: INTEGER;
+BEGIN
+  str := args.head; re := args.tail.head; repl := args.tail.tail.head;
+  IF (str.tag # tStr) OR (re.tag # tRegex) OR (repl.tag # tStr) THEN
+    Error("re-replace: needs string, regex, string"); RETURN NilV
+  END;
+  pos := 0; n := 0;
+  LOOP
+    start := Regex.FindAt(re.s, str.s, pos);
+    IF start < 0 THEN
+      j := pos;
+      WHILE (str.s[j] # 0X) & (n < LEN(result)-1) DO
+        result[n] := str.s[j]; INC(n); INC(j)
+      END;
+      EXIT
+    END;
+    mlen := Regex.MatchLen();
+    j := pos;
+    WHILE (j < start) & (n < LEN(result)-1) DO
+      result[n] := str.s[j]; INC(n); INC(j)
+    END;
+    AppendCStr(result, n, repl.s);
+    IF mlen = 0 THEN
+      IF str.s[pos] # 0X THEN
+        IF n < LEN(result)-1 THEN result[n] := str.s[pos]; INC(n) END;
+        INC(pos)
+      ELSE EXIT END
+    ELSE pos := start + mlen END
+  END;
+  result[n] := 0X;
+  RETURN MkStr(result)
+END BReReplace;
+
 (* ---------- File loading ---------- *)
 
 PROCEDURE LoadFile*(path: ARRAY OF CHAR; verbose: BOOLEAN): BOOLEAN;
@@ -3782,6 +3962,13 @@ BEGIN
   RegisterDoc("ends-with?", BEndsWithQ, "True if s ends with suffix.");
   RegisterDoc("includes?", BIncludesQ, "True if s includes substr.");
   RegisterDoc("string-length", BStrlen, "Returns the length of string s.");
+
+  (* Regex *)
+  RegisterDoc("re-pattern", BRePattern, "Returns a regex for the given string.");
+  RegisterDoc("re-find", BReFind, "Returns first regex match in s, or nil. With groups, returns vector.");
+  RegisterDoc("re-matches", BReMatches, "Returns match only if regex matches entire string.");
+  RegisterDoc("re-seq", BReSeq, "Returns lazy seq of successive matches of pattern in string.");
+  RegisterDoc("re-replace", BReReplace, "Replaces all regex matches in string with replacement.");
 
   (* Conversion *)
   RegisterDoc("int", BInt, "Converts to integer.");
