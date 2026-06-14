@@ -773,7 +773,7 @@ int main(int argc, char *argv[]) {
 
         char cmd[8192];
         int pos = snprintf(cmd, sizeof(cmd),
-            "bash -c 'set -o pipefail;gcc --std=c11 %s-O -Wno-incompatible-pointer-types -o %s",
+            "bash -c 'set -o pipefail;gcc --std=c11 %s-O -Wno-incompatible-pointer-types -Wno-implicit-function-declaration -o %s",
             g_warnings
                 ? "-Wall -Wno-unused-function -Wno-unused-variable "
                 : "-w ",
