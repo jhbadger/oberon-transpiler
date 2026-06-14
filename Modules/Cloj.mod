@@ -22,14 +22,16 @@ CONST
   tSet*    = 15;
   tRegex*  = 16;
 
-  MaxTok   = 65536;
-  MaxStr   = 256;
+  MaxTok     = 65536;
+  MaxStr     = 256;
+  MaxModules = 64;
 
 TYPE
   Value*   = POINTER TO ValueDesc;
   Env*     = POINTER TO EnvDesc;
   Binding* = POINTER TO BindingDesc;
   Builtin* = PROCEDURE(args: Value; env: Env): Value;
+  ModuleRegFn* = PROCEDURE(env: Env);
   EvalProc = PROCEDURE(expr: Value; env: Env): Value;
 
   ValueDesc* = RECORD
@@ -78,6 +80,10 @@ VAR
   thrownVal*: Value;
 
   EvalRef: EvalProc;  (* forward indirection *)
+
+  modNames: ARRAY MaxModules OF ARRAY 64 OF CHAR;
+  modFns:   ARRAY MaxModules OF ModuleRegFn;
+  nModules: INTEGER;
 
 (* ---------- Value constructors ---------- *)
 
@@ -195,7 +201,7 @@ BEGIN
   RETURN MkSet(first)
 END SetConj;
 
-PROCEDURE MkBuiltin(name: ARRAY OF CHAR; fn: Builtin): Value;
+PROCEDURE MkBuiltin*(name: ARRAY OF CHAR; fn: Builtin): Value;
 VAR v: Value;
 BEGIN
   NEW(v); v.tag := tBuiltin; v.builtin := fn;
@@ -203,17 +209,17 @@ BEGIN
   RETURN v
 END MkBuiltin;
 
-PROCEDURE IsNil(v: Value): BOOLEAN;
+PROCEDURE IsNil*(v: Value): BOOLEAN;
 BEGIN RETURN (v = NIL) OR (v.tag = tNil) END IsNil;
 
-PROCEDURE IsTruthy(v: Value): BOOLEAN;
+PROCEDURE IsTruthy*(v: Value): BOOLEAN;
 BEGIN
   IF IsNil(v) THEN RETURN FALSE END;
   IF (v.tag = tBool) & ~v.b THEN RETURN FALSE END;
   RETURN TRUE
 END IsTruthy;
 
-PROCEDURE ListLen(v: Value): INTEGER;
+PROCEDURE ListLen*(v: Value): INTEGER;
 VAR n: INTEGER;
 BEGIN
   n := 0;
@@ -1787,7 +1793,7 @@ BEGIN
   RETURN TrueV
 END BGE;
 
-PROCEDURE ValueEqual(a, b: Value): BOOLEAN;
+PROCEDURE ValueEqual*(a, b: Value): BOOLEAN;
 VAR pa, pb: Value; isSeqA, isSeqB: BOOLEAN;
 BEGIN
   IF IsNil(a) & IsNil(b) THEN RETURN TRUE END;
@@ -3564,6 +3570,39 @@ BEGIN
   RETURN m
 END BGetIn;
 
+(* ---------- Oberon module integration ---------- *)
+
+PROCEDURE AddOberonModule*(name: ARRAY OF CHAR; fn: ModuleRegFn);
+BEGIN
+  IF nModules < MaxModules THEN
+    Strings.Copy(name, modNames[nModules]);
+    modFns[nModules] := fn;
+    INC(nModules)
+  END
+END AddOberonModule;
+
+PROCEDURE RegisterBuiltin*(env: Env; name: ARRAY OF CHAR; fn: Builtin);
+BEGIN Define(env, name, MkBuiltin(name, fn)) END RegisterBuiltin;
+
+PROCEDURE BImportOberon(args: Value; env: Env): Value;
+VAR nameV: Value; i: INTEGER; buf: ARRAY 256 OF CHAR;
+BEGIN
+  nameV := args.head;
+  IF IsNil(nameV) OR (nameV.tag # tStr) THEN
+    Error("import-oberon: needs a string module name"); RETURN NilV
+  END;
+  i := 0;
+  WHILE i < nModules DO
+    IF modNames[i] = nameV.s THEN
+      modFns[i](GlobalEnv); RETURN NilV
+    END;
+    INC(i)
+  END;
+  Strings.Copy("import-oberon: module not registered: ", buf);
+  Strings.Append(nameV.s, buf);
+  Error(buf); RETURN NilV
+END BImportOberon;
+
 (* ---------- Regex operations ---------- *)
 
 PROCEDURE BRePattern(args: Value; env: Env): Value;
@@ -3996,6 +4035,7 @@ BEGIN
   RegisterDoc("apply", BApplyFn, "Applies fn to args, with last arg as a seq.");
   RegisterDoc("gensym", BGensym, "Returns a unique symbol.");
   RegisterDoc("load-file", BLoadFile, "Loads Clojure source from a file.");
+  RegisterDoc("import-oberon", BImportOberon, "Import a registered Oberon module into the Cloj environment.");
 
   (* Atoms and concurrency *)
   RegisterDoc("atom", BAtom, "Creates an atom with initial value.");
@@ -4161,5 +4201,6 @@ BEGIN
 END Main;
 
 BEGIN
+  nModules := 0;
   Init
 END Cloj.
