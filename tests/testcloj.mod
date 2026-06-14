@@ -378,6 +378,20 @@ BEGIN
   Check("shorthand \\w",  '(= (re-find #"\w+" "hello world") "hello")');
   Check("shorthand \\s",  '(= (re-find #"\s+" "a  b") "  ")');
   Check("anchors",        '(nil? (re-find #"^\d+$" "12x"))');
+  Check("anchor match",   '(= (re-find #"^\d+" "42abc") "42")');
+  Check("anchor end",     '(= (re-find #"\d+$" "abc99") "99")');
+  Check("alternation",    '(= (re-find #"cat|dog" "I have a dog") "dog")');
+  Check("dot",            '(= (re-find #"h.t" "the hat") "hat")');
+  Check("char range",     '(= (re-find #"[a-z]+" "123abc456") "abc")');
+  Check("negated class",  '(= (re-find #"[^0-9]+" "123abc") "abc")');
+  Check("quantifier {n}", '(= (re-find #"\d{3}" "12 345 6789") "345")');
+  Check("quantifier {n,m}",'(= (re-find #"a{2,4}" "baaab") "aaa")');
+  Check("shorthand \\D",  '(= (re-find #"\D+" "123abc") "abc")');
+  Check("shorthand \\W",  '(= (re-find #"\W+" "abc   def") "   ")');
+  Check("shorthand \\S",  '(= (re-find #"\S+" "  hello") "hello")');
+  Check("re-seq grp vec", '(= (first (re-seq #"(\w+)" "hi")) ["hi" "hi"])');
+  Check("re-seq all grps",'(= (map first (re-seq #"(\w+)" "a b")) (list "a" "b"))');
+  Check("nested groups",  '(= (re-find #"((a)(b))" "xaby") ["ab" "ab" "a" "b"])');
 
   (* ── Summary ────────────────────────────────────────────────────────── *)
   Out.Ln;
