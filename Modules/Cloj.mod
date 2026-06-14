@@ -288,6 +288,8 @@ BEGIN
     IF IsSpace(c) THEN INC(srcPos)
     ELSIF c = ';' THEN
       WHILE (srcPos < srcLen) & (src[srcPos] # 0AX) DO INC(srcPos) END
+    ELSIF (c = '#') & (srcPos + 1 < srcLen) & (src[srcPos + 1] = '!') THEN
+      WHILE (srcPos < srcLen) & (src[srcPos] # 0AX) DO INC(srcPos) END
     ELSE RETURN END
   END
 END SkipWS;
