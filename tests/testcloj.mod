@@ -356,6 +356,29 @@ BEGIN
   Check("multi+varadic 3","(= (dispatch 1 2 3) 6)");
   Check("apply variadic", "(= (apply vsum [1 2 3]) 6)");
 
+  (* ── 24. Regular expressions ────────────────────────────────────────── *)
+  Section("Regex");
+  Check("literal",        '(= (re-find #"\d+" "abc123") "123")');
+  Check("no match nil",   '(nil? (re-find #"\d+" "abc"))');
+  Check("re-pattern str", '(= (re-find (re-pattern "\\d+") "x42") "42")');
+  Check("re-pattern eq",  '(= #"\d+" #"\d+")');
+  Check("re-pattern neq", '(not (= #"\d+" #"\w+"))');
+  Check("groups vector",  '(= (re-find #"(\w+)@(\w+)" "u@h") ["u@h" "u" "h"])');
+  Check("group nil",      '(nil? (nth (re-find #"(\d+)(-(\d+))?" "42") 2))');
+  Check("re-matches ok",  '(= (re-matches #"\d+" "123") "123")');
+  Check("re-matches fail",'(nil? (re-matches #"\d+" "12x"))');
+  Check("re-matches grp", '(= (re-matches #"(\d+)-(\d+)" "5-9") ["5-9" "5" "9"])');
+  Check("re-seq nums",    '(= (re-seq #"\d+" "a1b22c3") (list "1" "22" "3"))');
+  Check("re-seq groups",  '(= (count (re-seq #"(\w+)" "a b")) 2)');
+  Check("re-seq empty",   '(nil? (re-seq #"\d+" "abc"))');
+  Check("re-replace all", '(= (re-replace "foo bar" #"\w+" "X") "X X")');
+  Check("re-replace vowel",'(= (re-replace "hello" #"[aeiou]" "*") "h*ll*")');
+  Check("re-replace none", '(= (re-replace "xyz" #"\d+" "N") "xyz")');
+  Check("shorthand \\d",  '(= (re-find #"\d+" "test9") "9")');
+  Check("shorthand \\w",  '(= (re-find #"\w+" "hello world") "hello")');
+  Check("shorthand \\s",  '(= (re-find #"\s+" "a  b") "  ")');
+  Check("anchors",        '(nil? (re-find #"^\d+$" "12x"))');
+
   (* ── Summary ────────────────────────────────────────────────────────── *)
   Out.Ln;
   Out.String("Results: ");

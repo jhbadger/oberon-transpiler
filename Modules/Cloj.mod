@@ -590,6 +590,7 @@ BEGIN
       i := 0;
       WHILE v.s[i] # 0X DO
         IF v.s[i] = '"' THEN Out.Char('\'); Out.Char('"')
+        ELSIF v.s[i] = '\' THEN Out.Char('\'); Out.Char('\')
         ELSE Out.Char(v.s[i]) END;
         INC(i)
       END;
@@ -1821,7 +1822,7 @@ BEGIN
   IF a.tag # b.tag THEN RETURN FALSE END;
   CASE a.tag OF
     tBool: RETURN a.b = b.b
-  | tStr, tSym, tKey: RETURN a.s = b.s
+  | tStr, tSym, tKey, tRegex: RETURN a.s = b.s
   ELSE RETURN FALSE
   END
 END ValueEqual;
