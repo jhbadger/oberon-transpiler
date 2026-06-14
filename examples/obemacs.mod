@@ -21,8 +21,10 @@ MODULE obemacs;
      Cloj:       C-x C-e eval-last-sexp (anywhere; inserts result as ; => comment)
                  F1        show doc for symbol at point (popup)
                  M-x cloj-repl (or ielm)  open interactive Cloj REPL buffer
+                 Tab       complete Cloj symbol in clojure-mode / REPL (cycles; incl. user defs)
      Misc:       C-g keyboard-quit, C-x C-c save-buffers-kill-emacs
-                 M-x execute-extended-command
+                 M-x execute-extended-command (Tab cycles completions)
+                 M-/       dabbrev-expand (word completion from open buffers)
 
    Syntax highlighting is selected by the buffer's file extension:
      .mod .obn .oberon         -> Oberon
@@ -37,6 +39,8 @@ MODULE obemacs;
     MaxBuffers   = 32;
     MaxKillRing  = 32;
     MaxBuf       = 256;
+    MaxACMatches = 64;
+    NMxCmds      = 17;
 
     (* Special keys -- ASCII codes for control characters. *)
     KCtrlA = 01X; KCtrlB = 02X; KCtrlC = 03X; KCtrlD = 04X;
@@ -124,6 +128,16 @@ MODULE obemacs;
     initHome:       ARRAY 256 OF CHAR;
     initPath:       ARRAY 512 OF CHAR;
 
+    acPrefix:    ARRAY MaxBuf OF CHAR;
+    acPrefixLen: INTEGER;
+    acMatches:   ARRAY MaxACMatches OF ARRAY 128 OF CHAR;
+    acCount:     INTEGER;
+    acIndex:     INTEGER;
+    acInserted:  INTEGER;
+    lastWasAC:   BOOLEAN;
+    acActive:    BOOLEAN;
+    acMode:      INTEGER;  (* 1 = dabbrev, 2 = cloj *)
+
   (* ===================================================================
      small helpers
      =================================================================== *)
@@ -172,6 +186,17 @@ MODULE obemacs;
         OR Strings.EndsWith(s, b)
         OR Strings.EndsWith(s, c)
   END EndsWithAny;
+
+  PROCEDURE HasPrefix(VAR s: ARRAY OF CHAR; VAR prefix: ARRAY OF CHAR; prefLen: INTEGER): BOOLEAN;
+    VAR i: INTEGER;
+  BEGIN
+    i := 0;
+    WHILE i < prefLen DO
+      IF s[i] # prefix[i] THEN RETURN FALSE END;
+      INC(i)
+    END;
+    RETURN TRUE
+  END HasPrefix;
 
   PROCEDURE DetectSyntax(path: ARRAY OF CHAR): INTEGER;
   BEGIN
@@ -1321,7 +1346,7 @@ MODULE obemacs;
   PROCEDURE SwitchBuffer;
     VAR name: ARRAY MaxBuf OF CHAR; b: Buffer;
   BEGIN
-    IF ~Prompt("Switch to buffer: ", name) THEN RETURN END;
+    IF ~PromptBuffer("Switch to buffer: ", name) THEN RETURN END;
     IF name[0] = 0X THEN RETURN END;
     b := FindBuffer(name);
     IF b = NIL THEN b := NewBuffer(name) END;
@@ -1537,10 +1562,309 @@ MODULE obemacs;
     GotoP(BufLen())
   END CmdReplBuffer;
 
+  (* ===================================================================
+     M-x command name list (Tab completion)
+     =================================================================== *)
+
+  PROCEDURE MxCmdAt(i: INTEGER; VAR s: ARRAY OF CHAR);
+  BEGIN
+    CASE i OF
+      0:  Strings.Copy("replace-string",    s)
+    | 1:  Strings.Copy("list-buffers",      s)
+    | 2:  Strings.Copy("save-buffer",       s)
+    | 3:  Strings.Copy("find-file",         s)
+    | 4:  Strings.Copy("switch-to-buffer",  s)
+    | 5:  Strings.Copy("isearch-forward",   s)
+    | 6:  Strings.Copy("isearch-backward",  s)
+    | 7:  Strings.Copy("oberon-mode",       s)
+    | 8:  Strings.Copy("ruby-mode",         s)
+    | 9:  Strings.Copy("r-mode",            s)
+    | 10: Strings.Copy("clojure-mode",      s)
+    | 11: Strings.Copy("fundamental-mode",  s)
+    | 12: Strings.Copy("text-mode",         s)
+    | 13: Strings.Copy("cloj-repl",         s)
+    | 14: Strings.Copy("ielm",              s)
+    | 15: Strings.Copy("auto-fill-mode",    s)
+    | 16: Strings.Copy("recover-this-file", s)
+    ELSE  s[0] := 0X
+    END
+  END MxCmdAt;
+
+  (* ===================================================================
+     dabbrev-expand: word completion from open buffers (M-/)
+     =================================================================== *)
+
+  PROCEDURE CollectACMatches;
+    VAR bi, li, ci, wlen, j, prefLen, lineLen: INTEGER;
+        line: ARRAY 4096 OF CHAR;
+        word: ARRAY 128 OF CHAR;
+        found: BOOLEAN;
+  BEGIN
+    acCount := 0;
+    prefLen := Strings.Length(acPrefix);
+    IF prefLen = 0 THEN RETURN END;
+    bi := 0;
+    WHILE bi < nBuffers DO
+      li := 1;
+      WHILE li <= Editor.LineCount(buffers[bi].ed) DO
+        lineLen := Editor.GetLine(buffers[bi].ed, li, LEN(line), line);
+        ci := 0;
+        WHILE (ci < lineLen) & (acCount < MaxACMatches) DO
+          IF IsWordChar(line[ci]) & ((ci = 0) OR ~IsWordChar(line[ci - 1])) THEN
+            wlen := 0;
+            WHILE (ci < lineLen) & IsWordChar(line[ci]) & (wlen < LEN(word) - 1) DO
+              word[wlen] := line[ci]; INC(wlen); INC(ci)
+            END;
+            word[wlen] := 0X;
+            IF (wlen > prefLen) & HasPrefix(word, acPrefix, prefLen) THEN
+              found := FALSE; j := 0;
+              WHILE (j < acCount) & ~found DO
+                IF Strings.Compare(acMatches[j], word) = 0 THEN found := TRUE END;
+                INC(j)
+              END;
+              IF ~found THEN
+                Strings.Copy(word, acMatches[acCount]); INC(acCount)
+              END
+            END
+          ELSE INC(ci)
+          END
+        END;
+        INC(li)
+      END;
+      INC(bi)
+    END
+  END CollectACMatches;
+
+  PROCEDURE DabbrevExpand;
+    VAR p, i, prefLen: INTEGER; ch: CHAR;
+        msg, tmp: ARRAY MaxBuf OF CHAR;
+  BEGIN
+    IF lastWasAC & (acMode = 1) & (acCount > 0) THEN
+      i := 0;
+      WHILE i < acInserted DO Editor.Backspace(curBuf.ed); INC(i) END;
+      acIndex := (acIndex + 1) MOD acCount
+    ELSE
+      p := PointPos();
+      WHILE (p > 0) & CharAt(p - 1, ch) & IsWordChar(ch) DO DEC(p) END;
+      prefLen := PointPos() - p;
+      IF prefLen = 0 THEN SetEcho("No word before point"); RETURN END;
+      acPrefixLen := prefLen;
+      i := 0;
+      WHILE i < prefLen DO
+        IF CharAt(p + i, ch) THEN acPrefix[i] := ch END;
+        INC(i)
+      END;
+      acPrefix[prefLen] := 0X;
+      CollectACMatches;
+      IF acCount = 0 THEN SetEcho("No completions"); RETURN END;
+      acIndex := 0;
+      i := 0;
+      WHILE i < prefLen DO Editor.Backspace(curBuf.ed); INC(i) END
+    END;
+    Editor.InsertStr(curBuf.ed, acMatches[acIndex]);
+    acInserted := Strings.Length(acMatches[acIndex]);
+    IF acCount > 1 THEN
+      Strings.Copy("Complete: ", msg);
+      Strings.Append(acMatches[acIndex], msg);
+      Strings.Append(" (", msg);
+      IntToStr(acIndex + 1, tmp); Strings.Append(tmp, msg);
+      Strings.Append("/", msg);
+      IntToStr(acCount, tmp); Strings.Append(tmp, msg);
+      Strings.Append(")", msg);
+      SetEcho(msg)
+    ELSE
+      SetEcho("Unique completion")
+    END;
+    acActive := TRUE; acMode := 1
+  END DabbrevExpand;
+
+  (* ===================================================================
+     Cloj symbol completion (Tab in clojure-mode / REPL)
+     =================================================================== *)
+
+  PROCEDURE ClojComplete;
+    VAR p, i, prefLen, si, wlen: INTEGER; ch: CHAR;
+        msg, tmp: ARRAY MaxBuf OF CHAR;
+        symStr: ARRAY 8192 OF CHAR;
+        word: ARRAY 128 OF CHAR;
+  BEGIN
+    IF lastWasAC & (acMode = 2) & (acCount > 0) THEN
+      i := 0;
+      WHILE i < acInserted DO Editor.Backspace(curBuf.ed); INC(i) END;
+      acIndex := (acIndex + 1) MOD acCount
+    ELSE
+      p := PointPos();
+      WHILE (p > 0) & CharAt(p - 1, ch) & IsClojureSymbolChar(ch) DO DEC(p) END;
+      prefLen := PointPos() - p;
+      IF prefLen = 0 THEN SetEcho("No symbol before point"); RETURN END;
+      acPrefixLen := prefLen;
+      i := 0;
+      WHILE i < prefLen DO
+        IF CharAt(p + i, ch) THEN acPrefix[i] := ch END;
+        INC(i)
+      END;
+      acPrefix[prefLen] := 0X;
+      IF ~clojReady THEN Cloj.Init; clojReady := TRUE END;
+      Cloj.EnvSymbolsStr(acPrefix, symStr);
+      acCount := 0; si := 0;
+      WHILE (symStr[si] # 0X) & (acCount < MaxACMatches) DO
+        WHILE symStr[si] = " " DO INC(si) END;
+        wlen := 0;
+        WHILE (symStr[si] # 0X) & (symStr[si] # " ") & (wlen < LEN(word) - 1) DO
+          word[wlen] := symStr[si]; INC(wlen); INC(si)
+        END;
+        word[wlen] := 0X;
+        IF wlen > 0 THEN
+          Strings.Copy(word, acMatches[acCount]); INC(acCount)
+        END
+      END;
+      IF acCount = 0 THEN SetEcho("No completions"); RETURN END;
+      acIndex := 0;
+      i := 0;
+      WHILE i < prefLen DO Editor.Backspace(curBuf.ed); INC(i) END
+    END;
+    Editor.InsertStr(curBuf.ed, acMatches[acIndex]);
+    acInserted := Strings.Length(acMatches[acIndex]);
+    IF acCount > 1 THEN
+      Strings.Copy("Complete: ", msg);
+      Strings.Append(acMatches[acIndex], msg);
+      Strings.Append(" (", msg);
+      IntToStr(acIndex + 1, tmp); Strings.Append(tmp, msg);
+      Strings.Append("/", msg);
+      IntToStr(acCount, tmp); Strings.Append(tmp, msg);
+      Strings.Append(")", msg);
+      SetEcho(msg)
+    ELSE
+      SetEcho("Unique completion")
+    END;
+    acActive := TRUE; acMode := 2
+  END ClojComplete;
+
+  PROCEDURE CmdTabOrComplete;
+  BEGIN
+    IF (curBuf.syntax = SynClojure) OR (curBuf = replBuf) THEN
+      ClojComplete
+    ELSE
+      CmdSelfInsert(09X)
+    END
+  END CmdTabOrComplete;
+
+  (* ===================================================================
+     PromptComplete: minibuffer prompt with Tab cycling for M-x
+     =================================================================== *)
+
+  PROCEDURE PromptComplete(promptStr: ARRAY OF CHAR; VAR result: ARRAY OF CHAR): BOOLEAN;
+    VAR ch: CHAR; len, i: INTEGER;
+        line: ARRAY MaxBuf OF CHAR;
+        candidate: ARRAY 64 OF CHAR;
+        tabMatches: ARRAY NMxCmds OF ARRAY 64 OF CHAR;
+        tabCount, tabIdx, tabBasLen: INTEGER;
+        tabBase: ARRAY MaxBuf OF CHAR;
+        inTab: BOOLEAN;
+  BEGIN
+    result[0] := 0X; len := 0;
+    inTab := FALSE; tabCount := 0; tabIdx := 0; tabBasLen := 0;
+    LOOP
+      Terminal.Color(ColDefault, 0);
+      Terminal.Goto(1, rows);
+      Terminal.HLine(1, rows, cols, " ");
+      Terminal.Goto(1, rows);
+      Strings.Copy(promptStr, line);
+      Strings.Append(result, line);
+      Out.String(line);
+      Terminal.ShowCursor;
+      ch := Terminal.ReadKey();
+      IF ch = KEnter THEN RETURN TRUE
+      ELSIF ch = KCtrlG THEN
+        result[0] := 0X; SetEcho("Quit"); RETURN FALSE
+      ELSIF (ch = KBackspace) OR (ch = KDel) THEN
+        IF len > 0 THEN DEC(len); result[len] := 0X END;
+        inTab := FALSE; tabCount := 0
+      ELSIF ch = KTab THEN
+        IF ~inTab THEN
+          Strings.Copy(result, tabBase); tabBasLen := len;
+          tabCount := 0;
+          i := 0;
+          WHILE i < NMxCmds DO
+            MxCmdAt(i, candidate);
+            IF HasPrefix(candidate, tabBase, tabBasLen) THEN
+              Strings.Copy(candidate, tabMatches[tabCount]);
+              INC(tabCount)
+            END;
+            INC(i)
+          END;
+          inTab := TRUE; tabIdx := -1
+        END;
+        IF tabCount > 0 THEN
+          tabIdx := (tabIdx + 1) MOD tabCount;
+          Strings.Copy(tabMatches[tabIdx], result);
+          len := Strings.Length(result)
+        END
+      ELSIF (ch >= " ") & (ch < 7FX) & (len < LEN(result) - 1) THEN
+        result[len] := ch; INC(len); result[len] := 0X;
+        inTab := FALSE; tabCount := 0
+      END
+    END;
+    RETURN FALSE
+  END PromptComplete;
+
+  PROCEDURE PromptBuffer(promptStr: ARRAY OF CHAR; VAR result: ARRAY OF CHAR): BOOLEAN;
+    VAR ch: CHAR; len, i: INTEGER;
+        line: ARRAY MaxBuf OF CHAR;
+        tabMatches: ARRAY MaxBuffers OF ARRAY 64 OF CHAR;
+        tabCount, tabIdx, tabBasLen: INTEGER;
+        tabBase: ARRAY MaxBuf OF CHAR;
+        inTab: BOOLEAN;
+  BEGIN
+    result[0] := 0X; len := 0;
+    inTab := FALSE; tabCount := 0; tabIdx := 0; tabBasLen := 0;
+    LOOP
+      Terminal.Color(ColDefault, 0);
+      Terminal.Goto(1, rows);
+      Terminal.HLine(1, rows, cols, " ");
+      Terminal.Goto(1, rows);
+      Strings.Copy(promptStr, line);
+      Strings.Append(result, line);
+      Out.String(line);
+      Terminal.ShowCursor;
+      ch := Terminal.ReadKey();
+      IF ch = KEnter THEN RETURN TRUE
+      ELSIF ch = KCtrlG THEN
+        result[0] := 0X; SetEcho("Quit"); RETURN FALSE
+      ELSIF (ch = KBackspace) OR (ch = KDel) THEN
+        IF len > 0 THEN DEC(len); result[len] := 0X END;
+        inTab := FALSE; tabCount := 0
+      ELSIF ch = KTab THEN
+        IF ~inTab THEN
+          Strings.Copy(result, tabBase); tabBasLen := len;
+          tabCount := 0;
+          i := 0;
+          WHILE i < nBuffers DO
+            IF HasPrefix(buffers[i].name, tabBase, tabBasLen) THEN
+              Strings.Copy(buffers[i].name, tabMatches[tabCount]);
+              INC(tabCount)
+            END;
+            INC(i)
+          END;
+          inTab := TRUE; tabIdx := -1
+        END;
+        IF tabCount > 0 THEN
+          tabIdx := (tabIdx + 1) MOD tabCount;
+          Strings.Copy(tabMatches[tabIdx], result);
+          len := Strings.Length(result)
+        END
+      ELSIF (ch >= " ") & (ch < 7FX) & (len < LEN(result) - 1) THEN
+        result[len] := ch; INC(len); result[len] := 0X;
+        inTab := FALSE; tabCount := 0
+      END
+    END;
+    RETURN FALSE
+  END PromptBuffer;
+
   PROCEDURE ExecuteExtended;
     VAR name: ARRAY MaxBuf OF CHAR;
   BEGIN
-    IF ~Prompt("M-x ", name) THEN RETURN END;
+    IF ~PromptComplete("M-x ", name) THEN RETURN END;
     IF (Strings.Compare(name, "replace-string") = 0)
        OR (Strings.Compare(name, "repl s") = 0)
     THEN DoReplaceString
@@ -1625,6 +1949,7 @@ MODULE obemacs;
     | "<":  CmdBeginningOfBuffer
     | ">":  CmdEndOfBuffer
     | "x":  ExecuteExtended
+    | "/":  DabbrevExpand
     | KBackspace, KDel: CmdKillWordBackward
     ELSE
       SetEcho("Unknown M-key")
@@ -1929,6 +2254,7 @@ MODULE obemacs;
   BEGIN
     nextWasYank := FALSE;
     nextWasKill := FALSE;
+    acActive := FALSE;
     CASE ch OF
       KCtrlF: CmdForwardChar
     | KCtrlB: CmdBackwardChar
@@ -1949,7 +2275,7 @@ MODULE obemacs;
     | KEsc:   HandleMeta
     | KEnter: IF curBuf = replBuf THEN CmdReplEnter ELSE CmdNewline END
     | KBackspace, KDel: CmdBackspace
-    | KTab:   CmdSelfInsert(09X)
+    | KTab:   CmdTabOrComplete
     | KNul:   CmdSetMark             (* C-SPC / C-@ *)
     | KCtrlG: SetEcho("Quit")
     | KUp:    CmdPreviousLine
@@ -1967,6 +2293,7 @@ MODULE obemacs;
     ELSE
       IF (ch >= " ") & (ch < 7FX) THEN CmdSelfInsert(ch) END
     END;
+    lastWasAC   := acActive;
     lastWasYank := nextWasYank;
     lastWasKill := nextWasKill
   END Dispatch;
@@ -2074,6 +2401,9 @@ BEGIN
   clojReady := FALSE;
   replBuf := NIL;
   replInputStart := 0;
+  acCount := 0; acIndex := 0; acInserted := 0;
+  acPrefixLen := 0; acPrefix[0] := 0X;
+  lastWasAC := FALSE; acActive := FALSE; acMode := 0;
 
   (* Load ~/.config/obemacs/init.clj if it exists *)
   IF Env.Get("HOME", initHome) & (initHome[0] # 0X) THEN

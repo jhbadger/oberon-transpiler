@@ -4152,6 +4152,26 @@ BEGIN
   RETURN TRUE
 END LoadFile;
 
+PROCEDURE EnvSymbolsStr*(prefix: ARRAY OF CHAR; VAR result: ARRAY OF CHAR);
+  VAR b: Binding; i, plen: INTEGER; ok: BOOLEAN;
+BEGIN
+  result[0] := 0X;
+  plen := Strings.Length(prefix);
+  b := GlobalEnv.bindings;
+  WHILE b # NIL DO
+    ok := TRUE; i := 0;
+    WHILE (i < plen) & ok DO
+      IF b.name[i] # prefix[i] THEN ok := FALSE END;
+      INC(i)
+    END;
+    IF ok & (Strings.Length(b.name) > plen) THEN
+      IF result[0] # 0X THEN Strings.Append(" ", result) END;
+      Strings.Append(b.name, result)
+    END;
+    b := b.next
+  END
+END EnvSymbolsStr;
+
 PROCEDURE EvalStr*(s: ARRAY OF CHAR): Value;
 VAR v: Value;
 BEGIN
