@@ -339,6 +339,7 @@ BEGIN
       IF (src[srcPos] = '\') & (srcPos+1 < srcLen) THEN
         INC(srcPos);
         IF src[srcPos] = 'n' THEN tok[i] := 0AX
+        ELSIF src[srcPos] = 'r' THEN tok[i] := 0DX
         ELSIF src[srcPos] = 't' THEN tok[i] := 09X
         ELSIF src[srcPos] = '\' THEN tok[i] := '\'
         ELSIF src[srcPos] = '"' THEN tok[i] := '"'
@@ -3232,6 +3233,226 @@ BEGIN
 END BStrCompare;
 
 (* Functional *)
+(* ── clojure.string extensions ──────────────────────────────────────────── *)
+
+PROCEDURE BStrBlankQ(args: Value; env: Env): Value;
+VAR s: Value; i: INTEGER;
+BEGIN
+  s := args.head;
+  IF IsNil(s) THEN RETURN TrueV END;
+  IF s.tag # tStr THEN RETURN FalseV END;
+  i := 0;
+  WHILE s.s[i] # 0X DO
+    IF (s.s[i] # ' ') & (s.s[i] # 09X) & (s.s[i] # 0AX) & (s.s[i] # 0DX) THEN
+      RETURN FalseV
+    END;
+    INC(i)
+  END;
+  RETURN TrueV
+END BStrBlankQ;
+
+PROCEDURE BStrCapitalize(args: Value; env: Env): Value;
+VAR s: Value; buf: ARRAY MaxStr OF CHAR;
+BEGIN
+  s := args.head;
+  IF s.tag # tStr THEN Error("capitalize: needs string"); RETURN NilV END;
+  Strings.Copy(s.s, buf); Strings.ToLower(buf);
+  IF (buf[0] >= 'a') & (buf[0] <= 'z') THEN buf[0] := CHR(ORD(buf[0]) - 32) END;
+  RETURN MkStr(buf)
+END BStrCapitalize;
+
+PROCEDURE BStrReverse(args: Value; env: Env): Value;
+VAR s: Value; buf: ARRAY MaxStr OF CHAR; i, j, n: INTEGER; tmp: CHAR;
+BEGIN
+  s := args.head;
+  IF s.tag # tStr THEN Error("string/reverse: needs string"); RETURN NilV END;
+  Strings.Copy(s.s, buf);
+  n := Strings.Length(buf); i := 0; j := n - 1;
+  WHILE i < j DO
+    tmp := buf[i]; buf[i] := buf[j]; buf[j] := tmp; INC(i); DEC(j)
+  END;
+  RETURN MkStr(buf)
+END BStrReverse;
+
+PROCEDURE BStrTrimL(args: Value; env: Env): Value;
+VAR s: Value; buf: ARRAY MaxStr OF CHAR; i, j: INTEGER;
+BEGIN
+  s := args.head;
+  IF s.tag # tStr THEN Error("triml: needs string"); RETURN NilV END;
+  i := 0;
+  WHILE (s.s[i] = ' ') OR (s.s[i] = 09X) OR (s.s[i] = 0AX) OR (s.s[i] = 0DX) DO INC(i) END;
+  j := 0; WHILE s.s[i] # 0X DO buf[j] := s.s[i]; INC(i); INC(j) END;
+  buf[j] := 0X;
+  RETURN MkStr(buf)
+END BStrTrimL;
+
+PROCEDURE BStrTrimR(args: Value; env: Env): Value;
+VAR s: Value; buf: ARRAY MaxStr OF CHAR; n: INTEGER;
+BEGIN
+  s := args.head;
+  IF s.tag # tStr THEN Error("trimr: needs string"); RETURN NilV END;
+  Strings.Copy(s.s, buf);
+  n := Strings.Length(buf) - 1;
+  WHILE (n >= 0) & ((buf[n] = ' ') OR (buf[n] = 09X) OR (buf[n] = 0AX) OR (buf[n] = 0DX)) DO
+    DEC(n)
+  END;
+  buf[n+1] := 0X;
+  RETURN MkStr(buf)
+END BStrTrimR;
+
+PROCEDURE BStrTrimNewline(args: Value; env: Env): Value;
+VAR s: Value; buf: ARRAY MaxStr OF CHAR; n: INTEGER;
+BEGIN
+  s := args.head;
+  IF s.tag # tStr THEN Error("trim-newline: needs string"); RETURN NilV END;
+  Strings.Copy(s.s, buf);
+  n := Strings.Length(buf) - 1;
+  WHILE (n >= 0) & ((buf[n] = 0AX) OR (buf[n] = 0DX)) DO DEC(n) END;
+  buf[n+1] := 0X;
+  RETURN MkStr(buf)
+END BStrTrimNewline;
+
+PROCEDURE BStrSplitLines(args: Value; env: Env): Value;
+VAR s: Value; first, last, cell: Value; buf: ARRAY MaxStr OF CHAR; i, j: INTEGER;
+BEGIN
+  s := args.head;
+  IF s.tag # tStr THEN Error("split-lines: needs string"); RETURN NilV END;
+  first := NilV; last := NIL; i := 0; j := 0;
+  LOOP
+    IF (s.s[i] = 0AX) OR (s.s[i] = 0X) THEN
+      buf[j] := 0X;
+      cell := Cons(MkStr(buf), NilV);
+      IF last = NIL THEN first := cell ELSE last.tail := cell END;
+      last := cell; j := 0;
+      IF s.s[i] = 0X THEN EXIT END
+    ELSIF s.s[i] # 0DX THEN
+      IF j < MaxStr - 1 THEN buf[j] := s.s[i]; INC(j) END
+    END;
+    INC(i)
+  END;
+  RETURN first
+END BStrSplitLines;
+
+PROCEDURE BStrIndexOf(args: Value; env: Env): Value;
+VAR s, sub, fromv: Value; from, pos: INTEGER; tail: ARRAY MaxStr OF CHAR;
+BEGIN
+  s := args.head; sub := args.tail.head;
+  IF (s.tag # tStr) OR (sub.tag # tStr) THEN Error("index-of: needs strings"); RETURN NilV END;
+  from := 0;
+  IF ~IsNil(args.tail.tail) & ~IsNil(args.tail.tail.head) THEN
+    fromv := args.tail.tail.head;
+    IF fromv.tag = tInt THEN from := fromv.i END
+  END;
+  Strings.Extract(s.s, from, Strings.Length(s.s), tail);
+  pos := Strings.Pos(sub.s, tail);
+  IF pos < 0 THEN RETURN NilV END;
+  RETURN MkInt(pos + from)
+END BStrIndexOf;
+
+PROCEDURE BStrLastIndexOf(args: Value; env: Env): Value;
+VAR s, sub: Value; last, pos, cur, slen: INTEGER; tail: ARRAY MaxStr OF CHAR;
+BEGIN
+  s := args.head; sub := args.tail.head;
+  IF (s.tag # tStr) OR (sub.tag # tStr) THEN Error("last-index-of: needs strings"); RETURN NilV END;
+  last := -1; cur := 0; pos := 0; slen := Strings.Length(s.s);
+  WHILE (cur <= slen) & (pos >= 0) DO
+    Strings.Extract(s.s, cur, slen - cur, tail);
+    pos := Strings.Pos(sub.s, tail);
+    IF pos >= 0 THEN last := cur + pos; cur := last + 1 END
+  END;
+  IF last < 0 THEN RETURN NilV END;
+  RETURN MkInt(last)
+END BStrLastIndexOf;
+
+PROCEDURE BStrReplace(args: Value; env: Env): Value;
+VAR s, match, repl: Value; buf: ARRAY MaxStr OF CHAR;
+    n, pos, start, mlen, i, j: INTEGER; found: BOOLEAN;
+BEGIN
+  s := args.head; match := args.tail.head; repl := args.tail.tail.head;
+  IF s.tag # tStr THEN Error("string/replace: needs string first arg"); RETURN NilV END;
+  IF repl.tag # tStr THEN Error("string/replace: replacement must be string"); RETURN NilV END;
+  n := 0; pos := 0; buf[0] := 0X;
+  IF match.tag = tRegex THEN
+    LOOP
+      start := Regex.FindAt(match.s, s.s, pos);
+      IF start < 0 THEN
+        j := pos; WHILE (s.s[j] # 0X) & (n < MaxStr-1) DO buf[n] := s.s[j]; INC(n); INC(j) END;
+        EXIT
+      END;
+      mlen := Regex.MatchLen();
+      j := pos; WHILE (j < start) & (n < MaxStr-1) DO buf[n] := s.s[j]; INC(n); INC(j) END;
+      AppendCStr(buf, n, repl.s);
+      IF mlen = 0 THEN
+        IF s.s[pos] # 0X THEN
+          IF n < MaxStr-1 THEN buf[n] := s.s[pos]; INC(n) END; INC(pos)
+        ELSE EXIT END
+      ELSE pos := start + mlen END
+    END
+  ELSIF match.tag = tStr THEN
+    mlen := Strings.Length(match.s);
+    IF mlen = 0 THEN Strings.Copy(s.s, buf)
+    ELSE
+      WHILE s.s[pos] # 0X DO
+        found := TRUE; i := 0;
+        WHILE (i < mlen) & found DO
+          IF s.s[pos + i] # match.s[i] THEN found := FALSE END; INC(i)
+        END;
+        IF found THEN
+          AppendCStr(buf, n, repl.s); pos := pos + mlen
+        ELSE
+          IF n < MaxStr-1 THEN buf[n] := s.s[pos]; INC(n) END; INC(pos)
+        END
+      END;
+      buf[n] := 0X
+    END
+  ELSE
+    Error("string/replace: match must be string or regex"); RETURN NilV
+  END;
+  RETURN MkStr(buf)
+END BStrReplace;
+
+PROCEDURE BStrReplaceFirst(args: Value; env: Env): Value;
+VAR s, match, repl: Value; buf: ARRAY MaxStr OF CHAR;
+    n, pos, start, mlen, i, j: INTEGER; found: BOOLEAN;
+BEGIN
+  s := args.head; match := args.tail.head; repl := args.tail.tail.head;
+  IF s.tag # tStr THEN Error("string/replace-first: needs string"); RETURN NilV END;
+  IF repl.tag # tStr THEN Error("string/replace-first: replacement must be string"); RETURN NilV END;
+  n := 0; pos := 0; buf[0] := 0X;
+  IF match.tag = tRegex THEN
+    start := Regex.FindAt(match.s, s.s, 0);
+    IF start >= 0 THEN
+      mlen := Regex.MatchLen();
+      j := 0; WHILE (j < start) & (n < MaxStr-1) DO buf[n] := s.s[j]; INC(n); INC(j) END;
+      AppendCStr(buf, n, repl.s);
+      j := start + mlen; WHILE (s.s[j] # 0X) & (n < MaxStr-1) DO buf[n] := s.s[j]; INC(n); INC(j) END;
+      buf[n] := 0X
+    ELSE Strings.Copy(s.s, buf) END
+  ELSIF match.tag = tStr THEN
+    mlen := Strings.Length(match.s);
+    IF mlen = 0 THEN Strings.Copy(s.s, buf)
+    ELSE
+      found := FALSE;
+      WHILE (s.s[pos] # 0X) & ~found DO
+        found := TRUE; i := 0;
+        WHILE (i < mlen) & found DO
+          IF s.s[pos + i] # match.s[i] THEN found := FALSE END; INC(i)
+        END;
+        IF found THEN
+          AppendCStr(buf, n, repl.s); pos := pos + mlen;
+          WHILE (s.s[pos] # 0X) & (n < MaxStr-1) DO buf[n] := s.s[pos]; INC(n); INC(pos) END
+        ELSE
+          IF n < MaxStr-1 THEN buf[n] := s.s[pos]; INC(n) END; INC(pos)
+        END
+      END;
+      buf[n] := 0X
+    END
+  ELSE
+    Error("string/replace-first: match must be string or regex"); RETURN NilV
+  END;
+  RETURN MkStr(buf)
+END BStrReplaceFirst;
+
 PROCEDURE BIdentity(args: Value; env: Env): Value;
 BEGIN RETURN args.head END BIdentity;
 
@@ -4004,6 +4225,17 @@ BEGIN
   RegisterDoc("ends-with?", BEndsWithQ, "True if s ends with suffix.");
   RegisterDoc("includes?", BIncludesQ, "True if s includes substr.");
   RegisterDoc("string-length", BStrlen, "Returns the length of string s.");
+  RegisterDoc("string/blank?", BStrBlankQ, "True if s is nil, empty, or whitespace only.");
+  RegisterDoc("string/capitalize", BStrCapitalize, "First char upper-case, rest lower-case.");
+  RegisterDoc("string/reverse", BStrReverse, "Returns s with chars in reverse order.");
+  RegisterDoc("string/triml", BStrTrimL, "Removes whitespace from left end of s.");
+  RegisterDoc("string/trimr", BStrTrimR, "Removes whitespace from right end of s.");
+  RegisterDoc("string/trim-newline", BStrTrimNewline, "Removes trailing newline characters from s.");
+  RegisterDoc("string/split-lines", BStrSplitLines, "Splits s on newlines, returns list of lines.");
+  RegisterDoc("string/index-of", BStrIndexOf, "Index of first occurrence of value in s, or nil.");
+  RegisterDoc("string/last-index-of", BStrLastIndexOf, "Index of last occurrence of value in s, or nil.");
+  RegisterDoc("string/replace", BStrReplace, "Replaces all occurrences of match (string or regex) in s.");
+  RegisterDoc("string/replace-first", BStrReplaceFirst, "Replaces first occurrence of match in s.");
 
   (* Regex *)
   RegisterDoc("re-pattern", BRePattern, "Returns a regex for the given string.");
@@ -4089,7 +4321,6 @@ BEGIN
   Eval1("(defn string/starts-with? [s prefix] (starts-with? s prefix))");
   Eval1("(defn string/ends-with? [s suffix] (ends-with? s suffix))");
   Eval1("(defn string/includes? [s sub] (includes? s sub))");
-  Eval1("(defn string/replace [s from to] (join to (split s (str (first from)))))");
   Eval1("(defn update-in [m path f & args] (assoc-in m path (apply f (get-in m path) args)))");
   Eval1("(defn merge-with [f & maps] (reduce (fn [acc m] (reduce (fn [a [k v]] (assoc a k (if (contains? a k) (f (get a k) v) v))) acc (map (fn [k] [k (get m k)]) (keys m)))) {} maps))");
   Eval1("(defn take-last [n coll] (drop (- (count coll) n) coll))");

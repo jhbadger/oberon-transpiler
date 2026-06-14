@@ -592,7 +592,7 @@ static int is_builtin_module(const char *s) {
  * Only exported (public) symbols need aliases; private ones keep their
  * original name and are marked static, so no aliasing is required.
  * ----------------------------------------------------------------------- */
-#define MAX_MODSYMS 256
+#define MAX_MODSYMS 512
 static char g_modsyms[MAX_MODSYMS][MAX_IDENT];
 static int  g_nmodsyms = 0;
 

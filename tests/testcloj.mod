@@ -393,6 +393,43 @@ BEGIN
   Check("re-seq all grps",'(= (map first (re-seq #"(\w+)" "a b")) (list "a" "b"))');
   Check("nested groups",  '(= (re-find #"((a)(b))" "xaby") ["ab" "ab" "a" "b"])');
 
+  (* ── 25. clojure.string methods ─────────────────────────────────────── *)
+  Section("clojure.string");
+  Check("blank? empty",     '(string/blank? "")');
+  Check("blank? spaces",    '(string/blank? "   ")');
+  Check("blank? nil",       "(string/blank? nil)");
+  Check("blank? false",     '(not (string/blank? "hi"))');
+  Check("capitalize",       '(= (string/capitalize "hello world") "Hello world")');
+  Check("capitalize upper", '(= (string/capitalize "HELLO") "Hello")');
+  Check("reverse",          '(= (string/reverse "abcde") "edcba")');
+  Check("reverse empty",    '(= (string/reverse "") "")');
+  Check("triml",            '(= (string/triml "  hi  ") "hi  ")');
+  Check("trimr",            '(= (string/trimr "  hi  ") "  hi")');
+  Check("trim-newline",     '(= (string/trim-newline "hello\n") "hello")');
+  Check("trim-newline crlf",'(= (string/trim-newline "hi\r\n") "hi")');
+  Check("split-lines",      '(= (string/split-lines "a\nb\nc") (list "a" "b" "c"))');
+  Check("split-lines 1",    '(= (string/split-lines "only") (list "only"))');
+  Check("index-of found",   '(= (string/index-of "hello" "l") 2)');
+  Check("index-of from",    '(= (string/index-of "hello" "l" 3) 3)');
+  Check("index-of nil",     '(nil? (string/index-of "hello" "z"))');
+  Check("last-index-of",    '(= (string/last-index-of "hello" "l") 3)');
+  Check("last-index-of nil",'(nil? (string/last-index-of "hello" "z"))');
+  Check("replace str all",  '(= (string/replace "hello world" "o" "0") "hell0 w0rld")');
+  Check("replace regex",    '(= (string/replace "foo bar" #"\w+" "X") "X X")');
+  Check("replace none",     '(= (string/replace "abc" "z" "X") "abc")');
+  Check("replace-first str",'(= (string/replace-first "aabbcc" "b" "X") "aaXbcc")');
+  Check("replace-first re", '(= (string/replace-first "foo bar" #"\w+" "X") "X bar")');
+  Check("replace-first nil",'(= (string/replace-first "abc" "z" "X") "abc")');
+  (* existing string/ aliases still work *)
+  Check("upper-case",       '(= (string/upper-case "hello") "HELLO")');
+  Check("lower-case",       '(= (string/lower-case "HELLO") "hello")');
+  Check("trim",             '(= (string/trim "  hi  ") "hi")');
+  Check("starts-with?",     '(string/starts-with? "foobar" "foo")');
+  Check("ends-with?",       '(string/ends-with? "foobar" "bar")');
+  Check("includes?",        '(string/includes? "foobar" "oba")');
+  Check("join sep",         '(= (string/join ", " ["a" "b" "c"]) "a, b, c")');
+  Check("join no sep",      '(= (string/join ["a" "b" "c"]) "abc")');
+
   (* ── Summary ────────────────────────────────────────────────────────── *)
   Out.Ln;
   Out.String("Results: ");
