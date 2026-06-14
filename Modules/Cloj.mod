@@ -1592,7 +1592,23 @@ BEGIN
         last := cell; vec := vec.tail
       END;
       RETURN first
-  | tMap: RETURN expr
+  | tMap:
+      vec := expr.head; fn := expr.tail;
+      first := NilV; last := NIL; evArgs := NilV; looked := NIL;
+      WHILE ~IsNil(vec) DO
+        v := EvalRef(vec.head, env);
+        IF err THEN RETURN NilV END;
+        cell := Cons(v, NilV);
+        IF last = NIL THEN first := cell ELSE last.tail := cell END;
+        last := cell;
+        v := EvalRef(fn.head, env);
+        IF err THEN RETURN NilV END;
+        head := Cons(v, NilV);
+        IF looked = NIL THEN evArgs := head ELSE looked.tail := head END;
+        looked := head;
+        vec := vec.tail; fn := fn.tail
+      END;
+      RETURN MkMap(first, evArgs)
   | tList:
       head := expr.head;
       IF ~IsNil(head) & (head.tag = tSym) THEN
