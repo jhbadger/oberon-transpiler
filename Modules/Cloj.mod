@@ -609,6 +609,119 @@ BEGIN
   END
 END PrintValue;
 
+(* ---------- Value → string (non-printing variant of PrintValue) ---------- *)
+
+PROCEDURE BufAppendC(VAR s: ARRAY OF CHAR; VAR n: INTEGER; c: CHAR);
+BEGIN IF n < LEN(s) - 1 THEN s[n] := c; INC(n) END END BufAppendC;
+
+PROCEDURE BufAppendS(VAR s: ARRAY OF CHAR; VAR n: INTEGER; t: ARRAY OF CHAR);
+VAR i: INTEGER;
+BEGIN i := 0; WHILE t[i] # 0X DO BufAppendC(s, n, t[i]); INC(i) END END BufAppendS;
+
+PROCEDURE ValToStrBuf(v: Value; readable: BOOLEAN; VAR s: ARRAY OF CHAR; VAR n: INTEGER);
+VAR p, k, val: Value; first: BOOLEAN; buf: ARRAY 32 OF CHAR; i: INTEGER;
+BEGIN
+  IF IsNil(v) THEN BufAppendS(s, n, "nil"); RETURN END;
+  CASE v.tag OF
+    tBool:
+      IF v.b THEN BufAppendS(s, n, "true") ELSE BufAppendS(s, n, "false") END
+  | tInt:
+      Strings.IntToStr(v.i, buf); BufAppendS(s, n, buf)
+  | tReal:
+      Strings.RealToStr(v.r, buf); BufAppendS(s, n, buf)
+  | tStr:
+      IF readable THEN
+        BufAppendC(s, n, '"');
+        i := 0;
+        WHILE v.s[i] # 0X DO
+          IF v.s[i] = '"' THEN BufAppendC(s, n, '\'); BufAppendC(s, n, '"')
+          ELSIF v.s[i] = '\' THEN BufAppendC(s, n, '\'); BufAppendC(s, n, '\')
+          ELSIF v.s[i] = 0AX THEN BufAppendC(s, n, '\'); BufAppendC(s, n, 'n')
+          ELSE BufAppendC(s, n, v.s[i]) END;
+          INC(i)
+        END;
+        BufAppendC(s, n, '"')
+      ELSE BufAppendS(s, n, v.s) END
+  | tSym: BufAppendS(s, n, v.s)
+  | tKey: BufAppendC(s, n, ':'); BufAppendS(s, n, v.s)
+  | tList:
+      BufAppendC(s, n, '('); p := v; first := TRUE;
+      WHILE ~IsNil(p) & (p.tag = tList) DO
+        IF ~first THEN BufAppendC(s, n, ' ') END;
+        ValToStrBuf(p.head, readable, s, n);
+        first := FALSE; p := p.tail
+      END;
+      BufAppendC(s, n, ')')
+  | tVec:
+      BufAppendC(s, n, '['); p := v; first := TRUE;
+      WHILE ~IsNil(p) & (p.tag = tVec) DO
+        IF ~first THEN BufAppendC(s, n, ' ') END;
+        ValToStrBuf(p.head, readable, s, n);
+        first := FALSE; p := p.tail
+      END;
+      BufAppendC(s, n, ']')
+  | tMap:
+      BufAppendC(s, n, '{'); k := v.head; val := v.tail; first := TRUE;
+      WHILE ~IsNil(k) DO
+        IF ~first THEN BufAppendC(s, n, ' ') END;
+        ValToStrBuf(k.head, readable, s, n); BufAppendC(s, n, ' ');
+        ValToStrBuf(val.head, readable, s, n);
+        first := FALSE; k := k.tail; val := val.tail
+      END;
+      BufAppendC(s, n, '}')
+  | tSet:
+      BufAppendC(s, n, '#'); BufAppendC(s, n, '{'); p := v.head; first := TRUE;
+      WHILE ~IsNil(p) DO
+        IF ~first THEN BufAppendC(s, n, ' ') END;
+        ValToStrBuf(p.head, readable, s, n);
+        first := FALSE; p := p.tail
+      END;
+      BufAppendC(s, n, '}')
+  | tRegex:
+      BufAppendC(s, n, '#'); BufAppendC(s, n, '"');
+      i := 0;
+      WHILE v.s[i] # 0X DO
+        IF v.s[i] = '"' THEN BufAppendC(s, n, '\'); BufAppendC(s, n, '"')
+        ELSIF v.s[i] = '\' THEN BufAppendC(s, n, '\'); BufAppendC(s, n, '\')
+        ELSE BufAppendC(s, n, v.s[i]) END;
+        INC(i)
+      END;
+      BufAppendC(s, n, '"')
+  | tFn: BufAppendS(s, n, "#<fn>")
+  | tBuiltin: BufAppendS(s, n, "#<builtin "); BufAppendS(s, n, v.name); BufAppendC(s, n, '>')
+  | tMacro: BufAppendS(s, n, "#<macro>")
+  | tAtom: BufAppendS(s, n, "#<Atom: "); ValToStrBuf(v.head, readable, s, n); BufAppendC(s, n, '>')
+  | tDelay:
+      IF v.head # NIL THEN
+        BufAppendS(s, n, "#<Delay: "); ValToStrBuf(v.head, readable, s, n); BufAppendC(s, n, '>')
+      ELSE BufAppendS(s, n, "#<Delay (pending)>") END
+  ELSE BufAppendS(s, n, "#<?>")
+  END
+END ValToStrBuf;
+
+PROCEDURE ValueToStr*(v: Value; readable: BOOLEAN; VAR s: ARRAY OF CHAR);
+VAR n: INTEGER;
+BEGIN n := 0; ValToStrBuf(v, readable, s, n); s[n] := 0X
+END ValueToStr;
+
+PROCEDURE DocStr*(sym: ARRAY OF CHAR; VAR s: ARRAY OF CHAR);
+VAR v: Value; n: INTEGER;
+BEGIN
+  n := 0;
+  v := Lookup(GlobalEnv, sym);
+  BufAppendS(s, n, "-------------------------"); BufAppendC(s, n, 0AX);
+  BufAppendS(s, n, sym); BufAppendC(s, n, 0AX);
+  IF v = NIL THEN
+    BufAppendS(s, n, "  Not found.")
+  ELSIF (v.tag = tBuiltin) OR (v.tag = tFn) OR (v.tag = tMacro) THEN
+    IF v.doc[0] # 0X THEN BufAppendS(s, n, "  "); BufAppendS(s, n, v.doc)
+    ELSE BufAppendS(s, n, "  No documentation available.") END
+  ELSE
+    BufAppendS(s, n, "  "); ValToStrBuf(v, TRUE, s, n)
+  END;
+  s[n] := 0X
+END DocStr;
+
 (* ---------- Destructuring ---------- *)
 
 PROCEDURE MapGet(m, k: Value): Value;

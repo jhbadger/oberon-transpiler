@@ -18,8 +18,9 @@ MODULE obemacs;
      Windows:    C-x 1 only-window, C-x 2 split-window,
                  C-x o other-window
      Search:     C-s isearch-forward, C-r isearch-backward
-     Clojure:    C-x C-e eval-last-sexp (inserts result as ; => comment)
+     Cloj:       C-x C-e eval-last-sexp (anywhere; inserts result as ; => comment)
                  F1        show doc for symbol at point (popup)
+                 M-x cloj-repl (or ielm)  open interactive Cloj REPL buffer
      Misc:       C-g keyboard-quit, C-x C-c save-buffers-kill-emacs
                  M-x execute-extended-command
 
@@ -30,12 +31,12 @@ MODULE obemacs;
      .clj .cljs .cljc          -> Clojure
 *)
 
-  IMPORT Terminal, Editor, Strings, Files, Args, Out, OS, Env;
+  IMPORT Terminal, Editor, Strings, Files, Args, Out, Env, Cloj;
 
   CONST
     MaxBuffers   = 32;
     MaxKillRing  = 32;
-    MaxStr       = 256;
+    MaxBuf       = 256;
 
     (* Special keys -- ASCII codes for control characters. *)
     KCtrlA = 01X; KCtrlB = 02X; KCtrlC = 03X; KCtrlD = 04X;
@@ -106,7 +107,7 @@ MODULE obemacs;
     lastWasYank: BOOLEAN;
     lastWasKill: BOOLEAN;
 
-    echoMsg:    ARRAY MaxStr OF CHAR;
+    echoMsg:    ARRAY MaxBuf OF CHAR;
     quitFlag:   BOOLEAN;
     prefixArg:  INTEGER;
 
@@ -117,8 +118,11 @@ MODULE obemacs;
     showParenLine:  INTEGER;  (* 1-based line of matching paren; -1 = none *)
     showParenCol:   INTEGER;  (* 1-based col  of matching paren *)
 
-    (* Clojure eval REPL session state: all previously evaluated forms. *)
-    replHistory:    ARRAY 65536 OF CHAR;
+    clojReady:      BOOLEAN; (* TRUE once Cloj.Init has been called *)
+    replBuf:        Buffer;  (* the *cloj-repl* buffer, NIL if not open *)
+    replInputStart: INTEGER; (* byte offset of current input in replBuf *)
+    initHome:       ARRAY 256 OF CHAR;
+    initPath:       ARRAY 512 OF CHAR;
 
   (* ===================================================================
      small helpers
@@ -829,7 +833,6 @@ MODULE obemacs;
     VAR pos, matchPos, savPos: INTEGER; ch: CHAR; open, close: CHAR;
   BEGIN
     showParenLine := -1; showParenCol := -1;
-    IF curBuf.syntax # SynClojure THEN RETURN END;
     pos := PointPos();
     (* cursor just after a close paren *)
     IF pos > 0 THEN
@@ -964,7 +967,7 @@ MODULE obemacs;
      =================================================================== *)
 
   PROCEDURE Prompt(promptStr: ARRAY OF CHAR; VAR result: ARRAY OF CHAR): BOOLEAN;
-    VAR ch: CHAR; len: INTEGER; line: ARRAY MaxStr OF CHAR;
+    VAR ch: CHAR; len: INTEGER; line: ARRAY MaxBuf OF CHAR;
   BEGIN
     result[0] := 0X; len := 0;
     LOOP
@@ -1248,7 +1251,7 @@ MODULE obemacs;
      =================================================================== *)
 
   PROCEDURE FindFile;
-    VAR path: ARRAY MaxStr OF CHAR; name: ARRAY 64 OF CHAR;
+    VAR path: ARRAY MaxBuf OF CHAR; name: ARRAY 64 OF CHAR;
         b: Buffer; rc: INTEGER;
   BEGIN
     IF ~Prompt("Find file: ", path) THEN RETURN END;
@@ -1269,8 +1272,8 @@ MODULE obemacs;
   END FindFile;
 
   PROCEDURE SaveBuffer;
-    VAR path: ARRAY MaxStr OF CHAR; rc: INTEGER;
-        msg: ARRAY MaxStr OF CHAR;
+    VAR path: ARRAY MaxBuf OF CHAR; rc: INTEGER;
+        msg: ARRAY MaxBuf OF CHAR;
   BEGIN
     IF curBuf.file[0] = 0X THEN
       IF ~Prompt("File to save in: ", path) THEN RETURN END;
@@ -1291,7 +1294,7 @@ MODULE obemacs;
 
   PROCEDURE SaveSomeBuffers;
     VAR i, rc: INTEGER; ch: CHAR;
-        msg: ARRAY MaxStr OF CHAR;
+        msg: ARRAY MaxBuf OF CHAR;
   BEGIN
     i := 0;
     WHILE i < nBuffers DO
@@ -1316,7 +1319,7 @@ MODULE obemacs;
   END SaveSomeBuffers;
 
   PROCEDURE SwitchBuffer;
-    VAR name: ARRAY MaxStr OF CHAR; b: Buffer;
+    VAR name: ARRAY MaxBuf OF CHAR; b: Buffer;
   BEGIN
     IF ~Prompt("Switch to buffer: ", name) THEN RETURN END;
     IF name[0] = 0X THEN RETURN END;
@@ -1328,7 +1331,7 @@ MODULE obemacs;
   PROCEDURE ListBuffers;
     VAR b: Buffer; i: INTEGER;
         text: ARRAY 4096 OF CHAR;
-        line: ARRAY MaxStr OF CHAR;
+        line: ARRAY MaxBuf OF CHAR;
         tmp:  ARRAY 32 OF CHAR;
         nl:   ARRAY 2 OF CHAR;
   BEGIN
@@ -1368,7 +1371,7 @@ MODULE obemacs;
      =================================================================== *)
 
   PROCEDURE Isearch(direction: INTEGER);
-    VAR needle: ARRAY MaxStr OF CHAR;
+    VAR needle: ARRAY MaxBuf OF CHAR;
         startPos, anchor, best, p: INTEGER;
         len, found: INTEGER;
         failing, done: BOOLEAN;
@@ -1464,9 +1467,9 @@ MODULE obemacs;
      =================================================================== *)
 
   PROCEDURE DoReplaceString;
-    VAR from, to_: ARRAY MaxStr OF CHAR;
+    VAR from, to_: ARRAY MaxBuf OF CHAR;
         count, fl, i: INTEGER;
-        msg, tmp: ARRAY MaxStr OF CHAR;
+        msg, tmp: ARRAY MaxBuf OF CHAR;
   BEGIN
     IF ~Prompt("Replace string: ", from) THEN RETURN END;
     IF from[0] = 0X THEN RETURN END;
@@ -1486,8 +1489,56 @@ MODULE obemacs;
     SetEcho(msg)
   END DoReplaceString;
 
+  (* ===================================================================
+     Cloj REPL buffer  (M-x cloj-repl / M-x ielm)
+     =================================================================== *)
+
+  PROCEDURE CmdReplEnter;
+    VAR input: ARRAY 4096 OF CHAR;
+        result: ARRAY 1024 OF CHAR;
+        v: Cloj.Value; len: INTEGER;
+  BEGIN
+    len := BufLen();
+    ExtractBuf(replInputStart, len, input);
+    GotoP(len);
+    Editor.InsertChar(curBuf.ed, 0AX);
+    IF input[0] # 0X THEN
+      Cloj.err := FALSE;
+      v := Cloj.EvalStr(input);
+      IF Cloj.err THEN
+        Strings.Copy("error: ", result);
+        Strings.Append(Cloj.errMsg, result)
+      ELSE
+        Cloj.ValueToStr(v, TRUE, result)
+      END;
+      Editor.InsertStr(curBuf.ed, "; => ");
+      Editor.InsertStr(curBuf.ed, result);
+      Editor.InsertChar(curBuf.ed, 0AX)
+    END;
+    Editor.InsertStr(curBuf.ed, "=> ");
+    replInputStart := BufLen()
+  END CmdReplEnter;
+
+  PROCEDURE CmdReplBuffer;
+    VAR b: Buffer;
+  BEGIN
+    b := FindBuffer("*cloj-repl*");
+    IF b = NIL THEN
+      b := NewBuffer("*cloj-repl*");
+      b.syntax := SynClojure;
+      IF ~clojReady THEN Cloj.Init; clojReady := TRUE END;
+      Editor.InsertStr(b.ed, "Cloj REPL  (Enter to eval, C-x C-c to quit)");
+      Editor.InsertChar(b.ed, 0AX);
+      Editor.InsertStr(b.ed, "=> ");
+      replInputStart := Editor.Len(b.ed)
+    END;
+    replBuf := b;
+    ShowBuffer(b);
+    GotoP(BufLen())
+  END CmdReplBuffer;
+
   PROCEDURE ExecuteExtended;
-    VAR name: ARRAY MaxStr OF CHAR;
+    VAR name: ARRAY MaxBuf OF CHAR;
   BEGIN
     IF ~Prompt("M-x ", name) THEN RETURN END;
     IF (Strings.Compare(name, "replace-string") = 0)
@@ -1510,6 +1561,8 @@ MODULE obemacs;
     ELSIF (Strings.Compare(name, "fundamental-mode") = 0)
        OR (Strings.Compare(name, "text-mode")        = 0) THEN
         curBuf.syntax := SynNone; SetEcho("Fundamental mode")
+    ELSIF (Strings.Compare(name, "cloj-repl") = 0)
+       OR (Strings.Compare(name, "ielm")      = 0) THEN CmdReplBuffer
     ELSIF Strings.Compare(name, "auto-fill-mode")   = 0 THEN
         SetEcho("Auto-fill not implemented in obemacs")
     ELSIF Strings.Compare(name, "recover-this-file") = 0 THEN
@@ -1525,7 +1578,7 @@ MODULE obemacs;
 
   PROCEDURE HandleCtrlX;
     VAR ch: CHAR;
-        msg: ARRAY MaxStr OF CHAR;
+        msg: ARRAY MaxBuf OF CHAR;
   BEGIN
     SetEcho("C-x-");
     Redraw;
@@ -1664,7 +1717,7 @@ MODULE obemacs;
      =================================================================== *)
 
   PROCEDURE CmdRunBuffer;
-    VAR ch: CHAR; cmd: ARRAY MaxStr OF CHAR;
+    VAR ch: CHAR; cmd: ARRAY MaxBuf OF CHAR;
         binName: ARRAY 64 OF CHAR; n: INTEGER;
   BEGIN
     IF curBuf.file[0] = 0X THEN
@@ -1697,8 +1750,15 @@ MODULE obemacs;
         Strings.Copy("Rscript ", cmd);
         Strings.Append(curBuf.file, cmd)
     | SynClojure:
-        Strings.Copy("clojrepl ", cmd);
-        Strings.Append(curBuf.file, cmd)
+        Terminal.Restore;
+        Out.Ln;
+        IF ~clojReady THEN Cloj.Init; clojReady := TRUE END;
+        IF ~Cloj.LoadFile(curBuf.file, TRUE) THEN END;
+        Out.String("-- Press Enter to return --"); Out.Flush;
+        Terminal.Init;
+        ch := Terminal.ReadKey();
+        IF ch = ch THEN END;
+        RETURN
     ELSE
       SetEcho("No run command for this file type"); RETURN
     END;
@@ -1749,91 +1809,32 @@ MODULE obemacs;
     RETURN TRUE
   END FindSexprBefore;
 
-  (* Evaluate the Clojure s-expression immediately before the cursor.
-     Runs cloj with accumulated session history so prior definitions
-     remain visible.  Inserts the result as a "; =>" comment. *)
+  (* Evaluate the s-expression immediately before the cursor using the
+     embedded Cloj interpreter.  Definitions accumulate across evals.
+     Inserts the result as a "; =>" comment.  Works in any buffer mode. *)
   PROCEDURE CmdEvalSexpr;
-    VAR start, finish, rlen, i, rc: INTEGER;
+    VAR start, finish: INTEGER;
         sexpr: ARRAY 4096 OF CHAR;
-        sessFile, outFile: ARRAY 64 OF CHAR;
-        cmd, msg: ARRAY MaxStr OF CHAR;
-        f: Files.File; r: Files.Rider;
-        line, result: ARRAY 1024 OF CHAR;
-        inResult: BOOLEAN;
-        nl: ARRAY 2 OF CHAR;
+        result: ARRAY 1024 OF CHAR;
+        msg: ARRAY MaxBuf OF CHAR;
+        v: Cloj.Value;
   BEGIN
-    IF curBuf.syntax # SynClojure THEN
-      SetEcho("C-x C-e: not in Clojure mode"); RETURN
-    END;
     IF ~FindSexprBefore(start, finish) THEN RETURN END;
     ExtractBuf(start, finish, sexpr);
 
-    TmpPath("obecloj_sess.clj", sessFile);
-    TmpPath("obecloj_out.txt", outFile);
-
-    (* Write session file: accumulated history then eval wrapper *)
-    f := Files.New(sessFile);
-    IF f = NIL THEN SetEcho("C-x C-e: cannot write temp file"); RETURN END;
-    Files.Set(r, f, 0);
-    IF replHistory[0] # 0X THEN
-      WriteChars(r, replHistory)   (* history already ends with LF *)
-    END;
-    WriteChars(r, '(println ";;OBEMACS_SEP;;")');
-    Files.Write(r, 10);
-    WriteChars(r, "(println (do ");
-    WriteChars(r, sexpr);
-    WriteChars(r, "))");
-    Files.Write(r, 10);
-    Files.Register(f);
-    Files.Close(f);
-
-    (* Run cloj, redirect all output to the output file *)
-    Files.Delete(outFile);
-    Strings.Copy("clojrepl ", cmd);
-    Strings.Append(sessFile, cmd);
-    Strings.Append(" > ", cmd);
-    Strings.Append(outFile, cmd);
-    Strings.Append(" 2>&1", cmd);
-    rc := OS.Exec(cmd);
-
-    (* Collect output lines that follow the sentinel *)
-    result[0] := 0X; rlen := 0; inResult := FALSE;
-    f := Files.Old(outFile);
-    IF f # NIL THEN
-      Files.Set(r, f, 0);
-      WHILE ~r.eof DO
-        Files.ReadLine(r, line);
-        IF ~r.eof OR (line[0] # 0X) THEN
-          IF inResult THEN
-            IF rlen > 0 THEN result[rlen] := " "; INC(rlen) END;
-            i := 0;
-            WHILE (line[i] # 0X) & (rlen < LEN(result) - 1) DO
-              result[rlen] := line[i]; INC(rlen); INC(i)
-            END;
-            result[rlen] := 0X
-          ELSIF Strings.Compare(line, ";;OBEMACS_SEP;;") = 0 THEN
-            inResult := TRUE
-          END
-        END
-      END;
-      Files.Close(f)
+    IF ~clojReady THEN Cloj.Init; clojReady := TRUE END;
+    Cloj.err := FALSE;
+    v := Cloj.EvalStr(sexpr);
+    IF Cloj.err THEN
+      Strings.Copy("error: ", result);
+      Strings.Append(Cloj.errMsg, result)
+    ELSE
+      Cloj.ValueToStr(v, TRUE, result)
     END;
 
-    (* Insert "; => <result>" comment after the s-expression *)
     GotoP(finish);
     Editor.InsertStr(curBuf.ed, " ; => ");
-    IF result[0] # 0X THEN
-      Editor.InsertStr(curBuf.ed, result)
-    ELSE
-      Editor.InsertStr(curBuf.ed, "(no output)")
-    END;
-
-    (* Accumulate this form in history so future evals see its definitions *)
-    nl[0] := 0AX; nl[1] := 0X;
-    IF Strings.Length(replHistory) + Strings.Length(sexpr) + 2 < LEN(replHistory) THEN
-      Strings.Append(sexpr, replHistory);
-      Strings.Append(nl, replHistory)
-    END;
+    Editor.InsertStr(curBuf.ed, result);
 
     Strings.Copy("=> ", msg);
     Strings.Append(result, msg);
@@ -1841,76 +1842,46 @@ MODULE obemacs;
   END CmdEvalSexpr;
 
   (* ===================================================================
-     F1: show (doc symbol-at-point) in a popup (Clojure mode only)
+     F1: show (doc symbol-at-point) in a popup
      =================================================================== *)
 
   PROCEDURE CmdClojureDoc;
-    VAR p, start, finish, len, i, rc: INTEGER;
+    VAR p, start, finish, len, i, j: INTEGER;
         ch, key: CHAR;
         sym: ARRAY 256 OF CHAR;
-        inFile, outFile: ARRAY 64 OF CHAR;
-        cmd: ARRAY MaxStr OF CHAR;
-        f, fw: Files.File; r, rw: Files.Rider;
-        line: ARRAY 1024 OF CHAR;
+        docBuf: ARRAY 2048 OF CHAR;
         lines: ARRAY 16 OF ARRAY 128 OF CHAR;
         nLines, maxW, llen: INTEGER;
         bx, by, bw, bh, row: INTEGER;
   BEGIN
-    IF curBuf.syntax # SynClojure THEN
-      SetEcho("F1: not in Clojure mode"); RETURN
-    END;
-
     (* Collect symbol chars around point *)
     p := PointPos(); len := BufLen();
-    (* step back to start of symbol *)
     WHILE (p > 0) & CharAt(p - 1, ch) & IsClojureSymbolChar(ch) DO DEC(p) END;
     start := p;
-    (* step forward to end of symbol *)
     WHILE (p < len) & CharAt(p, ch) & IsClojureSymbolChar(ch) DO INC(p) END;
     finish := p;
     IF finish <= start THEN SetEcho("F1: no symbol at point"); RETURN END;
     ExtractBuf(start, finish, sym);
 
-    TmpPath("obecloj_doc.txt",    outFile);
-    TmpPath("obecloj_doc_in.clj", inFile);
-    Files.Delete(outFile);
+    IF ~clojReady THEN Cloj.Init; clojReady := TRUE END;
+    Cloj.DocStr(sym, docBuf);
 
-    (* Write (doc sym) to a temp file and feed it to clojrepl *)
-    fw := Files.New(inFile);
-    IF fw = NIL THEN SetEcho("F1: cannot write temp file"); RETURN END;
-    Files.Set(rw, fw, 0);
-    IF replHistory[0] # 0X THEN WriteChars(rw, replHistory) END;
-    WriteChars(rw, "(doc "); WriteChars(rw, sym); WriteChars(rw, ")");
-    Files.Write(rw, 10);
-    Files.Register(fw); Files.Close(fw);
-
-    Strings.Copy("clojrepl ", cmd);
-    Strings.Append(inFile, cmd);
-    Strings.Append(" > ", cmd);
-    Strings.Append(outFile, cmd);
-    Strings.Append(" 2>&1", cmd);
-    rc := OS.Exec(cmd);
-
-    (* Read output into lines array *)
-    nLines := 0; maxW := 0;
-    f := Files.Old(outFile);
-    IF f # NIL THEN
-      Files.Set(r, f, 0);
-      WHILE ~r.eof & (nLines < LEN(lines)) DO
-        Files.ReadLine(r, line);
-        IF ~r.eof OR (line[0] # 0X) THEN
-          llen := Strings.Length(line);
-          IF llen > LEN(lines[0]) - 1 THEN llen := LEN(lines[0]) - 1 END;
-          IF llen > 0 THEN
-            i := 0;
-            WHILE i < llen DO lines[nLines][i] := line[i]; INC(i) END;
-            lines[nLines][llen] := 0X;
-            IF llen > maxW THEN maxW := llen END;
-            INC(nLines)
-          END
-        END
+    (* Split docBuf on newlines into lines[] *)
+    nLines := 0; maxW := 0; j := 0; i := 0;
+    WHILE (docBuf[i] # 0X) & (nLines < LEN(lines)) DO
+      IF docBuf[i] = 0AX THEN
+        lines[nLines][j] := 0X; llen := j;
+        IF llen > maxW THEN maxW := llen END;
+        INC(nLines); j := 0
+      ELSIF j < LEN(lines[0]) - 1 THEN
+        lines[nLines][j] := docBuf[i]; INC(j)
       END;
-      Files.Close(f)
+      INC(i)
+    END;
+    IF (j > 0) & (nLines < LEN(lines)) THEN
+      lines[nLines][j] := 0X; llen := j;
+      IF llen > maxW THEN maxW := llen END;
+      INC(nLines)
     END;
     IF nLines = 0 THEN
       Strings.Copy("No doc for: ", lines[0]); Strings.Append(sym, lines[0]);
@@ -1976,7 +1947,7 @@ MODULE obemacs;
     | KCtrlSlash: CmdUndo
     | KCtrlX: HandleCtrlX
     | KEsc:   HandleMeta
-    | KEnter: CmdNewline
+    | KEnter: IF curBuf = replBuf THEN CmdReplEnter ELSE CmdNewline END
     | KBackspace, KDel: CmdBackspace
     | KTab:   CmdSelfInsert(09X)
     | KNul:   CmdSetMark             (* C-SPC / C-@ *)
@@ -2032,7 +2003,7 @@ MODULE obemacs;
 
   PROCEDURE InitialBuffer;
     VAR b: Buffer;
-        argv: ARRAY MaxStr OF CHAR;
+        argv: ARRAY MaxBuf OF CHAR;
         rc: INTEGER;
         name: ARRAY 64 OF CHAR;
   BEGIN
@@ -2100,7 +2071,19 @@ BEGIN
   blockDepth  := 0;
   showParenLine := -1;
   showParenCol  := -1;
-  replHistory[0] := 0X;
+  clojReady := FALSE;
+  replBuf := NIL;
+  replInputStart := 0;
+
+  (* Load ~/.config/obemacs/init.clj if it exists *)
+  IF Env.Get("HOME", initHome) & (initHome[0] # 0X) THEN
+    Strings.Copy(initHome, initPath);
+    Strings.Append("/.config/obemacs/init.clj", initPath);
+    IF Files.Exists(initPath) THEN
+      Cloj.Init; clojReady := TRUE;
+      IF ~Cloj.LoadFile(initPath, FALSE) THEN END
+    END
+  END;
 
   cols := Terminal.Cols();
   rows := Terminal.Rows();

@@ -208,7 +208,7 @@ int Editor_Load(Editor_Handle h, char *path) {
 
 int Editor_Save(Editor_Handle h, char *path) {
     FILE *f = fopen(path, "wb");
-    if (!f) return 0;
+    if (!f) return 1;
     int ok = 1;
     if (h->gapstart > 0)
         ok &= (fwrite(h->buf, 1, (size_t)h->gapstart, f)
@@ -219,7 +219,7 @@ int Editor_Save(Editor_Handle h, char *path) {
                == (size_t)post);
     fclose(f);
     if (ok) h->modified = 0;
-    return ok;
+    return !ok;
 }
 
 int Editor_Len(Editor_Handle h)        { return ed_len(h); }
