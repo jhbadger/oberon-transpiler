@@ -91,7 +91,7 @@ PROCEDURE MkNil(): Value;
 VAR v: Value;
 BEGIN NEW(v); v.tag := tNil; RETURN v END MkNil;
 
-PROCEDURE MkBool(b: BOOLEAN): Value;
+PROCEDURE MkBool*(b: BOOLEAN): Value;
 BEGIN
   IF b THEN RETURN TrueV ELSE RETURN FalseV END
 END MkBool;
@@ -134,7 +134,7 @@ BEGIN
   RETURN v
 END MkVec;
 
-PROCEDURE MkMap(keys, vals: Value): Value;
+PROCEDURE MkMap*(keys, vals: Value): Value;
 VAR v: Value;
 BEGIN
   NEW(v); v.tag := tMap; v.head := keys; v.tail := vals;
@@ -4175,29 +4175,47 @@ BEGIN
 END REPL;
 
 PROCEDURE Main*;
-VAR i, nFiles: INTEGER; arg: ARRAY 256 OF CHAR;
+VAR i, scriptIdx: INTEGER; arg: ARRAY 256 OF CHAR;
   interactive, ok: BOOLEAN;
+  argsV, argsLast, cell: Value;
 BEGIN
   Init;
-  interactive := FALSE; nFiles := 0;
+  interactive := FALSE; scriptIdx := 0;
   i := 1;
   WHILE i <= Args.Count() DO
     Args.Get(i, arg);
     IF (arg[0] = '-') & (arg[1] = 'i') & (arg[2] = 0X) THEN
       interactive := TRUE
     ELSIF (arg[0] = '-') & (arg[1] = 'h') & (arg[2] = 0X) THEN
-      Out.String("usage: cloj [-i] [file.clj ...]"); Out.Ln;
-      Out.String("  -i        drop into REPL after loading files"); Out.Ln;
+      Out.String("usage: cloj [-i] [script.clj [args...]]"); Out.Ln;
+      Out.String("  -i        drop into REPL after running script"); Out.Ln;
       Out.String("  no args   start REPL"); Out.Ln;
+      Out.String("  *args*    bound to the args after the script name"); Out.Ln;
       RETURN
-    ELSE
-      ok := LoadFile(arg, FALSE);
-      INC(nFiles)
+    ELSIF scriptIdx = 0 THEN
+      scriptIdx := i
     END;
     INC(i)
   END;
-
-  IF (nFiles = 0) OR interactive THEN REPL END
+  (* Bind *args* to arguments after the script file *)
+  argsV := NilV; argsLast := NIL;
+  IF scriptIdx > 0 THEN
+    i := scriptIdx + 1;
+    WHILE i <= Args.Count() DO
+      Args.Get(i, arg);
+      cell := Cons(MkStr(arg), NilV);
+      IF argsLast = NIL THEN argsV := cell ELSE argsLast.tail := cell END;
+      argsLast := cell; INC(i)
+    END
+  END;
+  Define(GlobalEnv, "*args*", argsV);
+  IF scriptIdx > 0 THEN
+    Args.Get(scriptIdx, arg);
+    ok := LoadFile(arg, FALSE);
+    IF ok & interactive THEN REPL() END
+  ELSE
+    REPL()
+  END
 END Main;
 
 BEGIN
