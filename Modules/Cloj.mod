@@ -326,6 +326,8 @@ BEGIN
       tok[i] := 0X;
       IF (srcPos < srcLen) & (src[srcPos] = '"') THEN INC(srcPos)
       ELSE Error("unterminated regex literal") END
+    ELSIF (srcPos + 1 < srcLen) & (src[srcPos + 1] = '(') THEN
+      tokKind := 16; srcPos := srcPos + 2
     ELSE
       tokKind := 8; i := 0;
       WHILE (srcPos < srcLen) & ~IsDelim(src[srcPos]) & (i < MaxStr-1) DO
@@ -465,6 +467,58 @@ PROCEDURE ParseExpr(): Value;
     RETURN MkSet(first)
   END ParseSet;
 
+  PROCEDURE ScanPct(v: Value; VAR maxN: INTEGER; VAR hasRest: BOOLEAN);
+  VAR n: INTEGER;
+  BEGIN
+    IF IsNil(v) THEN RETURN END;
+    IF v.tag = tSym THEN
+      IF (v.s[0] = '%') & (v.s[1] = 0X) THEN
+        IF maxN < 1 THEN maxN := 1 END
+      ELSIF (v.s[0] = '%') & (v.s[1] = '&') & (v.s[2] = 0X) THEN
+        hasRest := TRUE
+      ELSIF (v.s[0] = '%') & (v.s[1] >= '1') & (v.s[1] <= '9') & (v.s[2] = 0X) THEN
+        n := ORD(v.s[1]) - ORD('0');
+        IF n > maxN THEN maxN := n END
+      END
+    ELSIF (v.tag = tList) OR (v.tag = tVec) THEN
+      ScanPct(v.head, maxN, hasRest); ScanPct(v.tail, maxN, hasRest)
+    END
+  END ScanPct;
+
+  PROCEDURE NormPct(v: Value);
+  BEGIN
+    IF IsNil(v) THEN RETURN END;
+    IF v.tag = tSym THEN
+      IF (v.s[0] = '%') & (v.s[1] = 0X) THEN
+        v.s[1] := '1'; v.s[2] := 0X
+      END
+    ELSIF (v.tag = tList) OR (v.tag = tVec) THEN
+      NormPct(v.head); NormPct(v.tail)
+    END
+  END NormPct;
+
+  PROCEDURE ParseFnShorthand(): Value;
+  VAR body, params: Value; maxN, i: INTEGER; hasRest: BOOLEAN;
+      buf: ARRAY 4 OF CHAR;
+  BEGIN
+    body := ParseSeq(2);
+    IF err THEN RETURN NilV END;
+    maxN := 0; hasRest := FALSE;
+    ScanPct(body, maxN, hasRest); NormPct(body);
+    params := NilV;
+    IF hasRest THEN
+      params := MkVec(MkSym("%&"), NilV);
+      params := MkVec(MkSym("&"), params)
+    END;
+    i := maxN;
+    WHILE i >= 1 DO
+      buf[0] := '%'; buf[1] := CHR(ORD('0') + i); buf[2] := 0X;
+      params := MkVec(MkSym(buf), params);
+      DEC(i)
+    END;
+    RETURN Cons(MkSym("fn"), Cons(params, Cons(body, NilV)))
+  END ParseFnShorthand;
+
 VAR v, q: Value;
 BEGIN
   CASE tokKind OF
@@ -486,6 +540,7 @@ BEGIN
         q := Cons(MkSym("deref"), Cons(v, NilV)); RETURN q
   | 14: RETURN ParseSet()
   | 15: RETURN MkRegex(tok)
+  | 16: RETURN ParseFnShorthand()
   ELSE Error("unexpected token"); RETURN NilV
   END
 END ParseExpr;
@@ -1985,6 +2040,21 @@ BEGIN
   RETURN first
 END BVector;
 
+PROCEDURE BVec(args: Value; env: Env): Value;
+VAR coll, first, last, cell: Value;
+BEGIN
+  coll := args.head;
+  IF IsNil(coll) THEN RETURN NilV END;
+  IF coll.tag = tSet THEN coll := coll.head END;
+  first := NilV; last := NIL;
+  WHILE ~IsNil(coll) & ((coll.tag = tList) OR (coll.tag = tVec)) DO
+    cell := MkVec(coll.head, NilV);
+    IF last = NIL THEN first := cell ELSE last.tail := cell END;
+    last := cell; coll := coll.tail
+  END;
+  RETURN first
+END BVec;
+
 PROCEDURE BCons(args: Value; env: Env): Value;
 BEGIN RETURN Cons(args.head, args.tail.head) END BCons;
 
@@ -2024,11 +2094,22 @@ BEGIN
 END BCount;
 
 PROCEDURE BNth(args: Value; env: Env): Value;
-VAR v: Value; n: INTEGER;
+VAR v: Value; n: INTEGER; buf: ARRAY 2 OF CHAR;
 BEGIN
   v := args.head; n := args.tail.head.i;
+  IF v.tag = tStr THEN
+    IF (n < 0) OR (n >= Strings.Length(v.s)) THEN
+      IF ~IsNil(args.tail.tail) THEN RETURN args.tail.tail.head END;
+      RETURN NilV
+    END;
+    buf[0] := v.s[n]; buf[1] := 0X;
+    RETURN MkStr(buf)
+  END;
   WHILE (n > 0) & ~IsNil(v) DO v := v.tail; DEC(n) END;
-  IF IsNil(v) THEN RETURN NilV END;
+  IF IsNil(v) THEN
+    IF ~IsNil(args.tail.tail) THEN RETURN args.tail.tail.head END;
+    RETURN NilV
+  END;
   RETURN v.head
 END BNth;
 
@@ -2054,18 +2135,36 @@ BEGIN
 END BConj;
 
 PROCEDURE BMap(args: Value; env: Env): Value;
-VAR fn, coll, first, last, cell, callArgs, result: Value;
+VAR fn, colls, cur, p, first, last, cell, callArgs, callLast, result: Value;
 BEGIN
-  fn := args.head; coll := args.tail.head;
-  IF ~IsNil(coll) & (coll.tag = tSet) THEN coll := coll.head END;
+  fn := args.head;
+  colls := NilV; last := NIL;
+  p := args.tail;
+  WHILE ~IsNil(p) DO
+    cur := p.head;
+    IF ~IsNil(cur) & (cur.tag = tSet) THEN cur := cur.head END;
+    cell := Cons(cur, NilV);
+    IF last = NIL THEN colls := cell ELSE last.tail := cell END;
+    last := cell; p := p.tail
+  END;
   first := NilV; last := NIL;
-  WHILE ~IsNil(coll) & ~err DO
-    callArgs := Cons(coll.head, NilV);
+  LOOP
+    cur := colls;
+    WHILE ~IsNil(cur) & ~IsNil(cur.head) DO cur := cur.tail END;
+    IF ~IsNil(cur) THEN EXIT END;
+    callArgs := NilV; callLast := NIL; cur := colls;
+    WHILE ~IsNil(cur) DO
+      cell := Cons(cur.head.head, NilV);
+      IF callLast = NIL THEN callArgs := cell ELSE callLast.tail := cell END;
+      callLast := cell; cur := cur.tail
+    END;
     result := Apply(fn, callArgs, env);
     IF err THEN RETURN NilV END;
     cell := Cons(result, NilV);
     IF last = NIL THEN first := cell ELSE last.tail := cell END;
-    last := cell; coll := coll.tail
+    last := cell;
+    cur := colls;
+    WHILE ~IsNil(cur) DO cur.head := cur.head.tail; cur := cur.tail END
   END;
   RETURN first
 END BMap;
@@ -4291,7 +4390,7 @@ BEGIN
   (* Sequence constructors *)
   RegisterDoc("list", BList, "Creates a list with supplied items.");
   RegisterDoc("vector", BVector, "Creates a vector with supplied items.");
-  RegisterDoc("vec", BVector, "Creates a vector from a collection.");
+  RegisterDoc("vec", BVec, "Creates a vector from a collection.");
   RegisterDoc("hash-map", BHashMap, "Creates a hash map with supplied key/value pairs.");
   RegisterDoc("seq", BSeq, "Returns a seq on the collection. Returns nil if empty.");
 
