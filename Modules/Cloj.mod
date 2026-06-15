@@ -21,10 +21,22 @@ CONST
   tDelay*  = 14;
   tSet*    = 15;
   tRegex*  = 16;
+  tResolved* = 17;
 
   MaxTok     = 65536;
   MaxStr     = 256;
   MaxModules = 64;
+  MaxSymbols = 4096;
+
+  (* Special-form ids; 0 = not a special form *)
+  sfNone = 0; sfDef = 1; sfDefn = 2; sfIf = 3; sfFn = 4; sfLet = 5;
+  sfDo = 6; sfQuote = 7; sfAnd = 8; sfOr = 9; sfWhen = 10;
+  sfWhenNot = 11; sfCond = 12; sfCase = 13; sfDotimes = 14; sfDoseq = 15;
+  sfLoop = 16; sfRecur = 17; sfDefmacro = 18; sfThrow = 19; sfTry = 20;
+  sfQuasiquote = 21; sfLetfn = 22; sfDelay = 23; sfFuture = 24;
+  sfDosync = 25; sfDefrecord = 26; sfDefprotocol = 27; sfExtendType = 28;
+  sfExtendProtocol = 29; sfDoc = 30; sfThread = 31; sfThreadLast = 32;
+  sfFor = 33;
 
 TYPE
   Value*   = POINTER TO ValueDesc;
@@ -47,13 +59,17 @@ TYPE
     builtin*: Builtin;
     name*: ARRAY 32 OF CHAR;
     doc*: ARRAY MaxStr OF CHAR;
+    symId*: INTEGER;
+    sfId*: INTEGER;
   END;
 
   BindingDesc = RECORD
     name: ARRAY MaxStr OF CHAR;
+    symId: INTEGER;
     val: Value;
     next: Binding;
   END;
+  
 
   EnvDesc* = RECORD
     bindings: Binding;
@@ -85,11 +101,43 @@ VAR
   modFns:   ARRAY MaxModules OF ModuleRegFn;
   nModules: INTEGER;
 
+  (* Symbol intern table *)
+  symTab: ARRAY MaxSymbols OF ARRAY MaxStr OF CHAR;
+  symSF:  ARRAY MaxSymbols OF INTEGER;
+  nSyms: INTEGER;
+
+  (* Generation counter, bumped on every global Define *)
+  globalGen: INTEGER;
+
+(* ---------- Symbol interning ---------- *)
+
+PROCEDURE InternSym(s: ARRAY OF CHAR): INTEGER;
+VAR i: INTEGER;
+BEGIN
+  i := 0;
+  WHILE i < nSyms DO
+    IF symTab[i] = s THEN RETURN i END;
+    INC(i)
+  END;
+  IF nSyms >= MaxSymbols THEN RETURN -1 END;
+  Strings.Copy(s, symTab[nSyms]);
+  symSF[nSyms] := sfNone;
+  INC(nSyms);
+  RETURN nSyms - 1
+END InternSym;
+
+PROCEDURE MarkSF(name: ARRAY OF CHAR; id: INTEGER);
+VAR sid: INTEGER;
+BEGIN
+  sid := InternSym(name);
+  IF sid >= 0 THEN symSF[sid] := id END
+END MarkSF;
+
 (* ---------- Value constructors ---------- *)
 
 PROCEDURE MkNil(): Value;
 VAR v: Value;
-BEGIN NEW(v); v.tag := tNil; RETURN v END MkNil;
+BEGIN NEW(v); v.tag := tNil; v.symId := -1; RETURN v END MkNil;
 
 PROCEDURE MkBool*(b: BOOLEAN): Value;
 BEGIN
@@ -98,32 +146,39 @@ END MkBool;
 
 PROCEDURE MkInt*(n: INTEGER): Value;
 VAR v: Value;
-BEGIN NEW(v); v.tag := tInt; v.i := n; RETURN v END MkInt;
+BEGIN NEW(v); v.tag := tInt; v.i := n; v.symId := -1; RETURN v END MkInt;
 
 PROCEDURE MkReal*(x: REAL): Value;
 VAR v: Value;
-BEGIN NEW(v); v.tag := tReal; v.r := x; RETURN v END MkReal;
+BEGIN NEW(v); v.tag := tReal; v.r := x; v.symId := -1; RETURN v END MkReal;
 
 PROCEDURE MkStr*(s: ARRAY OF CHAR): Value;
 VAR v: Value;
-BEGIN NEW(v); v.tag := tStr; Strings.Copy(s, v.s); RETURN v END MkStr;
+BEGIN NEW(v); v.tag := tStr; Strings.Copy(s, v.s); v.symId := -1; RETURN v END MkStr;
 
 PROCEDURE MkSym*(s: ARRAY OF CHAR): Value;
 VAR v: Value;
-BEGIN NEW(v); v.tag := tSym; Strings.Copy(s, v.s); RETURN v END MkSym;
+BEGIN
+  NEW(v); v.tag := tSym; Strings.Copy(s, v.s);
+  v.symId := InternSym(s);
+  v.sfId := 0;
+  IF v.symId >= 0 THEN v.sfId := symSF[v.symId] END;
+  RETURN v
+END MkSym;
 
 PROCEDURE MkKey*(s: ARRAY OF CHAR): Value;
 VAR v: Value;
-BEGIN NEW(v); v.tag := tKey; Strings.Copy(s, v.s); RETURN v END MkKey;
+BEGIN NEW(v); v.tag := tKey; Strings.Copy(s, v.s); v.symId := -1; RETURN v END MkKey;
 
 PROCEDURE MkRegex*(s: ARRAY OF CHAR): Value;
 VAR v: Value;
-BEGIN NEW(v); v.tag := tRegex; Strings.Copy(s, v.s); RETURN v END MkRegex;
+BEGIN NEW(v); v.tag := tRegex; Strings.Copy(s, v.s); v.symId := -1; RETURN v END MkRegex;
 
 PROCEDURE Cons*(h, t: Value): Value;
 VAR v: Value;
 BEGIN
   NEW(v); v.tag := tList; v.head := h; v.tail := t;
+  v.symId := -1;
   RETURN v
 END Cons;
 
@@ -131,6 +186,7 @@ PROCEDURE MkVec(h, t: Value): Value;
 VAR v: Value;
 BEGIN
   NEW(v); v.tag := tVec; v.head := h; v.tail := t;
+  v.symId := -1;
   RETURN v
 END MkVec;
 
@@ -138,6 +194,7 @@ PROCEDURE MkMap*(keys, vals: Value): Value;
 VAR v: Value;
 BEGIN
   NEW(v); v.tag := tMap; v.head := keys; v.tail := vals;
+  v.symId := -1;
   RETURN v
 END MkMap;
 
@@ -145,11 +202,11 @@ END MkMap;
    b = TRUE marks a sorted-set (elements kept in ValLT order). *)
 PROCEDURE MkSet(elems: Value): Value;
 VAR v: Value;
-BEGIN NEW(v); v.tag := tSet; v.b := FALSE; v.head := elems; RETURN v END MkSet;
+BEGIN NEW(v); v.tag := tSet; v.b := FALSE; v.head := elems; v.symId := -1; RETURN v END MkSet;
 
 PROCEDURE MkSortedSet(elems: Value): Value;
 VAR v: Value;
-BEGIN NEW(v); v.tag := tSet; v.b := TRUE; v.head := elems; RETURN v END MkSortedSet;
+BEGIN NEW(v); v.tag := tSet; v.b := TRUE; v.head := elems; v.symId := -1; RETURN v END MkSortedSet;
 
 PROCEDURE SetContains(s, elem: Value): BOOLEAN;
 VAR p: Value;
@@ -206,6 +263,7 @@ VAR v: Value;
 BEGIN
   NEW(v); v.tag := tBuiltin; v.builtin := fn;
   Strings.Copy(name, v.name);
+  v.symId := -1;
   RETURN v
 END MkBuiltin;
 
@@ -243,31 +301,62 @@ PROCEDURE NewEnv*(parent: Env): Env;
 VAR e: Env;
 BEGIN NEW(e); e.parent := parent; e.bindings := NIL; RETURN e END NewEnv;
 
-PROCEDURE Define*(e: Env; name: ARRAY OF CHAR; v: Value);
+PROCEDURE DefineId(e: Env; id: INTEGER; name: ARRAY OF CHAR; v: Value);
 VAR b: Binding;
 BEGIN
   b := e.bindings;
   WHILE b # NIL DO
-    IF b.name = name THEN b.val := v; RETURN END;
+    IF b.symId = id THEN b.val := v; RETURN END;
     b := b.next
   END;
-  NEW(b); Strings.Copy(name, b.name); b.val := v;
-  b.next := e.bindings; e.bindings := b
-END Define;
+  NEW(b); Strings.Copy(name, b.name); b.symId := id; b.val := v;
+  b.next := e.bindings; e.bindings := b;
+  IF e = GlobalEnv THEN INC(globalGen) END
+END DefineId;
 
-PROCEDURE Lookup*(e: Env; name: ARRAY OF CHAR): Value;
+PROCEDURE LookupId(e: Env; id: INTEGER): Value;
 VAR b: Binding;
 BEGIN
   WHILE e # NIL DO
     b := e.bindings;
     WHILE b # NIL DO
-      IF b.name = name THEN RETURN b.val END;
+      IF b.symId = id THEN RETURN b.val END;
       b := b.next
     END;
     e := e.parent
   END;
   RETURN NIL
+END LookupId;
+
+PROCEDURE Define*(e: Env; name: ARRAY OF CHAR; v: Value);
+VAR id: INTEGER;
+BEGIN
+  id := InternSym(name);
+  DefineId(e, id, name, v)
+END Define;
+
+PROCEDURE Lookup*(e: Env; name: ARRAY OF CHAR): Value;
+VAR id: INTEGER;
+BEGIN
+  id := InternSym(name);
+  IF id < 0 THEN RETURN NIL END;
+  RETURN LookupId(e, id)
 END Lookup;
+
+PROCEDURE IsGlobalBinding(env: Env; id: INTEGER): BOOLEAN;
+VAR b: Binding; e: Env;
+BEGIN
+  e := env;
+  WHILE (e # NIL) & (e # GlobalEnv) DO
+    b := e.bindings;
+    WHILE b # NIL DO
+      IF b.symId = id THEN RETURN FALSE END;
+      b := b.next
+    END;
+    e := e.parent
+  END;
+  RETURN e = GlobalEnv
+END IsGlobalBinding;
 
 (* ---------- Tokenizer ---------- *)
 
@@ -609,7 +698,7 @@ BEGIN
         END;
         Out.Char('"')
       ELSE WriteStr(v.s) END
-  | tSym: WriteStr(v.s)
+  | tSym, tResolved: WriteStr(v.s)
   | tKey: Out.Char(':'); WriteStr(v.s)
   | tList:
       Out.Char('('); p := v; first := TRUE;
@@ -697,7 +786,7 @@ BEGIN
         END;
         BufAppendC(s, n, '"')
       ELSE BufAppendS(s, n, v.s) END
-  | tSym: BufAppendS(s, n, v.s)
+  | tSym, tResolved: BufAppendS(s, n, v.s)
   | tKey: BufAppendC(s, n, ':'); BufAppendS(s, n, v.s)
   | tList:
       BufAppendC(s, n, '('); p := v; first := TRUE;
@@ -1086,7 +1175,6 @@ BEGIN
 END ExpandQQ;
 
 (* ---------- Evaluator ---------- *)
-
 PROCEDURE Eval*(expr: Value; env: Env): Value;
 
   PROCEDURE DoDef(args: Value): Value;
@@ -1097,7 +1185,7 @@ PROCEDURE Eval*(expr: Value; env: Env): Value;
     END;
     v := EvalRef(args.tail.head, env);
     IF err THEN RETURN NilV END;
-    Define(GlobalEnv, args.head.s, v);
+    DefineId(GlobalEnv, args.head.symId, args.head.s, v);
     RETURN v
   END DoDef;
 
@@ -1114,13 +1202,12 @@ PROCEDURE Eval*(expr: Value; env: Env): Value;
   PROCEDURE DoFn(args: Value): Value;
   VAR v, clause, arList, arLast, c: Value;
   BEGIN
-    NEW(v); v.tag := tFn;
+    NEW(v); v.tag := tFn; v.symId := -1;
     v.closure := env;
-    (* multi-arity: (fn ([] body) ([x] body) ...) — first arg is a list, not a vector *)
     IF ~IsNil(args) & ~IsNil(args.head) & (args.head.tag = tList) THEN
       arList := NilV; arLast := NIL;
       WHILE ~IsNil(args) DO
-        NEW(clause); clause.tag := tFn;
+        NEW(clause); clause.tag := tFn; clause.symId := -1;
         clause.params := args.head.head;
         clause.body   := args.head.tail;
         clause.closure := env;
@@ -1214,7 +1301,6 @@ PROCEDURE Eval*(expr: Value; env: Env): Value;
     IF IsNil(args) OR (args.head.tag # tSym) THEN
       Error("defn needs name"); RETURN NilV
     END;
-    (* support optional docstring: (defn name "doc" [params] body) *)
     IF ~IsNil(args.tail) & ~IsNil(args.tail.head) & (args.tail.head.tag = tStr) THEN
       fnVal := DoFn(args.tail.tail);
       IF err THEN RETURN NilV END;
@@ -1223,7 +1309,7 @@ PROCEDURE Eval*(expr: Value; env: Env): Value;
       fnVal := DoFn(args.tail);
       IF err THEN RETURN NilV END
     END;
-    Define(GlobalEnv, args.head.s, fnVal);
+    DefineId(GlobalEnv, args.head.symId, args.head.s, fnVal);
     RETURN fnVal
   END DoDefn;
 
@@ -1284,7 +1370,7 @@ PROCEDURE Eval*(expr: Value; env: Env): Value;
     newEnv := NewEnv(env);
     result := NilV; i := 0;
     WHILE (i < n) & ~err DO
-      Define(newEnv, nameV.s, MkInt(i));
+      DefineId(newEnv, nameV.symId, nameV.s, MkInt(i));
       result := NilV;
       body := args.tail;
       WHILE ~IsNil(body) & ~err DO
@@ -1320,8 +1406,10 @@ PROCEDURE Eval*(expr: Value; env: Env): Value;
 
   PROCEDURE DoLoop(args: Value): Value;
   VAR bindVec, body, p, symV, valV, result, rp: Value;
-    newEnv: Env; names: ARRAY 16 OF ARRAY MaxStr OF CHAR;
+    newEnv: Env;
+    bs: ARRAY 16 OF Binding;
     numB, i: INTEGER;
+    bnd: Binding;
   BEGIN
     bindVec := args.head; body := args.tail;
     IF IsNil(bindVec) OR ((bindVec.tag # tVec) & (bindVec.tag # tList)) THEN
@@ -1335,8 +1423,10 @@ PROCEDURE Eval*(expr: Value; env: Env): Value;
       valV := EvalRef(p.head, newEnv);
       IF err THEN RETURN NilV END;
       IF symV.tag # tSym THEN Error("loop: not a symbol"); RETURN NilV END;
-      Strings.Copy(symV.s, names[numB]); INC(numB);
-      Define(newEnv, symV.s, valV);
+      DefineId(newEnv, symV.symId, symV.s, valV);
+      bnd := newEnv.bindings;
+      WHILE (bnd # NIL) & (bnd.symId # symV.symId) DO bnd := bnd.next END;
+      bs[numB] := bnd; INC(numB);
       p := p.tail
     END;
     LOOP
@@ -1349,7 +1439,7 @@ PROCEDURE Eval*(expr: Value; env: Env): Value;
       doRecur := FALSE;
       rp := recurArgs; i := 0;
       WHILE (i < numB) & ~IsNil(rp) DO
-        Define(newEnv, names[i], rp.head);
+        bs[i].val := rp.head;
         rp := rp.tail; INC(i)
       END
     END;
@@ -1376,11 +1466,11 @@ PROCEDURE Eval*(expr: Value; env: Env): Value;
     IF IsNil(args) OR (args.head.tag # tSym) THEN
       Error("defmacro: needs name"); RETURN NilV
     END;
-    NEW(macV); macV.tag := tMacro;
+    NEW(macV); macV.tag := tMacro; macV.symId := -1;
     macV.params := args.tail.head;
     macV.body := args.tail.tail;
     macV.closure := env;
-    Define(GlobalEnv, args.head.s, macV);
+    DefineId(GlobalEnv, args.head.symId, args.head.s, macV);
     RETURN macV
   END DoDefmacro;
 
@@ -1439,7 +1529,7 @@ PROCEDURE Eval*(expr: Value; env: Env): Value;
       err := FALSE; isThrown := FALSE;
       newEnv := NewEnv(env);
       IF ~IsNil(catchSym) & (catchSym.tag = tSym) THEN
-        Define(newEnv, catchSym.s, savedThrown)
+        DefineId(newEnv, catchSym.symId, catchSym.s, savedThrown)
       END;
       result := NilV;
       WHILE ~IsNil(catchBody) & ~err DO
@@ -1477,7 +1567,7 @@ PROCEDURE Eval*(expr: Value; env: Env): Value;
     def := fnDefs;
     WHILE ~IsNil(def) DO
       IF ~IsNil(def.head) & ~IsNil(def.head.head) & (def.head.head.tag = tSym) THEN
-        Define(newEnv, def.head.head.s, NilV)
+        DefineId(newEnv, def.head.head.symId, def.head.head.s, NilV)
       END;
       def := def.tail
     END;
@@ -1485,11 +1575,11 @@ PROCEDURE Eval*(expr: Value; env: Env): Value;
     WHILE ~IsNil(def) DO
       IF ~IsNil(def.head) & ~IsNil(def.head.head) & (def.head.head.tag = tSym) THEN
         name := def.head.head;
-        NEW(fnVal); fnVal.tag := tFn;
+        NEW(fnVal); fnVal.tag := tFn; fnVal.symId := -1;
         fnVal.params := def.head.tail.head;
         fnVal.body := def.head.tail.tail;
         fnVal.closure := newEnv;
-        Define(newEnv, name.s, fnVal)
+        DefineId(newEnv, name.symId, name.s, fnVal)
       END;
       def := def.tail
     END;
@@ -1503,7 +1593,7 @@ PROCEDURE Eval*(expr: Value; env: Env): Value;
   PROCEDURE DoDelay(args: Value): Value;
   VAR v: Value;
   BEGIN
-    NEW(v); v.tag := tDelay; v.head := NIL;
+    NEW(v); v.tag := tDelay; v.head := NIL; v.symId := -1;
     v.body := Cons(MkSym("do"), args);
     v.closure := env;
     RETURN v
@@ -1514,7 +1604,7 @@ PROCEDURE Eval*(expr: Value; env: Env): Value;
   BEGIN
     result := EvalRef(args.head, env);
     IF err THEN RETURN NilV END;
-    NEW(v); v.tag := tAtom; v.head := result;
+    NEW(v); v.tag := tAtom; v.head := result; v.symId := -1;
     RETURN v
   END DoFuture;
 
@@ -1530,10 +1620,8 @@ PROCEDURE Eval*(expr: Value; env: Env): Value;
     IF IsNil(fields) OR ((fields.tag # tVec) & (fields.tag # tList)) THEN
       Error("defrecord: needs fields vector"); RETURN NilV
     END;
-    (* ->TypeName constructor — use (hash-map ...) so field syms get evaluated *)
-    NEW(fnVal); fnVal.tag := tFn; fnVal.params := fields;
+    NEW(fnVal); fnVal.tag := tFn; fnVal.symId := -1; fnVal.params := fields;
     mapKeys := Cons(MkSym("hash-map"), NilV); kLast := mapKeys;
-    (* first pair: :__type__ "TypeName" *)
     c := Cons(MkKey("__type__"), NilV); kLast.tail := c; kLast := c;
     c := Cons(MkStr(typeName.s), NilV); kLast.tail := c; kLast := c;
     p := fields;
@@ -1544,12 +1632,11 @@ PROCEDURE Eval*(expr: Value; env: Env): Value;
       END;
       p := p.tail
     END;
-    fnVal.body := Cons(mapKeys, NilV);  (* mapKeys is now the (hash-map ...) call *)
+    fnVal.body := Cons(mapKeys, NilV);
     fnVal.closure := GlobalEnv;
     Strings.Copy("->", buf); Strings.Append(typeName.s, buf);
     Define(GlobalEnv, buf, fnVal);
-    (* TypeName? predicate: (fn [x] (= (get x :__type__) "TypeName")) *)
-    NEW(fnVal); fnVal.tag := tFn;
+    NEW(fnVal); fnVal.tag := tFn; fnVal.symId := -1;
     fnVal.params := Cons(MkSym("x"), NilV);
     fnVal.body := Cons(
       Cons(MkSym("="),
@@ -1558,8 +1645,7 @@ PROCEDURE Eval*(expr: Value; env: Env): Value;
     fnVal.closure := GlobalEnv;
     Strings.Copy(typeName.s, buf); Strings.Append("?", buf);
     Define(GlobalEnv, buf, fnVal);
-    (* map->TypeName: (fn [m] (assoc m :__type__ "TypeName")) *)
-    NEW(fnVal); fnVal.tag := tFn;
+    NEW(fnVal); fnVal.tag := tFn; fnVal.symId := -1;
     fnVal.params := Cons(MkSym("m"), NilV);
     fnVal.body := Cons(
       Cons(MkSym("assoc"),
@@ -1616,7 +1702,7 @@ PROCEDURE Eval*(expr: Value; env: Env): Value;
   VAR typeName, methods, method, fnVal: Value;
       tname, mname: ARRAY MaxStr OF CHAR;
   BEGIN
-    typeName := args.head; methods := args.tail.tail; (* skip protocol name *)
+    typeName := args.head; methods := args.tail.tail;
     IF IsNil(typeName) OR (typeName.tag # tSym) THEN
       Error("extend-type: needs type name"); RETURN NilV
     END;
@@ -1625,7 +1711,7 @@ PROCEDURE Eval*(expr: Value; env: Env): Value;
       method := methods.head;
       IF (method.tag = tList) & ~IsNil(method.head) & (method.head.tag = tSym) THEN
         Strings.Copy(method.head.s, mname);
-        NEW(fnVal); fnVal.tag := tFn;
+        NEW(fnVal); fnVal.tag := tFn; fnVal.symId := -1;
         fnVal.params := method.tail.head;
         fnVal.body := method.tail.tail;
         fnVal.closure := env;
@@ -1640,7 +1726,7 @@ PROCEDURE Eval*(expr: Value; env: Env): Value;
   VAR rest, typeName, method, fnVal: Value;
       tname, mname: ARRAY MaxStr OF CHAR;
   BEGIN
-    rest := args.tail; (* skip protocol name *)
+    rest := args.tail;
     WHILE ~IsNil(rest) DO
       typeName := rest.head; rest := rest.tail;
       IF IsNil(typeName) OR (typeName.tag # tSym) THEN EXIT END;
@@ -1649,7 +1735,7 @@ PROCEDURE Eval*(expr: Value; env: Env): Value;
         method := rest.head;
         IF ~IsNil(method.head) & (method.head.tag = tSym) THEN
           Strings.Copy(method.head.s, mname);
-          NEW(fnVal); fnVal.tag := tFn;
+          NEW(fnVal); fnVal.tag := tFn; fnVal.symId := -1;
           fnVal.params := method.tail.head;
           fnVal.body := method.tail.tail;
           fnVal.closure := env;
@@ -1734,20 +1820,37 @@ PROCEDURE Eval*(expr: Value; env: Env): Value;
     RETURN ForExpand(bindVec, body, env)
   END DoFor;
 
-VAR head: Value; sym: ARRAY MaxStr OF CHAR; fn, evArgs, looked: Value;
+VAR head: Value; fn, evArgs, looked: Value;
   vec, first, last, cell, v: Value;
 BEGIN
   IF err THEN RETURN NilV END;
   IF IsNil(expr) THEN RETURN NilV END;
   CASE expr.tag OF
     tBool, tInt, tReal, tStr, tKey, tFn, tBuiltin: RETURN expr
-  | tSym:
-      looked := Lookup(env, expr.s);
+  | tResolved:
+      IF expr.i = globalGen THEN RETURN expr.head END;
+      expr.tag := tSym;
+      looked := LookupId(env, expr.symId);
       IF looked = NIL THEN
         Strings.Copy("undefined symbol: ", errMsg);
         Strings.Append(expr.s, errMsg);
         err := TRUE;
         RETURN NilV
+      END;
+      IF IsGlobalBinding(env, expr.symId) THEN
+        expr.tag := tResolved; expr.head := looked; expr.i := globalGen
+      END;
+      RETURN looked
+  | tSym:
+      looked := LookupId(env, expr.symId);
+      IF looked = NIL THEN
+        Strings.Copy("undefined symbol: ", errMsg);
+        Strings.Append(expr.s, errMsg);
+        err := TRUE;
+        RETURN NilV
+      END;
+      IF IsGlobalBinding(env, expr.symId) THEN
+        expr.tag := tResolved; expr.head := looked; expr.i := globalGen
       END;
       RETURN looked
   | tVec:
@@ -1779,41 +1882,42 @@ BEGIN
       RETURN MkMap(first, evArgs)
   | tList:
       head := expr.head;
-      IF ~IsNil(head) & (head.tag = tSym) THEN
-        Strings.Copy(head.s, sym);
-        IF sym = "def" THEN RETURN DoDef(expr.tail)
-        ELSIF sym = "defn" THEN RETURN DoDefn(expr.tail)
-        ELSIF sym = "if" THEN RETURN DoIf(expr.tail)
-        ELSIF sym = "fn" THEN RETURN DoFn(expr.tail)
-        ELSIF sym = "let" THEN RETURN DoLet(expr.tail)
-        ELSIF sym = "do" THEN RETURN DoDo(expr.tail)
-        ELSIF sym = "quote" THEN RETURN expr.tail.head
-        ELSIF sym = "and" THEN RETURN DoAnd(expr.tail)
-        ELSIF sym = "or" THEN RETURN DoOr(expr.tail)
-        ELSIF sym = "when" THEN RETURN DoWhen(expr.tail)
-        ELSIF sym = "when-not" THEN RETURN DoWhenNot(expr.tail)
-        ELSIF sym = "cond" THEN RETURN DoCond(expr.tail)
-        ELSIF sym = "case" THEN RETURN DoCase(expr.tail)
-        ELSIF sym = "dotimes" THEN RETURN DoDotimes(expr.tail)
-        ELSIF sym = "doseq" THEN RETURN DoDoseq(expr.tail)
-        ELSIF sym = "loop" THEN RETURN DoLoop(expr.tail)
-        ELSIF sym = "recur" THEN RETURN DoRecur(expr.tail)
-        ELSIF sym = "defmacro" THEN RETURN DoDefmacro(expr.tail)
-        ELSIF sym = "throw" THEN RETURN DoThrow(expr.tail)
-        ELSIF sym = "try" THEN RETURN DoTry(expr.tail)
-        ELSIF sym = "quasiquote" THEN RETURN DoQuasiquote(expr.tail)
-        ELSIF sym = "letfn" THEN RETURN DoLetfn(expr.tail)
-        ELSIF sym = "delay" THEN RETURN DoDelay(expr.tail)
-        ELSIF sym = "future" THEN RETURN DoFuture(expr.tail)
-        ELSIF sym = "dosync" THEN RETURN DoDo(expr.tail)
-        ELSIF sym = "defrecord" THEN RETURN DoDefrecord(expr.tail)
-        ELSIF sym = "defprotocol" THEN RETURN DoDefprotocol(expr.tail)
-        ELSIF sym = "extend-type" THEN RETURN DoExtendType(expr.tail)
-        ELSIF sym = "extend-protocol" THEN RETURN DoExtendProtocol(expr.tail)
-        ELSIF sym = "doc" THEN RETURN DoDocForm(expr.tail)
-        ELSIF sym = "->" THEN RETURN DoThread(expr.tail, TRUE)
-        ELSIF sym = "->>" THEN RETURN DoThread(expr.tail, FALSE)
-        ELSIF sym = "for" THEN RETURN DoFor(expr.tail)
+      IF ~IsNil(head) & (head.tag = tSym) & (head.sfId # sfNone) THEN
+        CASE head.sfId OF
+          sfDef:        RETURN DoDef(expr.tail)
+        | sfDefn:       RETURN DoDefn(expr.tail)
+        | sfIf:         RETURN DoIf(expr.tail)
+        | sfFn:         RETURN DoFn(expr.tail)
+        | sfLet:        RETURN DoLet(expr.tail)
+        | sfDo:         RETURN DoDo(expr.tail)
+        | sfQuote:      RETURN expr.tail.head
+        | sfAnd:        RETURN DoAnd(expr.tail)
+        | sfOr:         RETURN DoOr(expr.tail)
+        | sfWhen:       RETURN DoWhen(expr.tail)
+        | sfWhenNot:    RETURN DoWhenNot(expr.tail)
+        | sfCond:       RETURN DoCond(expr.tail)
+        | sfCase:       RETURN DoCase(expr.tail)
+        | sfDotimes:    RETURN DoDotimes(expr.tail)
+        | sfDoseq:      RETURN DoDoseq(expr.tail)
+        | sfLoop:       RETURN DoLoop(expr.tail)
+        | sfRecur:      RETURN DoRecur(expr.tail)
+        | sfDefmacro:   RETURN DoDefmacro(expr.tail)
+        | sfThrow:      RETURN DoThrow(expr.tail)
+        | sfTry:        RETURN DoTry(expr.tail)
+        | sfQuasiquote: RETURN DoQuasiquote(expr.tail)
+        | sfLetfn:      RETURN DoLetfn(expr.tail)
+        | sfDelay:      RETURN DoDelay(expr.tail)
+        | sfFuture:     RETURN DoFuture(expr.tail)
+        | sfDosync:     RETURN DoDo(expr.tail)
+        | sfDefrecord:  RETURN DoDefrecord(expr.tail)
+        | sfDefprotocol: RETURN DoDefprotocol(expr.tail)
+        | sfExtendType: RETURN DoExtendType(expr.tail)
+        | sfExtendProtocol: RETURN DoExtendProtocol(expr.tail)
+        | sfDoc:        RETURN DoDocForm(expr.tail)
+        | sfThread:     RETURN DoThread(expr.tail, TRUE)
+        | sfThreadLast: RETURN DoThread(expr.tail, FALSE)
+        | sfFor:        RETURN DoFor(expr.tail)
+        ELSE
         END
       END;
       fn := EvalRef(head, env);
@@ -2006,6 +2110,9 @@ BEGIN
     END;
     RETURN TRUE
   END;
+  IF (a.tag = tResolved) & (b.tag = tSym) THEN RETURN a.s = b.s END;
+  IF (a.tag = tSym) & (b.tag = tResolved) THEN RETURN a.s = b.s END;
+  IF (a.tag = tResolved) & (b.tag = tResolved) THEN RETURN a.s = b.s END;
   IF a.tag # b.tag THEN RETURN FALSE END;
   CASE a.tag OF
     tBool: RETURN a.b = b.b
@@ -2273,7 +2380,7 @@ BEGIN
   WHILE ~IsNil(args) DO
     v := args.head;
     IF IsNil(v) THEN (* skip *)
-    ELSIF (v.tag = tStr) OR (v.tag = tSym) THEN
+    ELSIF (v.tag = tStr) OR (v.tag = tSym) OR (v.tag = tResolved) THEN
       AppendCStr(buf, n, v.s)
     ELSIF v.tag = tInt THEN
       Strings.IntToStr(v.i, tmp); AppendCStr(buf, n, tmp)
@@ -2302,7 +2409,7 @@ BEGIN
   | tInt: RETURN MkKey("int")
   | tReal: RETURN MkKey("real")
   | tStr: RETURN MkKey("string")
-  | tSym: RETURN MkKey("symbol")
+  | tSym, tResolved: RETURN MkKey("symbol")
   | tKey: RETURN MkKey("keyword")
   | tList: RETURN MkKey("list")
   | tVec: RETURN MkKey("vector")
@@ -2588,7 +2695,11 @@ PROCEDURE BKeywordQ(args: Value; env: Env): Value;
 BEGIN RETURN MkBool(~IsNil(args.head) & (args.head.tag = tKey)) END BKeywordQ;
 
 PROCEDURE BSymbolQ(args: Value; env: Env): Value;
-BEGIN RETURN MkBool(~IsNil(args.head) & (args.head.tag = tSym)) END BSymbolQ;
+VAR v: Value;
+BEGIN
+  v := args.head;
+  RETURN MkBool(~IsNil(v) & ((v.tag = tSym) OR (v.tag = tResolved)))
+END BSymbolQ;
 
 PROCEDURE BFnQ(args: Value; env: Env): Value;
 VAR v: Value;
@@ -3461,7 +3572,6 @@ BEGIN
 END BStrCompare;
 
 (* Functional *)
-(* ── clojure.string extensions ──────────────────────────────────────────── *)
 
 PROCEDURE BStrBlankQ(args: Value; env: Env): Value;
 VAR s: Value; i: INTEGER;
@@ -4313,6 +4423,7 @@ END Eval1;
 
 PROCEDURE Init*;
 BEGIN
+  nSyms := 0; globalGen := 0; 
   NEW(NilV); NilV.tag := tNil;
   NEW(TrueV); TrueV.tag := tBool; TrueV.b := TRUE;
   NEW(FalseV); FalseV.tag := tBool; FalseV.b := FALSE;
@@ -4321,6 +4432,24 @@ BEGIN
 
   EvalRef := Eval;
   GlobalEnv := NewEnv(NIL);
+
+  (* Mark special-form symbols *)
+  MarkSF("def", sfDef); MarkSF("defn", sfDefn); MarkSF("if", sfIf);
+  MarkSF("fn", sfFn); MarkSF("let", sfLet); MarkSF("do", sfDo);
+  MarkSF("quote", sfQuote); MarkSF("and", sfAnd); MarkSF("or", sfOr);
+  MarkSF("when", sfWhen); MarkSF("when-not", sfWhenNot);
+  MarkSF("cond", sfCond); MarkSF("case", sfCase);
+  MarkSF("dotimes", sfDotimes); MarkSF("doseq", sfDoseq);
+  MarkSF("loop", sfLoop); MarkSF("recur", sfRecur);
+  MarkSF("defmacro", sfDefmacro); MarkSF("throw", sfThrow);
+  MarkSF("try", sfTry); MarkSF("quasiquote", sfQuasiquote);
+  MarkSF("letfn", sfLetfn); MarkSF("delay", sfDelay);
+  MarkSF("future", sfFuture); MarkSF("dosync", sfDosync);
+  MarkSF("defrecord", sfDefrecord); MarkSF("defprotocol", sfDefprotocol);
+  MarkSF("extend-type", sfExtendType);
+  MarkSF("extend-protocol", sfExtendProtocol);
+  MarkSF("doc", sfDoc); MarkSF("->", sfThread); MarkSF("->>", sfThreadLast);
+  MarkSF("for", sfFor);
 
   (* Core arithmetic *)
   RegisterDoc("+", BAdd, "Returns the sum of nums. (+) returns 0.");
@@ -4702,5 +4831,7 @@ END Main;
 
 BEGIN
   nModules := 0;
+  nSyms := 0;
+  globalGen := 0;
   Init
 END Cloj.
