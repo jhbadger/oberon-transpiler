@@ -7,14 +7,20 @@ MODULE obemacs;
      Movement:   C-f C-b C-n C-p  M-f M-b  C-a C-e  M-a M-e
                  M-<  M->  arrows  C-v  M-v  C-l
                  C-u <n> <cmd>  (numeric prefix repeat count)
+                 M-g       goto-line
      Editing:    self-insert, <Return>, <DEL>, C-d
+                 C-o       open-line
+                 C-t       transpose-chars
+                 M-q       fill-paragraph (reflow to column 70)
+                 M-u M-l M-c  upcase / downcase / capitalize word
                  M-<DEL>  M-d  C-k  M-k
-                 C-<SPC> set mark, C-w kill region, M-w copy region
+                 C-<SPC> set mark, C-x C-x exchange-point-and-mark
+                 C-w kill region, M-w copy region
                  C-y yank, M-y yank-pop
                  C-/  C-_  C-x u   undo
      Files:      C-x C-f find-file, C-x C-s save-buffer,
                  C-x s save-some-buffers
-     Buffers:    C-x b switch-buffer, C-x C-b list-buffers
+     Buffers:    C-x b switch-buffer, C-x k kill-buffer, C-x C-b list-buffers
      Windows:    C-x 1 only-window, C-x 2 split-window,
                  C-x o other-window
      Search:     C-s isearch-forward, C-r isearch-backward
@@ -40,14 +46,14 @@ MODULE obemacs;
     MaxKillRing  = 32;
     MaxBuf       = 256;
     MaxACMatches = 64;
-    NMxCmds      = 17;
+    NMxCmds      = 19;
 
     (* Special keys -- ASCII codes for control characters. *)
     KCtrlA = 01X; KCtrlB = 02X; KCtrlC = 03X; KCtrlD = 04X;
     KCtrlE = 05X; KCtrlF = 06X; KCtrlG = 07X; KBackspace = 08X;
     KTab   = 09X; KCtrlK = 0BX; KCtrlL = 0CX; KEnter = 0DX;
     KCtrlN = 0EX; KCtrlO = 0FX; KCtrlP = 10X; KCtrlQ = 11X;
-    KCtrlR = 12X; KCtrlS = 13X; KCtrlU = 15X; KCtrlV = 16X;
+    KCtrlR = 12X; KCtrlS = 13X; KCtrlT = 14X; KCtrlU = 15X; KCtrlV = 16X;
     KCtrlW = 17X; KCtrlX = 18X; KCtrlY = 19X; KCtrlSlash = 1FX;
     KEsc   = 1BX; KSpace = 20X; KDel = 7FX;
     KPgUp  = 80X; KPgDn = 81X; KHome = 82X; KEnd = 83X;
@@ -137,6 +143,7 @@ MODULE obemacs;
     lastWasAC:   BOOLEAN;
     acActive:    BOOLEAN;
     acMode:      INTEGER;  (* 1 = dabbrev, 2 = cloj *)
+    fillCol:     INTEGER;
 
   (* ===================================================================
      small helpers
@@ -769,6 +776,9 @@ MODULE obemacs;
     Strings.Append("   L", modeLine);
     IntToStr(Editor.CursorLine(w.buf.ed), tmp);
     Strings.Append(tmp, modeLine);
+    Strings.Append(":C", modeLine);
+    IntToStr(Editor.CursorCol(w.buf.ed), tmp);
+    Strings.Append(tmp, modeLine);
     Strings.Append("  ", modeLine);
     IF total > 0 THEN
       i := (Editor.CursorLine(w.buf.ed) * 100) DIV total;
@@ -1271,6 +1281,232 @@ MODULE obemacs;
   BEGIN Editor.Undo(curBuf.ed)
   END CmdUndo;
 
+  PROCEDURE CmdOpenLine;
+  BEGIN
+    Editor.InsertChar(curBuf.ed, 0AX);
+    Editor.MoveLeft(curBuf.ed)
+  END CmdOpenLine;
+
+  PROCEDURE CmdTransposeChars;
+    VAR p, len: INTEGER; a: CHAR;
+  BEGIN
+    p := PointPos(); len := BufLen();
+    IF (p = 0) OR (len < 2) THEN RETURN END;
+    IF p >= len THEN DEC(p) END;
+    IF CharAt(p - 1, a) THEN
+      Editor.GotoPos(curBuf.ed, p);
+      Editor.Backspace(curBuf.ed);
+      Editor.MoveRight(curBuf.ed);
+      Editor.InsertChar(curBuf.ed, a)
+    END
+  END CmdTransposeChars;
+
+  PROCEDURE CmdUpcaseWord;
+    VAR p, len: INTEGER; ch: CHAR;
+  BEGIN
+    p := PointPos(); len := BufLen();
+    WHILE (p < len) & CharAt(p, ch) & ~IsWordChar(ch) DO INC(p) END;
+    WHILE (p < len) & CharAt(p, ch) & IsWordChar(ch) DO
+      IF (ch >= "a") & (ch <= "z") THEN
+        Editor.GotoPos(curBuf.ed, p);
+        Editor.DeleteChar(curBuf.ed);
+        Editor.InsertChar(curBuf.ed, CHR(ORD(ch) - 32))
+      END;
+      INC(p)
+    END;
+    GotoP(p)
+  END CmdUpcaseWord;
+
+  PROCEDURE CmdDowncaseWord;
+    VAR p, len: INTEGER; ch: CHAR;
+  BEGIN
+    p := PointPos(); len := BufLen();
+    WHILE (p < len) & CharAt(p, ch) & ~IsWordChar(ch) DO INC(p) END;
+    WHILE (p < len) & CharAt(p, ch) & IsWordChar(ch) DO
+      IF (ch >= "A") & (ch <= "Z") THEN
+        Editor.GotoPos(curBuf.ed, p);
+        Editor.DeleteChar(curBuf.ed);
+        Editor.InsertChar(curBuf.ed, CHR(ORD(ch) + 32))
+      END;
+      INC(p)
+    END;
+    GotoP(p)
+  END CmdDowncaseWord;
+
+  PROCEDURE CmdCapitalizeWord;
+    VAR p, len: INTEGER; ch, newch: CHAR; first: BOOLEAN;
+  BEGIN
+    p := PointPos(); len := BufLen(); first := TRUE;
+    WHILE (p < len) & CharAt(p, ch) & ~IsWordChar(ch) DO INC(p) END;
+    WHILE (p < len) & CharAt(p, ch) & IsWordChar(ch) DO
+      IF first THEN
+        newch := ch;
+        IF (ch >= "a") & (ch <= "z") THEN newch := CHR(ORD(ch) - 32) END;
+        first := FALSE
+      ELSE
+        newch := ch;
+        IF (ch >= "A") & (ch <= "Z") THEN newch := CHR(ORD(ch) + 32) END
+      END;
+      IF newch # ch THEN
+        Editor.GotoPos(curBuf.ed, p);
+        Editor.DeleteChar(curBuf.ed);
+        Editor.InsertChar(curBuf.ed, newch)
+      END;
+      INC(p)
+    END;
+    GotoP(p)
+  END CmdCapitalizeWord;
+
+  PROCEDURE CmdGotoLine;
+    VAR s: ARRAY MaxBuf OF CHAR; n, i, total: INTEGER;
+  BEGIN
+    IF ~Prompt("Goto line: ", s) THEN RETURN END;
+    IF s[0] = 0X THEN RETURN END;
+    n := 0; i := 0;
+    WHILE (s[i] >= "0") & (s[i] <= "9") DO
+      n := n * 10 + (ORD(s[i]) - ORD("0")); INC(i)
+    END;
+    IF n < 1 THEN n := 1 END;
+    total := Editor.LineCount(curBuf.ed);
+    IF n > total THEN n := total END;
+    Editor.GotoPos(curBuf.ed, 0);
+    i := 1;
+    WHILE i < n DO Editor.MoveDown(curBuf.ed); INC(i) END;
+    Editor.MoveLineStart(curBuf.ed)
+  END CmdGotoLine;
+
+  PROCEDURE CmdExchangePointMark;
+    VAR pos: INTEGER;
+  BEGIN
+    IF ~curBuf.hasMark THEN SetEcho("No mark set"); RETURN END;
+    pos := PointPos();
+    GotoP(curBuf.markPos);
+    curBuf.markPos := pos;
+    SetEcho("Mark exchanged")
+  END CmdExchangePointMark;
+
+  PROCEDURE FillParagraph;
+    VAR ln, startLine, endLine, total, len, i, j, ri: INTEGER;
+        startPos, endPos, col, wordStart, wordLen, indent: INTEGER;
+        line: ARRAY 4096 OF CHAR;
+        text: ARRAY 8192 OF CHAR;
+        result: ARRAY 8192 OF CHAR;
+        indentStr: ARRAY 128 OF CHAR;
+        isBlank: BOOLEAN;
+  BEGIN
+    total := Editor.LineCount(curBuf.ed);
+    ln    := Editor.CursorLine(curBuf.ed);
+
+    (* Reject if on a blank line *)
+    len := Editor.GetLine(curBuf.ed, ln, LEN(line), line);
+    isBlank := TRUE; i := 0;
+    WHILE (i < len) & isBlank DO
+      IF (line[i] # " ") & (line[i] # 09X) THEN isBlank := FALSE END; INC(i)
+    END;
+    IF isBlank THEN SetEcho("fill-paragraph: cursor on blank line"); RETURN END;
+
+    (* Find paragraph start: walk back until blank line or top *)
+    startLine := ln;
+    WHILE startLine > 1 DO
+      len := Editor.GetLine(curBuf.ed, startLine - 1, LEN(line), line);
+      isBlank := TRUE; i := 0;
+      WHILE (i < len) & isBlank DO
+        IF (line[i] # " ") & (line[i] # 09X) THEN isBlank := FALSE END; INC(i)
+      END;
+      IF isBlank THEN EXIT END;
+      DEC(startLine)
+    END;
+
+    (* Find paragraph end: walk forward until blank line or bottom *)
+    endLine := ln;
+    WHILE endLine < total DO
+      len := Editor.GetLine(curBuf.ed, endLine + 1, LEN(line), line);
+      isBlank := TRUE; i := 0;
+      WHILE (i < len) & isBlank DO
+        IF (line[i] # " ") & (line[i] # 09X) THEN isBlank := FALSE END; INC(i)
+      END;
+      IF isBlank THEN EXIT END;
+      INC(endLine)
+    END;
+
+    (* Extract indentation from first line *)
+    len := Editor.GetLine(curBuf.ed, startLine, LEN(line), line);
+    indent := 0;
+    WHILE (indent < len) & (line[indent] = " ") DO INC(indent) END;
+    i := 0;
+    WHILE i < indent DO indentStr[i] := " "; INC(i) END;
+    indentStr[indent] := 0X;
+
+    (* Flatten paragraph: join lines, collapse whitespace to single spaces *)
+    j := 0; ln := startLine;
+    WHILE ln <= endLine DO
+      len := Editor.GetLine(curBuf.ed, ln, LEN(line), line);
+      i := 0;
+      WHILE (i < len) & ((line[i] = " ") OR (line[i] = 09X)) DO INC(i) END;
+      WHILE (i < len) & (j < LEN(text) - 2) DO
+        IF (line[i] = " ") OR (line[i] = 09X) THEN
+          WHILE (i < len) & ((line[i] = " ") OR (line[i] = 09X)) DO INC(i) END;
+          IF (j > 0) & (text[j-1] # " ") THEN text[j] := " "; INC(j) END
+        ELSE
+          text[j] := line[i]; INC(j); INC(i)
+        END
+      END;
+      IF (ln < endLine) & (j > 0) & (text[j-1] # " ") THEN
+        text[j] := " "; INC(j)
+      END;
+      INC(ln)
+    END;
+    WHILE (j > 0) & (text[j-1] = " ") DO DEC(j) END;
+    text[j] := 0X;
+
+    (* Word-wrap into result at fillCol *)
+    ri := 0; col := indent;
+    i := 0;
+    WHILE indentStr[i] # 0X DO result[ri] := indentStr[i]; INC(ri); INC(i) END;
+    i := 0;
+    WHILE (text[i] # 0X) & (ri < LEN(result) - 2) DO
+      wordStart := i;
+      WHILE (text[i] # 0X) & (text[i] # " ") DO INC(i) END;
+      wordLen := i - wordStart;
+      IF text[i] = " " THEN INC(i) END;
+      IF (col > indent) & (col + 1 + wordLen > fillCol) THEN
+        result[ri] := 0AX; INC(ri);
+        j := 0;
+        WHILE indentStr[j] # 0X DO result[ri] := indentStr[j]; INC(ri); INC(j) END;
+        col := indent
+      ELSIF col > indent THEN
+        result[ri] := " "; INC(ri); INC(col)
+      END;
+      j := wordStart;
+      WHILE j < wordStart + wordLen DO
+        result[ri] := text[j]; INC(ri); INC(j)
+      END;
+      INC(col, wordLen)
+    END;
+    result[ri] := 0X;
+
+    (* Navigate to paragraph start *)
+    Editor.GotoPos(curBuf.ed, 0);
+    i := 1;
+    WHILE i < startLine DO Editor.MoveDown(curBuf.ed); INC(i) END;
+    Editor.MoveLineStart(curBuf.ed);
+    startPos := PointPos();
+
+    (* Navigate to paragraph end (position of trailing newline) *)
+    i := startLine;
+    WHILE i < endLine DO Editor.MoveDown(curBuf.ed); INC(i) END;
+    Editor.MoveLineEnd(curBuf.ed);
+    endPos := PointPos();
+
+    (* Delete original paragraph text (not including the trailing newline) *)
+    i := endPos - startPos;
+    WHILE i > 0 DO Editor.Backspace(curBuf.ed); DEC(i) END;
+
+    (* Insert reformatted text *)
+    Editor.InsertStr(curBuf.ed, result);
+    SetEcho("Filled paragraph")
+  END FillParagraph;
+
   (* ===================================================================
      commands -- files & buffers
      =================================================================== *)
@@ -1390,6 +1626,38 @@ MODULE obemacs;
     Editor.GotoPos(b.ed, 0);
     ShowBuffer(b)
   END ListBuffers;
+
+  PROCEDURE KillBuffer;
+    VAR promptStr, name, msg: ARRAY MaxBuf OF CHAR;
+        b, repl: Buffer; i, j: INTEGER;
+        w: Window;
+  BEGIN
+    Strings.Copy("Kill buffer (default ", promptStr);
+    Strings.Append(curBuf.name, promptStr);
+    Strings.Append("): ", promptStr);
+    IF ~PromptBuffer(promptStr, name) THEN RETURN END;
+    IF name[0] = 0X THEN Strings.Copy(curBuf.name, name) END;
+    b := FindBuffer(name);
+    IF b = NIL THEN SetEcho("No such buffer"); RETURN END;
+    i := 0;
+    WHILE (i < nBuffers) & (buffers[i] # b) DO INC(i) END;
+    IF i >= nBuffers THEN RETURN END;
+    j := i;
+    WHILE j < nBuffers - 1 DO buffers[j] := buffers[j + 1]; INC(j) END;
+    DEC(nBuffers);
+    IF nBuffers = 0 THEN repl := NewBuffer("*scratch*")
+    ELSE repl := buffers[Min(i, nBuffers - 1)]
+    END;
+    w := rootWin;
+    WHILE w # NIL DO
+      IF w.buf = b THEN w.buf := repl END;
+      w := w.next
+    END;
+    curBuf := curWin.buf;
+    Strings.Copy("Killed ", msg);
+    Strings.Append(b.name, msg);
+    SetEcho(msg)
+  END KillBuffer;
 
   (* ===================================================================
      incremental search
@@ -1586,6 +1854,8 @@ MODULE obemacs;
     | 14: Strings.Copy("ielm",              s)
     | 15: Strings.Copy("auto-fill-mode",    s)
     | 16: Strings.Copy("recover-this-file", s)
+    | 17: Strings.Copy("goto-line",         s)
+    | 18: Strings.Copy("fill-paragraph",    s)
     ELSE  s[0] := 0X
     END
   END MxCmdAt;
@@ -1891,6 +2161,8 @@ MODULE obemacs;
         SetEcho("Auto-fill not implemented in obemacs")
     ELSIF Strings.Compare(name, "recover-this-file") = 0 THEN
         SetEcho("No auto-save in obemacs")
+    ELSIF Strings.Compare(name, "goto-line")      = 0 THEN CmdGotoLine
+    ELSIF Strings.Compare(name, "fill-paragraph") = 0 THEN FillParagraph
     ELSE
         SetEcho("No such command")
     END
@@ -1902,7 +2174,6 @@ MODULE obemacs;
 
   PROCEDURE HandleCtrlX;
     VAR ch: CHAR;
-        msg: ARRAY MaxBuf OF CHAR;
   BEGIN
     SetEcho("C-x-");
     Redraw;
@@ -1919,10 +2190,8 @@ MODULE obemacs;
     | "2":    SplitWindow
     | "o":    OtherWindow
     | "u":    CmdUndo
-    | "k":
-        IF Prompt("Kill buffer: ", msg) THEN
-          SetEcho("Buffer kill not fully supported")
-        END
+    | KCtrlX: CmdExchangePointMark
+    | "k":    KillBuffer
     ELSE
       SetEcho("C-x: unknown sub-command")
     END
@@ -1943,6 +2212,11 @@ MODULE obemacs;
     | "e":  CmdForwardSentence
     | "d":  CmdKillWordForward
     | "k":  CmdKillSentence
+    | "g":  CmdGotoLine
+    | "q":  FillParagraph
+    | "u":  CmdUpcaseWord
+    | "l":  CmdDowncaseWord
+    | "c":  CmdCapitalizeWord
     | "v":  CmdScrollDown
     | "w":  CmdCopyRegion
     | "y":  CmdYankPop
@@ -2265,6 +2539,8 @@ MODULE obemacs;
     | KCtrlV: CmdScrollUp
     | KCtrlL: CmdRecenter
     | KCtrlD: CmdDeleteChar
+    | KCtrlO: CmdOpenLine
+    | KCtrlT: CmdTransposeChars
     | KCtrlK: CmdKillLine; nextWasKill := TRUE
     | KCtrlY: CmdYank; nextWasYank := TRUE
     | KCtrlW: CmdKillRegion; nextWasKill := TRUE
@@ -2404,6 +2680,7 @@ BEGIN
   acCount := 0; acIndex := 0; acInserted := 0;
   acPrefixLen := 0; acPrefix[0] := 0X;
   lastWasAC := FALSE; acActive := FALSE; acMode := 0;
+  fillCol := 70;
 
   (* Load ~/.config/obemacs/init.clj if it exists *)
   IF Env.Get("HOME", initHome) & (initHome[0] # 0X) THEN
