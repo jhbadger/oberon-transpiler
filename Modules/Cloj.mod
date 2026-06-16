@@ -22,6 +22,7 @@ CONST
   tSet*    = 15;
   tRegex*  = 16;
   tResolved* = 17;
+  tBigInt* = 18;
 
   MaxTok     = 65536;
   MaxStr     = 256;
@@ -151,6 +152,10 @@ BEGIN NEW(v); v.tag := tInt; v.i := n; v.symId := -1; RETURN v END MkInt;
 PROCEDURE MkReal*(x: REAL): Value;
 VAR v: Value;
 BEGIN NEW(v); v.tag := tReal; v.r := x; v.symId := -1; RETURN v END MkReal;
+
+PROCEDURE MkBigInt*(s: ARRAY OF CHAR): Value;
+VAR v: Value;
+BEGIN NEW(v); v.tag := tBigInt; Strings.Copy(s, v.s); v.symId := -1; RETURN v END MkBigInt;
 
 PROCEDURE MkStr*(s: ARRAY OF CHAR): Value;
 VAR v: Value;
@@ -487,6 +492,12 @@ BEGIN
       ok := Strings.StrToInt(tok, n);
       IF ok THEN RETURN MkInt(n) END
     END
+  ELSE
+    n := Strings.Length(tok);
+    IF (n >= 2) & (tok[n-1] = 'N') THEN
+      Strings.Extract(tok, 0, n-1, sub);
+      IF IsNumber(sub, hasDot) & ~hasDot THEN RETURN MkBigInt(sub) END
+    END
   END;
   RETURN MkSym(tok)
 END ParseAtom;
@@ -683,6 +694,8 @@ BEGIN
       IF v.b THEN WriteStr("true") ELSE WriteStr("false") END
   | tInt:
       Strings.IntToStr(v.i, buf); WriteStr(buf)
+  | tBigInt:
+      WriteStr(v.s); IF readable THEN Out.Char('N') END
   | tReal:
       Strings.RealToStr(v.r, buf); WriteStr(buf)
   | tStr:
@@ -771,6 +784,8 @@ BEGIN
       IF v.b THEN BufAppendS(s, n, "true") ELSE BufAppendS(s, n, "false") END
   | tInt:
       Strings.IntToStr(v.i, buf); BufAppendS(s, n, buf)
+  | tBigInt:
+      BufAppendS(s, n, v.s); IF readable THEN BufAppendC(s, n, 'N') END
   | tReal:
       Strings.RealToStr(v.r, buf); BufAppendS(s, n, buf)
   | tStr:
@@ -1932,19 +1947,273 @@ BEGIN
   END
 END Eval;
 
+(* ---- BigInt string arithmetic (stored as decimal string in v.s) ---- *)
+(* Positive: "123", negative: "-123", zero: "0"; max ~254 digits *)
+
+PROCEDURE BigDigLen(s: ARRAY OF CHAR; start: INTEGER): INTEGER;
+VAR n: INTEGER;
+BEGIN n := 0; WHILE s[start + n] # 0X DO INC(n) END; RETURN n END BigDigLen;
+
+PROCEDURE BigIsNeg*(s: ARRAY OF CHAR): BOOLEAN;
+BEGIN RETURN s[0] = '-' END BigIsNeg;
+
+PROCEDURE BigIsZero*(s: ARRAY OF CHAR): BOOLEAN;
+BEGIN RETURN (s[0] = '0') & (s[1] = 0X) END BigIsZero;
+
+PROCEDURE PrependMinus(s: ARRAY OF CHAR; VAR res: ARRAY OF CHAR);
+VAR i: INTEGER;
+BEGIN
+  res[0] := '-'; i := 0;
+  WHILE s[i] # 0X DO res[i+1] := s[i]; INC(i) END;
+  res[i+1] := 0X
+END PrependMinus;
+
+PROCEDURE BigAbsCmp(a, b: ARRAY OF CHAR; as, bs: INTEGER): INTEGER;
+VAR la, lb, i: INTEGER;
+BEGIN
+  la := BigDigLen(a, as); lb := BigDigLen(b, bs);
+  IF la < lb THEN RETURN -1 END;
+  IF la > lb THEN RETURN 1 END;
+  i := 0;
+  WHILE i < la DO
+    IF a[as+i] < b[bs+i] THEN RETURN -1 END;
+    IF a[as+i] > b[bs+i] THEN RETURN 1 END;
+    INC(i)
+  END;
+  RETURN 0
+END BigAbsCmp;
+
+PROCEDURE BigAbsAdd(a, b: ARRAY OF CHAR; as, bs: INTEGER; VAR res: ARRAY OF CHAR);
+VAR la, lb, i, carry, da, db, sum, rlen: INTEGER; tmp: ARRAY MaxStr OF CHAR;
+BEGIN
+  la := BigDigLen(a, as); lb := BigDigLen(b, bs);
+  i := 0; carry := 0; rlen := 0;
+  WHILE (i < la) OR (i < lb) OR (carry > 0) DO
+    da := 0; db := 0;
+    IF i < la THEN da := ORD(a[as + la - 1 - i]) - ORD('0') END;
+    IF i < lb THEN db := ORD(b[bs + lb - 1 - i]) - ORD('0') END;
+    sum := da + db + carry;
+    carry := sum DIV 10;
+    tmp[rlen] := CHR(sum MOD 10 + ORD('0'));
+    INC(i); INC(rlen)
+  END;
+  IF rlen = 0 THEN res[0] := '0'; res[1] := 0X; RETURN END;
+  i := 0; WHILE i < rlen DO res[i] := tmp[rlen - 1 - i]; INC(i) END;
+  res[rlen] := 0X
+END BigAbsAdd;
+
+PROCEDURE BigAbsSub(a, b: ARRAY OF CHAR; as, bs: INTEGER; VAR res: ARRAY OF CHAR);
+VAR la, lb, i, borrow, da, db, diff, rlen: INTEGER; tmp: ARRAY MaxStr OF CHAR;
+BEGIN
+  la := BigDigLen(a, as); lb := BigDigLen(b, bs);
+  i := 0; borrow := 0; rlen := 0;
+  WHILE i < la DO
+    da := ORD(a[as + la - 1 - i]) - ORD('0');
+    db := 0;
+    IF i < lb THEN db := ORD(b[bs + lb - 1 - i]) - ORD('0') END;
+    diff := da - db - borrow;
+    IF diff < 0 THEN diff := diff + 10; borrow := 1 ELSE borrow := 0 END;
+    tmp[rlen] := CHR(diff + ORD('0'));
+    INC(i); INC(rlen)
+  END;
+  WHILE (rlen > 1) & (tmp[rlen-1] = '0') DO DEC(rlen) END;
+  i := 0; WHILE i < rlen DO res[i] := tmp[rlen - 1 - i]; INC(i) END;
+  res[rlen] := 0X
+END BigAbsSub;
+
+PROCEDURE BigAbsMul(a, b: ARRAY OF CHAR; as, bs: INTEGER; VAR res: ARRAY OF CHAR; VAR ok: BOOLEAN);
+VAR la, lb, i, j, carry, prod, rlen: INTEGER;
+    tmp: ARRAY 512 OF INTEGER;
+BEGIN
+  ok := TRUE;
+  la := BigDigLen(a, as); lb := BigDigLen(b, bs);
+  rlen := la + lb;
+  IF rlen >= MaxStr THEN ok := FALSE; RETURN END;
+  i := 0; WHILE i < rlen DO tmp[i] := 0; INC(i) END;
+  i := la - 1;
+  WHILE i >= 0 DO
+    j := lb - 1;
+    WHILE j >= 0 DO
+      prod := (ORD(a[as+i]) - ORD('0')) * (ORD(b[bs+j]) - ORD('0'));
+      tmp[i+j+1] := tmp[i+j+1] + prod;
+      DEC(j)
+    END;
+    DEC(i)
+  END;
+  i := rlen - 1;
+  WHILE i > 0 DO
+    carry := tmp[i] DIV 10; tmp[i] := tmp[i] MOD 10; tmp[i-1] := tmp[i-1] + carry; DEC(i)
+  END;
+  j := 0; i := 0;
+  WHILE (i < rlen - 1) & (tmp[i] = 0) DO INC(i) END;
+  WHILE i < rlen DO res[j] := CHR(tmp[i] + ORD('0')); INC(j); INC(i) END;
+  IF j = 0 THEN res[0] := '0'; j := 1 END;
+  res[j] := 0X
+END BigAbsMul;
+
+PROCEDURE BigAbsDiv(a, b: ARRAY OF CHAR; as, bs: INTEGER; VAR q, r: ARRAY OF CHAR);
+VAR la, i, count, rlen, qlen: INTEGER; tmp: ARRAY MaxStr OF CHAR;
+BEGIN
+  r[0] := '0'; r[1] := 0X; qlen := 0; la := BigDigLen(a, as);
+  i := 0;
+  WHILE i < la DO
+    IF (r[0] = '0') & (r[1] = 0X) THEN
+      r[0] := a[as+i]; r[1] := 0X
+    ELSE
+      rlen := BigDigLen(r, 0);
+      IF rlen < MaxStr - 1 THEN r[rlen] := a[as+i]; r[rlen+1] := 0X END
+    END;
+    count := 0;
+    WHILE BigAbsCmp(r, b, 0, bs) >= 0 DO
+      BigAbsSub(r, b, 0, bs, tmp); Strings.Copy(tmp, r); INC(count)
+    END;
+    q[qlen] := CHR(count + ORD('0')); INC(qlen);
+    INC(i)
+  END;
+  q[qlen] := 0X;
+  IF qlen = 0 THEN q[0] := '0'; q[1] := 0X
+  ELSE
+    i := 0; WHILE (i < qlen - 1) & (q[i] = '0') DO INC(i) END;
+    IF i > 0 THEN Strings.Extract(q, i, qlen - i, tmp); Strings.Copy(tmp, q) END
+  END
+END BigAbsDiv;
+
+PROCEDURE BigCmp*(a, b: ARRAY OF CHAR): INTEGER;
+VAR aNeg, bNeg: BOOLEAN; r: INTEGER;
+BEGIN
+  aNeg := a[0] = '-'; bNeg := b[0] = '-';
+  IF BigIsZero(a) & BigIsZero(b) THEN RETURN 0 END;
+  IF BigIsZero(a) THEN IF bNeg THEN RETURN 1 ELSE RETURN -1 END END;
+  IF BigIsZero(b) THEN IF aNeg THEN RETURN -1 ELSE RETURN 1 END END;
+  IF aNeg & ~bNeg THEN RETURN -1 END;
+  IF ~aNeg & bNeg THEN RETURN 1 END;
+  IF aNeg THEN r := BigAbsCmp(a, b, 1, 1); RETURN -r
+  ELSE RETURN BigAbsCmp(a, b, 0, 0) END
+END BigCmp;
+
+PROCEDURE BigNeg*(a: ARRAY OF CHAR; VAR res: ARRAY OF CHAR);
+VAR i: INTEGER;
+BEGIN
+  IF BigIsZero(a) THEN res[0] := '0'; res[1] := 0X; RETURN END;
+  IF a[0] = '-' THEN
+    i := 0; WHILE a[i+1] # 0X DO res[i] := a[i+1]; INC(i) END; res[i] := 0X
+  ELSE PrependMinus(a, res) END
+END BigNeg;
+
+PROCEDURE BigAdd*(a, b: ARRAY OF CHAR; VAR res: ARRAY OF CHAR);
+VAR aNeg, bNeg: BOOLEAN; cmp, i: INTEGER; aS, bS: INTEGER; tmp: ARRAY MaxStr OF CHAR;
+BEGIN
+  aNeg := a[0] = '-'; bNeg := b[0] = '-';
+  aS := 0; IF aNeg THEN aS := 1 END;
+  bS := 0; IF bNeg THEN bS := 1 END;
+  IF BigIsZero(a) THEN Strings.Copy(b, res); RETURN END;
+  IF BigIsZero(b) THEN Strings.Copy(a, res); RETURN END;
+  IF aNeg = bNeg THEN
+    BigAbsAdd(a, b, aS, bS, tmp);
+    IF aNeg THEN PrependMinus(tmp, res) ELSE Strings.Copy(tmp, res) END
+  ELSE
+    cmp := BigAbsCmp(a, b, aS, bS);
+    IF cmp = 0 THEN res[0] := '0'; res[1] := 0X
+    ELSIF cmp > 0 THEN
+      BigAbsSub(a, b, aS, bS, tmp);
+      IF aNeg THEN PrependMinus(tmp, res) ELSE Strings.Copy(tmp, res) END
+    ELSE
+      BigAbsSub(b, a, bS, aS, tmp);
+      IF bNeg THEN PrependMinus(tmp, res) ELSE Strings.Copy(tmp, res) END
+    END
+  END
+END BigAdd;
+
+PROCEDURE BigSub*(a, b: ARRAY OF CHAR; VAR res: ARRAY OF CHAR);
+VAR negB: ARRAY MaxStr OF CHAR;
+BEGIN BigNeg(b, negB); BigAdd(a, negB, res) END BigSub;
+
+PROCEDURE BigMul*(a, b: ARRAY OF CHAR; VAR res: ARRAY OF CHAR);
+VAR aNeg, bNeg: BOOLEAN; aS, bS: INTEGER; tmp: ARRAY MaxStr OF CHAR; ok: BOOLEAN;
+BEGIN
+  IF BigIsZero(a) OR BigIsZero(b) THEN res[0] := '0'; res[1] := 0X; RETURN END;
+  aNeg := a[0] = '-'; bNeg := b[0] = '-';
+  aS := 0; IF aNeg THEN aS := 1 END;
+  bS := 0; IF bNeg THEN bS := 1 END;
+  BigAbsMul(a, b, aS, bS, tmp, ok);
+  IF ~ok THEN res[0] := '0'; res[1] := 0X; RETURN END;
+  IF aNeg # bNeg THEN PrependMinus(tmp, res) ELSE Strings.Copy(tmp, res) END
+END BigMul;
+
+PROCEDURE BigQuot*(a, b: ARRAY OF CHAR; VAR res: ARRAY OF CHAR);
+VAR aNeg, bNeg: BOOLEAN; aS, bS: INTEGER; q, r: ARRAY MaxStr OF CHAR;
+BEGIN
+  aNeg := a[0] = '-'; bNeg := b[0] = '-';
+  aS := 0; IF aNeg THEN aS := 1 END;
+  bS := 0; IF bNeg THEN bS := 1 END;
+  BigAbsDiv(a, b, aS, bS, q, r);
+  IF aNeg # bNeg THEN PrependMinus(q, res) ELSE Strings.Copy(q, res) END
+END BigQuot;
+
+PROCEDURE BigRem*(a, b: ARRAY OF CHAR; VAR res: ARRAY OF CHAR);
+VAR aNeg: BOOLEAN; aS, bS: INTEGER; q, r: ARRAY MaxStr OF CHAR;
+BEGIN
+  aNeg := a[0] = '-';
+  aS := 0; IF aNeg THEN aS := 1 END;
+  bS := 0; IF b[0] = '-' THEN bS := 1 END;
+  BigAbsDiv(a, b, aS, bS, q, r);
+  IF aNeg & ~BigIsZero(r) THEN PrependMinus(r, res) ELSE Strings.Copy(r, res) END
+END BigRem;
+
+PROCEDURE BigMod*(a, b: ARRAY OF CHAR; VAR res: ARRAY OF CHAR);
+VAR aNeg, bNeg: BOOLEAN; aS, bS: INTEGER; q, r, tmp: ARRAY MaxStr OF CHAR;
+BEGIN
+  aNeg := a[0] = '-'; bNeg := b[0] = '-';
+  aS := 0; IF aNeg THEN aS := 1 END;
+  bS := 0; IF bNeg THEN bS := 1 END;
+  BigAbsDiv(a, b, aS, bS, q, r);
+  IF aNeg & ~BigIsZero(r) THEN PrependMinus(r, tmp) ELSE Strings.Copy(r, tmp) END;
+  IF (aNeg # bNeg) & ~BigIsZero(r) THEN BigAdd(tmp, b, res)
+  ELSE Strings.Copy(tmp, res) END
+END BigMod;
+
+PROCEDURE ToNumStr(v: Value; VAR s: ARRAY OF CHAR);
+BEGIN
+  IF v.tag = tInt THEN Strings.IntToStr(v.i, s)
+  ELSIF v.tag = tBigInt THEN Strings.Copy(v.s, s)
+  END
+END ToNumStr;
+
+PROCEDURE HasBigInt(args: Value): BOOLEAN;
+VAR a: Value;
+BEGIN
+  a := args;
+  WHILE ~IsNil(a) DO
+    IF a.head.tag = tBigInt THEN RETURN TRUE END;
+    a := a.tail
+  END;
+  RETURN FALSE
+END HasBigInt;
+
 (* ---------- Numeric helpers ---------- *)
 
 PROCEDURE IsNum(v: Value): BOOLEAN;
-BEGIN RETURN ~IsNil(v) & ((v.tag = tInt) OR (v.tag = tReal)) END IsNum;
+BEGIN RETURN ~IsNil(v) & ((v.tag = tInt) OR (v.tag = tReal) OR (v.tag = tBigInt)) END IsNum;
 
 PROCEDURE NumReal(v: Value): REAL;
+VAR x: REAL; ok: BOOLEAN;
 BEGIN
-  IF v.tag = tInt THEN RETURN FLT(v.i) ELSE RETURN v.r END
+  IF v.tag = tInt THEN RETURN FLT(v.i)
+  ELSIF v.tag = tBigInt THEN
+    ok := Strings.StrToReal(v.s, x);
+    IF ok THEN RETURN x ELSE RETURN 0.0 END
+  ELSE RETURN v.r END
 END NumReal;
 
 PROCEDURE NumsEqual(a, b: Value): BOOLEAN;
+VAR aStr, bStr: ARRAY MaxStr OF CHAR;
 BEGIN
   IF (a.tag = tInt) & (b.tag = tInt) THEN RETURN a.i = b.i END;
+  IF (a.tag = tBigInt) OR (b.tag = tBigInt) THEN
+    IF (a.tag = tReal) OR (b.tag = tReal) THEN RETURN NumReal(a) = NumReal(b) END;
+    ToNumStr(a, aStr); ToNumStr(b, bStr);
+    RETURN BigCmp(aStr, bStr) = 0
+  END;
   RETURN NumReal(a) = NumReal(b)
 END NumsEqual;
 
@@ -1952,7 +2221,19 @@ END NumsEqual;
 
 PROCEDURE BAdd(args: Value; env: Env): Value;
 VAR sumI: INTEGER; sumR: REAL; isReal: BOOLEAN; a: Value;
+    acc, tmp, aStr: ARRAY MaxStr OF CHAR;
 BEGIN
+  IF HasBigInt(args) THEN
+    acc[0] := '0'; acc[1] := 0X;
+    WHILE ~IsNil(args) DO
+      a := args.head;
+      IF a.tag = tReal THEN Error("+ cannot mix bigint and real"); RETURN NilV END;
+      IF ~IsNum(a) THEN Error("+ needs numbers"); RETURN NilV END;
+      ToNumStr(a, aStr); BigAdd(acc, aStr, tmp); Strings.Copy(tmp, acc);
+      args := args.tail
+    END;
+    RETURN MkBigInt(acc)
+  END;
   sumI := 0; sumR := 0.0; isReal := FALSE;
   WHILE ~IsNil(args) DO
     a := args.head;
@@ -1969,8 +2250,24 @@ END BAdd;
 
 PROCEDURE BSub(args: Value; env: Env): Value;
 VAR resI: INTEGER; resR: REAL; isReal: BOOLEAN; a: Value;
+    acc, tmp, aStr: ARRAY MaxStr OF CHAR;
 BEGIN
   IF IsNil(args) THEN Error("- needs args"); RETURN NilV END;
+  IF HasBigInt(args) THEN
+    a := args.head;
+    IF a.tag = tReal THEN Error("- cannot mix bigint and real"); RETURN NilV END;
+    IF ~IsNum(a) THEN Error("- needs numbers"); RETURN NilV END;
+    ToNumStr(a, acc); args := args.tail;
+    IF IsNil(args) THEN BigNeg(acc, tmp); RETURN MkBigInt(tmp) END;
+    WHILE ~IsNil(args) DO
+      a := args.head;
+      IF a.tag = tReal THEN Error("- cannot mix bigint and real"); RETURN NilV END;
+      IF ~IsNum(a) THEN Error("- needs numbers"); RETURN NilV END;
+      ToNumStr(a, aStr); BigSub(acc, aStr, tmp); Strings.Copy(tmp, acc);
+      args := args.tail
+    END;
+    RETURN MkBigInt(acc)
+  END;
   a := args.head;
   IF ~IsNum(a) THEN Error("- needs numbers"); RETURN NilV END;
   IF a.tag = tReal THEN resR := a.r; isReal := TRUE; resI := 0
@@ -1994,7 +2291,19 @@ END BSub;
 
 PROCEDURE BMul(args: Value; env: Env): Value;
 VAR resI: INTEGER; resR: REAL; isReal: BOOLEAN; a: Value;
+    acc, tmp, aStr: ARRAY MaxStr OF CHAR;
 BEGIN
+  IF HasBigInt(args) THEN
+    acc[0] := '1'; acc[1] := 0X;
+    WHILE ~IsNil(args) DO
+      a := args.head;
+      IF a.tag = tReal THEN Error("* cannot mix bigint and real"); RETURN NilV END;
+      IF ~IsNum(a) THEN Error("* needs numbers"); RETURN NilV END;
+      ToNumStr(a, aStr); BigMul(acc, aStr, tmp); Strings.Copy(tmp, acc);
+      args := args.tail
+    END;
+    RETURN MkBigInt(acc)
+  END;
   resI := 1; resR := 1.0; isReal := FALSE;
   WHILE ~IsNil(args) DO
     a := args.head;
@@ -2029,57 +2338,83 @@ BEGIN
 END BDiv;
 
 PROCEDURE BMod(args: Value; env: Env): Value;
-VAR a, b: Value;
+VAR a, b: Value; aStr, bStr, res: ARRAY MaxStr OF CHAR;
 BEGIN
   a := args.head; b := args.tail.head;
+  IF (a.tag = tBigInt) OR (b.tag = tBigInt) THEN
+    IF (a.tag # tInt) & (a.tag # tBigInt) THEN Error("mod needs ints"); RETURN NilV END;
+    IF (b.tag # tInt) & (b.tag # tBigInt) THEN Error("mod needs ints"); RETURN NilV END;
+    ToNumStr(a, aStr); ToNumStr(b, bStr);
+    BigMod(aStr, bStr, res); RETURN MkBigInt(res)
+  END;
   IF (a.tag # tInt) OR (b.tag # tInt) THEN Error("mod needs ints"); RETURN NilV END;
   RETURN MkInt(a.i MOD b.i)
 END BMod;
 
 PROCEDURE BLT(args: Value; env: Env): Value;
-VAR a, b: Value;
+VAR a, b: Value; aStr, bStr: ARRAY MaxStr OF CHAR;
 BEGIN
   a := args.head;
   args := args.tail;
   WHILE ~IsNil(args) DO
     b := args.head;
-    IF NumReal(a) >= NumReal(b) THEN RETURN FalseV END;
+    IF (a.tag = tBigInt) OR (b.tag = tBigInt) THEN
+      ToNumStr(a, aStr); ToNumStr(b, bStr);
+      IF BigCmp(aStr, bStr) >= 0 THEN RETURN FalseV END
+    ELSE
+      IF NumReal(a) >= NumReal(b) THEN RETURN FalseV END
+    END;
     a := b; args := args.tail
   END;
   RETURN TrueV
 END BLT;
 
 PROCEDURE BGT(args: Value; env: Env): Value;
-VAR a, b: Value;
+VAR a, b: Value; aStr, bStr: ARRAY MaxStr OF CHAR;
 BEGIN
   a := args.head; args := args.tail;
   WHILE ~IsNil(args) DO
     b := args.head;
-    IF NumReal(a) <= NumReal(b) THEN RETURN FalseV END;
+    IF (a.tag = tBigInt) OR (b.tag = tBigInt) THEN
+      ToNumStr(a, aStr); ToNumStr(b, bStr);
+      IF BigCmp(aStr, bStr) <= 0 THEN RETURN FalseV END
+    ELSE
+      IF NumReal(a) <= NumReal(b) THEN RETURN FalseV END
+    END;
     a := b; args := args.tail
   END;
   RETURN TrueV
 END BGT;
 
 PROCEDURE BLE(args: Value; env: Env): Value;
-VAR a, b: Value;
+VAR a, b: Value; aStr, bStr: ARRAY MaxStr OF CHAR;
 BEGIN
   a := args.head; args := args.tail;
   WHILE ~IsNil(args) DO
     b := args.head;
-    IF NumReal(a) > NumReal(b) THEN RETURN FalseV END;
+    IF (a.tag = tBigInt) OR (b.tag = tBigInt) THEN
+      ToNumStr(a, aStr); ToNumStr(b, bStr);
+      IF BigCmp(aStr, bStr) > 0 THEN RETURN FalseV END
+    ELSE
+      IF NumReal(a) > NumReal(b) THEN RETURN FalseV END
+    END;
     a := b; args := args.tail
   END;
   RETURN TrueV
 END BLE;
 
 PROCEDURE BGE(args: Value; env: Env): Value;
-VAR a, b: Value;
+VAR a, b: Value; aStr, bStr: ARRAY MaxStr OF CHAR;
 BEGIN
   a := args.head; args := args.tail;
   WHILE ~IsNil(args) DO
     b := args.head;
-    IF NumReal(a) < NumReal(b) THEN RETURN FalseV END;
+    IF (a.tag = tBigInt) OR (b.tag = tBigInt) THEN
+      ToNumStr(a, aStr); ToNumStr(b, bStr);
+      IF BigCmp(aStr, bStr) < 0 THEN RETURN FalseV END
+    ELSE
+      IF NumReal(a) < NumReal(b) THEN RETURN FalseV END
+    END;
     a := b; args := args.tail
   END;
   RETURN TrueV
@@ -2384,6 +2719,8 @@ BEGIN
       AppendCStr(buf, n, v.s)
     ELSIF v.tag = tInt THEN
       Strings.IntToStr(v.i, tmp); AppendCStr(buf, n, tmp)
+    ELSIF v.tag = tBigInt THEN
+      AppendCStr(buf, n, v.s)
     ELSIF v.tag = tReal THEN
       Strings.RealToStr(v.r, tmp); AppendCStr(buf, n, tmp)
     ELSIF v.tag = tBool THEN
@@ -2407,6 +2744,7 @@ BEGIN
   CASE v.tag OF
     tBool: RETURN MkKey("bool")
   | tInt: RETURN MkKey("int")
+  | tBigInt: RETURN MkKey("bigint")
   | tReal: RETURN MkKey("real")
   | tStr: RETURN MkKey("string")
   | tSym, tResolved: RETURN MkKey("symbol")
@@ -2442,20 +2780,26 @@ PROCEDURE BNot(args: Value; env: Env): Value;
 BEGIN RETURN MkBool(~IsTruthy(args.head)) END BNot;
 
 PROCEDURE BInc(args: Value; env: Env): Value;
-VAR v: Value;
+VAR v: Value; tmp: ARRAY MaxStr OF CHAR;
 BEGIN
   v := args.head;
   IF v.tag = tInt THEN RETURN MkInt(v.i + 1) END;
   IF v.tag = tReal THEN RETURN MkReal(v.r + 1.0) END;
+  IF v.tag = tBigInt THEN
+    BigAdd(v.s, "1", tmp); RETURN MkBigInt(tmp)
+  END;
   Error("inc: needs number"); RETURN NilV
 END BInc;
 
 PROCEDURE BDec(args: Value; env: Env): Value;
-VAR v: Value;
+VAR v: Value; tmp: ARRAY MaxStr OF CHAR;
 BEGIN
   v := args.head;
   IF v.tag = tInt THEN RETURN MkInt(v.i - 1) END;
   IF v.tag = tReal THEN RETURN MkReal(v.r - 1.0) END;
+  IF v.tag = tBigInt THEN
+    BigSub(v.s, "1", tmp); RETURN MkBigInt(tmp)
+  END;
   Error("dec: needs number"); RETURN NilV
 END BDec;
 
@@ -2552,22 +2896,36 @@ END BApplyFn;
 
 (* Arithmetic *)
 PROCEDURE BQuot(args: Value; env: Env): Value;
-VAR a, b: Value;
+VAR a, b: Value; aStr, bStr, res: ARRAY MaxStr OF CHAR;
 BEGIN
   a := args.head; b := args.tail.head;
+  IF (a.tag = tBigInt) OR (b.tag = tBigInt) THEN
+    IF (a.tag # tInt) & (a.tag # tBigInt) THEN Error("quot: needs ints"); RETURN NilV END;
+    IF (b.tag # tInt) & (b.tag # tBigInt) THEN Error("quot: needs ints"); RETURN NilV END;
+    ToNumStr(b, bStr);
+    IF BigIsZero(bStr) THEN Error("quot: division by zero"); RETURN NilV END;
+    ToNumStr(a, aStr); BigQuot(aStr, bStr, res); RETURN MkBigInt(res)
+  END;
   IF (a.tag # tInt) OR (b.tag # tInt) THEN Error("quot: needs ints"); RETURN NilV END;
   IF b.i = 0 THEN Error("quot: division by zero"); RETURN NilV END;
   RETURN MkInt(a.i DIV b.i)
 END BQuot;
 
 PROCEDURE BRem(args: Value; env: Env): Value;
-VAR a, b, r: Value; ri: INTEGER;
+VAR a, b: Value; ri: INTEGER; aStr, bStr, res: ARRAY MaxStr OF CHAR;
 BEGIN
   a := args.head; b := args.tail.head;
+  IF (a.tag = tBigInt) OR (b.tag = tBigInt) THEN
+    IF (a.tag # tInt) & (a.tag # tBigInt) THEN Error("rem: needs ints"); RETURN NilV END;
+    IF (b.tag # tInt) & (b.tag # tBigInt) THEN Error("rem: needs ints"); RETURN NilV END;
+    ToNumStr(b, bStr);
+    IF BigIsZero(bStr) THEN Error("rem: division by zero"); RETURN NilV END;
+    ToNumStr(a, aStr); BigRem(aStr, bStr, res); RETURN MkBigInt(res)
+  END;
   IF (a.tag # tInt) OR (b.tag # tInt) THEN Error("rem: needs ints"); RETURN NilV END;
   IF b.i = 0 THEN Error("rem: division by zero"); RETURN NilV END;
-  ri := a.i - (a.i DIV b.i) * b.i;  (* floor remainder *)
-  IF (ri # 0) & ((a.i < 0) # (b.i < 0)) THEN ri := ri - b.i END;  (* truncate toward zero *)
+  ri := a.i - (a.i DIV b.i) * b.i;
+  IF (ri # 0) & ((a.i < 0) # (b.i < 0)) THEN ri := ri - b.i END;
   RETURN MkInt(ri)
 END BRem;
 
@@ -2598,36 +2956,69 @@ BEGIN
 END BMin;
 
 PROCEDURE BAbs(args: Value; env: Env): Value;
-VAR v: Value;
+VAR v: Value; i: INTEGER; tmp: ARRAY MaxStr OF CHAR;
 BEGIN
   v := args.head;
   IF v.tag = tInt THEN
     IF v.i < 0 THEN RETURN MkInt(-v.i) ELSE RETURN v END
   END;
   IF v.tag = tReal THEN RETURN MkReal(Math.abs(v.r)) END;
+  IF v.tag = tBigInt THEN
+    IF v.s[0] = '-' THEN
+      i := 0; WHILE v.s[i+1] # 0X DO tmp[i] := v.s[i+1]; INC(i) END; tmp[i] := 0X;
+      RETURN MkBigInt(tmp)
+    ELSE RETURN v END
+  END;
   Error("abs: needs number"); RETURN NilV
 END BAbs;
 
 PROCEDURE BEvenQ(args: Value; env: Env): Value;
+VAR v: Value; last: CHAR;
 BEGIN
-  IF args.head.tag # tInt THEN Error("even?: needs int"); RETURN NilV END;
-  RETURN MkBool(args.head.i MOD 2 = 0)
+  v := args.head;
+  IF v.tag = tBigInt THEN
+    last := v.s[Strings.Length(v.s) - 1];
+    RETURN MkBool((last = '0') OR (last = '2') OR (last = '4') OR (last = '6') OR (last = '8'))
+  END;
+  IF v.tag # tInt THEN Error("even?: needs int"); RETURN NilV END;
+  RETURN MkBool(v.i MOD 2 = 0)
 END BEvenQ;
 
 PROCEDURE BOddQ(args: Value; env: Env): Value;
+VAR v: Value; last: CHAR;
 BEGIN
-  IF args.head.tag # tInt THEN Error("odd?: needs int"); RETURN NilV END;
-  RETURN MkBool(args.head.i MOD 2 # 0)
+  v := args.head;
+  IF v.tag = tBigInt THEN
+    last := v.s[Strings.Length(v.s) - 1];
+    RETURN MkBool((last = '1') OR (last = '3') OR (last = '5') OR (last = '7') OR (last = '9'))
+  END;
+  IF v.tag # tInt THEN Error("odd?: needs int"); RETURN NilV END;
+  RETURN MkBool(v.i MOD 2 # 0)
 END BOddQ;
 
 PROCEDURE BZeroQ(args: Value; env: Env): Value;
-BEGIN RETURN MkBool(IsNum(args.head) & (NumReal(args.head) = 0.0)) END BZeroQ;
+VAR v: Value;
+BEGIN
+  v := args.head;
+  IF v.tag = tBigInt THEN RETURN MkBool(BigIsZero(v.s)) END;
+  RETURN MkBool(IsNum(v) & (NumReal(v) = 0.0))
+END BZeroQ;
 
 PROCEDURE BPosQ(args: Value; env: Env): Value;
-BEGIN RETURN MkBool(IsNum(args.head) & (NumReal(args.head) > 0.0)) END BPosQ;
+VAR v: Value;
+BEGIN
+  v := args.head;
+  IF v.tag = tBigInt THEN RETURN MkBool(~BigIsZero(v.s) & ~BigIsNeg(v.s)) END;
+  RETURN MkBool(IsNum(v) & (NumReal(v) > 0.0))
+END BPosQ;
 
 PROCEDURE BNegQ(args: Value; env: Env): Value;
-BEGIN RETURN MkBool(IsNum(args.head) & (NumReal(args.head) < 0.0)) END BNegQ;
+VAR v: Value;
+BEGIN
+  v := args.head;
+  IF v.tag = tBigInt THEN RETURN MkBool(BigIsNeg(v.s)) END;
+  RETURN MkBool(IsNum(v) & (NumReal(v) < 0.0))
+END BNegQ;
 
 (* Math *)
 PROCEDURE BFloor(args: Value; env: Env): Value;
@@ -2680,7 +3071,7 @@ PROCEDURE BNumberQ(args: Value; env: Env): Value;
 BEGIN RETURN MkBool(IsNum(args.head)) END BNumberQ;
 
 PROCEDURE BIntegerQ(args: Value; env: Env): Value;
-BEGIN RETURN MkBool(~IsNil(args.head) & (args.head.tag = tInt)) END BIntegerQ;
+BEGIN RETURN MkBool(~IsNil(args.head) & ((args.head.tag = tInt) OR (args.head.tag = tBigInt))) END BIntegerQ;
 
 PROCEDURE BFloatQ(args: Value; env: Env): Value;
 BEGIN RETURN MkBool(~IsNil(args.head) & (args.head.tag = tReal)) END BFloatQ;
@@ -2855,8 +3246,14 @@ BEGIN
 END BReverse;
 
 PROCEDURE ValLT(a, b: Value): BOOLEAN;
+VAR aStr, bStr: ARRAY MaxStr OF CHAR;
 BEGIN
-  IF IsNum(a) & IsNum(b) THEN RETURN NumReal(a) < NumReal(b) END;
+  IF IsNum(a) & IsNum(b) THEN
+    IF (a.tag = tBigInt) OR (b.tag = tBigInt) THEN
+      ToNumStr(a, aStr); ToNumStr(b, bStr); RETURN BigCmp(aStr, bStr) < 0
+    END;
+    RETURN NumReal(a) < NumReal(b)
+  END;
   IF (a.tag = tStr) & (b.tag = tStr) THEN RETURN Strings.Compare(a.s, b.s) < 0 END;
   IF (a.tag = tKey) & (b.tag = tKey) THEN RETURN Strings.Compare(a.s, b.s) < 0 END;
   RETURN FALSE
@@ -4033,6 +4430,19 @@ BEGIN
   Error("int: cannot convert"); RETURN NilV
 END BInt;
 
+PROCEDURE BBigInt(args: Value; env: Env): Value;
+VAR v: Value; s: ARRAY MaxStr OF CHAR;
+BEGIN
+  v := args.head;
+  IF v.tag = tBigInt THEN RETURN v END;
+  IF v.tag = tInt THEN Strings.IntToStr(v.i, s); RETURN MkBigInt(s) END;
+  IF v.tag = tStr THEN RETURN MkBigInt(v.s) END;
+  Error("bigint: cannot convert"); RETURN NilV
+END BBigInt;
+
+PROCEDURE BBigIntQ(args: Value; env: Env): Value;
+BEGIN RETURN MkBool(~IsNil(args.head) & (args.head.tag = tBigInt)) END BBigIntQ;
+
 PROCEDURE BFloat(args: Value; env: Env): Value;
 VAR v: Value; x: REAL; ok: BOOLEAN;
 BEGIN
@@ -4623,6 +5033,8 @@ BEGIN
 
   (* Conversion *)
   RegisterDoc("int", BInt, "Converts to integer.");
+  RegisterDoc("bigint", BBigInt, "Converts n to a BigInt.");
+  RegisterDoc("bigint?", BBigIntQ, "Returns true if x is a BigInt.");
   RegisterDoc("float", BFloat, "Converts to floating-point.");
   RegisterDoc("char", BChar, "Returns single-char string for integer codepoint.");
   RegisterDoc("char-code", BCharCode, "Returns integer codepoint of first char.");

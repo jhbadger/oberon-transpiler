@@ -430,6 +430,41 @@ BEGIN
   Check("join sep",         '(= (string/join ", " ["a" "b" "c"]) "a, b, c")');
   Check("join no sep",      '(= (string/join ["a" "b" "c"]) "abc")');
 
+  (* ── 26. BigInt ─────────────────────────────────────────────────────── *)
+  Section("BigInt");
+  Check("literal",        '(= 42N 42N)');
+  Check("add",            '(= (+ 1N 2N) 3N)');
+  Check("sub",            '(= (- 10N 3N) 7N)');
+  Check("mul",            '(= (* 100N 100N) 10000N)');
+  Check("mod",            '(= (mod 17N 5N) 2N)');
+  Check("quot",           '(= (quot 17N 5N) 3N)');
+  Check("rem neg",        '(= (rem -13N 4N) -1N)');
+  Check("mod neg",        '(= (mod -13N 4N) 3N)');
+  Check("bigint conv",    '(= (bigint 42) 42N)');
+  Check("bigint str",     '(= (str 42N) "42")');
+  Check("bigint?",        '(bigint? 42N)');
+  Check("bigint? false",  '(not (bigint? 42))');
+  Check("integer?",       '(integer? 42N)');
+  Check("type",           '(= (type 42N) :bigint)');
+  Check("eq int",         '(= 42N 42)');
+  Check("lt",             '(< 5N 10N)');
+  Check("gt",             '(> 10N 5N)');
+  Check("le",             '(<= 5N 5N)');
+  Check("ge",             '(>= 10N 5N)');
+  Check("inc",            '(= (inc 99N) 100N)');
+  Check("dec",            '(= (dec 100N) 99N)');
+  Check("abs neg",        '(= (abs -42N) 42N)');
+  Check("even?",          '(even? 4N)');
+  Check("odd?",           '(odd? 7N)');
+  Check("zero?",          '(zero? 0N)');
+  Check("pos?",           '(pos? 1N)');
+  Check("neg?",           '(neg? -1N)');
+  Check("mixed add",      '(= (+ 1 2N) 3N)');
+  Check("mixed mul",      '(= (* 3 4N) 12N)');
+  Check("sort",           '(= (sort [3N 1N 2N]) (list 1N 2N 3N))');
+  E('(defn fact20 [n] (if (<= n 1N) 1N (* n (fact20 (- n 1N)))))');
+  Check("factorial 20",   '(= (fact20 20N) 2432902008176640000N)');
+
   (* ── Summary ────────────────────────────────────────────────────────── *)
   Out.Ln;
   Out.String("Results: ");
