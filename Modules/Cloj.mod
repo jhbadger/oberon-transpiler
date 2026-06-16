@@ -590,7 +590,8 @@ PROCEDURE ParseExpr(): Value;
     IF IsNil(v) THEN RETURN END;
     IF v.tag = tSym THEN
       IF (v.s[0] = '%') & (v.s[1] = 0X) THEN
-        v.s[1] := '1'; v.s[2] := 0X
+        v.s[1] := '1'; v.s[2] := 0X;
+        v.symId := InternSym(v.s)
       END
     ELSIF (v.tag = tList) OR (v.tag = tVec) THEN
       NormPct(v.head); NormPct(v.tail)
