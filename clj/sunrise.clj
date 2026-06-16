@@ -245,3 +245,6 @@
      
      (print (compute-local-sunrise-sunset 39.0840 -77.1528 167 -4.0)) ; Rockville
      (print (compute-local-sunrise-sunset 43.0731 -89.4012 167 -5.0)) ; Madison
+     
+     (print (compute-local-sunrise-sunset 39.0840 -77.1528 360 -5.0)) ; Rockville
+     (print (compute-local-sunrise-sunset 43.0731 -89.4012 360 -6.0)) ; Madison
