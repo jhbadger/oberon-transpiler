@@ -46,7 +46,7 @@ MODULE obemacs;
     MaxKillRing  = 32;
     MaxBuf       = 256;
     MaxACMatches = 64;
-    NMxCmds      = 19;
+    NMxCmds      = 22;
 
     (* Special keys -- ASCII codes for control characters. *)
     KCtrlA = 01X; KCtrlB = 02X; KCtrlC = 03X; KCtrlD = 04X;
@@ -70,6 +70,8 @@ MODULE obemacs;
     SynRuby   = 2;
     SynR      = 3;
     SynClojure = 4;
+    SynPython  = 5;
+    SynC       = 6;
 
     (* ANSI colors used by the highlighter *)
     ColDefault = 7;   (* white   - identifier / default *)
@@ -110,7 +112,7 @@ MODULE obemacs;
     cols, rows: INTEGER;
 
     (* Kill ring: a circular list of strings. *)
-    killRing:   ARRAY MaxKillRing OF ARRAY 1024 OF CHAR;
+    killRing:   ARRAY MaxKillRing OF ARRAY 8192 OF CHAR;
     killCount:  INTEGER;
     killHead:   INTEGER;
     yankIndex:  INTEGER;
@@ -144,6 +146,10 @@ MODULE obemacs;
     acActive:    BOOLEAN;
     acMode:      INTEGER;  (* 1 = dabbrev, 2 = cloj *)
     fillCol:     INTEGER;
+
+    isearchLine: INTEGER;  (* 1-based line of current isearch match; -1 = none *)
+    isearchCol:  INTEGER;  (* 1-based col *)
+    isearchLen:  INTEGER;
 
   (* ===================================================================
      small helpers
@@ -213,6 +219,11 @@ MODULE obemacs;
       RETURN SynR
     END;
     IF EndsWithAny(path, ".clj", ".cljs", ".cljc") THEN RETURN SynClojure END;
+    IF Strings.EndsWith(path, ".py") THEN RETURN SynPython END;
+    IF Strings.EndsWith(path, ".c")   OR Strings.EndsWith(path, ".h")
+    OR Strings.EndsWith(path, ".cpp") OR Strings.EndsWith(path, ".hpp")
+    OR Strings.EndsWith(path, ".cc")  OR Strings.EndsWith(path, ".cxx")
+    THEN RETURN SynC END;
     RETURN SynNone
   END DetectSyntax;
 
@@ -437,6 +448,62 @@ MODULE obemacs;
     RETURN -1
   END RKeyword;
 
+  PROCEDURE PythonKeyword(VAR w: ARRAY OF CHAR): INTEGER;
+  BEGIN
+    IF StrEq(w, "def")      OR StrEq(w, "class")    OR StrEq(w, "return")
+    OR StrEq(w, "if")       OR StrEq(w, "elif")     OR StrEq(w, "else")
+    OR StrEq(w, "while")    OR StrEq(w, "for")      OR StrEq(w, "in")
+    OR StrEq(w, "break")    OR StrEq(w, "continue") OR StrEq(w, "pass")
+    OR StrEq(w, "import")   OR StrEq(w, "from")     OR StrEq(w, "as")
+    OR StrEq(w, "with")     OR StrEq(w, "try")      OR StrEq(w, "except")
+    OR StrEq(w, "finally")  OR StrEq(w, "raise")    OR StrEq(w, "yield")
+    OR StrEq(w, "lambda")   OR StrEq(w, "del")      OR StrEq(w, "global")
+    OR StrEq(w, "nonlocal") OR StrEq(w, "assert")   OR StrEq(w, "and")
+    OR StrEq(w, "or")       OR StrEq(w, "not")      OR StrEq(w, "is")
+    OR StrEq(w, "print")    OR StrEq(w, "async")    OR StrEq(w, "await")
+    THEN RETURN ColKeyword END;
+    IF StrEq(w, "True") OR StrEq(w, "False") OR StrEq(w, "None")
+    THEN RETURN ColConst END;
+    IF StrEq(w, "int")    OR StrEq(w, "float")  OR StrEq(w, "str")
+    OR StrEq(w, "bool")   OR StrEq(w, "list")   OR StrEq(w, "dict")
+    OR StrEq(w, "tuple")  OR StrEq(w, "set")    OR StrEq(w, "bytes")
+    OR StrEq(w, "object") OR StrEq(w, "type")
+    THEN RETURN ColType END;
+    RETURN -1
+  END PythonKeyword;
+
+  PROCEDURE CKeyword(VAR w: ARRAY OF CHAR): INTEGER;
+  BEGIN
+    IF StrEq(w, "if")       OR StrEq(w, "else")     OR StrEq(w, "while")
+    OR StrEq(w, "for")      OR StrEq(w, "do")       OR StrEq(w, "switch")
+    OR StrEq(w, "case")     OR StrEq(w, "default")  OR StrEq(w, "break")
+    OR StrEq(w, "continue") OR StrEq(w, "return")   OR StrEq(w, "goto")
+    OR StrEq(w, "struct")   OR StrEq(w, "union")    OR StrEq(w, "enum")
+    OR StrEq(w, "typedef")  OR StrEq(w, "static")   OR StrEq(w, "extern")
+    OR StrEq(w, "const")    OR StrEq(w, "volatile") OR StrEq(w, "register")
+    OR StrEq(w, "inline")   OR StrEq(w, "sizeof")   OR StrEq(w, "void")
+    OR StrEq(w, "class")    OR StrEq(w, "public")   OR StrEq(w, "private")
+    OR StrEq(w, "protected") OR StrEq(w, "namespace") OR StrEq(w, "template")
+    OR StrEq(w, "virtual")  OR StrEq(w, "override") OR StrEq(w, "final")
+    OR StrEq(w, "new")      OR StrEq(w, "delete")   OR StrEq(w, "try")
+    OR StrEq(w, "catch")    OR StrEq(w, "throw")    OR StrEq(w, "using")
+    OR StrEq(w, "explicit") OR StrEq(w, "operator") OR StrEq(w, "friend")
+    THEN RETURN ColKeyword END;
+    IF StrEq(w, "NULL") OR StrEq(w, "nullptr") OR StrEq(w, "true") OR StrEq(w, "false")
+    THEN RETURN ColConst END;
+    IF StrEq(w, "int")      OR StrEq(w, "char")     OR StrEq(w, "float")
+    OR StrEq(w, "double")   OR StrEq(w, "long")     OR StrEq(w, "short")
+    OR StrEq(w, "unsigned") OR StrEq(w, "signed")   OR StrEq(w, "bool")
+    OR StrEq(w, "size_t")   OR StrEq(w, "auto")     OR StrEq(w, "string")
+    OR StrEq(w, "vector")   OR StrEq(w, "map")      OR StrEq(w, "set")
+    OR StrEq(w, "pair")     OR StrEq(w, "array")    OR StrEq(w, "uint8_t")
+    OR StrEq(w, "uint16_t") OR StrEq(w, "uint32_t") OR StrEq(w, "uint64_t")
+    OR StrEq(w, "int8_t")   OR StrEq(w, "int16_t")  OR StrEq(w, "int32_t")
+    OR StrEq(w, "int64_t")
+    THEN RETURN ColType END;
+    RETURN -1
+  END CKeyword;
+
   PROCEDURE IsClojureSymbolChar(c: CHAR): BOOLEAN;
   BEGIN
     RETURN IsIdent(c) OR (c = "-") OR (c = "?") OR (c = "!") OR (c = "*")
@@ -481,6 +548,8 @@ MODULE obemacs;
     | SynRuby:    RETURN RubyKeyword(w)
     | SynR:       RETURN RKeyword(w)
     | SynClojure: RETURN ClojureKeyword(w)
+    | SynPython:  RETURN PythonKeyword(w)
+    | SynC:       RETURN CKeyword(w)
     ELSE RETURN -1
     END
   END LookupKeyword;
@@ -553,6 +622,21 @@ MODULE obemacs;
       END
     END;
 
+    (* Continue a C /* ... */ block comment from a previous line. *)
+    IF (syntax = SynC) & inBlockComment THEN
+      WHILE (i < len) & (screenCol < cols) DO
+        ch := line[i];
+        IF (ch = "*") & (i + 1 < len) & (line[i+1] = "/") THEN
+          ok := Emit(screenCol, row, "*", ColComment);
+          IF ok THEN ok := Emit(screenCol, row, "/", ColComment) END;
+          INC(i, 2); inBlockComment := FALSE; EXIT
+        ELSE
+          ok := Emit(screenCol, row, ch, ColComment); INC(i)
+        END;
+        IF ~ok THEN RETURN END
+      END
+    END;
+
     WHILE (i < len) & (screenCol < cols) DO
       ch := line[i];
 
@@ -568,6 +652,39 @@ MODULE obemacs;
         WHILE (i < len) & (screenCol < cols) DO
           ok := Emit(screenCol, row, line[i], ColComment);
           INC(i);
+          IF ~ok THEN RETURN END
+        END;
+        RETURN
+
+      (* --- C // line comment ---------------------------------------- *)
+      ELSIF (syntax = SynC) & (ch = "/") & (i + 1 < len) & (line[i+1] = "/") THEN
+        WHILE (i < len) & (screenCol < cols) DO
+          ok := Emit(screenCol, row, line[i], ColComment); INC(i);
+          IF ~ok THEN RETURN END
+        END;
+        RETURN
+
+      (* --- C /* ... */ block comment -------------------------------- *)
+      ELSIF (syntax = SynC) & (ch = "/") & (i + 1 < len) & (line[i+1] = "*") THEN
+        ok := Emit(screenCol, row, "/", ColComment);
+        IF ok THEN ok := Emit(screenCol, row, "*", ColComment) END;
+        INC(i, 2); inBlockComment := TRUE;
+        WHILE (i < len) & (screenCol < cols) & inBlockComment DO
+          ch := line[i];
+          IF (ch = "*") & (i + 1 < len) & (line[i+1] = "/") THEN
+            ok := Emit(screenCol, row, "*", ColComment);
+            IF ok THEN ok := Emit(screenCol, row, "/", ColComment) END;
+            INC(i, 2); inBlockComment := FALSE
+          ELSE
+            ok := Emit(screenCol, row, ch, ColComment); INC(i)
+          END;
+          IF ~ok THEN RETURN END
+        END
+
+      (* --- C # preprocessor directive ------------------------------- *)
+      ELSIF (syntax = SynC) & (ch = "#") THEN
+        WHILE (i < len) & (screenCol < cols) DO
+          ok := Emit(screenCol, row, line[i], ColConst); INC(i);
           IF ~ok THEN RETURN END
         END;
         RETURN
@@ -606,7 +723,7 @@ MODULE obemacs;
         IF ~ok THEN RETURN END;
         WHILE (i < len) & (line[i] # quote) DO
           IF (line[i] = "\") & (i + 1 < len)
-             & ((syntax = SynRuby) OR (syntax = SynR)) THEN
+             & ((syntax = SynRuby) OR (syntax = SynR) OR (syntax = SynC)) THEN
             ok := Emit(screenCol, row, line[i], ColString);
             IF ok THEN ok := Emit(screenCol, row, line[i+1], ColString) END;
             INC(i, 2)
@@ -697,7 +814,7 @@ MODULE obemacs;
 
   PROCEDURE DrawWindow(w: Window);
     VAR line: ARRAY 4096 OF CHAR;
-        rowIdx, lineNo, total, len, i: INTEGER;
+        rowIdx, lineNo, total, len, i, j: INTEGER;
         modeLine: ARRAY 256 OF CHAR;
         tmp: ARRAY 64 OF CHAR;
   BEGIN
@@ -709,24 +826,35 @@ MODULE obemacs;
        block comment at w.buf.scroll.  Cheap because we only inspect
        the first character pair of each line; that misses some edge
        cases but is good enough for live editing. *)
-    IF w.buf.syntax = SynOberon THEN
+    IF (w.buf.syntax = SynOberon) OR (w.buf.syntax = SynC) THEN
       lineNo := 1;
       WHILE lineNo < w.buf.scroll DO
         len := Editor.GetLine(w.buf.ed, lineNo, LEN(line), line);
         i := 0;
         WHILE i < len - 1 DO
           IF inBlockComment THEN
-            IF (line[i] = "*") & (line[i+1] = ")") THEN
-              DEC(blockDepth);
-              IF blockDepth <= 0 THEN inBlockComment := FALSE END;
-              INC(i, 2)
-            ELSIF (line[i] = "(") & (line[i+1] = "*") THEN
-              INC(blockDepth); INC(i, 2)
-            ELSE INC(i)
+            IF w.buf.syntax = SynOberon THEN
+              IF (line[i] = "*") & (line[i+1] = ")") THEN
+                DEC(blockDepth);
+                IF blockDepth <= 0 THEN inBlockComment := FALSE END;
+                INC(i, 2)
+              ELSIF (line[i] = "(") & (line[i+1] = "*") THEN
+                INC(blockDepth); INC(i, 2)
+              ELSE INC(i)
+              END
+            ELSE  (* SynC: no nesting *)
+              IF (line[i] = "*") & (line[i+1] = "/") THEN
+                inBlockComment := FALSE; INC(i, 2)
+              ELSE INC(i)
+              END
             END
           ELSE
-            IF (line[i] = "(") & (line[i+1] = "*") THEN
+            IF (w.buf.syntax = SynOberon) & (line[i] = "(") & (line[i+1] = "*") THEN
               inBlockComment := TRUE; blockDepth := 1; INC(i, 2)
+            ELSIF (w.buf.syntax = SynC) & (line[i] = "/") & (line[i+1] = "*") THEN
+              inBlockComment := TRUE; INC(i, 2)
+            ELSIF (w.buf.syntax = SynC) & (line[i] = "/") & (line[i+1] = "/") THEN
+              i := len  (* skip rest of line *)
             ELSE INC(i)
             END
           END
@@ -754,6 +882,18 @@ MODULE obemacs;
             Out.Char(line[showParenCol - 1]);
             Terminal.Reset
           END
+        END;
+        IF (isearchLine >= 0) & (lineNo = isearchLine) & (isearchLen > 0)
+           & (isearchCol >= 1) THEN
+          Terminal.Color(0, ColString);
+          i := CharIndexToScreenCol(line, len, isearchCol - 1);
+          j := 0;
+          WHILE (j < isearchLen) & (isearchCol - 1 + j < len) & (i + j < cols) DO
+            Terminal.Goto(i + j + 1, w.top + rowIdx);
+            Out.Char(line[isearchCol - 1 + j]);
+            INC(j)
+          END;
+          Terminal.Reset
         END
       ELSE
         Terminal.Color(ColDefault, 0);
@@ -792,6 +932,8 @@ MODULE obemacs;
     | SynRuby:    Strings.Append("Ruby", modeLine)
     | SynR:       Strings.Append("R", modeLine)
     | SynClojure: Strings.Append("Clojure", modeLine)
+    | SynPython:  Strings.Append("Python", modeLine)
+    | SynC:       Strings.Append("C/C++", modeLine)
     ELSE          Strings.Append("Fundamental", modeLine)
     END;
     Strings.Append(")", modeLine);
@@ -981,7 +1123,7 @@ MODULE obemacs;
 
   PROCEDURE KillRange(a, b: INTEGER);
     VAR lo, hi, i, n: INTEGER; ch: CHAR;
-        buf: ARRAY 4096 OF CHAR;
+        buf: ARRAY 8192 OF CHAR;
   BEGIN
     IF a < b THEN lo := a; hi := b ELSE lo := b; hi := a END;
     n := 0; i := lo;
@@ -1156,7 +1298,20 @@ MODULE obemacs;
   END CmdSelfInsert;
 
   PROCEDURE CmdNewline;
-  BEGIN Editor.InsertChar(curBuf.ed, 0AX)
+    VAR ln, len, i: INTEGER;
+        line: ARRAY 4096 OF CHAR;
+        indent: ARRAY 256 OF CHAR;
+  BEGIN
+    IF curBuf = replBuf THEN Editor.InsertChar(curBuf.ed, 0AX); RETURN END;
+    ln  := Editor.CursorLine(curBuf.ed);
+    len := Editor.GetLine(curBuf.ed, ln, LEN(line), line);
+    i := 0;
+    WHILE (i < len) & ((line[i] = " ") OR (line[i] = 09X)) DO
+      indent[i] := line[i]; INC(i)
+    END;
+    indent[i] := 0X;
+    Editor.InsertChar(curBuf.ed, 0AX);
+    IF indent[0] # 0X THEN Editor.InsertStr(curBuf.ed, indent) END
   END CmdNewline;
 
   PROCEDURE CmdBackspace;
@@ -1249,7 +1404,7 @@ MODULE obemacs;
   END CmdCopyRegion;
 
   PROCEDURE CmdYank;
-    VAR s: ARRAY 1024 OF CHAR;
+    VAR s: ARRAY 8192 OF CHAR;
   BEGIN
     IF killCount = 0 THEN SetEcho("Kill ring is empty"); RETURN END;
     yankIndex := 0;
@@ -1261,7 +1416,7 @@ MODULE obemacs;
   END CmdYank;
 
   PROCEDURE CmdYankPop;
-    VAR s: ARRAY 1024 OF CHAR; i, n: INTEGER;
+    VAR s: ARRAY 8192 OF CHAR; i, n: INTEGER;
   BEGIN
     IF ~lastWasYank THEN SetEcho("Previous command was not a yank"); RETURN END;
     IF killCount = 0 THEN RETURN END;
@@ -1511,6 +1666,70 @@ MODULE obemacs;
      commands -- files & buffers
      =================================================================== *)
 
+  PROCEDURE CmdJoinLine;
+    VAR ln, len, i: INTEGER;
+        line: ARRAY 4096 OF CHAR;
+        ch: CHAR;
+  BEGIN
+    ln := Editor.CursorLine(curBuf.ed);
+    IF ln <= 1 THEN RETURN END;
+    len := Editor.GetLine(curBuf.ed, ln, LEN(line), line);
+    i := 0;
+    WHILE (i < len) & ((line[i] = " ") OR (line[i] = 09X)) DO INC(i) END;
+    Editor.MoveUp(curBuf.ed);
+    Editor.MoveLineEnd(curBuf.ed);
+    (* delete newline then i leading-whitespace chars from the joined line *)
+    WHILE i >= 0 DO Editor.DeleteChar(curBuf.ed); DEC(i) END;
+    (* insert a space unless previous char already is one *)
+    IF ~CharAt(PointPos() - 1, ch) OR (ch # " ") THEN
+      Editor.InsertChar(curBuf.ed, " ")
+    END
+  END CmdJoinLine;
+
+  PROCEDURE WriteFile;
+    VAR path: ARRAY MaxBuf OF CHAR; rc: INTEGER; msg: ARRAY MaxBuf OF CHAR;
+  BEGIN
+    IF ~Prompt("Write file: ", path) THEN RETURN END;
+    IF path[0] = 0X THEN RETURN END;
+    rc := Editor.Save(curBuf.ed, path);
+    IF rc = 0 THEN
+      Strings.Copy(path, curBuf.file);
+      BaseName(path, curBuf.name);
+      curBuf.syntax := DetectSyntax(path);
+      Strings.Copy("Wrote ", msg);
+      Strings.Append(path, msg);
+      SetEcho(msg)
+    ELSE
+      SetEcho("Error writing file")
+    END
+  END WriteFile;
+
+  PROCEDURE DoShellCommand;
+    VAR cmd: ARRAY MaxBuf OF CHAR;
+        fullCmd: ARRAY 512 OF CHAR;
+        tmpFile: ARRAY 256 OF CHAR;
+        b: Buffer; rc: INTEGER;
+  BEGIN
+    IF ~Prompt("Shell command: ", cmd) THEN RETURN END;
+    IF cmd[0] = 0X THEN RETURN END;
+    TmpPath("obemacs-shell.txt", tmpFile);
+    Strings.Copy(cmd, fullCmd);
+    Strings.Append(" > ", fullCmd);
+    Strings.Append(tmpFile, fullCmd);
+    Strings.Append(" 2>&1", fullCmd);
+    Terminal.Shell(fullCmd);
+    b := FindBuffer("*shell-output*");
+    IF b = NIL THEN b := NewBuffer("*shell-output*") END;
+    Editor.Free(b.ed); b.ed := Editor.New();
+    IF Files.Exists(tmpFile) THEN
+      rc := Editor.Load(b.ed, tmpFile);
+      IF rc # 0 THEN SetEcho("Could not load shell output"); RETURN END
+    END;
+    Editor.GotoPos(b.ed, 0);
+    ShowBuffer(b);
+    SetEcho("Shell output in *shell-output*")
+  END DoShellCommand;
+
   PROCEDURE FindFile;
     VAR path: ARRAY MaxBuf OF CHAR; name: ARRAY 64 OF CHAR;
         b: Buffer; rc: INTEGER;
@@ -1663,6 +1882,17 @@ MODULE obemacs;
      incremental search
      =================================================================== *)
 
+  PROCEDURE SetIsearchHighlight(nlen: INTEGER);
+  BEGIN
+    IF nlen > 0 THEN
+      isearchLine := Editor.CursorLine(curBuf.ed);
+      isearchCol  := Editor.CursorCol(curBuf.ed);
+      isearchLen  := nlen
+    ELSE
+      isearchLine := -1; isearchCol := -1; isearchLen := 0
+    END
+  END SetIsearchHighlight;
+
   PROCEDURE Isearch(direction: INTEGER);
     VAR needle: ARRAY MaxBuf OF CHAR;
         startPos, anchor, best, p: INTEGER;
@@ -1673,6 +1903,7 @@ MODULE obemacs;
     startPos := PointPos();
     anchor    := startPos;   (* search base; updated by C-s/C-r *)
     needle[0] := 0X; len := 0; failing := FALSE;
+    isearchLine := -1; isearchCol := -1; isearchLen := 0;
     LOOP
       Redraw;
       Terminal.Goto(1, rows);
@@ -1690,8 +1921,10 @@ MODULE obemacs;
       ch := Terminal.ReadKey();
 
       IF (ch = KEnter) OR (ch = KEsc) THEN
+        isearchLine := -1; isearchCol := -1; isearchLen := 0;
         SetEcho("Search done"); RETURN
       ELSIF ch = KCtrlG THEN
+        isearchLine := -1; isearchCol := -1; isearchLen := 0;
         Editor.GotoPos(curBuf.ed, startPos);
         SetEcho("Quit"); RETURN
       ELSIF ch = KCtrlS THEN
@@ -1704,9 +1937,11 @@ MODULE obemacs;
             found := Editor.Find(curBuf.ed, needle, 0, 0)
           END;
           IF found # 0 THEN
-            anchor := PointPos(); failing := FALSE
+            anchor := PointPos(); failing := FALSE;
+            SetIsearchHighlight(len)
           ELSE
-            Editor.GotoPos(curBuf.ed, anchor); failing := TRUE
+            Editor.GotoPos(curBuf.ed, anchor); failing := TRUE;
+            isearchLine := -1; isearchCol := -1; isearchLen := 0
           END
         END
       ELSIF ch = KCtrlR THEN
@@ -1723,9 +1958,11 @@ MODULE obemacs;
           END;
           IF best >= 0 THEN
             Editor.GotoPos(curBuf.ed, best);
-            anchor := best; failing := FALSE
+            anchor := best; failing := FALSE;
+            SetIsearchHighlight(len)
           ELSE
-            Editor.GotoPos(curBuf.ed, anchor); failing := TRUE
+            Editor.GotoPos(curBuf.ed, anchor); failing := TRUE;
+            isearchLine := -1; isearchCol := -1; isearchLen := 0
           END
         END
       ELSIF (ch = KBackspace) OR (ch = KDel) THEN
@@ -1735,11 +1972,16 @@ MODULE obemacs;
           Editor.GotoPos(curBuf.ed, startPos);
           IF needle[0] # 0X THEN
             found := Editor.Find(curBuf.ed, needle, 0, 0);
-            IF found # 0 THEN anchor := PointPos(); failing := FALSE
-            ELSE Editor.GotoPos(curBuf.ed, startPos); failing := TRUE
+            IF found # 0 THEN
+              anchor := PointPos(); failing := FALSE;
+              SetIsearchHighlight(len)
+            ELSE
+              Editor.GotoPos(curBuf.ed, startPos); failing := TRUE;
+              isearchLine := -1; isearchCol := -1; isearchLen := 0
             END
           ELSE
-            failing := FALSE
+            failing := FALSE;
+            isearchLine := -1; isearchCol := -1; isearchLen := 0
           END
         END
       ELSIF (ch >= " ") & (ch < 7FX) & (len < LEN(needle) - 1) THEN
@@ -1747,9 +1989,11 @@ MODULE obemacs;
         Editor.GotoPos(curBuf.ed, anchor);
         found := Editor.Find(curBuf.ed, needle, 0, 0);
         IF found # 0 THEN
-          anchor := PointPos(); failing := FALSE
+          anchor := PointPos(); failing := FALSE;
+          SetIsearchHighlight(len)
         ELSE
-          failing := TRUE
+          failing := TRUE;
+          isearchLine := -1; isearchCol := -1; isearchLen := 0
         END
       END
     END
@@ -1856,6 +2100,9 @@ MODULE obemacs;
     | 16: Strings.Copy("recover-this-file", s)
     | 17: Strings.Copy("goto-line",         s)
     | 18: Strings.Copy("fill-paragraph",    s)
+    | 19: Strings.Copy("python-mode",       s)
+    | 20: Strings.Copy("shell-command",     s)
+    | 21: Strings.Copy("c-mode",            s)
     ELSE  s[0] := 0X
     END
   END MxCmdAt;
@@ -2163,6 +2410,11 @@ MODULE obemacs;
         SetEcho("No auto-save in obemacs")
     ELSIF Strings.Compare(name, "goto-line")      = 0 THEN CmdGotoLine
     ELSIF Strings.Compare(name, "fill-paragraph") = 0 THEN FillParagraph
+    ELSIF Strings.Compare(name, "python-mode")    = 0 THEN
+        curBuf.syntax := SynPython; SetEcho("Python mode")
+    ELSIF Strings.Compare(name, "shell-command")  = 0 THEN DoShellCommand
+    ELSIF Strings.Compare(name, "c-mode")         = 0 THEN
+        curBuf.syntax := SynC; SetEcho("C/C++ mode")
     ELSE
         SetEcho("No such command")
     END
@@ -2192,6 +2444,7 @@ MODULE obemacs;
     | "u":    CmdUndo
     | KCtrlX: CmdExchangePointMark
     | "k":    KillBuffer
+    | KCtrlW: WriteFile
     ELSE
       SetEcho("C-x: unknown sub-command")
     END
@@ -2224,6 +2477,7 @@ MODULE obemacs;
     | ">":  CmdEndOfBuffer
     | "x":  ExecuteExtended
     | "/":  DabbrevExpand
+    | "^":  CmdJoinLine
     | KBackspace, KDel: CmdKillWordBackward
     ELSE
       SetEcho("Unknown M-key")
@@ -2348,6 +2602,34 @@ MODULE obemacs;
     | SynR:
         Strings.Copy("Rscript ", cmd);
         Strings.Append(curBuf.file, cmd)
+    | SynPython:
+        Strings.Copy("python3 ", cmd);
+        Strings.Append(curBuf.file, cmd)
+    | SynC:
+        BaseName(curBuf.file, binName);
+        n := Strings.Length(binName);
+        IF (n > 4) & (Strings.EndsWith(binName, ".cpp")
+                   OR Strings.EndsWith(binName, ".cxx")) THEN
+          binName[n - 4] := 0X;
+          Strings.Copy("g++ -o /tmp/", cmd)
+        ELSIF (n > 3) & Strings.EndsWith(binName, ".cc") THEN
+          binName[n - 3] := 0X;
+          Strings.Copy("g++ -o /tmp/", cmd)
+        ELSIF (n > 4) & Strings.EndsWith(binName, ".hpp") THEN
+          SetEcho("Header file: cannot run directly"); RETURN
+        ELSIF (n > 2) & Strings.EndsWith(binName, ".h") THEN
+          SetEcho("Header file: cannot run directly"); RETURN
+        ELSE
+          IF (n > 2) & Strings.EndsWith(binName, ".c") THEN
+            binName[n - 2] := 0X
+          END;
+          Strings.Copy("gcc -o /tmp/", cmd)
+        END;
+        Strings.Append(binName, cmd);
+        Strings.Append(" ", cmd);
+        Strings.Append(curBuf.file, cmd);
+        Strings.Append(" && /tmp/", cmd);
+        Strings.Append(binName, cmd)
     | SynClojure:
         Terminal.Restore;
         Out.Ln;
@@ -2681,6 +2963,7 @@ BEGIN
   acPrefixLen := 0; acPrefix[0] := 0X;
   lastWasAC := FALSE; acActive := FALSE; acMode := 0;
   fillCol := 70;
+  isearchLine := -1; isearchCol := -1; isearchLen := 0;
 
   (* Load ~/.config/obemacs/init.clj if it exists *)
   IF Env.Get("HOME", initHome) & (initHome[0] # 0X) THEN
