@@ -26,7 +26,7 @@ typedef struct {
     int   frame_is_var[128];                 /* 1 if was a VAR param        */
     int   nested_sym_start;                  /* g_nsyms after nested push   */
     int   n_nested_procs;
-    char  nested_proc_names[32][MAX_IDENT];
+    char  nested_proc_names[128][MAX_IDENT];
     int   loop_exit_label;  /* label# of innermost active LOOP, 0 = none */
 } CG;
 
@@ -522,7 +522,7 @@ static void build_frame(CG *g, Node *proc) {
 static void collect_nested_names(CG *g, Node *proc) {
     g->n_nested_procs=0;
     for (Node *d=proc->c2;d;d=d->next)
-        if (d->kind==ND_PROC_DECL && g->n_nested_procs<32)
+        if (d->kind==ND_PROC_DECL && g->n_nested_procs<128)
             strncpy(g->nested_proc_names[g->n_nested_procs++],d->str,MAX_IDENT-1);
 }
 
@@ -2347,7 +2347,7 @@ static void emit_proc_def(CG *g, Node *proc, int nested) {
     int save_nested_sym = g->nested_sym_start;
     char save_outer[MAX_IDENT];
     strncpy(save_outer, g->outer_proc_name, MAX_IDENT-1);
-    char save_nested_names[32][MAX_IDENT];
+    char save_nested_names[128][MAX_IDENT];
     memcpy(save_nested_names, g->nested_proc_names, sizeof(g->nested_proc_names));
 
     if (!nested && has_nested_procs(proc)) {
