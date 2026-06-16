@@ -23,11 +23,13 @@ CONST
   tRegex*  = 16;
   tResolved* = 17;
   tBigInt* = 18;
+  tLazy*   = 19;
 
   MaxTok     = 65536;
   MaxStr     = 256;
   MaxModules = 64;
   MaxSymbols = 4096;
+  MaxNS      = 32;
 
   (* Special-form ids; 0 = not a special form *)
   sfNone = 0; sfDef = 1; sfDefn = 2; sfIf = 3; sfFn = 4; sfLet = 5;
@@ -37,7 +39,7 @@ CONST
   sfQuasiquote = 21; sfLetfn = 22; sfDelay = 23; sfFuture = 24;
   sfDosync = 25; sfDefrecord = 26; sfDefprotocol = 27; sfExtendType = 28;
   sfExtendProtocol = 29; sfDoc = 30; sfThread = 31; sfThreadLast = 32;
-  sfFor = 33;
+  sfFor = 33; sfLazySeq = 34; sfNs = 35; sfBinding = 36;
 
 TYPE
   Value*   = POINTER TO ValueDesc;
@@ -97,6 +99,7 @@ VAR
   thrownVal*: Value;
 
   EvalRef: EvalProc;  (* forward indirection *)
+  ForceLazyRef: PROCEDURE(v: Value);  (* forward indirection for lazy forcing *)
 
   modNames: ARRAY MaxModules OF ARRAY 64 OF CHAR;
   modFns:   ARRAY MaxModules OF ModuleRegFn;
@@ -109,6 +112,16 @@ VAR
 
   (* Generation counter, bumped on every global Define *)
   globalGen: INTEGER;
+
+  (* Namespace table *)
+  nsNames: ARRAY MaxNS OF ARRAY 64 OF CHAR;
+  nsEnvs:  ARRAY MaxNS OF Env;
+  nNS: INTEGER;
+  currentNS: INTEGER;
+
+  (* Dynamic var registry and binding stack *)
+  dynVar: ARRAY MaxSymbols OF BOOLEAN;
+  DynEnv: Env;
 
 (* ---------- Symbol interning ---------- *)
 
@@ -273,7 +286,11 @@ BEGIN
 END MkBuiltin;
 
 PROCEDURE IsNil*(v: Value): BOOLEAN;
-BEGIN RETURN (v = NIL) OR (v.tag = tNil) END IsNil;
+BEGIN
+  IF (v = NIL) OR (v.tag = tNil) THEN RETURN TRUE END;
+  IF v.tag = tLazy THEN ForceLazyRef(v); RETURN v.tag = tNil END;
+  RETURN FALSE
+END IsNil;
 
 PROCEDURE IsTruthy*(v: Value): BOOLEAN;
 BEGIN
@@ -286,7 +303,9 @@ PROCEDURE ListLen*(v: Value): INTEGER;
 VAR n: INTEGER;
 BEGIN
   n := 0;
-  WHILE ~IsNil(v) & ((v.tag = tList) OR (v.tag = tVec)) DO
+  WHILE ~IsNil(v) DO
+    IF v.tag = tLazy THEN ForceLazyRef(v) END;
+    IF (v.tag # tList) & (v.tag # tVec) THEN EXIT END;
     INC(n); v := v.tail
   END;
   RETURN n
@@ -307,7 +326,7 @@ VAR e: Env;
 BEGIN NEW(e); e.parent := parent; e.bindings := NIL; RETURN e END NewEnv;
 
 PROCEDURE DefineId(e: Env; id: INTEGER; name: ARRAY OF CHAR; v: Value);
-VAR b: Binding;
+VAR b: Binding; j: INTEGER;
 BEGIN
   b := e.bindings;
   WHILE b # NIL DO
@@ -316,12 +335,32 @@ BEGIN
   END;
   NEW(b); Strings.Copy(name, b.name); b.symId := id; b.val := v;
   b.next := e.bindings; e.bindings := b;
-  IF e = GlobalEnv THEN INC(globalGen) END
+  IF e = GlobalEnv THEN INC(globalGen)
+  ELSE
+    j := 1;
+    WHILE j < nNS DO
+      IF nsEnvs[j] = e THEN INC(globalGen); j := nNS
+      ELSE INC(j) END
+    END
+  END
 END DefineId;
 
 PROCEDURE LookupId(e: Env; id: INTEGER): Value;
-VAR b: Binding;
+VAR b: Binding; de: Env;
 BEGIN
+  (* Check dynamic scope first for dynamic vars *)
+  IF (id >= 0) & (id < MaxSymbols) & dynVar[id] & (DynEnv # NIL) THEN
+    de := DynEnv;
+    WHILE de # NIL DO
+      b := de.bindings;
+      WHILE b # NIL DO
+        IF b.symId = id THEN RETURN b.val END;
+        b := b.next
+      END;
+      de := de.parent
+    END
+  END;
+  (* Normal lexical lookup *)
   WHILE e # NIL DO
     b := e.bindings;
     WHILE b # NIL DO
@@ -347,6 +386,62 @@ BEGIN
   IF id < 0 THEN RETURN NIL END;
   RETURN LookupId(e, id)
 END Lookup;
+
+PROCEDURE HasSlash(s: ARRAY OF CHAR): BOOLEAN;
+VAR i: INTEGER;
+BEGIN
+  i := 1;
+  WHILE s[i] # 0X DO
+    IF s[i] = '/' THEN RETURN TRUE END;
+    INC(i)
+  END;
+  RETURN FALSE
+END HasSlash;
+
+PROCEDURE FindNS*(name: ARRAY OF CHAR): INTEGER;
+VAR i: INTEGER;
+BEGIN
+  i := 0;
+  WHILE i < nNS DO
+    IF nsNames[i] = name THEN RETURN i END;
+    INC(i)
+  END;
+  RETURN -1
+END FindNS;
+
+PROCEDURE GetOrCreateNS(name: ARRAY OF CHAR): INTEGER;
+VAR i: INTEGER;
+BEGIN
+  i := FindNS(name);
+  IF i >= 0 THEN RETURN i END;
+  IF nNS >= MaxNS THEN
+    Strings.Copy("too many namespaces", errMsg); err := TRUE; RETURN 0
+  END;
+  Strings.Copy(name, nsNames[nNS]);
+  nsEnvs[nNS] := NewEnv(GlobalEnv);
+  i := nNS; INC(nNS);
+  RETURN i
+END GetOrCreateNS;
+
+PROCEDURE LookupQualified(sym: ARRAY OF CHAR; env: Env): Value;
+VAR i, slash, k: INTEGER; nsName, varName: ARRAY 64 OF CHAR; id: INTEGER;
+BEGIN
+  slash := -1; i := 0;
+  WHILE sym[i] # 0X DO
+    IF sym[i] = '/' THEN slash := i END;
+    INC(i)
+  END;
+  IF slash <= 0 THEN RETURN LookupId(env, InternSym(sym)) END;
+  k := 0; WHILE k < slash DO nsName[k] := sym[k]; INC(k) END; nsName[k] := 0X;
+  k := 0; WHILE sym[slash+1+k] # 0X DO varName[k] := sym[slash+1+k]; INC(k) END; varName[k] := 0X;
+  i := FindNS(nsName);
+  IF i < 0 THEN
+    (* No namespace with that name — fall back to plain symbol lookup *)
+    RETURN LookupId(env, InternSym(sym))
+  END;
+  id := InternSym(varName);
+  RETURN LookupId(nsEnvs[i], id)
+END LookupQualified;
 
 PROCEDURE IsGlobalBinding(env: Env; id: INTEGER): BOOLEAN;
 VAR b: Binding; e: Env;
@@ -763,6 +858,8 @@ BEGIN
   | tDelay:
       IF v.head # NIL THEN WriteStr("#<Delay: "); PrintValue(v.head, readable); Out.Char('>')
       ELSE WriteStr("#<Delay (pending)>") END
+  | tLazy:
+      ForceLazyRef(v); PrintValue(v, readable)
   ELSE WriteStr("#<?>")
   END
 END PrintValue;
@@ -855,6 +952,8 @@ BEGIN
       IF v.head # NIL THEN
         BufAppendS(s, n, "#<Delay: "); ValToStrBuf(v.head, readable, s, n); BufAppendC(s, n, '>')
       ELSE BufAppendS(s, n, "#<Delay (pending)>") END
+  | tLazy:
+      ForceLazyRef(v); ValToStrBuf(v, readable, s, n)
   ELSE BufAppendS(s, n, "#<?>")
   END
 END ValToStrBuf;
@@ -951,13 +1050,26 @@ BEGIN
   END
 END DestructureBind;
 
+(* Force all lazy tail-links in a list spine without touching the head elements.
+   This is needed after lazy concat is used in macro expansion or list construction. *)
+PROCEDURE RealizeSpine(v: Value);
+BEGIN
+  WHILE v # NIL DO
+    IF v.tag = tLazy THEN ForceLazyRef(v) END;
+    IF (v.tag = tList) OR (v.tag = tVec) THEN v := v.tail
+    ELSE EXIT END
+  END
+END RealizeSpine;
+
 (* ---------- Apply (used by Eval and by higher-order builtins) ---------- *)
 
 PROCEDURE EvalList(lst: Value; env: Env): Value;
 VAR first, last, cell, v: Value;
 BEGIN
   first := NilV; last := NIL;
-  WHILE ~IsNil(lst) & (lst.tag = tList) & ~err DO
+  WHILE ~IsNil(lst) & ((lst.tag = tList) OR (lst.tag = tLazy)) & ~err DO
+    IF lst.tag = tLazy THEN ForceLazyRef(lst) END;
+    IF (lst.tag # tList) & (lst.tag # tVec) THEN EXIT END;
     v := EvalRef(lst.head, env);
     IF err THEN RETURN NilV END;
     cell := Cons(v, NilV);
@@ -980,6 +1092,7 @@ BEGIN
     expanded := Apply(fn, args, env);
     fn.tag := tMacro;
     IF err THEN RETURN NilV END;
+    RealizeSpine(expanded);  (* ensure expansion has a concrete list spine *)
     RETURN EvalRef(expanded, env)
   END;
   IF fn.tag = tMap THEN
@@ -1190,18 +1303,83 @@ BEGIN
   END
 END ExpandQQ;
 
+(* ---------- Lazy / Namespace / Binding helpers (module-level, called from Eval) ---------- *)
+
+PROCEDURE DoLazySeqM(args: Value; env: Env): Value;
+VAR v, thunk: Value;
+BEGIN
+  NEW(thunk); thunk.tag := tFn; thunk.symId := -1;
+  thunk.params := NilV;
+  (* body must be a list of forms; wrap args in (do ...) as a single form *)
+  thunk.body := Cons(Cons(MkSym("do"), args), NilV);
+  thunk.closure := env;
+  NEW(v); v.tag := tLazy; v.symId := -1;
+  v.body := thunk;
+  RETURN v
+END DoLazySeqM;
+
+PROCEDURE DoNsM(args: Value): Value;
+VAR nsName: ARRAY 64 OF CHAR; idx: INTEGER;
+BEGIN
+  IF IsNil(args) OR (args.head.tag # tSym) THEN
+    Error("ns: needs namespace name"); RETURN NilV
+  END;
+  Strings.Copy(args.head.s, nsName);
+  idx := GetOrCreateNS(nsName);
+  IF err THEN RETURN NilV END;
+  currentNS := idx;
+  Define(nsEnvs[currentNS], "*ns*", MkStr(nsName));
+  RETURN MkStr(nsName)
+END DoNsM;
+
+PROCEDURE DoBindingM(args: Value; env: Env): Value;
+VAR pairs, sym, val, result, body: Value;
+    savedDynEnv: Env; newFrame: Env;
+BEGIN
+  IF IsNil(args) THEN Error("binding: needs vector"); RETURN NilV END;
+  pairs := args.head;
+  IF IsNil(pairs) OR ((pairs.tag # tVec) & (pairs.tag # tList)) THEN
+    Error("binding: needs bindings vector"); RETURN NilV
+  END;
+  savedDynEnv := DynEnv;
+  newFrame := NewEnv(DynEnv);
+  WHILE ~IsNil(pairs) & ~err DO
+    sym := pairs.head; pairs := pairs.tail;
+    IF IsNil(pairs) THEN Error("binding: odd forms"); DynEnv := savedDynEnv; RETURN NilV END;
+    IF sym.tag # tSym THEN Error("binding: needs symbol"); DynEnv := savedDynEnv; RETURN NilV END;
+    val := EvalRef(pairs.head, env);
+    IF err THEN DynEnv := savedDynEnv; RETURN NilV END;
+    DefineId(newFrame, sym.symId, sym.s, val);
+    pairs := pairs.tail
+  END;
+  IF err THEN DynEnv := savedDynEnv; RETURN NilV END;
+  DynEnv := newFrame;
+  result := NilV; body := args.tail;
+  WHILE ~IsNil(body) & ~err DO
+    result := EvalRef(body.head, env); body := body.tail
+  END;
+  DynEnv := savedDynEnv;
+  RETURN result
+END DoBindingM;
+
 (* ---------- Evaluator ---------- *)
 PROCEDURE Eval*(expr: Value; env: Env): Value;
 
   PROCEDURE DoDef(args: Value): Value;
-  VAR v: Value;
+  VAR v: Value; n: INTEGER;
   BEGIN
     IF IsNil(args) OR (args.head.tag # tSym) THEN
       Error("def needs symbol"); RETURN NilV
     END;
     v := EvalRef(args.tail.head, env);
     IF err THEN RETURN NilV END;
-    DefineId(GlobalEnv, args.head.symId, args.head.s, v);
+    DefineId(nsEnvs[currentNS], args.head.symId, args.head.s, v);
+    (* auto-mark *earmuff* vars as dynamic *)
+    n := 0; WHILE args.head.s[n] # 0X DO INC(n) END;
+    IF (n >= 3) & (args.head.s[0] = '*') & (args.head.s[n-1] = '*')
+       & (args.head.symId >= 0) & (args.head.symId < MaxSymbols) THEN
+      dynVar[args.head.symId] := TRUE
+    END;
     RETURN v
   END DoDef;
 
@@ -1858,6 +2036,15 @@ BEGIN
       END;
       RETURN looked
   | tSym:
+      IF HasSlash(expr.s) THEN
+        looked := LookupQualified(expr.s, env);
+        IF err THEN RETURN NilV END;
+        IF looked = NIL THEN
+          Strings.Copy("undefined: ", errMsg); Strings.Append(expr.s, errMsg);
+          err := TRUE; RETURN NilV
+        END;
+        RETURN looked
+      END;
       looked := LookupId(env, expr.symId);
       IF looked = NIL THEN
         Strings.Copy("undefined symbol: ", errMsg);
@@ -1899,6 +2086,7 @@ BEGIN
   | tList:
       head := expr.head;
       IF ~IsNil(head) & (head.tag = tSym) & (head.sfId # sfNone) THEN
+        RealizeSpine(expr.tail);  (* ensure arg list is concrete for special forms *)
         CASE head.sfId OF
           sfDef:        RETURN DoDef(expr.tail)
         | sfDefn:       RETURN DoDefn(expr.tail)
@@ -1933,6 +2121,9 @@ BEGIN
         | sfThread:     RETURN DoThread(expr.tail, TRUE)
         | sfThreadLast: RETURN DoThread(expr.tail, FALSE)
         | sfFor:        RETURN DoFor(expr.tail)
+        | sfLazySeq:   RETURN DoLazySeqM(expr.tail, env)
+        | sfNs:        RETURN DoNsM(expr.tail)
+        | sfBinding:   RETURN DoBindingM(expr.tail, env)
         ELSE
         END
       END;
@@ -3395,10 +3586,7 @@ VAR v: Value; i: INTEGER; first, last, cell: Value; buf: ARRAY 2 OF CHAR;
 BEGIN
   v := args.head;
   IF IsNil(v) THEN RETURN NilV END;
-  IF v.tag = tList THEN
-    IF ListLen(v) = 0 THEN RETURN NilV END;
-    RETURN v
-  END;
+  IF v.tag = tList THEN RETURN v END;  (* tList always has at least one element *)
   IF v.tag = tVec THEN
     IF ListLen(v) = 0 THEN RETURN NilV END;
     first := NilV; last := NIL;
@@ -4758,7 +4946,7 @@ BEGIN
   LOOP
     expr := ReadNext();
     IF expr = NIL THEN EXIT END;
-    result := Eval(expr, GlobalEnv);
+    result := Eval(expr, nsEnvs[currentNS]);
     IF err THEN
       Out.String("error in "); WriteStr(path); Out.String(": ");
       WriteStr(errMsg); Out.Ln;
@@ -4797,7 +4985,7 @@ VAR v: Value;
 BEGIN
   v := ReadStr(s);
   IF err THEN RETURN NilV END;
-  RETURN Eval(v, GlobalEnv)
+  RETURN Eval(v, nsEnvs[currentNS])
 END EvalStr;
 
 PROCEDURE BLoadFile(args: Value; env: Env): Value;
@@ -4810,6 +4998,48 @@ BEGIN
   ok := LoadFile(path.s, FALSE);
   RETURN MkBool(ok)
 END BLoadFile;
+
+(* ---------- ForceLazy (defined after Apply which it calls) ---------- *)
+
+PROCEDURE ForceLazy(v: Value);
+VAR thunk, result: Value;
+BEGIN
+  IF (v = NIL) OR (v.tag # tLazy) THEN RETURN END;
+  IF v.body = NIL THEN RETURN END;  (* in-progress guard *)
+  thunk := v.body;
+  v.body := NIL;  (* prevent re-entry *)
+  result := Apply(thunk, NilV, NIL);
+  (* flatten any chain of lazy nodes *)
+  WHILE (result # NIL) & (result.tag = tLazy) DO
+    ForceLazyRef(result);
+    IF result.tag = tLazy THEN result := NilV END
+  END;
+  IF IsNil(result) THEN
+    v.tag := tNil
+  ELSE
+    v.tag := tList;
+    v.head := result.head;
+    v.tail := result.tail
+  END
+END ForceLazy;
+
+PROCEDURE BInNs(args: Value; env: Env): Value;
+VAR sym: Value; nsName: ARRAY 64 OF CHAR; idx: INTEGER;
+BEGIN
+  sym := args.head;
+  IF IsNil(sym) THEN Error("in-ns: needs namespace"); RETURN NilV END;
+  IF (sym.tag = tList) & ~IsNil(sym.head) & (sym.head.tag = tSym)
+     & (sym.head.s = "quote") & ~IsNil(sym.tail) THEN
+    sym := sym.tail.head
+  END;
+  IF sym.tag # tSym THEN Error("in-ns: needs symbol"); RETURN NilV END;
+  Strings.Copy(sym.s, nsName);
+  idx := GetOrCreateNS(nsName);
+  IF err THEN RETURN NilV END;
+  currentNS := idx;
+  Define(nsEnvs[currentNS], "*ns*", MkStr(nsName));
+  RETURN MkStr(nsName)
+END BInNs;
 
 (* ---------- Setup ---------- *)
 
@@ -4828,21 +5058,31 @@ PROCEDURE Eval1(s: ARRAY OF CHAR);
 VAR expr: Value;
 BEGIN
   expr := ReadStr(s);
-  IF ~err THEN expr := Eval(expr, GlobalEnv) END;
+  IF ~err THEN expr := Eval(expr, nsEnvs[currentNS]) END;
   err := FALSE
 END Eval1;
 
 PROCEDURE Init*;
+VAR i: INTEGER;
 BEGIN
-  nSyms := 0; globalGen := 0; 
+  nSyms := 0; globalGen := 0;
   NEW(NilV); NilV.tag := tNil;
   NEW(TrueV); TrueV.tag := tBool; TrueV.b := TRUE;
   NEW(FalseV); FalseV.tag := tBool; FalseV.b := FALSE;
   doRecur := FALSE; recurArgs := NIL; gensymCount := 0;
   isThrown := FALSE; thrownVal := NIL;
+  DynEnv := NIL;
+  i := 0; WHILE i < MaxSymbols DO dynVar[i] := FALSE; INC(i) END;
 
   EvalRef := Eval;
+  ForceLazyRef := ForceLazy;
   GlobalEnv := NewEnv(NIL);
+
+  (* Namespace table: ns[0] = "user" = GlobalEnv *)
+  nNS := 0; currentNS := 0;
+  Strings.Copy("user", nsNames[0]);
+  nsEnvs[0] := GlobalEnv;
+  nNS := 1;
 
   (* Mark special-form symbols *)
   MarkSF("def", sfDef); MarkSF("defn", sfDefn); MarkSF("if", sfIf);
@@ -4861,6 +5101,9 @@ BEGIN
   MarkSF("extend-protocol", sfExtendProtocol);
   MarkSF("doc", sfDoc); MarkSF("->", sfThread); MarkSF("->>", sfThreadLast);
   MarkSF("for", sfFor);
+  MarkSF("lazy-seq", sfLazySeq);
+  MarkSF("ns", sfNs);
+  MarkSF("binding", sfBinding);
 
   (* Core arithmetic *)
   RegisterDoc("+", BAdd, "Returns the sum of nums. (+) returns 0.");
@@ -5061,6 +5304,11 @@ BEGIN
   RegisterDoc("gensym", BGensym, "Returns a unique symbol.");
   RegisterDoc("load-file", BLoadFile, "Loads Clojure source from a file.");
   RegisterDoc("import-oberon", BImportOberon, "Import a registered Oberon module into the Cloj environment.");
+  RegisterDoc("in-ns", BInNs, "Switch to or create namespace.");
+
+  (* Define *ns* dynamic var *)
+  Define(GlobalEnv, "*ns*", MkStr("user"));
+  dynVar[InternSym("*ns*")] := TRUE;
 
   (* Atoms and concurrency *)
   RegisterDoc("atom", BAtom, "Creates an atom with initial value.");
@@ -5118,10 +5366,18 @@ BEGIN
   Eval1("(defn split-at [n coll] [(take n coll) (drop n coll)])");
   Eval1("(defn split-with [f coll] [(take-while f coll) (drop-while f coll)])");
   Eval1("(defn interleave [& colls] (loop [cs colls acc []] (if (some empty? cs) (seq acc) (recur (map rest cs) (into acc (map first cs))))))");
-  Eval1("(defn repeat [n x] (map (fn [_] x) (range n)))");
-  Eval1("(defn repeatedly [n f] (map (fn [_] (f)) (range n)))");
-  Eval1("(defn iterate [f x] (loop [cur x acc [] n 0] (if (>= n 1000) acc (recur (f cur) (conj acc cur) (+ n 1)))))");
-  Eval1("(defn cycle [coll] (loop [c coll acc [] n 0] (if (>= n 1000) (seq acc) (if (empty? c) (recur coll acc n) (recur (rest c) (conj acc (first c)) (+ n 1))))))");
+  (* True lazy sequences *)
+  Eval1("(defn next [coll] (seq (rest coll)))");
+  Eval1("(defn range ([] (range 0 2147483647 1)) ([stop] (range 0 stop 1)) ([start stop] (range start stop 1)) ([start stop step] (lazy-seq (if (if (> step 0) (< start stop) (> start stop)) (cons start (range (+ start step) stop step)) nil))))");
+  Eval1("(defn map ([f coll] (lazy-seq (when (seq coll) (cons (f (first coll)) (map f (rest coll)))))) ([f c1 c2] (lazy-seq (when (and (seq c1) (seq c2)) (cons (f (first c1) (first c2)) (map f (rest c1) (rest c2)))))))");
+  Eval1("(defn filter [pred coll] (lazy-seq (loop [c (seq coll)] (cond (nil? c) nil (pred (first c)) (cons (first c) (filter pred (rest c))) :else (recur (next c))))))");
+  Eval1("(defn take [n coll] (lazy-seq (when (and (> n 0) (seq coll)) (cons (first coll) (take (dec n) (rest coll))))))");
+  Eval1("(defn drop [n coll] (if (or (<= n 0) (not (seq coll))) coll (drop (dec n) (rest coll))))");
+  Eval1("(defn concat ([] nil) ([x] (lazy-seq (seq x))) ([x y] (lazy-seq (if (seq x) (cons (first x) (concat (rest x) y)) (seq y)))) ([x y & more] (lazy-seq (concat (concat x y) (apply concat more)))))");
+  Eval1("(defn cycle [coll] (lazy-seq (concat coll (cycle coll))))");
+  Eval1("(defn iterate [f x] (lazy-seq (cons x (iterate f (f x)))))");
+  Eval1("(defn repeat ([x] (lazy-seq (cons x (repeat x)))) ([n x] (take n (repeat x))))");
+  Eval1("(defn repeatedly ([f] (lazy-seq (cons (f) (repeatedly f)))) ([n f] (take n (repeatedly f))))");
   Eval1("(defn flatten-1 [coll] (apply concat coll))");
   Eval1("(defn indexed [coll] (map list (range (count coll)) coll))");
   Eval1("(defn any? [pred coll] (not (nil? (some pred coll))))");
@@ -5188,7 +5444,7 @@ BEGIN
     IF err THEN
       Out.String("read error: "); Out.String(errMsg); Out.Ln
     ELSE
-      result := Eval(expr, GlobalEnv);
+      result := Eval(expr, nsEnvs[currentNS]);
       IF err THEN
         Out.String("error: "); Out.String(errMsg); Out.Ln
       ELSE

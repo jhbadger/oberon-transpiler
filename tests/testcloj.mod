@@ -298,7 +298,7 @@ BEGIN
   Check("repeatedly",   "(= (count (repeatedly 3 rand)) 3)");
   Check("interleave",   "(= (count (interleave [1 2 3] [4 5 6])) 6)");
   Check("split-at",     "(= (first (split-at 2 [1 2 3 4])) [1 2])");
-  Check("cycle prefix", "(= (count (cycle [1 2 3])) 1000)");
+  Check("cycle prefix", "(= (take 5 (cycle [1 2 3])) (list 1 2 3 1 2))");
   Check("map-indexed",  "(= (map-indexed (fn [i x] (+ i 1)) [:a :b]) (list 1 2))");
   Check("shuffle count","(= (count (shuffle [1 2 3 4 5])) 5)");
   Check("not=",         "(not= 1 2)");
@@ -464,6 +464,43 @@ BEGIN
   Check("sort",           '(= (sort [3N 1N 2N]) (list 1N 2N 3N))');
   E('(defn fact20 [n] (if (<= n 1N) 1N (* n (fact20 (- n 1N)))))');
   Check("factorial 20",   '(= (fact20 20N) 2432902008176640000N)');
+
+  (* ── Lazy sequences ─────────────────────────────────────────────────── *)
+  Section("Lazy sequences");
+  Check("lazy range n",     "(= (count (range 10)) 10)");
+  Check("lazy range inf",   "(= (take 5 (range)) (list 0 1 2 3 4))");
+  Check("lazy map",         "(= (take 3 (map inc (range))) (list 1 2 3))");
+  Check("lazy filter",      "(= (take 3 (filter even? (range))) (list 0 2 4))");
+  Check("lazy take",        "(= (take 3 (range 100)) (list 0 1 2))");
+  Check("lazy drop",        "(= (first (drop 3 (range))) 3)");
+  Check("lazy cycle",       "(= (take 5 (cycle [1 2])) (list 1 2 1 2 1))");
+  Check("lazy iterate",     "(= (take 5 (iterate inc 0)) (list 0 1 2 3 4))");
+  Check("lazy repeat inf",  "(= (take 3 (repeat :x)) (list :x :x :x))");
+  Check("lazy repeat n",    "(= (count (repeat 5 :x)) 5)");
+  Check("lazy concat",      "(= (take 4 (concat [1 2] (range))) (list 1 2 0 1))");
+  Check("lazy-seq macro",   "(= (take 3 (lazy-seq (cons 1 (lazy-seq (cons 2 (lazy-seq (cons 3 nil))))))) (list 1 2 3))");
+
+  (* ── Namespaces ──────────────────────────────────────────────────────── *)
+  Section("Namespaces");
+  Check("*ns* default",  '(= *ns* "user")');
+  E("(ns testns)");
+  E("(def nsval 42)");
+  E("(ns user)");
+  Check("ns switch def",  "(= testns/nsval 42)");
+  E("(in-ns 'myns2)");
+  E("(def myval 99)");
+  E("(in-ns 'user)");
+  Check("in-ns def",     "(= myns2/myval 99)");
+
+  (* ── Dynamic vars / binding ──────────────────────────────────────────── *)
+  Section("Dynamic vars");
+  E("(def *dyn* 1)");
+  Check("dynamic default",   "(= *dyn* 1)");
+  Check("binding override",  "(binding [*dyn* 2] (= *dyn* 2))");
+  Check("binding restored",  "(do (binding [*dyn* 2] nil) (= *dyn* 1))");
+  E("(def get-dyn (fn [] *dyn*))");
+  Check("binding in fn",     "(= (binding [*dyn* 99] (get-dyn)) 99)");
+  Check("binding nested",    "(binding [*dyn* 5] (binding [*dyn* 6] (= *dyn* 6)))");
 
   (* ── Summary ────────────────────────────────────────────────────────── *)
   Out.Ln;
