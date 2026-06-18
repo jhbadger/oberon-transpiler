@@ -988,7 +988,7 @@ VAR ks, vs: Value;
 BEGIN
   IF IsNil(m) OR (m.tag # tMap) THEN RETURN NilV END;
   ks := m.head; vs := m.tail;
-  WHILE ~IsNil(ks) DO
+  WHILE ~IsNil(ks) & ~IsNil(vs) DO
     IF ValueEqual(ks.head, k) THEN RETURN vs.head END;
     ks := ks.tail; vs := vs.tail
   END;
@@ -996,9 +996,10 @@ BEGIN
 END MapGet;
 
 PROCEDURE DestructureBind(pat, val: Value; e: Env);
-VAR p, v, ks, vs: Value;
+VAR p, v, ks, vs, defaults: Value;
 BEGIN
   IF pat = NIL THEN RETURN END;
+  defaults := NilV;
   IF pat.tag = tSym THEN
     IF ~((pat.s[0] = "_") & (pat.s[1] = 0X)) THEN Define(e, pat.s, val) END
   ELSIF (pat.tag = tList) OR (pat.tag = tVec) THEN
@@ -1019,13 +1020,26 @@ BEGIN
       END
     END
   ELSIF pat.tag = tMap THEN
+    (* First pass: locate the :or defaults map, if any. *)
     ks := pat.head; vs := pat.tail;
-    WHILE ~IsNil(ks) DO
+    WHILE ~IsNil(ks) & ~IsNil(vs) DO
+      IF (ks.head.tag = tKey) & (ks.head.s = "or") THEN
+        defaults := vs.head
+      END;
+      ks := ks.tail; vs := vs.tail
+    END;
+    (* Second pass: bind. *)
+    ks := pat.head; vs := pat.tail;
+    WHILE ~IsNil(ks) & ~IsNil(vs) DO
       IF (ks.head.tag = tKey) & (ks.head.s = "keys") THEN
         p := vs.head;
         WHILE ~IsNil(p) DO
           IF p.head.tag = tSym THEN
-            Define(e, p.head.s, MapGet(val, MkKey(p.head.s)))
+            v := MapGet(val, MkKey(p.head.s));
+            IF IsNil(v) & ~IsNil(defaults) THEN
+              v := MapGet(defaults, p.head)
+            END;
+            Define(e, p.head.s, v)
           END;
           p := p.tail
         END
@@ -1033,19 +1047,26 @@ BEGIN
         p := vs.head;
         WHILE ~IsNil(p) DO
           IF p.head.tag = tSym THEN
-            Define(e, p.head.s, MapGet(val, MkStr(p.head.s)))
+            v := MapGet(val, MkStr(p.head.s));
+            IF IsNil(v) & ~IsNil(defaults) THEN
+              v := MapGet(defaults, p.head)
+            END;
+            Define(e, p.head.s, v)
           END;
           p := p.tail
         END
       ELSIF (ks.head.tag = tKey) & (ks.head.s = "as") THEN
         IF ~IsNil(vs) & (vs.head.tag = tSym) THEN Define(e, vs.head.s, val) END
       ELSIF (ks.head.tag = tKey) & (ks.head.s = "or") THEN
-        (* defaults not yet supported *)
+        (* handled in first pass *)
       ELSIF ks.head.tag = tSym THEN
-        Define(e, ks.head.s, MapGet(val, vs.head))
+        v := MapGet(val, vs.head);
+        IF IsNil(v) & ~IsNil(defaults) THEN
+          v := MapGet(defaults, ks.head)
+        END;
+        Define(e, ks.head.s, v)
       END;
-      ks := ks.tail;
-      IF ~IsNil(vs) THEN vs := vs.tail END
+      ks := ks.tail; vs := vs.tail
     END
   END
 END DestructureBind;
@@ -1088,11 +1109,35 @@ BEGIN
   IF IsNil(fn) THEN Error("cannot call nil"); RETURN NilV END;
   IF fn.tag = tBuiltin THEN RETURN fn.builtin(args, env) END;
   IF fn.tag = tMacro THEN
-    fn.tag := tFn;
-    expanded := Apply(fn, args, env);
-    fn.tag := tMacro;
+    (* Bind params and run body directly without flipping fn.tag, *)
+    (* so recursive macro calls still see tMacro. *)
+    newEnv := NewEnv(fn.closure);
+    params := fn.params; a := args; isRest := FALSE;
+    WHILE ~IsNil(params) & ~isRest DO
+      IF (params.head # NIL) & (params.head.tag = tSym)
+         & (params.head.s[0] = "&") & (params.head.s[1] = 0X) THEN
+        isRest := TRUE; params := params.tail;
+        IF IsNil(params) THEN Error("& without param"); RETURN NilV END;
+        restList := NilV; rLast := NIL;
+        WHILE ~IsNil(a) DO
+          c := Cons(a.head, NilV);
+          IF rLast = NIL THEN restList := c ELSE rLast.tail := c END;
+          rLast := c; a := a.tail
+        END;
+        Define(newEnv, params.head.s, restList);
+        params := NilV
+      ELSE
+        IF IsNil(a) THEN Error("macro: too few args"); RETURN NilV END;
+        DestructureBind(params.head, a.head, newEnv);
+        params := params.tail; a := a.tail
+      END
+    END;
+    expanded := NilV; body := fn.body;
+    WHILE ~IsNil(body) & ~err DO
+      expanded := EvalRef(body.head, newEnv); body := body.tail
+    END;
     IF err THEN RETURN NilV END;
-    RealizeSpine(expanded);  (* ensure expansion has a concrete list spine *)
+    RealizeSpine(expanded);
     RETURN EvalRef(expanded, env)
   END;
   IF fn.tag = tMap THEN
@@ -2022,7 +2067,12 @@ BEGIN
   CASE expr.tag OF
     tBool, tInt, tReal, tStr, tKey, tFn, tBuiltin: RETURN expr
   | tResolved:
-      IF expr.i = globalGen THEN RETURN expr.head END;
+      (* Cache is valid only when (a) generation matches AND
+         (b) no local scope shadows the symbol. *)
+      IF (expr.i = globalGen) & (env = GlobalEnv) THEN RETURN expr.head END;
+      IF (expr.i = globalGen) & IsGlobalBinding(env, expr.symId) THEN
+        RETURN expr.head
+      END;
       expr.tag := tSym;
       looked := LookupId(env, expr.symId);
       IF looked = NIL THEN
@@ -2731,8 +2781,12 @@ PROCEDURE BNth(args: Value; env: Env): Value;
 VAR v: Value; n: INTEGER; buf: ARRAY 2 OF CHAR;
 BEGIN
   v := args.head; n := args.tail.head.i;
+  IF n < 0 THEN
+    IF ~IsNil(args.tail.tail) THEN RETURN args.tail.tail.head END;
+    Error("nth: negative index"); RETURN NilV
+  END;
   IF v.tag = tStr THEN
-    IF (n < 0) OR (n >= Strings.Length(v.s)) THEN
+    IF n >= Strings.Length(v.s) THEN
       IF ~IsNil(args.tail.tail) THEN RETURN args.tail.tail.head END;
       RETURN NilV
     END;
@@ -2748,7 +2802,7 @@ BEGIN
 END BNth;
 
 PROCEDURE BConj(args: Value; env: Env): Value;
-VAR coll, item, first, last, cell, p: Value;
+VAR coll, item, first, last, cell, p, ks, vs: Value;
 BEGIN
   coll := args.head; item := args.tail.head;
   IF IsNil(coll) THEN RETURN Cons(item, NilV) END;
@@ -2765,6 +2819,24 @@ BEGIN
     RETURN first
   END;
   IF coll.tag = tSet THEN RETURN SetConj(coll, item) END;
+  IF coll.tag = tMap THEN
+    IF IsNil(item) THEN RETURN coll END;
+    IF (item.tag = tList) OR (item.tag = tVec) THEN
+      IF IsNil(item.tail) THEN
+        Error("conj: map entry needs key and value"); RETURN NilV
+      END;
+      RETURN BAssoc(Cons(coll, Cons(item.head, Cons(item.tail.head, NilV))), env)
+    END;
+    IF item.tag = tMap THEN
+      ks := item.head; vs := item.tail;
+      WHILE ~IsNil(ks) & ~IsNil(vs) DO
+        coll := BAssoc(Cons(coll, Cons(ks.head, Cons(vs.head, NilV))), env);
+        ks := ks.tail; vs := vs.tail
+      END;
+      RETURN coll
+    END;
+    Error("conj: map needs entry or map"); RETURN NilV
+  END;
   Error("conj: unsupported collection"); RETURN NilV
 END BConj;
 
@@ -3024,7 +3096,7 @@ BEGIN
   END;
   ks := m.head; vs := m.tail;
   nks := NilV; nvs := NilV; nkLast := NIL; nvLast := NIL; found := FALSE;
-  WHILE ~IsNil(ks) DO
+  WHILE ~IsNil(ks) & ~IsNil(vs) DO
     c := Cons(ks.head, NilV);
     IF nkLast = NIL THEN nks := c ELSE nkLast.tail := c END;
     nkLast := c;
@@ -3554,13 +3626,28 @@ BEGIN
 END BNotEveryQ;
 
 PROCEDURE BInto(args: Value; env: Env): Value;
-VAR dst, src, p, cell, first, last: Value; isVec: BOOLEAN; s: Value;
+VAR dst, src, p, cell, first, last: Value; isVec: BOOLEAN; s, m, entry: Value;
 BEGIN
   dst := args.head; src := args.tail.head;
   IF ~IsNil(dst) & (dst.tag = tSet) THEN
     s := dst; p := src;
     WHILE ~IsNil(p) DO s := SetConj(s, p.head); p := p.tail END;
     RETURN s
+  END;
+  IF ~IsNil(dst) & (dst.tag = tMap) THEN
+    m := dst; p := src;
+    WHILE ~IsNil(p) DO
+      entry := p.head;
+      IF IsNil(entry) OR ((entry.tag # tList) & (entry.tag # tVec)) THEN
+        Error("into: map entries must be 2-element seqs"); RETURN NilV
+      END;
+      IF IsNil(entry.tail) THEN
+        Error("into: map entry needs key and value"); RETURN NilV
+      END;
+      m := BAssoc(Cons(m, Cons(entry.head, Cons(entry.tail.head, NilV))), env);
+      p := p.tail
+    END;
+    RETURN m
   END;
   isVec := ~IsNil(dst) & (dst.tag = tVec);
   first := NilV; last := NIL;
@@ -3804,7 +3891,7 @@ BEGIN
   IF IsNil(m) OR (m.tag # tMap) THEN RETURN m END;
   ks := m.head; vs := m.tail;
   nks := NilV; nvs := NilV; nkLast := NIL; nvLast := NIL;
-  WHILE ~IsNil(ks) DO
+  WHILE ~IsNil(ks) & ~IsNil(vs) DO
     IF ~ValueEqual(ks.head, k) THEN
       c := Cons(ks.head, NilV);
       IF nkLast = NIL THEN nks := c ELSE nkLast.tail := c END;
@@ -3819,14 +3906,15 @@ BEGIN
 END BDissoc;
 
 PROCEDURE BMerge(args: Value; env: Env): Value;
-VAR result, m, ks, vs: Value;
+VAR result, m, ks, vs: Value; gotMap: BOOLEAN;
 BEGIN
-  result := NilV;
+  result := NilV; gotMap := FALSE;
   WHILE ~IsNil(args) DO
     m := args.head;
     IF ~IsNil(m) & (m.tag = tMap) THEN
+      IF ~gotMap THEN result := MkMap(NilV, NilV); gotMap := TRUE END;
       ks := m.head; vs := m.tail;
-      WHILE ~IsNil(ks) DO
+      WHILE ~IsNil(ks) & ~IsNil(vs) DO
         result := BAssoc(Cons(result, Cons(ks.head, Cons(vs.head, NilV))), env);
         ks := ks.tail; vs := vs.tail
       END
@@ -4545,11 +4633,21 @@ BEGIN
 END BGensym;
 
 PROCEDURE BReadString(args: Value; env: Env): Value;
-VAR v: Value;
+VAR v, result: Value;
+    savedSrc: ARRAY MaxTok OF CHAR;
+    savedTok: ARRAY MaxStr OF CHAR;
+    savedLen, savedPos, savedKind, i: INTEGER;
 BEGIN
   v := args.head;
   IF v.tag # tStr THEN Error("read-string: needs string"); RETURN NilV END;
-  RETURN ReadStr(v.s)
+  i := 0; WHILE i < srcLen DO savedSrc[i] := src[i]; INC(i) END;
+  savedLen := srcLen; savedPos := srcPos; savedKind := tokKind;
+  Strings.Copy(tok, savedTok);
+  result := ReadStr(v.s);
+  i := 0; WHILE i < savedLen DO src[i] := savedSrc[i]; INC(i) END;
+  srcLen := savedLen; srcPos := savedPos; tokKind := savedKind;
+  Strings.Copy(savedTok, tok);
+  RETURN result
 END BReadString;
 
 PROCEDURE BPrintStr(args: Value; env: Env): Value;
@@ -5130,7 +5228,7 @@ BEGIN
   RegisterDoc("<=", BLE, "Returns true if nums are in monotonically non-decreasing order.");
   RegisterDoc(">=", BGE, "Returns true if nums are in monotonically non-increasing order.");
   RegisterDoc("=", BEq, "Equality. Returns true if all args are equal.");
-  RegisterDoc("not=", BEq, "Returns true if args are not all equal."); (* overridden below *)
+  (* not= is defined in Clojure below *)
   RegisterDoc("compare", BStrCompare, "Comparator. Returns neg, zero, or pos.");
 
   (* Math *)
