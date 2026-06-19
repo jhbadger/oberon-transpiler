@@ -30,4 +30,9 @@ int  History_Save(char *filename);
 /* Clear all history entries. */
 void History_Clear(void);
 
+/* Completion callback: fills result with space-separated symbol names that
+   start with prefix.  result_len is the size of the result buffer. */
+typedef void (*History_CompletionFn)(const char *prefix, char *result, int result_len);
+void History_SetCompletionFn(History_CompletionFn fn);
+
 #endif /* OBC_HISTORY_H_ */

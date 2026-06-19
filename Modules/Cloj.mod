@@ -1,6 +1,6 @@
 MODULE Cloj;
 
-IMPORT Out, Strings, Math, Random, History, Files, Args, Regex, Time;
+IMPORT Out, Strings, Math, Random, History, Files, Args, Regex, Time, ClojCompletion;
 
 CONST
   (* Value tags *)
@@ -5059,22 +5059,26 @@ BEGIN
 END LoadFile;
 
 PROCEDURE EnvSymbolsStr*(prefix: ARRAY OF CHAR; VAR result: ARRAY OF CHAR);
-  VAR b: Binding; i, plen: INTEGER; ok: BOOLEAN;
+  VAR b: Binding; i, plen: INTEGER; ok: BOOLEAN; e: Env;
 BEGIN
   result[0] := 0X;
   plen := Strings.Length(prefix);
-  b := GlobalEnv.bindings;
-  WHILE b # NIL DO
-    ok := TRUE; i := 0;
-    WHILE (i < plen) & ok DO
-      IF b.name[i] # prefix[i] THEN ok := FALSE END;
-      INC(i)
+  e := nsEnvs[currentNS];
+  WHILE e # NIL DO
+    b := e.bindings;
+    WHILE b # NIL DO
+      ok := TRUE; i := 0;
+      WHILE (i < plen) & ok DO
+        IF b.name[i] # prefix[i] THEN ok := FALSE END;
+        INC(i)
+      END;
+      IF ok & (Strings.Length(b.name) > plen) THEN
+        IF result[0] # 0X THEN Strings.Append(" ", result) END;
+        Strings.Append(b.name, result)
+      END;
+      b := b.next
     END;
-    IF ok & (Strings.Length(b.name) > plen) THEN
-      IF result[0] # 0X THEN Strings.Append(" ", result) END;
-      Strings.Append(b.name, result)
-    END;
-    b := b.next
+    e := e.parent
   END
 END EnvSymbolsStr;
 
@@ -5524,6 +5528,7 @@ END BalancedDelims;
 PROCEDURE REPL*;
 VAR line, buf: ARRAY MaxTok OF CHAR; expr, result: Value; i, n: INTEGER;
 BEGIN
+  ClojCompletion.Register();
   Init;
   Out.String("Clojure-like REPL.  Empty line at => to exit."); Out.Ln;
   Out.String("Try: (+ 1 2 3)   (defn sq [x] (* x x))   (map sq (range 5))"); Out.Ln;

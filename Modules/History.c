@@ -11,8 +11,10 @@
  *   - Ctrl+U    : kill to beginning of line
  *   - Ctrl+K    : kill to end of line
  *   - Ctrl+W    : kill previous word
+ *   - Tab       : symbol completion (if callback registered)
  *   - Enter     : accept line
  *   - Ctrl+C    : cancel (returns empty string)
+ *   - )  ]  }   : flash matching open delimiter
  *
  * History is stored in a circular buffer of MaxHist entries.
  * Load/Save persist one entry per line in a plain text file.
@@ -60,6 +62,14 @@ void History_Add(char *line) {
     strncpy(hist_entries[slot], line, HIST_LEN - 1);
     hist_entries[slot][HIST_LEN - 1] = '\0';
     hist_total++;
+}
+
+/* ── Completion callback ──────────────────────────────────────────────────── */
+
+static History_CompletionFn completion_fn = NULL;
+
+void History_SetCompletionFn(History_CompletionFn fn) {
+    completion_fn = fn;
 }
 
 /* ── Public wrappers without _len params (obc FFI ABI) ──────────────────── */
@@ -167,6 +177,7 @@ static int readbyte(void) {
 #define K_CTRL_W   14
 #define K_CTRL_C   15
 #define K_CTRL_D   16
+#define K_TAB      17
 #define K_UNKNOWN  99
 
 typedef struct { int kind; char ch; } Key;
@@ -178,6 +189,7 @@ static Key read_key(void) {
 
     if (c == '\r' || c == '\n') { k.kind = K_ENTER; return k; }
     if (c == 127 || c == 8)     { k.kind = K_BACKSPACE; return k; }
+    if (c == 9)  { k.kind = K_TAB;    return k; }
     if (c == 1)  { k.kind = K_CTRL_A; return k; }
     if (c == 5)  { k.kind = K_CTRL_E; return k; }
     if (c == 21) { k.kind = K_CTRL_U; return k; }
@@ -216,6 +228,130 @@ static Key read_key(void) {
 
     if (c >= 32 && c < 127) { k.kind = K_CHAR; k.ch = (char)c; return k; }
     return k;
+}
+
+/* ── Paren flash ──────────────────────────────────────────────────────────── */
+
+/* After inserting a closing delimiter at buf[pos-1], briefly move the cursor
+   to the matching opener so the user can see it, then restore. */
+static void paren_flash(const char *prompt, int plen,
+                        char *buf, int len, int pos) {
+    char close = buf[pos - 1];
+    char open  = (close == ')') ? '(' : (close == ']') ? '[' : '{';
+
+    int depth = 0, in_str = 0, match = -1;
+    for (int i = pos - 2; i >= 0; i--) {
+        char c = buf[i];
+        if (in_str) {
+            /* a bare '"' while scanning backward exits the string */
+            if (c == '"' && (i == 0 || buf[i-1] != '\\')) in_str = 0;
+        } else {
+            if (c == '"')    { in_str = 1; }
+            else if (c == close) { depth++; }
+            else if (c == open)  {
+                if (depth == 0) { match = i; break; }
+                depth--;
+            }
+        }
+    }
+
+    if (match < 0) return;
+
+    /* Move cursor to the matching opener */
+    int fc = plen + match;
+    char esc[32];
+    out("\r");
+    if (fc > 0) { snprintf(esc, sizeof(esc), "\033[%dC", fc); out(esc); }
+    fflush(stdout);
+    usleep(200000);   /* 200 ms flash */
+    redraw(prompt, plen, buf, len, pos);
+}
+
+/* ── Tab completion ───────────────────────────────────────────────────────── */
+
+#define COMP_BUF  8192
+#define COMP_WORDS 128
+
+static void do_tab(const char *prompt, int plen,
+                   char *buf, int *plen2, int *ppos) {
+    int len = *plen2, pos = *ppos;
+
+    /* Find start of the symbol being typed (stop at Lisp delimiters) */
+    int ws = pos;
+    while (ws > 0) {
+        char c = buf[ws-1];
+        if (c == ' ' || c == '(' || c == '[' || c == '{' ||
+            c == ')' || c == ']' || c == '}' || c == '"') break;
+        ws--;
+    }
+    int wlen = pos - ws;
+
+    char prefix[LINE_MAX + 1];
+    strncpy(prefix, buf + ws, (size_t)wlen);
+    prefix[wlen] = '\0';
+
+    static char completions[COMP_BUF];
+    completions[0] = '\0';
+    completion_fn(prefix, completions, sizeof(completions));
+
+    if (!completions[0]) { outch('\a'); fflush(stdout); return; }
+
+    /* Split completions into words */
+    static char words[COMP_WORDS][LINE_MAX + 1];
+    int nwords = 0;
+    const char *p = completions;
+    while (*p && nwords < COMP_WORDS) {
+        while (*p == ' ') p++;
+        if (!*p) break;
+        int i = 0;
+        while (*p && *p != ' ' && i < LINE_MAX) words[nwords][i++] = *p++;
+        words[nwords][i] = '\0';
+        nwords++;
+    }
+
+    if (nwords == 1) {
+        /* Unique match: complete it in-place */
+        int nlen = (int)strlen(words[0]);
+        int total = len - wlen + nlen;
+        if (total <= LINE_MAX) {
+            memmove(buf + ws + nlen, buf + pos, (size_t)(len - pos));
+            memcpy(buf + ws, words[0], (size_t)nlen);
+            len = total; pos = ws + nlen;
+            buf[len] = '\0';
+            *plen2 = len; *ppos = pos;
+            redraw(prompt, plen, buf, len, pos);
+        }
+        return;
+    }
+
+    /* Multiple matches: extend to longest common prefix */
+    char common[LINE_MAX + 1];
+    strncpy(common, words[0], LINE_MAX);
+    common[LINE_MAX] = '\0';
+    for (int wi = 1; wi < nwords; wi++) {
+        int cp = 0;
+        while (common[cp] && words[wi][cp] && common[cp] == words[wi][cp]) cp++;
+        common[cp] = '\0';
+    }
+    int clen = (int)strlen(common);
+    if (clen > wlen) {
+        int total = len - wlen + clen;
+        if (total <= LINE_MAX) {
+            memmove(buf + ws + clen, buf + pos, (size_t)(len - pos));
+            memcpy(buf + ws, common, (size_t)clen);
+            len = total; pos = ws + clen;
+            buf[len] = '\0';
+            *plen2 = len; *ppos = pos;
+        }
+    }
+
+    /* Print candidates below the current line */
+    out("\r\n");
+    int shown = nwords < 20 ? nwords : 20;
+    for (int wi = 0; wi < shown; wi++) { out(words[wi]); outch(' '); }
+    if (nwords > 20) out("...");
+    out("\r\n");
+    redraw(prompt, plen, buf, len, pos);
 }
 
 /* ── ReadLine ─────────────────────────────────────────────────────────────── */
@@ -353,6 +489,12 @@ void History_ReadLine(char *prompt, char *result) {
             break;
         }
 
+        case K_TAB:
+            if (completion_fn) {
+                do_tab(prompt, plen, buf, &len, &pos);
+            }
+            break;
+
         case K_UP:
             if (hidx == -1) {
                 /* save current input */
@@ -402,6 +544,10 @@ void History_ReadLine(char *prompt, char *result) {
                 /* reset history browsing on any typed char */
                 hidx = -1;
                 redraw(prompt, plen, buf, len, pos);
+                /* flash matching open delimiter for ) ] } */
+                if ((k.ch == ')' || k.ch == ']' || k.ch == '}') && pos >= 2) {
+                    paren_flash(prompt, plen, buf, len, pos);
+                }
             }
             break;
 
