@@ -502,6 +502,20 @@ BEGIN
   Check("binding in fn",     "(= (binding [*dyn* 99] (get-dyn)) 99)");
   Check("binding nested",    "(binding [*dyn* 5] (binding [*dyn* 6] (= *dyn* 6)))");
 
+  (* ── 30. Memoize and time ───────────────────────────────────────────── *)
+  Section("Memoize and time");
+  E("(def call-count (atom 0))");
+  E("(def tracked (memoize (fn [x] (swap! call-count inc) (* x x))))");
+  Check("memoize result",    "(= (tracked 5) 25)");
+  Check("memoize cached",    "(do (tracked 5) (= @call-count 1))");
+  Check("memoize new arg",   "(do (tracked 6) (= @call-count 2))");
+  E("(def fib (memoize (fn [n] (if (< n 2) n (+ (fib (- n 1)) (fib (- n 2)))))))");
+  Check("memoize fib 10",    "(= (fib 10) 55)");
+  Check("memoize fib 30",    "(= (fib 30) 832040)");
+  Check("time returns val",  "(= (time 42) 42)");
+  Check("time expr result",  "(= (time (+ 1 2 3)) 6)");
+  Check("current-time-ms",   "(> (current-time-ms) 0.0)");
+
   (* ── Summary ────────────────────────────────────────────────────────── *)
   Out.Ln;
   Out.String("Results: ");

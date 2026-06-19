@@ -1,6 +1,6 @@
 MODULE Cloj;
 
-IMPORT Out, Strings, Math, Random, History, Files, Args, Regex;
+IMPORT Out, Strings, Math, Random, History, Files, Args, Regex, Time;
 
 CONST
   (* Value tags *)
@@ -5139,6 +5139,13 @@ BEGIN
   RETURN MkStr(nsName)
 END BInNs;
 
+PROCEDURE BCurrentTimeMs(args: Value; env: Env): Value;
+VAR t: LONGINT;
+BEGIN
+  t := Time.Now();
+  RETURN MkReal(FLT(t))
+END BCurrentTimeMs;
+
 (* ---------- Setup ---------- *)
 
 PROCEDURE Register(name: ARRAY OF CHAR; fn: Builtin);
@@ -5400,6 +5407,7 @@ BEGIN
   RegisterDoc("identity", BIdentity, "Returns its argument.");
   RegisterDoc("apply", BApplyFn, "Applies fn to args, with last arg as a seq.");
   RegisterDoc("gensym", BGensym, "Returns a unique symbol.");
+  RegisterDoc("current-time-ms", BCurrentTimeMs, "Returns current time in milliseconds since Unix epoch.");
   RegisterDoc("load-file", BLoadFile, "Loads Clojure source from a file.");
   RegisterDoc("import-oberon", BImportOberon, "Import a registered Oberon module into the Cloj environment.");
   RegisterDoc("in-ns", BInNs, "Switch to or create namespace.");
@@ -5483,6 +5491,8 @@ BEGIN
   Eval1("(defn some-fn [& preds] (fn [x] (some (fn [p] (p x)) preds)))");
   Eval1("(defn fnil [f default] (fn [x & args] (apply f (if (nil? x) default x) args)))");
   Eval1("(defn nil-safe [f default] (fn [x] (if (nil? x) default (f x))))");
+  Eval1('(defn memoize [f] (let [mem (atom {})] (fn [& args] (let [cached (get @mem args ::not-found)] (if (= cached ::not-found) (let [result (apply f args)] (swap! mem assoc args result) result) cached)))))');
+  Eval1('(defmacro time [expr] (let [s (gensym "start") r (gensym "ret")] `(let [~s (current-time-ms) ~r ~expr] (println (str "Elapsed time: " (- (current-time-ms) ~s) " msecs")) ~r)))');
 END Init;
 
 (* ---------- REPL loop ---------- *)
