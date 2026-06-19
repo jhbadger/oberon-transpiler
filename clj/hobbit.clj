@@ -20,28 +20,25 @@
    {:name "left-lower-leg" :size 3}
    {:name "left-achilles" :size 1}
    {:name "left-foot" :size 2}
-]) 
+]) ; => (no output) 
 
 (defn needs-matching-part?
    [part]
-   (re-find #"^left-" (:name part)))
+   (re-find #"^left-" (:name part))) ; => (no output) ; => (no output)
  
  (defn make-matching-part
    [part]
    {:name (string/replace (:name part) #"^left-" "right-")
-    :size (:size part)})
+    :size (:size part)}) ; => (no output)
  
 (defn symmetrize-body-parts
    "Expects a seq of maps which have a :name and :size"
    [asym-body-parts]
-   (loop [remaining-asym-parts asym-body-parts
-          final-body-parts []]
-     (if (empty? remaining-asym-parts)
-       final-body-parts
-       (let [[part & remaining] remaining-asym-parts
-             final-body-parts (conj final-body-parts part)]
-         (if (needs-matching-part? part)
-           (recur remaining (conj final-body-parts (make-matching-part part)))
-           (recur remaining final-body-parts))))))
+   (reduce (fn [final-body-parts part]
+             (let [final-body-parts (conj final-body-parts part)]
+               (if (needs-matching-part? part)
+                 (conj final-body-parts (make-matching-part part))
+                 final-body-parts))) [] asym-body-parts)) ; => (no output)
+
  
-(print (symmetrize-body-parts asym-hobbit-body-parts))
+ (print (symmetrize-body-parts asym-hobbit-body-parts)) ; => (no output)
