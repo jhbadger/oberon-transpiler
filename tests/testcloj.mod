@@ -516,6 +516,65 @@ BEGIN
   Check("time expr result",  "(= (time (+ 1 2 3)) 6)");
   Check("current-time-ms",   "(> (current-time-ms) 0.0)");
 
+  (* ── Bug-fix regressions ─────────────────────────────────────────────── *)
+  Section("Bug fixes");
+  Check("str list",         '(= (str (list 1 2 3)) "(1 2 3)")');
+  Check("str vec",          '(= (str [4 5]) "[4 5]")');
+  Check("str map",          '(= (str {:a 1}) "{:a 1}")');
+  Check("pr-str list",      '(= (pr-str (list 1 2)) "(1 2)")');
+  Check("pr-str vec str",   '(= (pr-str ["hi"]) "[\"hi\"]")');
+  Check("gensym no prefix", '(let [g (gensym)] (string? (str g)))');
+  Check("gensym prefix",    '(let [g (gensym "x")] (= (subs (str g) 0 1) "x"))');
+  Check("reduce empty",     "(= (reduce + '()) 0)");
+  Check("map equality",     "(= {:a 1 :b 2} {:b 2 :a 1})");
+  Check("map not equal",    "(not= {:a 1} {:a 2})");
+  Check("recur in fn",      "(let [f (fn [n acc] (if (= n 0) acc (recur (- n 1) (+ acc 1))))] (= (f 100 0) 100))");
+  Check("recur tail-only",  "(let [f (fn [n] (if (> n 0) (recur (- n 1)) :done))] (= (f 50) :done))");
+
+  (* ── New features ───────────────────────────────────────────────────── *)
+  Section("quot fix");
+  Check("quot pos/pos",    "(= (quot 7 3) 2)");
+  Check("quot neg/pos",    "(= (quot -7 3) -2)");
+  Check("quot pos/neg",    "(= (quot 7 -3) -2)");
+  Check("quot neg/neg",    "(= (quot -7 -3) 2)");
+  Check("quot exact",      "(= (quot -6 3) -2)");
+
+  Section("comp/complement/constantly");
+  Check("comp two fns",    '(= ((comp str inc) 5) "6")');
+  Check("comp three fns",  "(= ((comp inc inc inc) 0) 3)");
+  Check("comp zero fns",   "(= ((comp) 42) 42)");
+  Check("complement",      "(= ((complement even?) 3) true)");
+  Check("constantly",      "(= ((constantly 99) 1 2 3) 99)");
+
+  Section("reduce-kv / run!");
+  E("(def kv-sum (atom 0))");
+  E("(reduce-kv (fn [_ k v] (swap! kv-sum + v)) nil {:a 1 :b 2 :c 3})");
+  Check("reduce-kv sums vals", "(= @kv-sum 6)");
+  E("(def run-total (atom 0))");
+  E("(run! (fn [x] (swap! run-total + x)) [1 2 3])");
+  Check("run! side effects",   "(= @run-total 6)");
+
+  Section("if-let / when-let");
+  Check("if-let truthy",   "(= (if-let [x 5] x :no) 5)");
+  Check("if-let falsy",    "(= (if-let [x nil] x :no) :no)");
+  Check("if-let else",     "(= (if-let [x false] :yes :no) :no)");
+  Check("when-let truthy", "(= (when-let [x 3] (* x 2)) 6)");
+  Check("when-let falsy",  "(nil? (when-let [x nil] (* x 2)))");
+
+  Section("condp");
+  Check("condp match first",  "(= (condp = 1 1 :one 2 :two :other) :one)");
+  Check("condp match second", "(= (condp = 2 1 :one 2 :two :other) :two)");
+  Check("condp default",      "(= (condp = 9 1 :one 2 :two :other) :other)");
+  Check("condp pred",         "(= (condp > 5 10 :big 3 :small :mid) :big)");
+
+  Section("as-> / some-> / cond->");
+  Check("as->",            "(= (as-> 1 x (+ x 1) (* x 3)) 6)");
+  Check("some-> non-nil",  '(= (some-> 5 inc str) "6")');
+  Check("some-> nil",      "(nil? (some-> nil inc))");
+  Check("cond-> both",     "(= (cond-> 1 true inc true inc) 3)");
+  Check("cond-> skip",     "(= (cond-> 10 false inc true (+ 5)) 15)");
+  Check("cond->> both",    "(= (cond->> [1 2 3] true (map inc) true (filter odd?)) (list 3))");
+
   (* ── Summary ────────────────────────────────────────────────────────── *)
   Out.Ln;
   Out.String("Results: ");

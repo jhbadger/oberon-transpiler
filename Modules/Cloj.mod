@@ -1105,6 +1105,7 @@ PROCEDURE Apply*(fn, args: Value; env: Env): Value;
 VAR newEnv: Env; params, a: Value; isRest: BOOLEAN;
   restList, rLast, c, result, body, expanded: Value;
   nArgs, nParams: INTEGER; arities, clause, p: Value; clauseHasRest: BOOLEAN;
+  curArgs: Value; savedDoRecur: BOOLEAN; savedRecurArgs: Value;
 BEGIN
   IF IsNil(fn) THEN Error("cannot call nil"); RETURN NilV END;
   IF fn.tag = tBuiltin THEN RETURN fn.builtin(args, env) END;
@@ -1177,33 +1178,51 @@ BEGIN
     END;
     Error("Wrong number of args"); RETURN NilV
   END;
-  newEnv := NewEnv(fn.closure);
-  params := fn.params; a := args; isRest := FALSE;
-  WHILE ~IsNil(params) & ~isRest DO
-    IF (params.head # NIL) & (params.head.tag = tSym)
-       & (params.head.s[0] = "&") & (params.head.s[1] = 0X) THEN
-      isRest := TRUE; params := params.tail;
-      IF IsNil(params) THEN Error("& without param"); RETURN NilV END;
-      restList := NilV; rLast := NIL;
-      WHILE ~IsNil(a) DO
-        c := Cons(a.head, NilV);
-        IF rLast = NIL THEN restList := c ELSE rLast.tail := c END;
-        rLast := c; a := a.tail
-      END;
-      Define(newEnv, params.head.s, restList);
-      params := NilV
-    ELSE
-      IF IsNil(a) THEN Error("too few args"); RETURN NilV END;
-      DestructureBind(params.head, a.head, newEnv);
-      params := params.tail; a := a.tail
-    END
+  savedDoRecur := doRecur; savedRecurArgs := recurArgs;
+  doRecur := FALSE; recurArgs := NilV;
+  curArgs := args;
+  LOOP
+    newEnv := NewEnv(fn.closure);
+    params := fn.params; a := curArgs; isRest := FALSE;
+    WHILE ~IsNil(params) & ~isRest DO
+      IF (params.head # NIL) & (params.head.tag = tSym)
+         & (params.head.s[0] = "&") & (params.head.s[1] = 0X) THEN
+        isRest := TRUE; params := params.tail;
+        IF IsNil(params) THEN
+          doRecur := savedDoRecur; recurArgs := savedRecurArgs;
+          Error("& without param"); RETURN NilV
+        END;
+        restList := NilV; rLast := NIL;
+        WHILE ~IsNil(a) DO
+          c := Cons(a.head, NilV);
+          IF rLast = NIL THEN restList := c ELSE rLast.tail := c END;
+          rLast := c; a := a.tail
+        END;
+        Define(newEnv, params.head.s, restList);
+        params := NilV
+      ELSE
+        IF IsNil(a) THEN
+          doRecur := savedDoRecur; recurArgs := savedRecurArgs;
+          Error("too few args"); RETURN NilV
+        END;
+        DestructureBind(params.head, a.head, newEnv);
+        params := params.tail; a := a.tail
+      END
+    END;
+    IF ~isRest & ~IsNil(a) THEN
+      doRecur := savedDoRecur; recurArgs := savedRecurArgs;
+      Error("too many args"); RETURN NilV
+    END;
+    result := NilV; body := fn.body;
+    WHILE ~IsNil(body) & ~err & ~doRecur DO
+      result := EvalRef(body.head, newEnv);
+      body := body.tail
+    END;
+    IF err THEN doRecur := savedDoRecur; recurArgs := savedRecurArgs; RETURN NilV END;
+    IF ~doRecur THEN EXIT END;
+    curArgs := recurArgs; doRecur := FALSE; recurArgs := NilV
   END;
-  IF ~isRest & ~IsNil(a) THEN Error("too many args"); RETURN NilV END;
-  result := NilV; body := fn.body;
-  WHILE ~IsNil(body) & ~err DO
-    result := EvalRef(body.head, newEnv);
-    body := body.tail
-  END;
+  doRecur := savedDoRecur; recurArgs := savedRecurArgs;
   RETURN result
 END Apply;
 
@@ -2663,7 +2682,7 @@ BEGIN
 END BGE;
 
 PROCEDURE ValueEqual*(a, b: Value): BOOLEAN;
-VAR pa, pb: Value; isSeqA, isSeqB: BOOLEAN;
+VAR pa, pb, v: Value; isSeqA, isSeqB: BOOLEAN;
 BEGIN
   IF IsNil(a) & IsNil(b) THEN RETURN TRUE END;
   IF IsNil(a) OR IsNil(b) THEN RETURN FALSE END;
@@ -2684,6 +2703,16 @@ BEGIN
     WHILE ~IsNil(pa) DO
       IF ~SetContains(b, pa.head) THEN RETURN FALSE END;
       pa := pa.tail
+    END;
+    RETURN TRUE
+  END;
+  IF (a.tag = tMap) & (b.tag = tMap) THEN
+    IF ListLen(a.head) # ListLen(b.head) THEN RETURN FALSE END;
+    pa := a.head; pb := a.tail;
+    WHILE ~IsNil(pa) DO
+      v := MapGet(b, pa.head);
+      IF ~ValueEqual(v, pb.head) THEN RETURN FALSE END;
+      pa := pa.tail; pb := pb.tail
     END;
     RETURN TRUE
   END;
@@ -2902,7 +2931,7 @@ BEGIN
   IF IsNil(args.tail.tail) THEN
     coll := args.tail.head;
     IF ~IsNil(coll) & (coll.tag = tSet) THEN coll := coll.head END;
-    IF IsNil(coll) THEN RETURN NilV END;
+    IF IsNil(coll) THEN RETURN Apply(fn, NilV, env) END;
     acc := coll.head; coll := coll.tail
   ELSE
     acc := args.tail.head; coll := args.tail.tail.head;
@@ -2973,7 +3002,7 @@ BEGIN
 END AppendCStr;
 
 PROCEDURE BStr(args: Value; env: Env): Value;
-VAR buf: ARRAY MaxStr OF CHAR; tmp: ARRAY 64 OF CHAR; n: INTEGER; v: Value;
+VAR buf: ARRAY MaxStr OF CHAR; tmp: ARRAY MaxStr OF CHAR; n: INTEGER; v: Value;
 BEGIN
   buf[0] := 0X; n := 0;
   WHILE ~IsNil(args) DO
@@ -2993,6 +3022,8 @@ BEGIN
     ELSIF v.tag = tKey THEN
       IF n < LEN(buf)-1 THEN buf[n] := ':'; INC(n) END;
       AppendCStr(buf, n, v.s)
+    ELSE
+      ValueToStr(v, FALSE, tmp); AppendCStr(buf, n, tmp)
     END;
     args := args.tail
   END;
@@ -3160,7 +3191,7 @@ END BApplyFn;
 
 (* Arithmetic *)
 PROCEDURE BQuot(args: Value; env: Env): Value;
-VAR a, b: Value; aStr, bStr, res: ARRAY MaxStr OF CHAR;
+VAR a, b: Value; q: INTEGER; aStr, bStr, res: ARRAY MaxStr OF CHAR;
 BEGIN
   a := args.head; b := args.tail.head;
   IF (a.tag = tBigInt) OR (b.tag = tBigInt) THEN
@@ -3172,7 +3203,9 @@ BEGIN
   END;
   IF (a.tag # tInt) OR (b.tag # tInt) THEN Error("quot: needs ints"); RETURN NilV END;
   IF b.i = 0 THEN Error("quot: division by zero"); RETURN NilV END;
-  RETURN MkInt(a.i DIV b.i)
+  q := ABS(a.i) DIV ABS(b.i);
+  IF (a.i < 0) # (b.i < 0) THEN q := -q END;
+  RETURN MkInt(q)
 END BQuot;
 
 PROCEDURE BRem(args: Value; env: Env): Value;
@@ -4626,7 +4659,11 @@ PROCEDURE BGensym(args: Value; env: Env): Value;
 VAR buf: ARRAY MaxStr OF CHAR; n: ARRAY 16 OF CHAR;
 BEGIN
   INC(gensymCount);
-  Strings.Copy("G__", buf);
+  IF ~IsNil(args) & (args.head.tag = tStr) THEN
+    Strings.Copy(args.head.s, buf)
+  ELSE
+    Strings.Copy("G__", buf)
+  END;
   Strings.IntToStr(gensymCount, n);
   Strings.Append(n, buf);
   RETURN MkSym(buf)
@@ -4652,7 +4689,7 @@ END BReadString;
 
 PROCEDURE BPrintStr(args: Value; env: Env): Value;
 VAR buf: ARRAY MaxStr OF CHAR; n: INTEGER;
-    tmp: ARRAY 64 OF CHAR; first: BOOLEAN; v: Value;
+    tmp: ARRAY MaxStr OF CHAR; first: BOOLEAN; v: Value;
 BEGIN
   buf[0] := 0X; n := 0; first := TRUE;
   WHILE ~IsNil(args) DO
@@ -4669,6 +4706,8 @@ BEGIN
     ELSIF v.tag = tKey THEN
       IF n < LEN(buf)-1 THEN buf[n] := ':'; INC(n) END;
       AppendCStr(buf, n, v.s)
+    ELSE
+      ValueToStr(v, TRUE, tmp); AppendCStr(buf, n, tmp)
     END;
     first := FALSE; args := args.tail
   END;
@@ -5495,6 +5534,28 @@ BEGIN
   Eval1("(defn some-fn [& preds] (fn [x] (some (fn [p] (p x)) preds)))");
   Eval1("(defn fnil [f default] (fn [x & args] (apply f (if (nil? x) default x) args)))");
   Eval1("(defn nil-safe [f default] (fn [x] (if (nil? x) default (f x))))");
+  (* Higher-order functions *)
+  Eval1('(defn comp [& fns] (fn [& args] (if (empty? fns) (first args) (reduce (fn [v f] (f v)) (apply (last fns) args) (reverse (butlast fns))))))');
+  Eval1('(defn complement [f] (fn [& args] (not (apply f args))))');
+  Eval1('(defn constantly [x] (fn [& _] x))');
+  Eval1('(defn reduce-kv [f init m] (loop [ks (keys m) vs (vals m) acc init] (if (nil? ks) acc (recur (next ks) (next vs) (f acc (first ks) (first vs))))))');
+  Eval1('(defn run! [f coll] (doseq [x coll] (f x)) nil)');
+
+  (* Conditional binding macros *)
+  Eval1('(defmacro if-let [bindings & body] (let [sym (first bindings) expr (second bindings) then (first body) else (second body)] `(let [~sym ~expr] (if ~sym ~then ~else))))');
+  Eval1('(defmacro when-let [bindings & body] (let [sym (first bindings) expr (second bindings)] `(let [~sym ~expr] (when ~sym ~@body))))');
+
+  (* condp: (condp pred expr test1 result1 ... default) *)
+  Eval1('(defn condp-clauses [pred ep cs] (if (nil? cs) (list (quote throw) "condp: no matching clause") (if (nil? (next cs)) (first cs) (list (quote if) (list pred (first cs) ep) (second cs) (condp-clauses pred ep (next (next cs)))))))');
+  Eval1('(defmacro condp [pred expr & clauses] (let [e (gensym "cp")] (list (quote let) (vector e expr) (condp-clauses pred e clauses))))');
+
+  (* Threading macro variants *)
+  Eval1('(defmacro as-> [expr name & forms] (reduce (fn [acc form] `(let [~name ~acc] ~form)) expr forms))');
+  Eval1('(defmacro some-> [x & forms] (reduce (fn [acc f] (let [g (gensym "s")] `(let [~g ~acc] (if (nil? ~g) nil (-> ~g ~f))))) x forms))');
+  Eval1('(defmacro some->> [x & forms] (reduce (fn [acc f] (let [g (gensym "s")] `(let [~g ~acc] (if (nil? ~g) nil (->> ~g ~f))))) x forms))');
+  Eval1('(defmacro cond-> [expr & clauses] (reduce (fn [acc [test form]] (let [g (gensym "cv")] `(let [~g ~acc] (if ~test (-> ~g ~form) ~g)))) expr (partition 2 clauses)))');
+  Eval1('(defmacro cond->> [expr & clauses] (reduce (fn [acc [test form]] (let [g (gensym "cv")] `(let [~g ~acc] (if ~test (->> ~g ~form) ~g)))) expr (partition 2 clauses)))');
+
   Eval1('(defn memoize [f] (let [mem (atom {})] (fn [& args] (let [cached (get @mem args ::not-found)] (if (= cached ::not-found) (let [result (apply f args)] (swap! mem assoc args result) result) cached)))))');
   Eval1('(defmacro time [expr] (let [s (gensym "start") r (gensym "ret")] `(let [~s (current-time-ms) ~r ~expr] (println (str "Elapsed time: " (- (current-time-ms) ~s) " msecs")) ~r)))');
 END Init;
