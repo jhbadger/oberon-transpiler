@@ -31,123 +31,125 @@ MODULE IDE;
  *   Ctrl+K / Ctrl+Y Kill line / yank
  *   Ctrl+Left/Right Word left / right
  *)
-IMPORT TUI, Widgets, FileDialog, Help, Strings, Terminal, Files, OS, Out, Args;
+IMPORT TUI, Widgets, FileDialog, Help, Strings, Terminal, ProjectPane, Files, OS, Out, Args;
 
 CONST
-  MaxLines = 5000;
-  LLEN     = 512;    (* bytes per line — wide enough for UTF-8 *)
-  MaxWins  = 8;
-  MaxUndo  = 100;    (* undo history depth per editor window *)
+ProjPaneW = 28;
+MaxLines = 10000;
+LLEN     = 512;    (* bytes per line — wide enough for UTF-8 *)
+MaxWins  = 8;
+MaxUndo  = 100;    (* undo history depth per editor window *)
 
-  (* ── Undo operation types ── *)
-  UOpEdit  = 1;   (* one line modified in place *)
-  UOpSplit = 2;   (* line split into two by Enter *)
-  UOpJoin  = 3;   (* two lines joined into one by Backspace/Delete at boundary *)
-  UOpBlock = 4;   (* block cut/paste — saves/restores a region of lines *)
+(* ── Undo operation types ── *)
+UOpEdit  = 1;   (* one line modified in place *)
+UOpSplit = 2;   (* line split into two by Enter *)
+UOpJoin  = 3;   (* two lines joined into one by Backspace/Delete at boundary *)
+UOpBlock = 4;   (* block cut/paste — saves/restores a region of lines *)
 
-  (* ── Block undo snapshot limit ── *)
-  MaxBlockLines = 20;   (* lines per UOpBlock snapshot *)
-  MaxClipLines  = 200;  (* clipboard capacity *)
+(* ── Block undo snapshot limit ── *)
+MaxBlockLines = 20;   (* lines per UOpBlock snapshot *)
+MaxClipLines  = 200;  (* clipboard capacity *)
 
-  (* ── Menu command codes ── *)
-  CmdNew     = 10;   CmdOpen    = 11;   CmdSave    = 12;
-  CmdSaveAs  = 13;   CmdClose   = 14;   CmdQuit    = 15;
-  CmdUndo    = 19;
-  CmdFind    = 20;   CmdFindNext= 21;   CmdGoto    = 22;   CmdReplace = 23;
-  CmdCompile = 30;   CmdRun     = 31;   CmdCompRun = 32;
-  CmdNextWin = 40;   CmdTile    = 41;   CmdFullScreen = 42;
-  CmdHelp    = 50;
-  CmdJumpError = 51;
-  CmdCopy    = 60;   CmdCut     = 61;   CmdPaste   = 62;   CmdSelAll  = 63;
-  CmdReindent = 80;
+(* ── Menu command codes ── *)
+CmdNew     = 10;   CmdOpen    = 11;   CmdSave    = 12;
+CmdSaveAs  = 13;   CmdClose   = 14;   CmdQuit    = 15;
+CmdUndo    = 19;
+CmdFind    = 20;   CmdFindNext= 21;   CmdGoto    = 22;   CmdReplace = 23;
+CmdCompile = 30;   CmdRun     = 31;   CmdCompRun = 32;
+CmdNextWin = 40;   CmdTile    = 41;   CmdFullScreen = 42;
+CmdHelp    = 50;
+CmdJumpError = 51;
+CmdCopy    = 60;   CmdCut     = 61;   CmdPaste   = 62;   CmdSelAll  = 63;
+CmdReindent = 80;
 
-  (* ── Recent files ── *)
-  MaxRecent      = 8;
-  CmdRecentBase  = 70;   (* CmdRecentBase+0 .. CmdRecentBase+MaxRecent-1 *)
+(* ── Recent files ── *)
+MaxRecent      = 8;
+CmdRecentBase  = 70;   (* CmdRecentBase+0 .. CmdRecentBase+MaxRecent-1 *)
 
-  (* ── Autocomplete ── *)
-  MaxAcItems   = 200;
-  MaxAcVisible = 8;
+(* ── Autocomplete ── *)
+MaxAcItems   = 200;
+MaxAcVisible = 8;
 
 TYPE
-  UndoEntry = RECORD
-    op:       INTEGER;          (* UOpEdit / UOpSplit / UOpJoin / UOpBlock *)
-    cy, cx:   INTEGER;          (* cursor position before the edit *)
-    fromLine: INTEGER;          (* first affected line index *)
-    line0:    ARRAY LLEN OF CHAR;  (* saved content of fromLine *)
-    line1:    ARRAY LLEN OF CHAR;  (* saved content of fromLine+1 (UOpJoin only) *)
-    (* UOpBlock fields *)
-    blockNLines:    INTEGER;    (* lines in pre-op snapshot (<=MaxBlockLines) *)
-    blockPostNLines: INTEGER;   (* lines in region after the op *)
-    blockLines: ARRAY MaxBlockLines, LLEN OF CHAR
-  END;
+UndoEntry = RECORD
+  op:       INTEGER;          (* UOpEdit / UOpSplit / UOpJoin / UOpBlock *)
+  cy, cx:   INTEGER;          (* cursor position before the edit *)
+  fromLine: INTEGER;          (* first affected line index *)
+  line0:    ARRAY LLEN OF CHAR;  (* saved content of fromLine *)
+  line1:    ARRAY LLEN OF CHAR;  (* saved content of fromLine+1 (UOpJoin only) *)
+  (* UOpBlock fields *)
+  blockNLines:    INTEGER;    (* lines in pre-op snapshot (<=MaxBlockLines) *)
+  blockPostNLines: INTEGER;   (* lines in region after the op *)
+  blockLines: ARRAY MaxBlockLines, LLEN OF CHAR
+END;
 
-  EditorWin  = POINTER TO EditorWinRec;
-  EditorWinRec = RECORD (TUI.WindowRec)
-    (* text buffer *)
-    lines:    ARRAY MaxLines, LLEN OF CHAR;
-    nlines:   INTEGER;
-    (* cursor: byte offset in line, line index *)
-    cx, cy:   INTEGER;
-    topLine:  INTEGER;   (* first visible line              *)
-    leftCol:  INTEGER;   (* byte offset of left edge        *)
-    modified: BOOLEAN;
-    killBuf:  ARRAY LLEN OF CHAR;
-    srchBuf:  ARRAY 128  OF CHAR;
-    (* comment nesting depth at start of each line (for syntax colour) *)
-    cmtDepth: ARRAY MaxLines + 1 OF INTEGER;
-    (* undo stack (circular buffer) *)
-    undo:      ARRAY MaxUndo OF UndoEntry;
-    undoTop:   INTEGER;   (* next write slot *)
-    undoCount: INTEGER;   (* number of valid entries *)
-    (* selection *)
-    selActive:      BOOLEAN;
-    selAnchorLine:  INTEGER;
-    selAnchorCol:   INTEGER;
-    (* mouse drag tracking *)
-    mouseSelDrag:   BOOLEAN
-  END;
+EditorWin  = POINTER TO EditorWinRec;
+EditorWinRec = RECORD (TUI.WindowRec)
+(* text buffer *)
+lines:    ARRAY MaxLines, LLEN OF CHAR;
+nlines:   INTEGER;
+(* cursor: byte offset in line, line index *)
+cx, cy:   INTEGER;
+topLine:  INTEGER;   (* first visible line              *)
+leftCol:  INTEGER;   (* byte offset of left edge        *)
+modified: BOOLEAN;
+killBuf:  ARRAY LLEN OF CHAR;
+srchBuf:  ARRAY 128  OF CHAR;
+(* comment nesting depth at start of each line (for syntax colour) *)
+cmtDepth: ARRAY MaxLines + 1 OF INTEGER;
+(* undo stack (circular buffer) *)
+undo:      ARRAY MaxUndo OF UndoEntry;
+undoTop:   INTEGER;   (* next write slot *)
+undoCount: INTEGER;   (* number of valid entries *)
+(* selection *)
+selActive:      BOOLEAN;
+selAnchorLine:  INTEGER;
+selAnchorCol:   INTEGER;
+(* mouse drag tracking *)
+mouseSelDrag:   BOOLEAN
+END;
 
 (* ════════════════════════════════════════════════════════════════
    Module globals
    ════════════════════════════════════════════════════════════════ *)
 
 VAR
-  mbar:      Widgets.MenuBar;
-  sline:     Widgets.StatusLine;
-  running:   BOOLEAN;
-  statusMsg: ARRAY 128 OF CHAR;
-  wins:      ARRAY MaxWins OF EditorWin;
-  winCount:  INTEGER;
-  lastEditor: EditorWin;       (* last editor that held focus — used when menu is active *)
-  zoomedWin: EditorWin;        (* window currently zoomed full-screen, NIL = tiled mode *)
-  pendingCloseWin: EditorWin; (* editor awaiting close confirmation *)
-  pendingClose:    BOOLEAN;   (* close-box click — processed in main loop *)
-  (* inline prompt state *)
-  promptMode: INTEGER;   (* 0=none 1=find 2=goto 3=confirmClose 4=confirmQuit
+pane:      ProjectPane.Pane;
+mbar:      Widgets.MenuBar;
+sline:     Widgets.StatusLine;
+running:   BOOLEAN;
+statusMsg: ARRAY 128 OF CHAR;
+wins:      ARRAY MaxWins OF EditorWin;
+winCount:  INTEGER;
+lastEditor: EditorWin;       (* last editor that held focus — used when menu is active *)
+zoomedWin: EditorWin;        (* window currently zoomed full-screen, NIL = tiled mode *)
+pendingCloseWin: EditorWin; (* editor awaiting close confirmation *)
+pendingClose:    BOOLEAN;   (* close-box click — processed in main loop *)
+(* inline prompt state *)
+promptMode: INTEGER;   (* 0=none 1=find 2=goto 3=confirmClose 4=confirmQuit
                             5=replaceSearch 6=replaceWith 7=replaceStep *)
-  promptBuf:  ARRAY 128 OF CHAR;
-  promptPos:  INTEGER;
-  replaceBuf: ARRAY 128 OF CHAR;
-  replacePos: INTEGER;
-  (* clipboard (module-level, shared across windows) *)
-  clipLines:  ARRAY MaxClipLines, LLEN OF CHAR;
-  clipNLines: INTEGER;
-  (* recent files *)
-  recentFiles: ARRAY MaxRecent, 512 OF CHAR;
-  recentCount: INTEGER;
-  (* last compiler error location *)
-  errorFile: ARRAY 512 OF CHAR;
-  errorLine: INTEGER;
-  (* autocomplete popup *)
-  acActive:  BOOLEAN;
-  acItems:   ARRAY MaxAcItems, 64 OF CHAR;
-  acCount:   INTEGER;
-  acSel:     INTEGER;
-  acScroll:  INTEGER;
-  acX, acY:  INTEGER;
-  acPrefix:  ARRAY 64 OF CHAR;
-  acPrefLen: INTEGER;
+promptBuf:  ARRAY 128 OF CHAR;
+promptPos:  INTEGER;
+replaceBuf: ARRAY 128 OF CHAR;
+replacePos: INTEGER;
+(* clipboard (module-level, shared across windows) *)
+clipLines:  ARRAY MaxClipLines, LLEN OF CHAR;
+clipNLines: INTEGER;
+(* recent files *)
+recentFiles: ARRAY MaxRecent, 512 OF CHAR;
+recentCount: INTEGER;
+(* last compiler error location *)
+errorFile: ARRAY 512 OF CHAR;
+errorLine: INTEGER;
+(* autocomplete popup *)
+acActive:  BOOLEAN;
+acItems:   ARRAY MaxAcItems, 64 OF CHAR;
+acCount:   INTEGER;
+acSel:     INTEGER;
+acScroll:  INTEGER;
+acX, acY:  INTEGER;
+acPrefix:  ARRAY 64 OF CHAR;
+acPrefLen: INTEGER;
 
 (* ════════════════════════════════════════════════════════════════
    UTF-8 helpers
@@ -329,28 +331,28 @@ BEGIN
       ew.lines[fromLine + 1][i] := ew.undo[e].line1[i]
     END
   ELSE  (* UOpBlock: restore the saved region *)
-    n     := ew.undo[e].blockNLines;
-    postN := ew.undo[e].blockPostNLines;
-    (* Adjust line count: post had postN lines in region, pre had n *)
-    IF postN > n THEN
-      (* Post added lines (paste): remove the extra ones *)
-      FOR b := 1 TO postN - n DO  RemoveLine(ew, fromLine + n)  END
-    ELSIF postN < n THEN
-      (* Post removed lines (cut): re-insert the missing ones *)
-      FOR b := postN TO n - 1 DO  InsertLineAt(ew, fromLine + b)  END
-    END;
-    (* Restore all saved lines *)
-    FOR b := 0 TO n - 1 DO
-      FOR i := 0 TO LLEN - 1 DO
-        ew.lines[fromLine + b][i] := ew.undo[e].blockLines[b][i]
-      END
-    END;
-    ew.modified := TRUE
+  n     := ew.undo[e].blockNLines;
+  postN := ew.undo[e].blockPostNLines;
+  (* Adjust line count: post had postN lines in region, pre had n *)
+  IF postN > n THEN
+    (* Post added lines (paste): remove the extra ones *)
+    FOR b := 1 TO postN - n DO  RemoveLine(ew, fromLine + n)  END
+  ELSIF postN < n THEN
+    (* Post removed lines (cut): re-insert the missing ones *)
+    FOR b := postN TO n - 1 DO  InsertLineAt(ew, fromLine + b)  END
   END;
-  ew.cy := ew.undo[e].cy;
-  ew.cx := ew.undo[e].cx;
-  ClampCursor(ew);
-  ScrollToCursor(ew)
+  (* Restore all saved lines *)
+  FOR b := 0 TO n - 1 DO
+    FOR i := 0 TO LLEN - 1 DO
+      ew.lines[fromLine + b][i] := ew.undo[e].blockLines[b][i]
+    END
+  END;
+  ew.modified := TRUE
+END;
+ew.cy := ew.undo[e].cy;
+ew.cx := ew.undo[e].cx;
+ClampCursor(ew);
+ScrollToCursor(ew)
 END DoUndo;
 
 (* ════════════════════════════════════════════════════════════════
@@ -366,7 +368,7 @@ BEGIN
   (* Measure leading whitespace on the current line for auto-indent. *)
   baseIndent := 0;
   WHILE (baseIndent < ew.cx) &
-        ((ew.lines[ew.cy][baseIndent] = ' ') OR (ew.lines[ew.cy][baseIndent] = 09X)) DO
+  ((ew.lines[ew.cy][baseIndent] = ' ') OR (ew.lines[ew.cy][baseIndent] = 09X)) DO
     INC(baseIndent)
   END;
 
@@ -495,7 +497,7 @@ END DoYank;
 
 PROCEDURE DoFind(ew: EditorWin): BOOLEAN;
 VAR li, col, i, qlen, count: INTEGER;
-    found: BOOLEAN;
+found: BOOLEAN;
 BEGIN
   qlen := Strings.Length(ew.srchBuf);
   IF qlen = 0 THEN  RETURN FALSE  END;
@@ -564,8 +566,8 @@ END DoReplaceAll;
 
 PROCEDURE WordAtCursor(ew: EditorWin; VAR word: ARRAY OF CHAR);
 VAR i, wStart, wEnd, len: INTEGER;
-    ch: CHAR;
-    more: BOOLEAN;
+ch: CHAR;
+more: BOOLEAN;
 BEGIN
   word[0] := 0X;
   IF ew = NIL THEN  RETURN  END;
@@ -575,7 +577,7 @@ BEGIN
   WHILE more & (i > 0) DO
     ch := ew.lines[ew.cy][i - 1];
     IF ((ch >= 'A') & (ch <= 'Z')) OR ((ch >= 'a') & (ch <= 'z')) OR
-       ((ch >= '0') & (ch <= '9')) OR (ch = '_') OR (ch = '.') THEN
+    ((ch >= '0') & (ch <= '9')) OR (ch = '_') OR (ch = '.') THEN
       DEC(i)
     ELSE
       more := FALSE
@@ -587,7 +589,7 @@ BEGIN
   WHILE more & (i < len) DO
     ch := ew.lines[ew.cy][i];
     IF ((ch >= 'A') & (ch <= 'Z')) OR ((ch >= 'a') & (ch <= 'z')) OR
-       ((ch >= '0') & (ch <= '9')) OR (ch = '_') THEN
+    ((ch >= '0') & (ch <= '9')) OR (ch = '_') THEN
       INC(i)
     ELSE
       more := FALSE
@@ -606,7 +608,7 @@ END WordAtCursor;
 (* Case-insensitive: does item start with prefix? *)
 PROCEDURE AcMatch(item, prefix: ARRAY OF CHAR): BOOLEAN;
 VAR i, plen: INTEGER;
-    ic, pc: CHAR;
+ic, pc: CHAR;
 BEGIN
   plen := Strings.Length(prefix);
   IF plen = 0 THEN  RETURN TRUE  END;
@@ -640,9 +642,9 @@ END TryKw;
 
 PROCEDURE CollectAC(ew: EditorWin);
 VAR li, i, wStart, llen, wLen: INTEGER;
-    ch: CHAR;
-    word: ARRAY 64 OF CHAR;
-    more: BOOLEAN;
+ch: CHAR;
+word: ARRAY 64 OF CHAR;
+more: BOOLEAN;
 BEGIN
   acCount := 0;
   IF Strings.Length(acPrefix) = 0 THEN  RETURN  END;
@@ -677,40 +679,40 @@ BEGIN
         WHILE more DO
           INC(i);
           IF i >= llen THEN  more := FALSE
-          ELSE
-            ch := ew.lines[li][i];
-            IF ~(((ch >= 'A') & (ch <= 'Z')) OR ((ch >= 'a') & (ch <= 'z')) OR
-                 ((ch >= '0') & (ch <= '9')) OR (ch = '_')) THEN
-              more := FALSE
-            END
-          END
-        END;
-        wLen := i - wStart;
-        IF (wLen >= 2) & (wLen <= 62) THEN
-          Strings.Extract(ew.lines[li], wStart, wLen, word);
-          IF AcMatch(word, acPrefix) & ~AcHas(word) & (acCount < MaxAcItems) THEN
-            Strings.Copy(word, acItems[acCount]);  INC(acCount)
+        ELSE
+          ch := ew.lines[li][i];
+          IF ~(((ch >= 'A') & (ch <= 'Z')) OR ((ch >= 'a') & (ch <= 'z')) OR
+          ((ch >= '0') & (ch <= '9')) OR (ch = '_')) THEN
+            more := FALSE
           END
         END
-      ELSE
-        INC(i)
+      END;
+      wLen := i - wStart;
+      IF (wLen >= 2) & (wLen <= 62) THEN
+        Strings.Extract(ew.lines[li], wStart, wLen, word);
+        IF AcMatch(word, acPrefix) & ~AcHas(word) & (acCount < MaxAcItems) THEN
+          Strings.Copy(word, acItems[acCount]);  INC(acCount)
+        END
       END
+    ELSE
+      INC(i)
     END
   END
+END
 END CollectAC;
 
 PROCEDURE TriggerAC(ew: EditorWin);
 VAR i: INTEGER;
-    ch: CHAR;
-    more: BOOLEAN;
-    sx, sy, vis, popH: INTEGER;
+ch: CHAR;
+more: BOOLEAN;
+sx, sy, vis, popH: INTEGER;
 BEGIN
   (* Extract partial word to the LEFT of cursor *)
   i := ew.cx;  more := TRUE;
   WHILE more & (i > 0) DO
     ch := ew.lines[ew.cy][i - 1];
     IF ((ch >= 'A') & (ch <= 'Z')) OR ((ch >= 'a') & (ch <= 'z')) OR
-       ((ch >= '0') & (ch <= '9')) OR (ch = '_') THEN
+    ((ch >= '0') & (ch <= '9')) OR (ch = '_') THEN
       DEC(i)
     ELSE
       more := FALSE
@@ -742,7 +744,7 @@ END TriggerAC;
 
 PROCEDURE AcceptAC(ew: EditorWin);
 VAR suffix: ARRAY 64 OF CHAR;
-    suffLen: INTEGER;
+suffLen: INTEGER;
 BEGIN
   IF (acSel < 0) OR (acSel >= acCount) THEN  RETURN  END;
   suffLen := Strings.Length(acItems[acSel]) - acPrefLen;
@@ -755,8 +757,8 @@ END AcceptAC;
 
 PROCEDURE DrawAC;
 VAR popW, popH, vis, i, row: INTEGER;
-    fg, bg: INTEGER;
-    item: ARRAY 64 OF CHAR;
+fg, bg: INTEGER;
+item: ARRAY 64 OF CHAR;
 BEGIN
   vis := acCount;
   IF vis > MaxAcVisible THEN  vis := MaxAcVisible  END;
@@ -779,26 +781,26 @@ BEGIN
     row := acScroll + i;
     IF row < acCount THEN
       IF row = acSel THEN  fg := TUI.Black;  bg := TUI.White
-      ELSE                 fg := TUI.White;  bg := TUI.Black
-      END;
-      TUI.FillRect(acX + 1, acY + 1 + i, popW - 2, 1, ' ', fg, bg);
-      Strings.Extract(acItems[row], 0, popW - 2, item);
-      TUI.PutStr(acX + 1, acY + 1 + i, item, fg, bg)
-    END
-  END
+    ELSE                 fg := TUI.White;  bg := TUI.Black
+  END;
+  TUI.FillRect(acX + 1, acY + 1 + i, popW - 2, 1, ' ', fg, bg);
+  Strings.Extract(acItems[row], 0, popW - 2, item);
+  TUI.PutStr(acX + 1, acY + 1 + i, item, fg, bg)
+END
+END
 END DrawAC;
 
 PROCEDURE ClampCursor(ew: EditorWin);
 VAR len: INTEGER;
 BEGIN
   IF ew.cy < 0 THEN  ew.cy := 0
-  ELSIF ew.cy >= ew.nlines THEN  ew.cy := ew.nlines - 1
-  END;
-  len := LineLen(ew, ew.cy);
-  IF ew.cx < 0 THEN  ew.cx := 0
-  ELSIF ew.cx > len THEN  ew.cx := len
-  END;
-  WHILE (ew.cx > 0) & IsUtf8Cont(ew.lines[ew.cy][ew.cx]) DO  DEC(ew.cx)  END
+ELSIF ew.cy >= ew.nlines THEN  ew.cy := ew.nlines - 1
+END;
+len := LineLen(ew, ew.cy);
+IF ew.cx < 0 THEN  ew.cx := 0
+ELSIF ew.cx > len THEN  ew.cx := len
+END;
+WHILE (ew.cx > 0) & IsUtf8Cont(ew.lines[ew.cy][ew.cx]) DO  DEC(ew.cx)  END
 END ClampCursor;
 
 PROCEDURE ScrollToCursor(ew: EditorWin);
@@ -847,7 +849,7 @@ END StartSel;
 PROCEDURE SelNorm(ew: EditorWin; VAR r1, c1, r2, c2: INTEGER);
 BEGIN
   IF (ew.selAnchorLine < ew.cy) OR
-     ((ew.selAnchorLine = ew.cy) & (ew.selAnchorCol <= ew.cx)) THEN
+  ((ew.selAnchorLine = ew.cy) & (ew.selAnchorCol <= ew.cx)) THEN
     r1 := ew.selAnchorLine;  c1 := ew.selAnchorCol;
     r2 := ew.cy;             c2 := ew.cx
   ELSE
@@ -872,7 +874,7 @@ END InSel;
 (* Delete the current selection; push undo; cursor moves to selection start. *)
 PROCEDURE DeleteSel(ew: EditorWin);
 VAR r1, c1, r2, c2, i, slen: INTEGER;
-    suffix: ARRAY LLEN OF CHAR;
+suffix: ARRAY LLEN OF CHAR;
 BEGIN
   IF ~ew.selActive THEN  RETURN  END;
   SelNorm(ew, r1, c1, r2, c2);
@@ -897,7 +899,7 @@ END DeleteSel;
 (* Write internal clipboard to system clipboard via OSC 52 + command fallback. *)
 PROCEDURE SysClipCopy;
 VAR f: Files.File;  r: Files.Rider;
-    li, j: INTEGER;  ch: CHAR;
+li, j: INTEGER;  ch: CHAR;
 BEGIN
   f := Files.New(".obc_clipboard");
   IF f = NIL THEN  RETURN  END;
@@ -922,7 +924,7 @@ END SysClipCopy;
 (* Try to load system clipboard into internal clipboard. *)
 PROCEDURE SysClipPaste;
 VAR f: Files.File;  r: Files.Rider;
-    ch: CHAR;  li, j: INTEGER;  done: BOOLEAN;
+ch: CHAR;  li, j: INTEGER;  done: BOOLEAN;
 BEGIN
   OS.ClipPasteCmd(".obc_clipboard");
   f := Files.Old(".obc_clipboard");
@@ -938,14 +940,14 @@ BEGIN
       END;
       done := TRUE
     ELSIF ch = 0AX THEN  (* newline — advance to next line *)
-      clipLines[li][j] := 0X;
-      INC(li);  j := 0
-    ELSIF j < LLEN - 1 THEN
-      clipLines[li][j] := ch;
-      INC(j)
-    END
-  END;
-  IF li > 0 THEN  clipNLines := li  END
+    clipLines[li][j] := 0X;
+    INC(li);  j := 0
+  ELSIF j < LLEN - 1 THEN
+    clipLines[li][j] := ch;
+    INC(j)
+  END
+END;
+IF li > 0 THEN  clipNLines := li  END
 END SysClipPaste;
 
 (* Copy selection into the module clipboard. *)
@@ -988,7 +990,7 @@ END DoCut;
 (* Paste clipboard at cursor; replaces selection if any. *)
 PROCEDURE DoPaste(ew: EditorWin);
 VAR clen, slen, j, b, lastLen: INTEGER;
-    suffix: ARRAY LLEN OF CHAR;
+suffix: ARRAY LLEN OF CHAR;
 BEGIN
   SysClipPaste;  (* try to load from system clipboard first *)
   IF clipNLines = 0 THEN  RETURN  END;
@@ -1077,42 +1079,42 @@ END ComputeDepths;
 
 PROCEDURE IsKeyword(VAR line: ARRAY OF CHAR; from, len: INTEGER): BOOLEAN;
 VAR kw: ARRAY 16 OF CHAR;
-    i: INTEGER;
+i: INTEGER;
 BEGIN
   IF (len <= 0) OR (len > 15) THEN  RETURN FALSE  END;
   FOR i := 0 TO len - 1 DO  kw[i] := line[from + i]  END;
   kw[len] := 0X;
   RETURN
-    (Strings.Compare(kw, "MODULE")    = 0) OR (Strings.Compare(kw, "IMPORT")    = 0) OR
-    (Strings.Compare(kw, "VAR")       = 0) OR (Strings.Compare(kw, "TYPE")      = 0) OR
-    (Strings.Compare(kw, "CONST")     = 0) OR (Strings.Compare(kw, "BEGIN")     = 0) OR
-    (Strings.Compare(kw, "END")       = 0) OR (Strings.Compare(kw, "PROCEDURE") = 0) OR
-    (Strings.Compare(kw, "RECORD")    = 0) OR (Strings.Compare(kw, "ARRAY")     = 0) OR
-    (Strings.Compare(kw, "OF")        = 0) OR (Strings.Compare(kw, "POINTER")   = 0) OR
-    (Strings.Compare(kw, "TO")        = 0) OR (Strings.Compare(kw, "IF")        = 0) OR
-    (Strings.Compare(kw, "THEN")      = 0) OR (Strings.Compare(kw, "ELSIF")     = 0) OR
-    (Strings.Compare(kw, "ELSE")      = 0) OR (Strings.Compare(kw, "FOR")       = 0) OR
-    (Strings.Compare(kw, "DO")        = 0) OR (Strings.Compare(kw, "WHILE")     = 0) OR
-    (Strings.Compare(kw, "REPEAT")    = 0) OR (Strings.Compare(kw, "UNTIL")     = 0) OR
-    (Strings.Compare(kw, "CASE")      = 0) OR (Strings.Compare(kw, "WITH")      = 0) OR
-    (Strings.Compare(kw, "LOOP")      = 0) OR (Strings.Compare(kw, "EXIT")      = 0) OR
-    (Strings.Compare(kw, "RETURN")    = 0) OR (Strings.Compare(kw, "NEW")       = 0) OR
-    (Strings.Compare(kw, "NIL")       = 0) OR (Strings.Compare(kw, "TRUE")      = 0) OR
-    (Strings.Compare(kw, "FALSE")     = 0) OR (Strings.Compare(kw, "DIV")       = 0) OR
-    (Strings.Compare(kw, "MOD")       = 0) OR (Strings.Compare(kw, "IN")        = 0) OR
-    (Strings.Compare(kw, "IS")        = 0) OR (Strings.Compare(kw, "OR")        = 0) OR
-    (Strings.Compare(kw, "BY")        = 0) OR (Strings.Compare(kw, "CHAR")      = 0) OR
-    (Strings.Compare(kw, "INTEGER")   = 0) OR (Strings.Compare(kw, "REAL")      = 0) OR
-    (Strings.Compare(kw, "BOOLEAN")   = 0) OR (Strings.Compare(kw, "BYTE")      = 0) OR
-    (Strings.Compare(kw, "SET")       = 0) OR (Strings.Compare(kw, "INC")       = 0) OR
-    (Strings.Compare(kw, "DEC")       = 0) OR (Strings.Compare(kw, "CHR")       = 0) OR
-    (Strings.Compare(kw, "ORD")       = 0) OR (Strings.Compare(kw, "LEN")       = 0) OR
-    (Strings.Compare(kw, "ODD")       = 0) OR (Strings.Compare(kw, "ABS")       = 0) OR
-    (Strings.Compare(kw, "MIN")       = 0) OR (Strings.Compare(kw, "MAX")       = 0) OR
-    (Strings.Compare(kw, "COPY")      = 0) OR (Strings.Compare(kw, "ASSERT")    = 0) OR
-    (Strings.Compare(kw, "EXCL")      = 0) OR (Strings.Compare(kw, "INCL")      = 0) OR
-    (Strings.Compare(kw, "LSL")       = 0) OR (Strings.Compare(kw, "ASR")       = 0) OR
-    (Strings.Compare(kw, "ROR")       = 0) OR (Strings.Compare(kw, "ASH")       = 0)
+  (Strings.Compare(kw, "MODULE")    = 0) OR (Strings.Compare(kw, "IMPORT")    = 0) OR
+  (Strings.Compare(kw, "VAR")       = 0) OR (Strings.Compare(kw, "TYPE")      = 0) OR
+  (Strings.Compare(kw, "CONST")     = 0) OR (Strings.Compare(kw, "BEGIN")     = 0) OR
+  (Strings.Compare(kw, "END")       = 0) OR (Strings.Compare(kw, "PROCEDURE") = 0) OR
+  (Strings.Compare(kw, "RECORD")    = 0) OR (Strings.Compare(kw, "ARRAY")     = 0) OR
+  (Strings.Compare(kw, "OF")        = 0) OR (Strings.Compare(kw, "POINTER")   = 0) OR
+  (Strings.Compare(kw, "TO")        = 0) OR (Strings.Compare(kw, "IF")        = 0) OR
+  (Strings.Compare(kw, "THEN")      = 0) OR (Strings.Compare(kw, "ELSIF")     = 0) OR
+  (Strings.Compare(kw, "ELSE")      = 0) OR (Strings.Compare(kw, "FOR")       = 0) OR
+  (Strings.Compare(kw, "DO")        = 0) OR (Strings.Compare(kw, "WHILE")     = 0) OR
+  (Strings.Compare(kw, "REPEAT")    = 0) OR (Strings.Compare(kw, "UNTIL")     = 0) OR
+  (Strings.Compare(kw, "CASE")      = 0) OR (Strings.Compare(kw, "WITH")      = 0) OR
+  (Strings.Compare(kw, "LOOP")      = 0) OR (Strings.Compare(kw, "EXIT")      = 0) OR
+  (Strings.Compare(kw, "RETURN")    = 0) OR (Strings.Compare(kw, "NEW")       = 0) OR
+  (Strings.Compare(kw, "NIL")       = 0) OR (Strings.Compare(kw, "TRUE")      = 0) OR
+  (Strings.Compare(kw, "FALSE")     = 0) OR (Strings.Compare(kw, "DIV")       = 0) OR
+  (Strings.Compare(kw, "MOD")       = 0) OR (Strings.Compare(kw, "IN")        = 0) OR
+  (Strings.Compare(kw, "IS")        = 0) OR (Strings.Compare(kw, "OR")        = 0) OR
+  (Strings.Compare(kw, "BY")        = 0) OR (Strings.Compare(kw, "CHAR")      = 0) OR
+  (Strings.Compare(kw, "INTEGER")   = 0) OR (Strings.Compare(kw, "REAL")      = 0) OR
+  (Strings.Compare(kw, "BOOLEAN")   = 0) OR (Strings.Compare(kw, "BYTE")      = 0) OR
+  (Strings.Compare(kw, "SET")       = 0) OR (Strings.Compare(kw, "INC")       = 0) OR
+  (Strings.Compare(kw, "DEC")       = 0) OR (Strings.Compare(kw, "CHR")       = 0) OR
+  (Strings.Compare(kw, "ORD")       = 0) OR (Strings.Compare(kw, "LEN")       = 0) OR
+  (Strings.Compare(kw, "ODD")       = 0) OR (Strings.Compare(kw, "ABS")       = 0) OR
+  (Strings.Compare(kw, "MIN")       = 0) OR (Strings.Compare(kw, "MAX")       = 0) OR
+  (Strings.Compare(kw, "COPY")      = 0) OR (Strings.Compare(kw, "ASSERT")    = 0) OR
+  (Strings.Compare(kw, "EXCL")      = 0) OR (Strings.Compare(kw, "INCL")      = 0) OR
+  (Strings.Compare(kw, "LSL")       = 0) OR (Strings.Compare(kw, "ASR")       = 0) OR
+  (Strings.Compare(kw, "ROR")       = 0) OR (Strings.Compare(kw, "ASH")       = 0)
 END IsKeyword;
 
 (* Returns TRUE if the content of ew.lines[li] trimmed to the first atByte
@@ -1120,14 +1122,14 @@ END IsKeyword;
    BEGIN  THEN  ELSE  DO  REPEAT  RECORD  OF  WITH  LOOP *)
 PROCEDURE LineEndsWithOpener(ew: EditorWin; li, atByte: INTEGER): BOOLEAN;
 VAR i, wEnd, wStart, wLen, k: INTEGER;
-    kw: ARRAY 10 OF CHAR;
+kw: ARRAY 10 OF CHAR;
 BEGIN
   i := atByte - 1;
   WHILE (i >= 0) & (ew.lines[li][i] = ' ') DO  DEC(i)  END;
   wEnd := i + 1;   (* exclusive end of word *)
   WHILE (i >= 0) &
-        (((ew.lines[li][i] >= 'A') & (ew.lines[li][i] <= 'Z')) OR
-         ((ew.lines[li][i] >= 'a') & (ew.lines[li][i] <= 'z'))) DO
+  (((ew.lines[li][i] >= 'A') & (ew.lines[li][i] <= 'Z')) OR
+  ((ew.lines[li][i] >= 'a') & (ew.lines[li][i] <= 'z'))) DO
     DEC(i)
   END;
   wStart := i + 1;
@@ -1136,15 +1138,15 @@ BEGIN
   FOR k := 0 TO wLen - 1 DO  kw[k] := ew.lines[li][wStart + k]  END;
   kw[wLen] := 0X;
   RETURN
-    (Strings.Compare(kw, "BEGIN")  = 0) OR
-    (Strings.Compare(kw, "THEN")   = 0) OR
-    (Strings.Compare(kw, "ELSE")   = 0) OR
-    (Strings.Compare(kw, "DO")     = 0) OR
-    (Strings.Compare(kw, "REPEAT") = 0) OR
-    (Strings.Compare(kw, "RECORD") = 0) OR
-    (Strings.Compare(kw, "OF")     = 0) OR
-    (Strings.Compare(kw, "WITH")   = 0) OR
-    (Strings.Compare(kw, "LOOP")   = 0)
+  (Strings.Compare(kw, "BEGIN")  = 0) OR
+  (Strings.Compare(kw, "THEN")   = 0) OR
+  (Strings.Compare(kw, "ELSE")   = 0) OR
+  (Strings.Compare(kw, "DO")     = 0) OR
+  (Strings.Compare(kw, "REPEAT") = 0) OR
+  (Strings.Compare(kw, "RECORD") = 0) OR
+  (Strings.Compare(kw, "OF")     = 0) OR
+  (Strings.Compare(kw, "WITH")   = 0) OR
+  (Strings.Compare(kw, "LOOP")   = 0)
 END LineEndsWithOpener;
 
 (* If the current line is of the form <spaces><END|UNTIL|ELSE|ELSIF> with
@@ -1152,7 +1154,7 @@ END LineEndsWithOpener;
    adjust cx accordingly.  Called after each printable character is inserted. *)
 PROCEDURE CheckAutoDeindent(ew: EditorWin);
 VAR i, indent, len, kwLen, removed: INTEGER;
-    kw: ARRAY 10 OF CHAR;
+kw: ARRAY 10 OF CHAR;
 BEGIN
   len := LineLen(ew, ew.cy);
   indent := 0;
@@ -1160,8 +1162,8 @@ BEGIN
   IF indent = 0 THEN  RETURN  END;
   kwLen := 0;  i := indent;
   WHILE (i < len) &
-        (((ew.lines[ew.cy][i] >= 'A') & (ew.lines[ew.cy][i] <= 'Z')) OR
-         ((ew.lines[ew.cy][i] >= 'a') & (ew.lines[ew.cy][i] <= 'z'))) DO
+  (((ew.lines[ew.cy][i] >= 'A') & (ew.lines[ew.cy][i] <= 'Z')) OR
+  ((ew.lines[ew.cy][i] >= 'a') & (ew.lines[ew.cy][i] <= 'z'))) DO
     IF kwLen < 9 THEN  kw[kwLen] := ew.lines[ew.cy][i];  INC(kwLen)  END;
     INC(i)
   END;
@@ -1169,9 +1171,9 @@ BEGIN
   (* Line must be exactly <spaces><keyword> — nothing more *)
   IF i # len THEN  RETURN  END;
   IF (Strings.Compare(kw, "END")   = 0) OR
-     (Strings.Compare(kw, "UNTIL") = 0) OR
-     (Strings.Compare(kw, "ELSE")  = 0) OR
-     (Strings.Compare(kw, "ELSIF") = 0) THEN
+  (Strings.Compare(kw, "UNTIL") = 0) OR
+  (Strings.Compare(kw, "ELSE")  = 0) OR
+  (Strings.Compare(kw, "ELSIF") = 0) THEN
     removed := 2;
     IF removed > indent THEN  removed := indent  END;
     DeleteBytesAt(ew, ew.cy, 0, removed);
@@ -1185,8 +1187,8 @@ END CheckAutoDeindent;
    the next line forward one level.  Lines inside block comments are skipped. *)
 PROCEDURE DoReindent(ew: EditorWin);
 VAR li, indent, curIndent, newIndent, len, pos, wLen, k: INTEGER;
-    spaces: ARRAY LLEN OF CHAR;
-    w: ARRAY 16 OF CHAR;
+spaces: ARRAY LLEN OF CHAR;
+w: ARRAY 16 OF CHAR;
 BEGIN
   ComputeDepths(ew);
   indent := 0;
@@ -1198,16 +1200,16 @@ BEGIN
       IF pos < len THEN
         wLen := 0;  k := pos;
         WHILE (k < len) & (wLen < 15) &
-              (((ew.lines[li][k] >= 'A') & (ew.lines[li][k] <= 'Z')) OR
-               ((ew.lines[li][k] >= 'a') & (ew.lines[li][k] <= 'z'))) DO
+        (((ew.lines[li][k] >= 'A') & (ew.lines[li][k] <= 'Z')) OR
+        ((ew.lines[li][k] >= 'a') & (ew.lines[li][k] <= 'z'))) DO
           w[wLen] := ew.lines[li][k];  INC(wLen);  INC(k)
         END;
         w[wLen] := 0X;
         newIndent := indent;
         IF (Strings.Compare(w, "END")   = 0) OR
-           (Strings.Compare(w, "UNTIL") = 0) OR
-           (Strings.Compare(w, "ELSE")  = 0) OR
-           (Strings.Compare(w, "ELSIF") = 0) THEN
+        (Strings.Compare(w, "UNTIL") = 0) OR
+        (Strings.Compare(w, "ELSE")  = 0) OR
+        (Strings.Compare(w, "ELSIF") = 0) THEN
           IF newIndent >= 2 THEN  DEC(newIndent, 2)  ELSE  newIndent := 0  END
         END;
         curIndent := pos;
@@ -1249,8 +1251,8 @@ END GutterW;
    li = line index (0-based), currentLine = cursor line. *)
 PROCEDURE DrawGutter(gx, y, gw, li, currentLine: INTEGER);
 VAR numBuf: ARRAY 8 OF CHAR;
-    nlen, pad, i: INTEGER;
-    fg: INTEGER;
+nlen, pad, i: INTEGER;
+fg: INTEGER;
 BEGIN
   Strings.IntToStr(li + 1, numBuf);
   nlen := Strings.Length(numBuf);
@@ -1272,16 +1274,16 @@ END DrawGutter;
    cmtD        : comment nesting depth at the start of this line. *)
 PROCEDURE RenderEdLine(ew: EditorWin; li, innerX, sy, leftByte, innerW, cmtD: INTEGER);
 VAR
-  len, i, sc: INTEGER;
-  ch, nextCh: CHAR;
-  fg: INTEGER;
-  depth: INTEGER;
-  inStr: BOOLEAN;
-  closingParen: BOOLEAN;
-  kwEnd, kwFg, j, kwLen: INTEGER;
-  vc, leftVcol, seqLen: INTEGER;
-  c2, c3, c4: CHAR;
-  bg: INTEGER;
+len, i, sc: INTEGER;
+ch, nextCh: CHAR;
+fg: INTEGER;
+depth: INTEGER;
+inStr: BOOLEAN;
+closingParen: BOOLEAN;
+kwEnd, kwFg, j, kwLen: INTEGER;
+vc, leftVcol, seqLen: INTEGER;
+c2, c3, c4: CHAR;
+bg: INTEGER;
 BEGIN
   len      := LineLen(ew, li);
   leftVcol := ByteToCol(ew.lines[li], leftByte);
@@ -1303,82 +1305,82 @@ BEGIN
     ELSE
       (* Determine byte-length of this UTF-8 sequence. *)
       IF    ORD(ch) >= 0F0H THEN  seqLen := 4
-      ELSIF ORD(ch) >= 0E0H THEN  seqLen := 3
-      ELSIF ORD(ch) >= 0C0H THEN  seqLen := 2
-      ELSE                        seqLen := 1
-      END;
+    ELSIF ORD(ch) >= 0E0H THEN  seqLen := 3
+  ELSIF ORD(ch) >= 0C0H THEN  seqLen := 2
+ELSE                        seqLen := 1
+END;
 
-      (* nextCh: first byte of the following logical character. *)
-      IF i + seqLen < len THEN  nextCh := ew.lines[li][i + seqLen]
-      ELSE                      nextCh := 0X
-      END;
+(* nextCh: first byte of the following logical character. *)
+IF i + seqLen < len THEN  nextCh := ew.lines[li][i + seqLen]
+ELSE                      nextCh := 0X
+END;
 
-      (* ── Determine colour ── *)
-      IF closingParen THEN
-        fg := TUI.Green;  closingParen := FALSE
-      ELSIF depth > 0 THEN
-        fg := TUI.Green;
-        IF (ch = '*') & (nextCh = ')') THEN
-          IF depth > 0 THEN  DEC(depth)  END;
-          closingParen := TRUE
-        END
-      ELSIF inStr THEN
-        fg := TUI.Yellow;
-        IF ch = '"' THEN  inStr := FALSE  END
-      ELSIF i < kwEnd THEN
-        fg := kwFg
-      ELSIF (ch = '(') & (nextCh = '*') THEN
-        INC(depth);  fg := TUI.Green
-      ELSIF ch = '"' THEN
-        inStr := TRUE;  fg := TUI.Yellow
-      ELSIF (ch >= 'A') & (ch <= 'Z') THEN
-        (* Scan ahead for the full identifier (ASCII only). *)
-        j := i;
-        WHILE (j < len) &
-              (((ew.lines[li][j] >= 'A') & (ew.lines[li][j] <= 'Z')) OR
-               ((ew.lines[li][j] >= 'a') & (ew.lines[li][j] <= 'z')) OR
-               ((ew.lines[li][j] >= '0') & (ew.lines[li][j] <= '9')) OR
-               (ew.lines[li][j] = '_')) DO
-          INC(j)
-        END;
-        kwLen := j - i;
-        IF IsKeyword(ew.lines[li], i, kwLen) THEN
-          kwEnd := i + kwLen;  kwFg := TUI.Cyan;  fg := TUI.Cyan
-        ELSE
-          fg := TUI.White
-        END
-      ELSE
-        fg := TUI.White
-      END;
-
-      (* ── Output into the TUI back buffer if in the visible column range ── *)
-      sc := vc - leftVcol;
-      IF (sc >= 0) & (sc < innerW) THEN
-        IF InSel(ew, li, i) THEN  bg := TUI.Blue  ELSE  bg := TUI.Black  END;
-        (* Gather continuation bytes so the whole sequence lives in one cell. *)
-        c2 := 0X;  c3 := 0X;  c4 := 0X;
-        IF (seqLen >= 2) & (i + 1 < len) THEN  c2 := ew.lines[li][i + 1]  END;
-        IF (seqLen >= 3) & (i + 2 < len) THEN  c3 := ew.lines[li][i + 2]  END;
-        IF (seqLen >= 4) & (i + 3 < len) THEN  c4 := ew.lines[li][i + 3]  END;
-        IF c2 = 0X THEN
-          TUI.PutCell(innerX + sc, sy, ch, fg, bg)
-        ELSE
-          TUI.PutCellMB(innerX + sc, sy, ch, c2, c3, c4, fg, bg)
-        END
-      END;
-
-      INC(vc);
-      i := i + seqLen
-    END
+(* ── Determine colour ── *)
+IF closingParen THEN
+  fg := TUI.Green;  closingParen := FALSE
+ELSIF depth > 0 THEN
+  fg := TUI.Green;
+  IF (ch = '*') & (nextCh = ')') THEN
+    IF depth > 0 THEN  DEC(depth)  END;
+    closingParen := TRUE
   END
-  (* Cells beyond line length remain as spaces from DrawEditor's FillRect. *)
+ELSIF inStr THEN
+  fg := TUI.Yellow;
+  IF ch = '"' THEN  inStr := FALSE  END
+ELSIF i < kwEnd THEN
+  fg := kwFg
+ELSIF (ch = '(') & (nextCh = '*') THEN
+  INC(depth);  fg := TUI.Green
+ELSIF ch = '"' THEN
+  inStr := TRUE;  fg := TUI.Yellow
+ELSIF (ch >= 'A') & (ch <= 'Z') THEN
+  (* Scan ahead for the full identifier (ASCII only). *)
+  j := i;
+  WHILE (j < len) &
+  (((ew.lines[li][j] >= 'A') & (ew.lines[li][j] <= 'Z')) OR
+  ((ew.lines[li][j] >= 'a') & (ew.lines[li][j] <= 'z')) OR
+  ((ew.lines[li][j] >= '0') & (ew.lines[li][j] <= '9')) OR
+  (ew.lines[li][j] = '_')) DO
+    INC(j)
+  END;
+  kwLen := j - i;
+  IF IsKeyword(ew.lines[li], i, kwLen) THEN
+    kwEnd := i + kwLen;  kwFg := TUI.Cyan;  fg := TUI.Cyan
+  ELSE
+    fg := TUI.White
+  END
+ELSE
+  fg := TUI.White
+END;
+
+(* ── Output into the TUI back buffer if in the visible column range ── *)
+sc := vc - leftVcol;
+IF (sc >= 0) & (sc < innerW) THEN
+  IF InSel(ew, li, i) THEN  bg := TUI.Blue  ELSE  bg := TUI.Black  END;
+  (* Gather continuation bytes so the whole sequence lives in one cell. *)
+  c2 := 0X;  c3 := 0X;  c4 := 0X;
+  IF (seqLen >= 2) & (i + 1 < len) THEN  c2 := ew.lines[li][i + 1]  END;
+  IF (seqLen >= 3) & (i + 2 < len) THEN  c3 := ew.lines[li][i + 2]  END;
+  IF (seqLen >= 4) & (i + 3 < len) THEN  c4 := ew.lines[li][i + 3]  END;
+  IF c2 = 0X THEN
+    TUI.PutCell(innerX + sc, sy, ch, fg, bg)
+  ELSE
+    TUI.PutCellMB(innerX + sc, sy, ch, c2, c3, c4, fg, bg)
+  END
+END;
+
+INC(vc);
+i := i + seqLen
+END
+END
+(* Cells beyond line length remain as spaces from DrawEditor's FillRect. *)
 END RenderEdLine;
 
 (* Draw an editor window — called by TUI.DrawAll via the view's draw proc. *)
 PROCEDURE DrawEditor(v: TUI.View);
 VAR innerX, innerY, innerW, innerH, row, li, gw: INTEGER;
-    titleBuf: ARRAY 260 OF CHAR;
-    tlen, tx, borderFg, borderBg, titleFg: INTEGER;
+titleBuf: ARRAY 260 OF CHAR;
+tlen, tx, borderFg, borderBg, titleFg: INTEGER;
 BEGIN
   WITH v: EditorWinRec DO
     gw     := GutterW(v);
@@ -1405,31 +1407,31 @@ BEGIN
 
     (* ── Title (filename + modified indicator) ── *)
     IF v.title[0] = 0X THEN  Strings.Copy("[untitled]", titleBuf)
-    ELSE  Strings.Copy(v.title, titleBuf)
-    END;
-    IF v.modified THEN  Strings.Append(" *", titleBuf)  END;
-    tlen := Strings.Length(titleBuf);
-    IF tlen > v.w - 4 THEN  tlen := v.w - 4  END;
-    titleBuf[tlen] := 0X;
-    tx := v.x + (v.w - tlen) DIV 2;
-    TUI.PutStr(tx, v.y, titleBuf, titleFg, borderBg);
+  ELSE  Strings.Copy(v.title, titleBuf)
+END;
+IF v.modified THEN  Strings.Append(" *", titleBuf)  END;
+tlen := Strings.Length(titleBuf);
+IF tlen > v.w - 4 THEN  tlen := v.w - 4  END;
+titleBuf[tlen] := 0X;
+tx := v.x + (v.w - tlen) DIV 2;
+TUI.PutStr(tx, v.y, titleBuf, titleFg, borderBg);
 
-    (* ── Gutter + editor content ── *)
-    ComputeDepths(v);
-    FOR row := 0 TO innerH - 1 DO
-      li := v.topLine + row;
-      IF li < v.nlines THEN
-        DrawGutter(v.x + 1, innerY + row, gw, li, v.cy);
-        RenderEdLine(v, li, innerX, innerY + row, v.leftCol, innerW, v.cmtDepth[li])
-      END
-    END
+(* ── Gutter + editor content ── *)
+ComputeDepths(v);
+FOR row := 0 TO innerH - 1 DO
+  li := v.topLine + row;
+  IF li < v.nlines THEN
+    DrawGutter(v.x + 1, innerY + row, gw, li, v.cy);
+    RenderEdLine(v, li, innerX, innerY + row, v.leftCol, innerW, v.cmtDepth[li])
   END
+END
+END
 END DrawEditor;
 
 (* Handle keyboard and mouse events for an editor window. *)
 PROCEDURE HandleEditor(v: TUI.View; ev: TUI.Event): BOOLEAN;
 VAR ch: CHAR;
-    bytes: ARRAY 4 OF CHAR;
+bytes: ARRAY 4 OF CHAR;
 BEGIN
   WITH v: EditorWinRec DO
     IF ev.kind = TUI.EvKey THEN
@@ -1443,144 +1445,144 @@ BEGIN
       ELSIF ch = TUI.KLeft THEN
         ClearSel(v);
         IF v.cx > 0 THEN  Utf8Back(v.lines[v.cy], v.cx)
-        ELSIF v.cy > 0 THEN  DEC(v.cy);  v.cx := LineLen(v, v.cy)
-        END
-      ELSIF ch = TUI.KRight THEN
-        ClearSel(v);
-        IF v.cx < LineLen(v, v.cy) THEN  Utf8Fwd(v.lines[v.cy], v.cx)
-        ELSIF v.cy < v.nlines - 1 THEN  INC(v.cy);  v.cx := 0
-        END
-      ELSIF ch = TUI.KHome THEN
-        ClearSel(v);  v.cy := 0;  v.cx := 0
-      ELSIF ch = TUI.KEnd THEN
-        ClearSel(v);  v.cy := v.nlines - 1;  v.cx := LineLen(v, v.cy)
-      ELSIF ch = TUI.KCtrlHome THEN
-        ClearSel(v);  v.cx := 0
-      ELSIF ch = TUI.KCtrlEnd THEN
-        ClearSel(v);  v.cx := LineLen(v, v.cy)
-      ELSIF ch = TUI.KCtrlLeft THEN
-        ClearSel(v);  WordLeft(v)
-      ELSIF ch = TUI.KCtrlRight THEN
-        ClearSel(v);  WordRight(v)
-      ELSIF ch = TUI.KPgUp THEN
-        ClearSel(v);  DEC(v.cy, v.h - 2);  ClampCursor(v)
-      ELSIF ch = TUI.KPgDn THEN
-        ClearSel(v);  INC(v.cy, v.h - 2);  ClampCursor(v)
-
-      (* ── Shift+Arrow: extend selection ── *)
-      ELSIF ch = TUI.KShiftLeft THEN
-        IF ~v.selActive THEN  StartSel(v)  END;
-        IF v.cx > 0 THEN  Utf8Back(v.lines[v.cy], v.cx)
-        ELSIF v.cy > 0 THEN  DEC(v.cy);  v.cx := LineLen(v, v.cy)
-        END
-      ELSIF ch = TUI.KShiftRight THEN
-        IF ~v.selActive THEN  StartSel(v)  END;
-        IF v.cx < LineLen(v, v.cy) THEN  Utf8Fwd(v.lines[v.cy], v.cx)
-        ELSIF v.cy < v.nlines - 1 THEN  INC(v.cy);  v.cx := 0
-        END
-      ELSIF ch = TUI.KShiftUp THEN
-        IF ~v.selActive THEN  StartSel(v)  END;
-        DEC(v.cy);  ClampCursor(v)
-      ELSIF ch = TUI.KShiftDown THEN
-        IF ~v.selActive THEN  StartSel(v)  END;
-        INC(v.cy);  ClampCursor(v)
-
-      (* ── Editing: delete selection first where applicable ── *)
-      ELSIF ch = TUI.KEnter THEN
-        IF v.selActive THEN  DeleteSel(v)  END;
-        DoEnter(v)
-      ELSIF ch = TUI.KBackspace THEN
-        IF v.selActive THEN  DeleteSel(v)
-        ELSE  DoBackspace(v)
-        END
-      ELSIF ch = TUI.KDel THEN
-        IF v.selActive THEN  DeleteSel(v)
-        ELSE  DoDelete(v)
-        END
-      ELSIF ch = TUI.KTab THEN
-        IF v.selActive THEN  DeleteSel(v)  END;
-        PushUndo(v, UOpEdit, v.cy);
-        bytes[0] := ' ';  bytes[1] := ' ';  bytes[2] := ' ';  bytes[3] := ' ';
-        InsertBytesAt(v, v.cy, v.cx, bytes, 4);
-        INC(v.cx, 4)
-
-      (* ── Control commands ── *)
-      ELSIF ORD(ch) = 1  THEN  DoSelAll(v)       (* Ctrl+A: select all  *)
-      ELSIF ORD(ch) = 3  THEN  DoCopy(v)         (* Ctrl+C: copy        *)
-      ELSIF ORD(ch) = 22 THEN  DoPaste(v)        (* Ctrl+V: paste       *)
-      ELSIF ORD(ch) = 24 THEN  DoCut(v)          (* Ctrl+X: cut         *)
-      ELSIF ORD(ch) = 11 THEN  ClearSel(v);  DoKillLine(v)  (* Ctrl+K  *)
-      ELSIF ORD(ch) = 25 THEN  ClearSel(v);  DoYank(v)      (* Ctrl+Y  *)
-      ELSIF ORD(ch) = 26 THEN  ClearSel(v);  DoUndo(v)      (* Ctrl+Z  *)
-      ELSIF ORD(ch) = 6  THEN                    (* Ctrl+F: find        *)
-        promptMode := 1;
-        promptBuf[0] := 0X;  promptPos := 0;
-        Strings.Copy("Find: ", statusMsg)
-      ELSIF ORD(ch) = 7  THEN                    (* Ctrl+G: goto line   *)
-        promptMode := 2;
-        promptBuf[0] := 0X;  promptPos := 0;
-        Strings.Copy("Go to line: ", statusMsg)
-      ELSIF ORD(ch) = 18 THEN                    (* Ctrl+R: replace     *)
-        promptMode := 5;
-        promptBuf[0] := 0X;  promptPos := 0;
-        replaceBuf[0] := 0X;  replacePos := 0;
-        Strings.Copy("Find: ", statusMsg)
-
-      (* ── Printable characters ── *)
-      ELSIF (ORD(ch) >= 32) & (ORD(ch) < 127) THEN
-        IF v.selActive THEN  DeleteSel(v)  END;
-        PushUndo(v, UOpEdit, v.cy);
-        bytes[0] := ch;
-        InsertBytesAt(v, v.cy, v.cx, bytes, 1);
-        INC(v.cx);
-        CheckAutoDeindent(v)
-      END;
-      ScrollToCursor(v);
-      RETURN TRUE
-
-    ELSIF ev.kind = TUI.EvMouse THEN
-      IF (ev.mb = 0) & (ev.my = v.y) &   (* close-box click *)
-         (ev.mx >= v.x + 1) & (ev.mx <= v.x + 3) THEN
-        pendingClose := TRUE;
-        RETURN TRUE
-      ELSIF ev.mb = 64 THEN       (* wheel up *)
-        IF v.topLine > 0 THEN  DEC(v.topLine, 3) END;
-        IF v.topLine < 0 THEN  v.topLine := 0 END
-      ELSIF ev.mb = 65 THEN    (* wheel down *)
-        INC(v.topLine, 3);
-        IF v.topLine > v.nlines - 1 THEN  v.topLine := v.nlines - 1 END
-      ELSIF (ev.mb = 0) &      (* left press inside content area *)
-         (ev.mx >= v.x + 1) & (ev.mx <= v.x + v.w - 2) &
-         (ev.my >= v.y + 1) & (ev.my <= v.y + v.h - 2) THEN
-        ClearSel(v);
-        v.cy := v.topLine + (ev.my - v.y - 1);
-        IF ev.mx < v.x + 1 + GutterW(v) THEN
-          v.cx := 0
-        ELSE
-          v.cx := v.leftCol + (ev.mx - v.x - 1 - GutterW(v))
-        END;
-        ClampCursor(v);  ScrollToCursor(v);
-        (* Remember anchor for drag; selActive stays FALSE until drag moves *)
-        v.selAnchorLine := v.cy;  v.selAnchorCol := v.cx;
-        v.mouseSelDrag  := TRUE
-      ELSIF (ev.mb = 32) & v.mouseSelDrag &   (* drag with left button *)
-         (ev.mx >= v.x + 1) & (ev.mx <= v.x + v.w - 2) &
-         (ev.my >= v.y + 1) & (ev.my <= v.y + v.h - 2) THEN
-        IF ~v.selActive THEN  v.selActive := TRUE  END;
-        v.cy := v.topLine + (ev.my - v.y - 1);
-        IF ev.mx < v.x + 1 + GutterW(v) THEN
-          v.cx := 0
-        ELSE
-          v.cx := v.leftCol + (ev.mx - v.x - 1 - GutterW(v))
-        END;
-        ClampCursor(v)
-      ELSIF ev.mb = 3 THEN     (* any release *)
-        v.mouseSelDrag := FALSE
-      END;
-      RETURN TRUE
+      ELSIF v.cy > 0 THEN  DEC(v.cy);  v.cx := LineLen(v, v.cy)
     END
+  ELSIF ch = TUI.KRight THEN
+    ClearSel(v);
+    IF v.cx < LineLen(v, v.cy) THEN  Utf8Fwd(v.lines[v.cy], v.cx)
+  ELSIF v.cy < v.nlines - 1 THEN  INC(v.cy);  v.cx := 0
+END
+ELSIF ch = TUI.KHome THEN
+  ClearSel(v);  v.cy := 0;  v.cx := 0
+ELSIF ch = TUI.KEnd THEN
+  ClearSel(v);  v.cy := v.nlines - 1;  v.cx := LineLen(v, v.cy)
+ELSIF ch = TUI.KCtrlHome THEN
+  ClearSel(v);  v.cx := 0
+ELSIF ch = TUI.KCtrlEnd THEN
+  ClearSel(v);  v.cx := LineLen(v, v.cy)
+ELSIF ch = TUI.KCtrlLeft THEN
+  ClearSel(v);  WordLeft(v)
+ELSIF ch = TUI.KCtrlRight THEN
+  ClearSel(v);  WordRight(v)
+ELSIF ch = TUI.KPgUp THEN
+  ClearSel(v);  DEC(v.cy, v.h - 2);  ClampCursor(v)
+ELSIF ch = TUI.KPgDn THEN
+  ClearSel(v);  INC(v.cy, v.h - 2);  ClampCursor(v)
+
+  (* ── Shift+Arrow: extend selection ── *)
+ELSIF ch = TUI.KShiftLeft THEN
+  IF ~v.selActive THEN  StartSel(v)  END;
+  IF v.cx > 0 THEN  Utf8Back(v.lines[v.cy], v.cx)
+ELSIF v.cy > 0 THEN  DEC(v.cy);  v.cx := LineLen(v, v.cy)
+END
+ELSIF ch = TUI.KShiftRight THEN
+  IF ~v.selActive THEN  StartSel(v)  END;
+  IF v.cx < LineLen(v, v.cy) THEN  Utf8Fwd(v.lines[v.cy], v.cx)
+ELSIF v.cy < v.nlines - 1 THEN  INC(v.cy);  v.cx := 0
+END
+ELSIF ch = TUI.KShiftUp THEN
+  IF ~v.selActive THEN  StartSel(v)  END;
+  DEC(v.cy);  ClampCursor(v)
+ELSIF ch = TUI.KShiftDown THEN
+  IF ~v.selActive THEN  StartSel(v)  END;
+  INC(v.cy);  ClampCursor(v)
+
+  (* ── Editing: delete selection first where applicable ── *)
+ELSIF ch = TUI.KEnter THEN
+  IF v.selActive THEN  DeleteSel(v)  END;
+  DoEnter(v)
+ELSIF ch = TUI.KBackspace THEN
+  IF v.selActive THEN  DeleteSel(v)
+ELSE  DoBackspace(v)
+END
+ELSIF ch = TUI.KDel THEN
+  IF v.selActive THEN  DeleteSel(v)
+ELSE  DoDelete(v)
+END
+ELSIF ch = TUI.KTab THEN
+  IF v.selActive THEN  DeleteSel(v)  END;
+  PushUndo(v, UOpEdit, v.cy);
+  bytes[0] := ' ';  bytes[1] := ' ';  bytes[2] := ' ';  bytes[3] := ' ';
+  InsertBytesAt(v, v.cy, v.cx, bytes, 4);
+  INC(v.cx, 4)
+
+  (* ── Control commands ── *)
+ELSIF ORD(ch) = 1  THEN  DoSelAll(v)       (* Ctrl+A: select all  *)
+ELSIF ORD(ch) = 3  THEN  DoCopy(v)         (* Ctrl+C: copy        *)
+ELSIF ORD(ch) = 22 THEN  DoPaste(v)        (* Ctrl+V: paste       *)
+ELSIF ORD(ch) = 24 THEN  DoCut(v)          (* Ctrl+X: cut         *)
+ELSIF ORD(ch) = 11 THEN  ClearSel(v);  DoKillLine(v)  (* Ctrl+K  *)
+ELSIF ORD(ch) = 25 THEN  ClearSel(v);  DoYank(v)      (* Ctrl+Y  *)
+ELSIF ORD(ch) = 26 THEN  ClearSel(v);  DoUndo(v)      (* Ctrl+Z  *)
+ELSIF ORD(ch) = 6  THEN                    (* Ctrl+F: find        *)
+promptMode := 1;
+promptBuf[0] := 0X;  promptPos := 0;
+Strings.Copy("Find: ", statusMsg)
+ELSIF ORD(ch) = 7  THEN                    (* Ctrl+G: goto line   *)
+promptMode := 2;
+promptBuf[0] := 0X;  promptPos := 0;
+Strings.Copy("Go to line: ", statusMsg)
+ELSIF ORD(ch) = 18 THEN                    (* Ctrl+R: replace     *)
+promptMode := 5;
+promptBuf[0] := 0X;  promptPos := 0;
+replaceBuf[0] := 0X;  replacePos := 0;
+Strings.Copy("Find: ", statusMsg)
+
+(* ── Printable characters ── *)
+ELSIF (ORD(ch) >= 32) & (ORD(ch) < 127) THEN
+  IF v.selActive THEN  DeleteSel(v)  END;
+  PushUndo(v, UOpEdit, v.cy);
+  bytes[0] := ch;
+  InsertBytesAt(v, v.cy, v.cx, bytes, 1);
+  INC(v.cx);
+  CheckAutoDeindent(v)
+END;
+ScrollToCursor(v);
+RETURN TRUE
+
+ELSIF ev.kind = TUI.EvMouse THEN
+  IF (ev.mb = 0) & (ev.my = v.y) &   (* close-box click *)
+  (ev.mx >= v.x + 1) & (ev.mx <= v.x + 3) THEN
+    pendingClose := TRUE;
+    RETURN TRUE
+  ELSIF ev.mb = 64 THEN       (* wheel up *)
+  IF v.topLine > 0 THEN  DEC(v.topLine, 3) END;
+  IF v.topLine < 0 THEN  v.topLine := 0 END
+ELSIF ev.mb = 65 THEN    (* wheel down *)
+INC(v.topLine, 3);
+IF v.topLine > v.nlines - 1 THEN  v.topLine := v.nlines - 1 END
+ELSIF (ev.mb = 0) &      (* left press inside content area *)
+(ev.mx >= v.x + 1) & (ev.mx <= v.x + v.w - 2) &
+(ev.my >= v.y + 1) & (ev.my <= v.y + v.h - 2) THEN
+  ClearSel(v);
+  v.cy := v.topLine + (ev.my - v.y - 1);
+  IF ev.mx < v.x + 1 + GutterW(v) THEN
+    v.cx := 0
+  ELSE
+    v.cx := v.leftCol + (ev.mx - v.x - 1 - GutterW(v))
   END;
-  RETURN FALSE
+  ClampCursor(v);  ScrollToCursor(v);
+  (* Remember anchor for drag; selActive stays FALSE until drag moves *)
+  v.selAnchorLine := v.cy;  v.selAnchorCol := v.cx;
+  v.mouseSelDrag  := TRUE
+ELSIF (ev.mb = 32) & v.mouseSelDrag &   (* drag with left button *)
+(ev.mx >= v.x + 1) & (ev.mx <= v.x + v.w - 2) &
+(ev.my >= v.y + 1) & (ev.my <= v.y + v.h - 2) THEN
+  IF ~v.selActive THEN  v.selActive := TRUE  END;
+  v.cy := v.topLine + (ev.my - v.y - 1);
+  IF ev.mx < v.x + 1 + GutterW(v) THEN
+    v.cx := 0
+  ELSE
+    v.cx := v.leftCol + (ev.mx - v.x - 1 - GutterW(v))
+  END;
+  ClampCursor(v)
+ELSIF ev.mb = 3 THEN     (* any release *)
+v.mouseSelDrag := FALSE
+END;
+RETURN TRUE
+END
+END;
+RETURN FALSE
 END HandleEditor;
 
 (* ════════════════════════════════════════════════════════════════
@@ -1590,45 +1592,42 @@ END HandleEditor;
 (* Tile all EditorWins across the desktop interior
    (between menubar row 1 and statusline row TUI.Rows). *)
 PROCEDURE TileEditorWins;
-VAR i, n, row, col, cellW, cellH, x, y: INTEGER;
-    ewArr: ARRAY MaxWins OF EditorWin;
-    ew: EditorWin;
-    v: TUI.View;
+VAR i, n, row, col, cellW, cellH, x, y, edLeft, edCols: INTEGER;
+ewArr: ARRAY MaxWins OF EditorWin;
 BEGIN
-  (* Collect living EditorWins — scan the full array, not just 0..winCount-1,
-     because closing a window can leave NIL gaps below live entries. *)
   n := 0;
   FOR i := 0 TO MaxWins - 1 DO
-    IF wins[i] # NIL THEN
-      ewArr[n] := wins[i];  INC(n)
-    END
+    IF wins[i] # NIL THEN  ewArr[n] := wins[i];  INC(n)  END
   END;
   IF n = 0 THEN  RETURN  END;
 
-  (* Simple tiling: up to 2 columns *)
-  IF n = 1 THEN
-    col := 1;  row := 1
+  IF pane # NIL THEN
+    edLeft := ProjPaneW + 1;
+    edCols := TUI.Cols - ProjPaneW
   ELSE
-    col := 2;  row := (n + 1) DIV 2
+    edLeft := 1;
+    edCols := TUI.Cols
   END;
-  cellW := TUI.Cols DIV col;
-  cellH := (TUI.Rows - 2) DIV row;  (* rows 2..Rows-1 *)
 
-  FOR i := 0 TO n - 1 DO
-    x := (i MOD col) * cellW + 1;
-    y := (i DIV col) * cellH + 2;
-    ewArr[i].x := x;
-    ewArr[i].y := y;
-    ewArr[i].w := cellW;
-    ewArr[i].h := cellH
-  END;
-  zoomedWin := NIL;
-  TUI.InvalidateFront()
+  IF n = 1 THEN  col := 1;  row := 1
+ELSE           col := 2;  row := (n + 1) DIV 2
+END;
+cellW := edCols DIV col;
+cellH := (TUI.Rows - 2) DIV row;
+
+FOR i := 0 TO n - 1 DO
+  x := edLeft + (i MOD col) * cellW;
+  y := (i DIV col) * cellH + 2;
+  ewArr[i].x := x;       ewArr[i].y := y;
+  ewArr[i].w := cellW;   ewArr[i].h := cellH
+END;
+zoomedWin := NIL;
+TUI.InvalidateFront();
 END TileEditorWins;
 
 PROCEDURE NewEditorWin(): EditorWin;
 VAR ew: EditorWin;
-    i: INTEGER;
+i: INTEGER;
 BEGIN
   IF winCount >= MaxWins THEN  RETURN NIL  END;
   NEW(ew);
@@ -1695,7 +1694,7 @@ END FocusedEditor;
    Calling again (or Tile Windows) restores the tiled layout. *)
 PROCEDURE ZoomCurrentWin;
 VAR ew: EditorWin;
-    i: INTEGER;
+i: INTEGER;
 BEGIN
   ew := FocusedEditor();
   IF ew = NIL THEN  ew := lastEditor  END;
@@ -1716,8 +1715,10 @@ BEGIN
         wins[i].y := 2
       END
     END;
-    ew.x := 1;  ew.y := 2;
-    ew.w := TUI.Cols;  ew.h := TUI.Rows - 2;
+    ew.x := ProjPaneW + 1;
+    ew.w := TUI.Cols - ProjPaneW;
+    ew.y := 2;
+    ew.h := TUI.Rows - 2;
     TUI.BringToFront(ew);
     TUI.SetFocus(ew);
     TUI.InvalidateFront();
@@ -1727,7 +1728,7 @@ END ZoomCurrentWin;
 
 PROCEDURE NextEditorWin;
 VAR i, cur, next: INTEGER;
-    ew: EditorWin;
+ew: EditorWin;
 BEGIN
   ew := FocusedEditor();
   IF ew = NIL THEN  ew := lastEditor  END;
@@ -1754,7 +1755,7 @@ BEGIN
     END;
     TUI.BringToFront(wins[next]);
     TUI.SetFocus(wins[next]);
-    TUI.InvalidateFront()
+    TUI.InvalidateFront();
   END
 END NextEditorWin;
 
@@ -1765,7 +1766,7 @@ END NextEditorWin;
 (* Resolve a relative path to absolute by prepending the cwd. *)
 PROCEDURE AbsPath(rel: ARRAY OF CHAR; VAR abs: ARRAY OF CHAR);
 VAR cwd: ARRAY 512 OF CHAR;
-    n: INTEGER;
+n: INTEGER;
 BEGIN
   IF rel[0] = '/' THEN
     Strings.Copy(rel, abs)
@@ -1780,9 +1781,9 @@ END AbsPath;
 
 PROCEDURE LoadFile(ew: EditorWin; name: ARRAY OF CHAR): BOOLEAN;
 VAR f: Files.File;
-    r: Files.Rider;
-    b: BYTE;
-    li, col: INTEGER;
+r: Files.Rider;
+b: BYTE;
+li, col: INTEGER;
 BEGIN
   f := Files.Old(name);
   IF f = NIL THEN  RETURN FALSE  END;
@@ -1792,45 +1793,45 @@ BEGIN
   Files.Read(r, b);
   WHILE ~r.eof DO
     IF b = 10 THEN   (* newline *)
-      ew.lines[li][col] := 0X;
-      INC(li);
-      IF li >= MaxLines THEN
-        li := MaxLines - 1;
-        WHILE ~r.eof DO  Files.Read(r, b)  END
-      ELSE
-        col := 0;  ew.lines[li][0] := 0X
-      END
-    ELSIF b # 13 THEN  (* skip CR *)
-      IF col < LLEN - 1 THEN
-        IF b = 9 THEN   (* tab → 4 spaces *)
-          WHILE (col < LLEN - 1) & (col MOD 4 # 0) DO
-            ew.lines[li][col] := ' ';  INC(col)
-          END;
-          ew.lines[li][col] := ' ';  INC(col)
-        ELSE
-          ew.lines[li][col] := CHR(b);  INC(col)
-        END
-      END
+    ew.lines[li][col] := 0X;
+    INC(li);
+    IF li >= MaxLines THEN
+      li := MaxLines - 1;
+      WHILE ~r.eof DO  Files.Read(r, b)  END
+    ELSE
+      col := 0;  ew.lines[li][0] := 0X
+    END
+  ELSIF b # 13 THEN  (* skip CR *)
+  IF col < LLEN - 1 THEN
+    IF b = 9 THEN   (* tab → 4 spaces *)
+    WHILE (col < LLEN - 1) & (col MOD 4 # 0) DO
+      ew.lines[li][col] := ' ';  INC(col)
     END;
-    Files.Read(r, b)
-  END;
-  ew.lines[li][col] := 0X;
-  ew.nlines := li + 1;
-  Files.Close(f);
-  AbsPath(name, ew.title);
-  ew.cx := 0;  ew.cy := 0;
-  ew.topLine := 0;  ew.leftCol := 0;
-  ew.modified := FALSE;
-  ew.undoTop := 0;  ew.undoCount := 0;
-  ew.selActive := FALSE;
-  RETURN TRUE
+    ew.lines[li][col] := ' ';  INC(col)
+  ELSE
+    ew.lines[li][col] := CHR(b);  INC(col)
+  END
+END
+END;
+Files.Read(r, b)
+END;
+ew.lines[li][col] := 0X;
+ew.nlines := li + 1;
+Files.Close(f);
+AbsPath(name, ew.title);
+ew.cx := 0;  ew.cy := 0;
+ew.topLine := 0;  ew.leftCol := 0;
+ew.modified := FALSE;
+ew.undoTop := 0;  ew.undoCount := 0;
+ew.selActive := FALSE;
+RETURN TRUE
 END LoadFile;
 
 PROCEDURE SaveFile(ew: EditorWin): BOOLEAN;
 VAR f: Files.File;
-    r: Files.Rider;
-    b: BYTE;
-    li, col, len: INTEGER;
+r: Files.Rider;
+b: BYTE;
+li, col, len: INTEGER;
 BEGIN
   IF ew.title[0] = 0X THEN  RETURN FALSE  END;
   f := Files.New(ew.title);
@@ -1858,14 +1859,14 @@ END SaveFile;
    "examples/foo.mod" → "examples/foo" *)
 PROCEDURE BinName(title: ARRAY OF CHAR; VAR bin: ARRAY OF CHAR);
 VAR i: INTEGER;
-    hasSlash: BOOLEAN;
-    tmp: ARRAY 516 OF CHAR;
+hasSlash: BOOLEAN;
+tmp: ARRAY 516 OF CHAR;
 BEGIN
   Strings.Copy(title, bin);
   i := Strings.Length(bin);
   (* strip ".mod" suffix *)
   IF (i >= 4) & (bin[i-4] = '.') &
-     (bin[i-3] = 'm') & (bin[i-2] = 'o') & (bin[i-1] = 'd') THEN
+  (bin[i-3] = 'm') & (bin[i-2] = 'o') & (bin[i-1] = 'd') THEN
     bin[i-4] := 0X
   END;
   (* If path has no '/' it won't execute without a prefix; prepend "./" *)
@@ -1908,9 +1909,9 @@ END ParseErrorLoc;
 
 PROCEDURE JumpToError;
 VAR ew: EditorWin;
-    i:  INTEGER;
-    base: ARRAY 512 OF CHAR;
-    elen: INTEGER;
+i:  INTEGER;
+base: ARRAY 512 OF CHAR;
+elen: INTEGER;
 BEGIN
   IF errorLine <= 0 THEN
     Strings.Copy("No error location.", statusMsg);  RETURN
@@ -1926,7 +1927,7 @@ BEGIN
         (* match on basename: errorFile ends with title or title ends with errorFile *)
         IF Strings.Length(wins[i].title) <= elen THEN
           Strings.Extract(errorFile, elen - Strings.Length(wins[i].title),
-                          Strings.Length(wins[i].title), base);
+          Strings.Length(wins[i].title), base);
           IF Strings.Compare(base, wins[i].title) = 0 THEN  ew := wins[i]  END
         END
       END
@@ -1943,22 +1944,22 @@ BEGIN
   ew.cy := i;  ew.cx := 0;
   (* Scroll so the error line is visible *)
   IF ew.cy < ew.topLine THEN  ew.topLine := ew.cy
-  ELSIF ew.cy >= ew.topLine + (ew.h - 2) THEN
-    ew.topLine := ew.cy - (ew.h - 2) DIV 2
-  END;
-  TUI.SetFocus(ew);
-  Strings.Copy("Error at line ", statusMsg);
-  Strings.IntToStr(errorLine, base);
-  Strings.Append(base, statusMsg)
+ELSIF ew.cy >= ew.topLine + (ew.h - 2) THEN
+  ew.topLine := ew.cy - (ew.h - 2) DIV 2
+END;
+TUI.SetFocus(ew);
+Strings.Copy("Error at line ", statusMsg);
+Strings.IntToStr(errorLine, base);
+Strings.Append(base, statusMsg)
 END JumpToError;
 
 PROCEDURE Compile(ew: EditorWin);
 VAR cmd: ARRAY 512 OF CHAR;
-    f: Files.File;
-    r: Files.Rider;
-    b: BYTE;
-    outBuf: ARRAY 200 OF CHAR;
-    i, rc: INTEGER;
+f: Files.File;
+r: Files.Rider;
+b: BYTE;
+outBuf: ARRAY 200 OF CHAR;
+i, rc: INTEGER;
 BEGIN
   IF ew = NIL THEN
     Strings.Copy("No file open.", statusMsg);  RETURN
@@ -2009,8 +2010,8 @@ END Compile;
 PROCEDURE RunInTerminal(cmd: ARRAY OF CHAR);
 VAR fullCmd: ARRAY 640 OF CHAR;
 BEGIN
-      TUI.Suspend();
-      Terminal.Restore();
+  TUI.Suspend();
+  Terminal.Restore();
   Terminal.Clear();
   Strings.Copy(cmd, fullCmd);
   (* Read from /dev/tty so stale mouse-event bytes in stdin don't fool read *)
@@ -2037,8 +2038,8 @@ END CompileAndRun;
 
 PROCEDURE HandlePrompt(ev: TUI.Event);
 VAR ch: CHAR;
-    n, i: INTEGER;
-    ew: EditorWin;
+n, i: INTEGER;
+ew: EditorWin;
 BEGIN
   IF ev.kind # TUI.EvKey THEN  RETURN  END;
   ch := ev.key;
@@ -2110,96 +2111,96 @@ BEGIN
 
   IF ch = TUI.KEnter THEN
     IF promptMode = 1 THEN       (* find *)
-      IF ew # NIL THEN
-        Strings.Copy(promptBuf, ew.srchBuf);
-        IF DoFind(ew) THEN
-          ScrollToCursor(ew);
-          Strings.Copy("Found.", statusMsg)
-        ELSE
-          Strings.Copy("Not found.", statusMsg)
-        END
-      END;
-      promptMode := 0;  promptBuf[0] := 0X;
-      IF lastEditor # NIL THEN  TUI.SetFocus(lastEditor)  END
-    ELSIF promptMode = 2 THEN    (* goto line *)
-      n := 0;  i := 0;
-      WHILE (promptBuf[i] >= '0') & (promptBuf[i] <= '9') DO
-        n := n * 10 + (ORD(promptBuf[i]) - ORD('0'));  INC(i)
-      END;
-      IF ew # NIL THEN
-        DEC(n);
-        IF n < 0 THEN  n := 0  END;
-        IF n >= ew.nlines THEN  n := ew.nlines - 1  END;
-        ew.cy := n;  ew.cx := 0;
-        ScrollToCursor(ew)
-      END;
-      statusMsg[0] := 0X;
-      promptMode := 0;  promptBuf[0] := 0X;
-      IF lastEditor # NIL THEN  TUI.SetFocus(lastEditor)  END
-    ELSIF promptMode = 5 THEN    (* replace: Enter moves to With field *)
-      Strings.Copy(promptBuf, promptBuf);  (* keep search term in promptBuf *)
-      promptMode := 6;
-      replacePos := 0;  replaceBuf[0] := 0X;
-      Strings.Copy("Find: ", statusMsg);  Strings.Append(promptBuf, statusMsg);
-      Strings.Append("  With: ", statusMsg)
-    ELSIF promptMode = 6 THEN    (* replace: Enter starts replace *)
-      IF ew # NIL THEN
-        Strings.Copy(promptBuf, ew.srchBuf);
-        ew.cy := 0;  ew.cx := 0;
-        IF DoFind(ew) THEN
-          ScrollToCursor(ew);
-          promptMode := 7;
-          Strings.Copy("Replace (Y/N/A/Esc): ", statusMsg);
-          Strings.Append(ew.srchBuf, statusMsg)
-        ELSE
-          Strings.Copy("Not found.", statusMsg);
-          promptMode := 0;  promptBuf[0] := 0X;
-          IF lastEditor # NIL THEN  TUI.SetFocus(lastEditor)  END
-        END
+    IF ew # NIL THEN
+      Strings.Copy(promptBuf, ew.srchBuf);
+      IF DoFind(ew) THEN
+        ScrollToCursor(ew);
+        Strings.Copy("Found.", statusMsg)
+      ELSE
+        Strings.Copy("Not found.", statusMsg)
       END
     END;
-    RETURN
+    promptMode := 0;  promptBuf[0] := 0X;
+    IF lastEditor # NIL THEN  TUI.SetFocus(lastEditor)  END
+  ELSIF promptMode = 2 THEN    (* goto line *)
+  n := 0;  i := 0;
+  WHILE (promptBuf[i] >= '0') & (promptBuf[i] <= '9') DO
+    n := n * 10 + (ORD(promptBuf[i]) - ORD('0'));  INC(i)
   END;
-
-  (* Tab in search field moves to With field *)
-  IF (ch = 9X) & (promptMode = 5) THEN
-    promptMode := 6;
-    replacePos := 0;  replaceBuf[0] := 0X;
-    Strings.Copy("Find: ", statusMsg);  Strings.Append(promptBuf, statusMsg);
-    Strings.Append("  With: ", statusMsg);
-    RETURN
+  IF ew # NIL THEN
+    DEC(n);
+    IF n < 0 THEN  n := 0  END;
+    IF n >= ew.nlines THEN  n := ew.nlines - 1  END;
+    ew.cy := n;  ew.cx := 0;
+    ScrollToCursor(ew)
   END;
-  (* Tab in With field moves back to search field *)
-  IF (ch = 9X) & (promptMode = 6) THEN
-    promptMode := 5;
-    promptPos := Strings.Length(promptBuf);
-    Strings.Copy("Find: ", statusMsg);  Strings.Append(promptBuf, statusMsg);
-    RETURN
-  END;
-
-  (* Edit the active field *)
-  IF promptMode = 6 THEN
-    IF ch = TUI.KBackspace THEN
-      IF replacePos > 0 THEN  DEC(replacePos);  replaceBuf[replacePos] := 0X  END
-    ELSIF (ORD(ch) >= 32) & (ORD(ch) < 127) & (replacePos < 127) THEN
-      replaceBuf[replacePos] := ch;  INC(replacePos);  replaceBuf[replacePos] := 0X
-    END;
-    Strings.Copy("Find: ", statusMsg);  Strings.Append(promptBuf, statusMsg);
-    Strings.Append("  With: ", statusMsg);  Strings.Append(replaceBuf, statusMsg)
+  statusMsg[0] := 0X;
+  promptMode := 0;  promptBuf[0] := 0X;
+  IF lastEditor # NIL THEN  TUI.SetFocus(lastEditor)  END
+ELSIF promptMode = 5 THEN    (* replace: Enter moves to With field *)
+Strings.Copy(promptBuf, promptBuf);  (* keep search term in promptBuf *)
+promptMode := 6;
+replacePos := 0;  replaceBuf[0] := 0X;
+Strings.Copy("Find: ", statusMsg);  Strings.Append(promptBuf, statusMsg);
+Strings.Append("  With: ", statusMsg)
+ELSIF promptMode = 6 THEN    (* replace: Enter starts replace *)
+IF ew # NIL THEN
+  Strings.Copy(promptBuf, ew.srchBuf);
+  ew.cy := 0;  ew.cx := 0;
+  IF DoFind(ew) THEN
+    ScrollToCursor(ew);
+    promptMode := 7;
+    Strings.Copy("Replace (Y/N/A/Esc): ", statusMsg);
+    Strings.Append(ew.srchBuf, statusMsg)
   ELSE
-    IF ch = TUI.KBackspace THEN
-      IF promptPos > 0 THEN  DEC(promptPos);  promptBuf[promptPos] := 0X  END
-    ELSIF (ORD(ch) >= 32) & (ORD(ch) < 127) & (promptPos < 127) THEN
-      promptBuf[promptPos] := ch;  INC(promptPos);  promptBuf[promptPos] := 0X
-    END;
-    IF promptMode = 1 THEN
-      Strings.Copy("Find: ", statusMsg);  Strings.Append(promptBuf, statusMsg)
-    ELSIF promptMode = 2 THEN
-      Strings.Copy("Go to line: ", statusMsg);  Strings.Append(promptBuf, statusMsg)
-    ELSIF promptMode = 5 THEN
-      Strings.Copy("Find: ", statusMsg);  Strings.Append(promptBuf, statusMsg)
-    END
+    Strings.Copy("Not found.", statusMsg);
+    promptMode := 0;  promptBuf[0] := 0X;
+    IF lastEditor # NIL THEN  TUI.SetFocus(lastEditor)  END
   END
+END
+END;
+RETURN
+END;
+
+(* Tab in search field moves to With field *)
+IF (ch = 9X) & (promptMode = 5) THEN
+  promptMode := 6;
+  replacePos := 0;  replaceBuf[0] := 0X;
+  Strings.Copy("Find: ", statusMsg);  Strings.Append(promptBuf, statusMsg);
+  Strings.Append("  With: ", statusMsg);
+  RETURN
+END;
+(* Tab in With field moves back to search field *)
+IF (ch = 9X) & (promptMode = 6) THEN
+  promptMode := 5;
+  promptPos := Strings.Length(promptBuf);
+  Strings.Copy("Find: ", statusMsg);  Strings.Append(promptBuf, statusMsg);
+  RETURN
+END;
+
+(* Edit the active field *)
+IF promptMode = 6 THEN
+  IF ch = TUI.KBackspace THEN
+    IF replacePos > 0 THEN  DEC(replacePos);  replaceBuf[replacePos] := 0X  END
+  ELSIF (ORD(ch) >= 32) & (ORD(ch) < 127) & (replacePos < 127) THEN
+    replaceBuf[replacePos] := ch;  INC(replacePos);  replaceBuf[replacePos] := 0X
+  END;
+  Strings.Copy("Find: ", statusMsg);  Strings.Append(promptBuf, statusMsg);
+  Strings.Append("  With: ", statusMsg);  Strings.Append(replaceBuf, statusMsg)
+ELSE
+  IF ch = TUI.KBackspace THEN
+    IF promptPos > 0 THEN  DEC(promptPos);  promptBuf[promptPos] := 0X  END
+  ELSIF (ORD(ch) >= 32) & (ORD(ch) < 127) & (promptPos < 127) THEN
+    promptBuf[promptPos] := ch;  INC(promptPos);  promptBuf[promptPos] := 0X
+  END;
+  IF promptMode = 1 THEN
+    Strings.Copy("Find: ", statusMsg);  Strings.Append(promptBuf, statusMsg)
+  ELSIF promptMode = 2 THEN
+    Strings.Copy("Go to line: ", statusMsg);  Strings.Append(promptBuf, statusMsg)
+  ELSIF promptMode = 5 THEN
+    Strings.Copy("Find: ", statusMsg);  Strings.Append(promptBuf, statusMsg)
+  END
+END
 END HandlePrompt;
 
 (* ════════════════════════════════════════════════════════════════
@@ -2215,12 +2216,36 @@ BEGIN
   RETURN FALSE
 END AnyModified;
 
+PROCEDURE OpenFromPane(path: ARRAY OF CHAR);
+VAR ew: EditorWin;
+i:  INTEGER;
+BEGIN
+  (* If the file is already open, just focus it. *)
+  FOR i := 0 TO MaxWins - 1 DO
+    IF (wins[i] # NIL) & (Strings.Compare(wins[i].title, path) = 0) THEN
+      TUI.SetFocus(wins[i]);
+      TUI.BringToFront(wins[i]);
+      RETURN
+    END
+  END;
+  ew := NewEditorWin();
+  IF ew # NIL THEN
+    IF ~LoadFile(ew, path) THEN
+      Strings.Copy("Could not open file.", statusMsg)
+    ELSE
+      AddRecentFile(path);  RebuildMenuBar
+    END
+  ELSE
+    Strings.Copy("Too many windows.", statusMsg)
+  END
+END OpenFromPane;
+
 PROCEDURE OnMenuCmd(cmd: INTEGER);
 VAR ew: EditorWin;
-    path: ARRAY 512 OF CHAR;
-    ok: BOOLEAN;
-    cwd: ARRAY 512 OF CHAR;
-    i: INTEGER;
+path: ARRAY 512 OF CHAR;
+ok: BOOLEAN;
+cwd: ARRAY 512 OF CHAR;
+i: INTEGER;
 BEGIN
   ew := FocusedEditor();
   IF ew = NIL THEN  ew := lastEditor  END;
@@ -2364,38 +2389,38 @@ BEGIN
     ZoomCurrentWin
 
   ELSIF cmd = CmdCopy     THEN  IF ew # NIL THEN  DoCopy(ew)     END
-  ELSIF cmd = CmdCut      THEN  IF ew # NIL THEN  DoCut(ew)      END
-  ELSIF cmd = CmdPaste    THEN  IF ew # NIL THEN  DoPaste(ew)    END
-  ELSIF cmd = CmdSelAll   THEN  IF ew # NIL THEN  DoSelAll(ew)   END
-  ELSIF cmd = CmdReindent THEN  IF ew # NIL THEN  DoReindent(ew) END
+ELSIF cmd = CmdCut      THEN  IF ew # NIL THEN  DoCut(ew)      END
+ELSIF cmd = CmdPaste    THEN  IF ew # NIL THEN  DoPaste(ew)    END
+ELSIF cmd = CmdSelAll   THEN  IF ew # NIL THEN  DoSelAll(ew)   END
+ELSIF cmd = CmdReindent THEN  IF ew # NIL THEN  DoReindent(ew) END
 
-  ELSIF cmd = CmdHelp THEN
-    (* F1: help on word under cursor; open dialog with empty query if no editor *)
-    IF ew # NIL THEN  WordAtCursor(ew, path)
-    ELSE  path[0] := 0X
-    END;
-    Help.Show(path)
+ELSIF cmd = CmdHelp THEN
+  (* F1: help on word under cursor; open dialog with empty query if no editor *)
+  IF ew # NIL THEN  WordAtCursor(ew, path)
+ELSE  path[0] := 0X
+END;
+Help.Show(path)
 
-  ELSIF (cmd >= CmdRecentBase) & (cmd < CmdRecentBase + MaxRecent) THEN
-    i := cmd - CmdRecentBase;
-    IF i < recentCount THEN
-      ew := NewEditorWin();
-      IF ew # NIL THEN
-        IF ~LoadFile(ew, recentFiles[i]) THEN
-          Strings.Copy("Could not open file.", statusMsg)
-        ELSE
-          AddRecentFile(recentFiles[i]);
-          RebuildMenuBar
-        END
+ELSIF (cmd >= CmdRecentBase) & (cmd < CmdRecentBase + MaxRecent) THEN
+  i := cmd - CmdRecentBase;
+  IF i < recentCount THEN
+    ew := NewEditorWin();
+    IF ew # NIL THEN
+      IF ~LoadFile(ew, recentFiles[i]) THEN
+        Strings.Copy("Could not open file.", statusMsg)
       ELSE
-        Strings.Copy("Too many windows.", statusMsg)
+        AddRecentFile(recentFiles[i]);
+        RebuildMenuBar
       END
+    ELSE
+      Strings.Copy("Too many windows.", statusMsg)
     END
-  END;
-  (* Return focus to the editor (menus steal it; prompts restore it themselves) *)
-  IF (promptMode = 0) & (FocusedEditor() = NIL) & (lastEditor # NIL) THEN
-    TUI.SetFocus(lastEditor)
   END
+END;
+(* Return focus to the editor (menus steal it; prompts restore it themselves) *)
+IF (promptMode = 0) & (FocusedEditor() = NIL) & (lastEditor # NIL) THEN
+  TUI.SetFocus(lastEditor)
+END
 END OnMenuCmd;
 
 (* ════════════════════════════════════════════════════════════════
@@ -2404,9 +2429,9 @@ END OnMenuCmd;
 
 PROCEDURE UpdateStatus;
 VAR ew: EditorWin;
-    buf: ARRAY 256 OF CHAR;
-    tmp: ARRAY 32 OF CHAR;
-    ln, col: INTEGER;
+buf: ARRAY 256 OF CHAR;
+tmp: ARRAY 32 OF CHAR;
+ln, col: INTEGER;
 BEGIN
   ew := FocusedEditor();
   IF promptMode # 0 THEN
@@ -2422,13 +2447,13 @@ BEGIN
     Strings.IntToStr(col, tmp);  Strings.Append(tmp, buf);
     Strings.Append("  ", buf);
     IF ew.title[0] # 0X THEN  Strings.Append(ew.title, buf)
-    ELSE  Strings.Append("[untitled]", buf)
-    END;
-    IF ew.modified THEN  Strings.Append(" [+]", buf)  END
-  ELSE
-    Strings.Copy("  No file open", buf)
-  END;
-  Strings.Copy(buf, sline.text)
+  ELSE  Strings.Append("[untitled]", buf)
+END;
+IF ew.modified THEN  Strings.Append(" [+]", buf)  END
+ELSE
+  Strings.Copy("  No file open", buf)
+END;
+Strings.Copy(buf, sline.text)
 END UpdateStatus;
 
 (* ════════════════════════════════════════════════════════════════
@@ -2454,11 +2479,11 @@ END RecentPath;
 
 PROCEDURE LoadRecentFiles;
 VAR path: ARRAY 512 OF CHAR;
-    f:    Files.File;
-    r:    Files.Rider;
-    b:    BYTE;
-    buf:  ARRAY 512 OF CHAR;
-    col:  INTEGER;
+f:    Files.File;
+r:    Files.Rider;
+b:    BYTE;
+buf:  ARRAY 512 OF CHAR;
+col:  INTEGER;
 BEGIN
   recentCount := 0;
   RecentPath(path);
@@ -2490,10 +2515,10 @@ END LoadRecentFiles;
 
 PROCEDURE SaveRecentFiles;
 VAR path: ARRAY 512 OF CHAR;
-    f:    Files.File;
-    r:    Files.Rider;
-    i, j: INTEGER;
-    b:    BYTE;
+f:    Files.File;
+r:    Files.Rider;
+i, j: INTEGER;
+b:    BYTE;
 BEGIN
   RecentPath(path);
   f := Files.New(path);
@@ -2513,7 +2538,7 @@ END SaveRecentFiles;
 (* Add path to front of recent list; deduplicate; rebuild menu. *)
 PROCEDURE AddRecentFile(path: ARRAY OF CHAR);
 VAR i, j: INTEGER;
-    tmp: ARRAY 512 OF CHAR;
+tmp: ARRAY 512 OF CHAR;
 BEGIN
   IF path[0] = 0X THEN  RETURN  END;
   (* Copy path before the dedup shift loop, which may overwrite recentFiles[i]
@@ -2543,9 +2568,9 @@ END AddRecentFile;
 
 PROCEDURE RebuildMenuBar;
 VAR i: INTEGER;
-    label: ARRAY 64 OF CHAR;
-    name:  ARRAY 512 OF CHAR;
-    slen, j: INTEGER;
+label: ARRAY 64 OF CHAR;
+name:  ARRAY 512 OF CHAR;
+slen, j: INTEGER;
 BEGIN
   TUI.RemoveView(mbar);
   TUI.RemoveView(sline);
@@ -2562,6 +2587,7 @@ BEGIN
   Widgets.MenuBarAddItem(mbar, 0, "Close         Ctrl+W", CmdClose);
   Widgets.MenuBarAddSep (mbar, 0);
   Widgets.MenuBarAddItem(mbar, 0, "Quit          Ctrl+Q", CmdQuit);
+  Widgets.MenuBarAddItem(mbar, 3, "Project Pane  F4", CmdFocusPane);
   IF recentCount > 0 THEN
     Widgets.MenuBarAddSep(mbar, 0);
     FOR i := 0 TO recentCount - 1 DO
@@ -2683,12 +2709,12 @@ BEGIN
 END CursorScreenPos;
 
 VAR
-  ev:        TUI.Event;
-  ew:        EditorWin;
-  sx, sy:    INTEGER;
-  fn:        ARRAY 512 OF CHAR;
-  ch:        CHAR;
-  acHandled: BOOLEAN;
+ev:        TUI.Event;
+ew:        EditorWin;
+sx, sy:    INTEGER;
+fn:        ARRAY 512 OF CHAR;
+ch:        CHAR;
+acHandled: BOOLEAN;
 
 BEGIN
   TUI.Init();
@@ -2714,6 +2740,23 @@ BEGIN
   BuildMenus();
   RebuildMenuBar();   (* re-adds mbar and sline with recent files populated *)
 
+  (* Decide project root from argv[1]: file → its parent dir, dir → use as-is,
+   nothing → current working directory. *)
+  IF Args.Count() > 0 THEN
+    Args.Get(1, fn);
+    (* If fn looks like a directory (no '.' in basename, or ends with '/'),
+     treat it as the project root.  Otherwise use cwd. *)
+    IF (fn[Strings.Length(fn) - 1] = '/') OR ~LoadFile(NIL, fn) THEN
+      (* Heuristic: try opening as file first; if it works it's a file. *)
+    END
+  END;
+
+  (* Simple approach: always use cwd as the project root. *)
+  pane := ProjectPane.New(1, 2, ProjPaneW, TUI.Rows - 2);
+  pane.onOpenFile := OpenFromPane;
+  OS.GetCwd(fn);
+  ProjectPane.SetRoot(pane, fn);
+  TUI.AddView(pane);
   (* Open file from command line, or start with empty window *)
   ew := NewEditorWin();
   lastEditor := ew;   (* prime lastEditor so menu commands work before any mouse motion *)
@@ -2746,7 +2789,7 @@ BEGIN
 
     (* Clear status message only on significant input (key or real click, not motion) *)
     IF (ev.kind = TUI.EvKey) OR
-       ((ev.kind = TUI.EvMouse) & (ev.mb # 32) & (ev.mb # 3)) THEN
+    ((ev.kind = TUI.EvMouse) & (ev.mb # 32) & (ev.mb # 3)) THEN
       statusMsg[0] := 0X
     END;
 
@@ -2774,80 +2817,90 @@ BEGIN
           IF acSel >= acScroll + MaxAcVisible THEN  acScroll := acSel - MaxAcVisible + 1  END;
           acHandled := TRUE
         ELSIF (ch = TUI.KEnter) OR (ORD(ch) = 9) THEN  (* Enter or Tab *)
-          ew := FocusedEditor();
-          IF ew # NIL THEN  AcceptAC(ew)  END;
-          acActive  := FALSE;
-          acHandled := TRUE
-        ELSIF (ORD(ch) >= 32) & (ORD(ch) < 127) THEN
-          (* Printable: let it fall through to normal handling, then re-trigger *)
-          acHandled := FALSE
-        ELSIF ORD(ch) = 8 THEN  (* Backspace: let through, then re-trigger *)
-          acHandled := FALSE
-        ELSE
-          acActive  := FALSE;
-          acHandled := FALSE
-        END
-      END;
-
-      IF ~acHandled THEN
-        (* Global hotkeys *)
-        IF ORD(ch) = 14 THEN       (* Ctrl+N *)
-          acActive := FALSE;
-          IF NewEditorWin() = NIL THEN  Strings.Copy("Too many windows.", statusMsg)  END
-        ELSIF ORD(ch) = 15 THEN    (* Ctrl+O *)
-          acActive := FALSE;  OnMenuCmd(CmdOpen)
-        ELSIF ORD(ch) = 19 THEN    (* Ctrl+S *)
-          acActive := FALSE;  OnMenuCmd(CmdSave)
-        ELSIF ORD(ch) = 23 THEN    (* Ctrl+W *)
-          acActive := FALSE;  OnMenuCmd(CmdClose)
-        ELSIF ORD(ch) = 17 THEN    (* Ctrl+Q *)
-          acActive := FALSE;  OnMenuCmd(CmdQuit)
-        ELSIF ORD(ch) = 9  THEN    (* Tab — route to focused view *)
-          IF ~TUI.Dispatch(ev) THEN  END
-        ELSIF ORD(ch) = 0  THEN    (* Ctrl+Space — trigger autocomplete *)
-          ew := FocusedEditor();
-          IF ew # NIL THEN  TriggerAC(ew)  END
-        ELSIF ch = TUI.KF1  THEN   acActive := FALSE;  OnMenuCmd(CmdHelp)
-        ELSIF ch = TUI.KF2  THEN   acActive := FALSE;  OnMenuCmd(CmdJumpError)
-        ELSIF ch = TUI.KF5  THEN   acActive := FALSE;  OnMenuCmd(CmdCompile)
-        ELSIF ch = TUI.KF6  THEN   acActive := FALSE;  OnMenuCmd(CmdRun)
-        ELSIF ch = TUI.KF9  THEN   acActive := FALSE;  OnMenuCmd(CmdCompRun)
-        ELSIF ch = TUI.KF3  THEN   acActive := FALSE;  OnMenuCmd(CmdFindNext)
-        ELSIF ch = TUI.KF7  THEN   acActive := FALSE;  OnMenuCmd(CmdNextWin)
-        ELSIF ch = TUI.KF8  THEN   acActive := FALSE;  OnMenuCmd(CmdFullScreen)
-        ELSE
-          IF ~TUI.Dispatch(ev) THEN  END;
-          (* After a printable char or backspace, re-filter if AC is active *)
-          IF acActive & ((ORD(ch) >= 32) & (ORD(ch) < 127) OR (ORD(ch) = 8)) THEN
-            ew := FocusedEditor();
-            IF ew # NIL THEN  TriggerAC(ew)  END
-          END
-        END
-      END
-
-    ELSIF ev.kind = TUI.EvMouse THEN
-      (* Dismiss autocomplete on any real click *)
-      IF (ev.mb # 32) & (ev.mb # 3) THEN  acActive := FALSE  END;
-      IF ~TUI.Dispatch(ev) THEN  END;
-      IF pendingClose THEN  pendingClose := FALSE;  OnMenuCmd(CmdClose)  END
-
-    ELSIF ev.kind = TUI.EvResize THEN
-      sline.y := TUI.Rows;
-      sline.w := TUI.Cols;
-      mbar.w  := TUI.Cols;
-      IF zoomedWin # NIL THEN
-        (* Re-apply full-screen geometry to the zoomed window *)
-        zoomedWin.x := 1;  zoomedWin.y := 2;
-        zoomedWin.w := TUI.Cols;  zoomedWin.h := TUI.Rows - 2
-      ELSE
-        TileEditorWins()
-      END;
-      TUI.InvalidateFront()
+        ew := FocusedEditor();
+        IF ew # NIL THEN  AcceptAC(ew)  END;
+        acActive  := FALSE;
+        acHandled := TRUE
+      ELSIF (ORD(ch) >= 32) & (ORD(ch) < 127) THEN
+        (* Printable: let it fall through to normal handling, then re-trigger *)
+        acHandled := FALSE
+      ELSIF ORD(ch) = 8 THEN  (* Backspace: let through, then re-trigger *)
+      acHandled := FALSE
+    ELSE
+      acActive  := FALSE;
+      acHandled := FALSE
     END
   END;
 
-  TUI.Done()
+  IF ~acHandled THEN
+    (* Global hotkeys *)
+    IF ORD(ch) = 14 THEN       (* Ctrl+N *)
+    acActive := FALSE;
+    IF NewEditorWin() = NIL THEN  Strings.Copy("Too many windows.", statusMsg)  END
+  ELSIF ORD(ch) = 15 THEN    (* Ctrl+O *)
+  acActive := FALSE;  OnMenuCmd(CmdOpen)
+ELSIF ORD(ch) = 19 THEN    (* Ctrl+S *)
+acActive := FALSE;  OnMenuCmd(CmdSave)
+ELSIF ORD(ch) = 23 THEN    (* Ctrl+W *)
+acActive := FALSE;  OnMenuCmd(CmdClose)
+ELSIF ORD(ch) = 17 THEN    (* Ctrl+Q *)
+acActive := FALSE;  OnMenuCmd(CmdQuit)
+ELSIF ORD(ch) = 9  THEN    (* Tab — route to focused view *)
+IF ~TUI.Dispatch(ev) THEN  END
+ELSIF ORD(ch) = 0  THEN    (* Ctrl+Space — trigger autocomplete *)
+ew := FocusedEditor();
+IF ew # NIL THEN  TriggerAC(ew)  END
+ELSIF ch = TUI.KF1  THEN   acActive := FALSE;  OnMenuCmd(CmdHelp)
+ELSIF ch = TUI.KF2  THEN   acActive := FALSE;  OnMenuCmd(CmdJumpError)
+ELSIF ch = TUI.KF4 THEN acActive := FALSE;
+IF pane # NIL THEN  TUI.SetFocus(pane)  END
+ELSIF ch = TUI.KF5  THEN   acActive := FALSE;  OnMenuCmd(CmdCompile)
+ELSIF ch = TUI.KF6  THEN   acActive := FALSE;  OnMenuCmd(CmdRun)
+ELSIF ch = TUI.KF9  THEN   acActive := FALSE;  OnMenuCmd(CmdCompRun)
+ELSIF ch = TUI.KF3  THEN   acActive := FALSE;  OnMenuCmd(CmdFindNext)
+ELSIF ch = TUI.KF7  THEN   acActive := FALSE;  OnMenuCmd(CmdNextWin)
+ELSIF ch = TUI.KF8  THEN   acActive := FALSE;  OnMenuCmd(CmdFullScreen)
+ELSE
+  IF ~TUI.Dispatch(ev) THEN  END;
+  (* After a printable char or backspace, re-filter if AC is active *)
+  IF acActive & ((ORD(ch) >= 32) & (ORD(ch) < 127) OR (ORD(ch) = 8)) THEN
+    ew := FocusedEditor();
+    IF ew # NIL THEN  TriggerAC(ew)  END
+  END
+END
+END
+
+ELSIF ev.kind = TUI.EvMouse THEN
+  (* Dismiss autocomplete on any real click *)
+  IF (ev.mb # 32) & (ev.mb # 3) THEN  acActive := FALSE  END;
+  IF ~TUI.Dispatch(ev) THEN  END;
+  IF pendingClose THEN  pendingClose := FALSE;  OnMenuCmd(CmdClose)  END
+
+ELSIF ev.kind = TUI.EvResize THEN
+  sline.y := TUI.Rows;
+  sline.w := TUI.Cols;
+  mbar.w  := TUI.Cols;
+  IF zoomedWin # NIL THEN
+    (* Re-apply full-screen geometry to the zoomed window *)
+    zoomedWin.x := 1;  zoomedWin.y := 2;
+    zoomedWin.w := TUI.Cols;  zoomedWin.h := TUI.Rows - 2;
+  ELSE
+    TileEditorWins();
+  END;
+  IF pane # NIL THEN
+    pane.h := TUI.Rows - 2;
+  END
+  TUI.InvalidateFront();
+END
+END;
+
+TUI.Done()
 END IDE.
+
+
+
+
+
 
 
 
