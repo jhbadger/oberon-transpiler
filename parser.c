@@ -720,13 +720,24 @@ static Node *parse_stat_seq(Parser *p) {
             break;
         }
 
-        /* WHILE cond DO stmts END */
+        /* WHILE cond DO stmts {ELSIF cond DO stmts} END */
         case TOK_WHILE: {
             next_tok(p);
             s = node_new(ND_WHILE, line, col);
             s->c0 = parse_expr(p);
             eat(p, TOK_DO);
             s->c1 = parse_stat_seq(p);
+            NodeList welsifs = {0};
+            while (p->cur.kind == TOK_ELSIF) {
+                int el = p->cur.line, ec = p->cur.col;
+                next_tok(p);
+                Node *ei = node_new(ND_ELSIF, el, ec);
+                ei->c0 = parse_expr(p);
+                eat(p, TOK_DO);
+                ei->c1 = parse_stat_seq(p);
+                list_add(&welsifs, ei);
+            }
+            s->c2 = welsifs.head;
             eat(p, TOK_END);
             break;
         }

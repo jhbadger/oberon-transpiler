@@ -1903,11 +1903,31 @@ static void emit_stmt(CG *g, Node *s) {
     }
 
     case ND_WHILE: {
-        iemit(g,"while ("); emit_expr(g,s->c0); emit(g,") {\n");
-        g->indent++;
-        for (Node *st=s->c1;st;st=st->next) emit_stmt(g,st);
-        g->indent--;
-        iemit(g,"}\n");
+        if (s->c2) {
+            /* WHILE cond DO stmts ELSIF cond DO stmts ... END
+             * → for(;;) { if (c1) { s1; } else if (c2) { s2; } ... else break; } */
+            iemit(g,"for (;;) {\n");
+            g->indent++;
+            iemit(g,"if ("); emit_expr(g,s->c0); emit(g,") {\n");
+            g->indent++;
+            for (Node *st=s->c1;st;st=st->next) emit_stmt(g,st);
+            g->indent--;
+            for (Node *ei=s->c2;ei;ei=ei->next) {
+                iemit(g,"} else if ("); emit_expr(g,ei->c0); emit(g,") {\n");
+                g->indent++;
+                for (Node *st=ei->c1;st;st=st->next) emit_stmt(g,st);
+                g->indent--;
+            }
+            iemit(g,"} else { break; }\n");
+            g->indent--;
+            iemit(g,"}\n");
+        } else {
+            iemit(g,"while ("); emit_expr(g,s->c0); emit(g,") {\n");
+            g->indent++;
+            for (Node *st=s->c1;st;st=st->next) emit_stmt(g,st);
+            g->indent--;
+            iemit(g,"}\n");
+        }
         break;
     }
 
