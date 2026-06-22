@@ -26,7 +26,8 @@ CONST
   tLazy*   = 19;
 
   MaxTok     = 65536;
-  MaxStr     = 256;
+  MaxStr     = 256;      (* max symbol/keyword/identifier length *)
+  MaxStrVal  = 4096;     (* max string value content length *)
   MaxModules = 64;
   MaxSymbols = 4096;
   MaxNS      = 32;
@@ -54,7 +55,7 @@ TYPE
     b*: BOOLEAN;
     i*: INTEGER;
     r*: REAL;
-    s*: ARRAY MaxStr OF CHAR;
+    s*: ARRAY MaxStrVal OF CHAR;
     head*, tail*: Value;
     params*: Value;
     body*: Value;
@@ -1567,7 +1568,7 @@ PROCEDURE Eval*(expr: Value; env: Env): Value;
       fnVal := DoFn(args.tail);
       IF err THEN RETURN NilV END
     END;
-    DefineId(GlobalEnv, args.head.symId, args.head.s, fnVal);
+    DefineId(nsEnvs[currentNS], args.head.symId, args.head.s, fnVal);
     RETURN fnVal
   END DoDefn;
 
@@ -1665,26 +1666,23 @@ PROCEDURE Eval*(expr: Value; env: Env): Value;
   PROCEDURE DoLoop(args: Value): Value;
   VAR bindVec, body, p, symV, valV, result, rp: Value;
     newEnv: Env;
-    bs: ARRAY 16 OF Binding;
-    numB, i: INTEGER;
-    bnd: Binding;
+    patterns: ARRAY 16 OF Value;
+    numP, i: INTEGER;
   BEGIN
     bindVec := args.head; body := args.tail;
     IF IsNil(bindVec) OR ((bindVec.tag # tVec) & (bindVec.tag # tList)) THEN
       Error("loop: needs binding vector"); RETURN NilV
     END;
     newEnv := NewEnv(env);
-    p := bindVec; numB := 0;
-    WHILE ~IsNil(p) & (numB < 16) DO
+    p := bindVec; numP := 0;
+    WHILE ~IsNil(p) & (numP < 16) DO
       symV := p.head; p := p.tail;
       IF IsNil(p) THEN Error("loop: odd bindings"); RETURN NilV END;
       valV := EvalRef(p.head, newEnv);
       IF err THEN RETURN NilV END;
-      IF symV.tag # tSym THEN Error("loop: not a symbol"); RETURN NilV END;
-      DefineId(newEnv, symV.symId, symV.s, valV);
-      bnd := newEnv.bindings;
-      WHILE (bnd # NIL) & (bnd.symId # symV.symId) DO bnd := bnd.next END;
-      bs[numB] := bnd; INC(numB);
+      DestructureBind(symV, valV, newEnv);
+      IF err THEN RETURN NilV END;
+      patterns[numP] := symV; INC(numP);
       p := p.tail
     END;
     LOOP
@@ -1696,8 +1694,8 @@ PROCEDURE Eval*(expr: Value; env: Env): Value;
       IF ~doRecur THEN EXIT END;
       doRecur := FALSE;
       rp := recurArgs; i := 0;
-      WHILE (i < numB) & ~IsNil(rp) DO
-        bs[i].val := rp.head;
+      WHILE (i < numP) & ~IsNil(rp) DO
+        DestructureBind(patterns[i], rp.head, newEnv);
         rp := rp.tail; INC(i)
       END
     END;
@@ -1728,7 +1726,7 @@ PROCEDURE Eval*(expr: Value; env: Env): Value;
     macV.params := args.tail.head;
     macV.body := args.tail.tail;
     macV.closure := env;
-    DefineId(GlobalEnv, args.head.symId, args.head.s, macV);
+    DefineId(nsEnvs[currentNS], args.head.symId, args.head.s, macV);
     RETURN macV
   END DoDefmacro;
 
@@ -2831,42 +2829,51 @@ BEGIN
 END BNth;
 
 PROCEDURE BConj(args: Value; env: Env): Value;
-VAR coll, item, first, last, cell, p, ks, vs: Value;
+VAR coll, item, first, last, cell, p, ks, vs, rest: Value;
 BEGIN
-  coll := args.head; item := args.tail.head;
-  IF IsNil(coll) THEN RETURN Cons(item, NilV) END;
-  IF coll.tag = tList THEN RETURN Cons(item, coll) END;
-  IF coll.tag = tVec THEN
-    first := NilV; last := NIL; p := coll;
-    WHILE ~IsNil(p) DO
-      cell := MkVec(p.head, NilV);
+  coll := args.head; rest := args.tail;
+  WHILE ~IsNil(rest) & ~err DO
+    item := rest.head;
+    IF IsNil(coll) THEN
+      coll := Cons(item, NilV)
+    ELSIF coll.tag = tList THEN
+      coll := Cons(item, coll)
+    ELSIF coll.tag = tVec THEN
+      first := NilV; last := NIL; p := coll;
+      WHILE ~IsNil(p) DO
+        cell := MkVec(p.head, NilV);
+        IF last = NIL THEN first := cell ELSE last.tail := cell END;
+        last := cell; p := p.tail
+      END;
+      cell := MkVec(item, NilV);
       IF last = NIL THEN first := cell ELSE last.tail := cell END;
-      last := cell; p := p.tail
+      coll := first
+    ELSIF coll.tag = tSet THEN
+      coll := SetConj(coll, item)
+    ELSIF coll.tag = tMap THEN
+      IF ~IsNil(item) THEN
+        IF (item.tag = tList) OR (item.tag = tVec) THEN
+          IF IsNil(item.tail) THEN
+            Error("conj: map entry needs key and value"); RETURN NilV
+          END;
+          coll := BAssoc(Cons(coll, Cons(item.head, Cons(item.tail.head, NilV))), env)
+        ELSIF item.tag = tMap THEN
+          ks := item.head; vs := item.tail;
+          WHILE ~IsNil(ks) & ~IsNil(vs) DO
+            coll := BAssoc(Cons(coll, Cons(ks.head, Cons(vs.head, NilV))), env);
+            ks := ks.tail; vs := vs.tail
+          END
+        ELSE
+          Error("conj: map needs entry or map"); RETURN NilV
+        END
+      END
+    ELSE
+      Error("conj: unsupported collection"); RETURN NilV
     END;
-    cell := MkVec(item, NilV);
-    IF last = NIL THEN first := cell ELSE last.tail := cell END;
-    RETURN first
+    IF err THEN RETURN NilV END;
+    rest := rest.tail
   END;
-  IF coll.tag = tSet THEN RETURN SetConj(coll, item) END;
-  IF coll.tag = tMap THEN
-    IF IsNil(item) THEN RETURN coll END;
-    IF (item.tag = tList) OR (item.tag = tVec) THEN
-      IF IsNil(item.tail) THEN
-        Error("conj: map entry needs key and value"); RETURN NilV
-      END;
-      RETURN BAssoc(Cons(coll, Cons(item.head, Cons(item.tail.head, NilV))), env)
-    END;
-    IF item.tag = tMap THEN
-      ks := item.head; vs := item.tail;
-      WHILE ~IsNil(ks) & ~IsNil(vs) DO
-        coll := BAssoc(Cons(coll, Cons(ks.head, Cons(vs.head, NilV))), env);
-        ks := ks.tail; vs := vs.tail
-      END;
-      RETURN coll
-    END;
-    Error("conj: map needs entry or map"); RETURN NilV
-  END;
-  Error("conj: unsupported collection"); RETURN NilV
+  RETURN coll
 END BConj;
 
 PROCEDURE BMap(args: Value; env: Env): Value;
@@ -3002,7 +3009,7 @@ BEGIN
 END AppendCStr;
 
 PROCEDURE BStr(args: Value; env: Env): Value;
-VAR buf: ARRAY MaxStr OF CHAR; tmp: ARRAY MaxStr OF CHAR; n: INTEGER; v: Value;
+VAR buf: ARRAY MaxStrVal OF CHAR; tmp: ARRAY MaxStr OF CHAR; n: INTEGER; v: Value;
 BEGIN
   buf[0] := 0X; n := 0;
   WHILE ~IsNil(args) DO
@@ -3119,32 +3126,38 @@ BEGIN
 END BGet;
 
 PROCEDURE BAssoc(args: Value; env: Env): Value;
-VAR m, k, v, ks, vs, nks, nvs, c: Value; nkLast, nvLast: Value; found: BOOLEAN;
+VAR m, k, v, ks, vs, nks, nvs, c: Value; nkLast, nvLast: Value; found: BOOLEAN; rest: Value;
 BEGIN
-  m := args.head; k := args.tail.head; v := args.tail.tail.head;
-  IF IsNil(m) OR (m.tag # tMap) THEN
-    RETURN MkMap(Cons(k, NilV), Cons(v, NilV))
+  m := args.head; rest := args.tail;
+  WHILE ~IsNil(rest) & ~IsNil(rest.tail) DO
+    k := rest.head; v := rest.tail.head;
+    IF IsNil(m) OR (m.tag # tMap) THEN
+      m := MkMap(Cons(k, NilV), Cons(v, NilV))
+    ELSE
+      ks := m.head; vs := m.tail;
+      nks := NilV; nvs := NilV; nkLast := NIL; nvLast := NIL; found := FALSE;
+      WHILE ~IsNil(ks) & ~IsNil(vs) DO
+        c := Cons(ks.head, NilV);
+        IF nkLast = NIL THEN nks := c ELSE nkLast.tail := c END;
+        nkLast := c;
+        IF ValueEqual(ks.head, k) THEN
+          c := Cons(v, NilV); found := TRUE
+        ELSE c := Cons(vs.head, NilV) END;
+        IF nvLast = NIL THEN nvs := c ELSE nvLast.tail := c END;
+        nvLast := c;
+        ks := ks.tail; vs := vs.tail
+      END;
+      IF ~found THEN
+        c := Cons(k, NilV);
+        IF nkLast = NIL THEN nks := c ELSE nkLast.tail := c END;
+        c := Cons(v, NilV);
+        IF nvLast = NIL THEN nvs := c ELSE nvLast.tail := c END
+      END;
+      m := MkMap(nks, nvs)
+    END;
+    rest := rest.tail.tail
   END;
-  ks := m.head; vs := m.tail;
-  nks := NilV; nvs := NilV; nkLast := NIL; nvLast := NIL; found := FALSE;
-  WHILE ~IsNil(ks) & ~IsNil(vs) DO
-    c := Cons(ks.head, NilV);
-    IF nkLast = NIL THEN nks := c ELSE nkLast.tail := c END;
-    nkLast := c;
-    IF ValueEqual(ks.head, k) THEN
-      c := Cons(v, NilV); found := TRUE
-    ELSE c := Cons(vs.head, NilV) END;
-    IF nvLast = NIL THEN nvs := c ELSE nvLast.tail := c END;
-    nvLast := c;
-    ks := ks.tail; vs := vs.tail
-  END;
-  IF ~found THEN
-    c := Cons(k, NilV);
-    IF nkLast = NIL THEN nks := c ELSE nkLast.tail := c END;
-    c := Cons(v, NilV);
-    IF nvLast = NIL THEN nvs := c ELSE nvLast.tail := c END
-  END;
-  RETURN MkMap(nks, nvs)
+  RETURN m
 END BAssoc;
 
 PROCEDURE BKeys(args: Value; env: Env): Value;
@@ -3702,7 +3715,7 @@ BEGIN
 END BInto;
 
 PROCEDURE BSeq(args: Value; env: Env): Value;
-VAR v: Value; i: INTEGER; first, last, cell: Value; buf: ARRAY 2 OF CHAR;
+VAR v: Value; i: INTEGER; first, last, cell, ks, vs: Value; buf: ARRAY 2 OF CHAR;
 BEGIN
   v := args.head;
   IF IsNil(v) THEN RETURN NilV END;
@@ -3730,6 +3743,16 @@ BEGIN
   IF v.tag = tSet THEN
     IF IsNil(v.head) THEN RETURN NilV END;
     RETURN v.head
+  END;
+  IF v.tag = tMap THEN
+    IF IsNil(v.head) THEN RETURN NilV END;
+    first := NilV; last := NIL; ks := v.head; vs := v.tail;
+    WHILE ~IsNil(ks) & ~IsNil(vs) DO
+      cell := Cons(MkVec(ks.head, MkVec(vs.head, NilV)), NilV);
+      IF last = NIL THEN first := cell ELSE last.tail := cell END;
+      last := cell; ks := ks.tail; vs := vs.tail
+    END;
+    RETURN first
   END;
   RETURN NilV
 END BSeq;
@@ -3834,22 +3857,53 @@ BEGIN
 END BRemove;
 
 PROCEDURE BPartition(args: Value; env: Env): Value;
-VAR n: INTEGER; coll, first, last, grpFirst, grpLast, cell, group: Value; count: INTEGER;
+VAR n, step, i, count: INTEGER;
+    coll, pad, start, p, first, last, grpFirst, grpLast, cell, group: Value;
+    hasPad: BOOLEAN;
 BEGIN
-  n := args.head.i; coll := args.tail.head;
-  first := NilV; last := NIL;
-  WHILE ~IsNil(coll) DO
-    grpFirst := NilV; grpLast := NIL; count := 0;
-    WHILE (count < n) & ~IsNil(coll) DO
-      cell := Cons(coll.head, NilV);
+  IF IsNil(args) OR (args.head.tag # tInt) THEN
+    Error("partition: first arg must be integer"); RETURN NilV
+  END;
+  n := args.head.i;
+  IF IsNil(args.tail) THEN Error("partition: needs collection"); RETURN NilV END;
+  (* Detect arity: (n coll), (n step coll), (n step pad coll) *)
+  IF IsNil(args.tail.tail) THEN
+    step := n; coll := args.tail.head; hasPad := FALSE; pad := NilV
+  ELSIF IsNil(args.tail.tail.tail) THEN
+    IF args.tail.head.tag # tInt THEN Error("partition: step must be integer"); RETURN NilV END;
+    step := args.tail.head.i; coll := args.tail.tail.head; hasPad := FALSE; pad := NilV
+  ELSE
+    IF args.tail.head.tag # tInt THEN Error("partition: step must be integer"); RETURN NilV END;
+    step := args.tail.head.i; pad := args.tail.tail.head;
+    coll := args.tail.tail.tail.head; hasPad := TRUE
+  END;
+  IF step <= 0 THEN Error("partition: step must be positive"); RETURN NilV END;
+  first := NilV; last := NIL; start := coll;
+  WHILE ~IsNil(start) DO
+    grpFirst := NilV; grpLast := NIL; count := 0; p := start;
+    WHILE (count < n) & ~IsNil(p) DO
+      cell := Cons(p.head, NilV);
       IF grpLast = NIL THEN grpFirst := cell ELSE grpLast.tail := cell END;
-      grpLast := cell; INC(count); coll := coll.tail
+      grpLast := cell; INC(count); p := p.tail
     END;
     IF count = n THEN
       group := Cons(grpFirst, NilV);
       IF last = NIL THEN first := group ELSE last.tail := group END;
       last := group
-    END
+    ELSIF hasPad & ~IsNil(grpFirst) THEN
+      p := pad;
+      WHILE (count < n) & ~IsNil(p) DO
+        cell := Cons(p.head, NilV);
+        IF grpLast = NIL THEN grpFirst := cell ELSE grpLast.tail := cell END;
+        grpLast := cell; INC(count); p := p.tail
+      END;
+      group := Cons(grpFirst, NilV);
+      IF last = NIL THEN first := group ELSE last.tail := group END;
+      last := group
+    END;
+    p := start; i := 0;
+    WHILE (i < step) & ~IsNil(p) DO p := p.tail; INC(i) END;
+    start := p
   END;
   RETURN first
 END BPartition;
@@ -3918,24 +3972,30 @@ END BShuffle;
 
 (* Map operations *)
 PROCEDURE BDissoc(args: Value; env: Env): Value;
-VAR m, k, ks, vs, nks, nvs, c: Value; nkLast, nvLast: Value;
+VAR m, k, ks, vs, nks, nvs, c: Value; nkLast, nvLast: Value; rest: Value;
 BEGIN
-  m := args.head; k := args.tail.head;
-  IF IsNil(m) OR (m.tag # tMap) THEN RETURN m END;
-  ks := m.head; vs := m.tail;
-  nks := NilV; nvs := NilV; nkLast := NIL; nvLast := NIL;
-  WHILE ~IsNil(ks) & ~IsNil(vs) DO
-    IF ~ValueEqual(ks.head, k) THEN
-      c := Cons(ks.head, NilV);
-      IF nkLast = NIL THEN nks := c ELSE nkLast.tail := c END;
-      nkLast := c;
-      c := Cons(vs.head, NilV);
-      IF nvLast = NIL THEN nvs := c ELSE nvLast.tail := c END;
-      nvLast := c
+  m := args.head; rest := args.tail;
+  WHILE ~IsNil(rest) DO
+    k := rest.head;
+    IF ~IsNil(m) & (m.tag = tMap) THEN
+      ks := m.head; vs := m.tail;
+      nks := NilV; nvs := NilV; nkLast := NIL; nvLast := NIL;
+      WHILE ~IsNil(ks) & ~IsNil(vs) DO
+        IF ~ValueEqual(ks.head, k) THEN
+          c := Cons(ks.head, NilV);
+          IF nkLast = NIL THEN nks := c ELSE nkLast.tail := c END;
+          nkLast := c;
+          c := Cons(vs.head, NilV);
+          IF nvLast = NIL THEN nvs := c ELSE nvLast.tail := c END;
+          nvLast := c
+        END;
+        ks := ks.tail; vs := vs.tail
+      END;
+      m := MkMap(nks, nvs)
     END;
-    ks := ks.tail; vs := vs.tail
+    rest := rest.tail
   END;
-  RETURN MkMap(nks, nvs)
+  RETURN m
 END BDissoc;
 
 PROCEDURE BMerge(args: Value; env: Env): Value;
@@ -4688,7 +4748,7 @@ BEGIN
 END BReadString;
 
 PROCEDURE BPrintStr(args: Value; env: Env): Value;
-VAR buf: ARRAY MaxStr OF CHAR; n: INTEGER;
+VAR buf: ARRAY MaxStrVal OF CHAR; n: INTEGER;
     tmp: ARRAY MaxStr OF CHAR; first: BOOLEAN; v: Value;
 BEGIN
   buf[0] := 0X; n := 0; first := TRUE;
@@ -4715,15 +4775,56 @@ BEGIN
   RETURN MkStr(buf)
 END BPrintStr;
 
+PROCEDURE BPrStr(args: Value; env: Env): Value;
+VAR buf: ARRAY MaxStrVal OF CHAR; n: INTEGER; first: BOOLEAN; v: Value;
+BEGIN
+  buf[0] := 0X; n := 0; first := TRUE;
+  WHILE ~IsNil(args) DO
+    IF ~first THEN
+      IF n < LEN(buf)-1 THEN buf[n] := ' '; INC(n) END
+    END;
+    v := args.head;
+    ValToStrBuf(v, TRUE, buf, n);
+    first := FALSE; args := args.tail
+  END;
+  buf[n] := 0X;
+  RETURN MkStr(buf)
+END BPrStr;
+
 PROCEDURE BName(args: Value; env: Env): Value;
-VAR v: Value;
+VAR v: Value; i, slash: INTEGER; buf: ARRAY MaxStr OF CHAR;
 BEGIN
   v := args.head;
-  IF v.tag = tKey THEN RETURN MkStr(v.s) END;
-  IF v.tag = tSym THEN RETURN MkStr(v.s) END;
+  IF (v.tag = tKey) OR (v.tag = tSym) OR (v.tag = tResolved) THEN
+    slash := -1; i := 0;
+    WHILE v.s[i] # 0X DO
+      IF v.s[i] = '/' THEN slash := i END;
+      INC(i)
+    END;
+    IF slash < 0 THEN RETURN MkStr(v.s) END;
+    Strings.Extract(v.s, slash + 1, i - slash - 1, buf);
+    RETURN MkStr(buf)
+  END;
   IF v.tag = tStr THEN RETURN v END;
   Error("name: needs keyword, symbol, or string"); RETURN NilV
 END BName;
+
+PROCEDURE BNamespace(args: Value; env: Env): Value;
+VAR v: Value; i, slash: INTEGER; buf: ARRAY MaxStr OF CHAR;
+BEGIN
+  v := args.head;
+  IF (v.tag = tKey) OR (v.tag = tSym) OR (v.tag = tResolved) THEN
+    slash := -1; i := 0;
+    WHILE v.s[i] # 0X DO
+      IF v.s[i] = '/' THEN slash := i END;
+      INC(i)
+    END;
+    IF slash <= 0 THEN RETURN NilV END;
+    Strings.Extract(v.s, 0, slash, buf);
+    RETURN MkStr(buf)
+  END;
+  Error("namespace: needs keyword or symbol"); RETURN NilV
+END BNamespace;
 
 PROCEDURE BKeyword(args: Value; env: Env): Value;
 VAR v: Value;
@@ -4749,6 +4850,10 @@ BEGIN
   v := args.head;
   IF v.tag = tInt THEN RETURN v END;
   IF v.tag = tReal THEN RETURN MkInt(Math.entier(v.r)) END;
+  IF v.tag = tBigInt THEN
+    ok := Strings.StrToInt(v.s, n);
+    IF ok THEN RETURN MkInt(n) END
+  END;
   IF v.tag = tStr THEN
     ok := Strings.StrToInt(v.s, n);
     IF ok THEN RETURN MkInt(n) END
@@ -4775,6 +4880,10 @@ BEGIN
   v := args.head;
   IF v.tag = tReal THEN RETURN v END;
   IF v.tag = tInt THEN RETURN MkReal(FLT(v.i)) END;
+  IF v.tag = tBigInt THEN
+    ok := Strings.StrToReal(v.s, x);
+    IF ok THEN RETURN MkReal(x) END
+  END;
   IF v.tag = tStr THEN
     ok := Strings.StrToReal(v.s, x);
     IF ok THEN RETURN MkReal(x) END
@@ -4818,7 +4927,7 @@ BEGIN
 END BMapIndexed;
 
 PROCEDURE BGroupBy(args: Value; env: Env): Value;
-VAR fn, coll, k, ks, vs, kp, vp, c, existing, newList: Value; found: BOOLEAN;
+VAR fn, coll, k, ks, vs, kp, vp, tail: Value; found: BOOLEAN;
 BEGIN
   fn := args.head; coll := args.tail.head;
   ks := NilV; vs := NilV;
@@ -4828,7 +4937,11 @@ BEGIN
     kp := ks; vp := vs; found := FALSE;
     WHILE ~IsNil(kp) DO
       IF ValueEqual(kp.head, k) THEN
-        vp.head := Cons(coll.head, vp.head); found := TRUE
+        (* append to preserve insertion order *)
+        tail := vp.head;
+        WHILE ~IsNil(tail.tail) DO tail := tail.tail END;
+        tail.tail := Cons(coll.head, NilV);
+        found := TRUE
       END;
       kp := kp.tail; vp := vp.tail
     END;
@@ -5360,7 +5473,7 @@ BEGIN
   RegisterDoc("some", BSome, "Returns first true value of pred applied to items.");
   RegisterDoc("not-any?", BNotAnyQ, "Returns true if pred is false for all items in coll.");
   RegisterDoc("not-every?", BNotEveryQ, "Returns true if pred is false for some item.");
-  RegisterDoc("partition", BPartition, "Returns list of lists of n items each.");
+  RegisterDoc("partition", BPartition, "Returns list of lists of n items each; optional step and pad.");
   RegisterDoc("interpose", BInterpose, "Returns seq with sep between each item in coll.");
   RegisterDoc("frequencies", BFrequencies, "Returns map of item to frequency count.");
   RegisterDoc("group-by", BGroupBy, "Returns map of keyfn(item) to list of items.");
@@ -5430,7 +5543,8 @@ BEGIN
   RegisterDoc("float", BFloat, "Converts to floating-point.");
   RegisterDoc("char", BChar, "Returns single-char string for integer codepoint.");
   RegisterDoc("char-code", BCharCode, "Returns integer codepoint of first char.");
-  RegisterDoc("name", BName, "Returns string name of keyword, symbol, or string.");
+  RegisterDoc("name", BName, "Returns local name part of keyword, symbol, or string (strips namespace).");
+  RegisterDoc("namespace", BNamespace, "Returns namespace part of qualified keyword or symbol, or nil.");
   RegisterDoc("keyword", BKeyword, "Returns keyword from string or symbol.");
   RegisterDoc("symbol", BSymbol, "Returns symbol from string or keyword.");
   RegisterDoc("type", BType, "Returns keyword describing the type of x.");
@@ -5442,7 +5556,7 @@ BEGIN
   RegisterDoc("print", BPrint, "Prints args, separated by spaces, without newline.");
   RegisterDoc("newline", BNewline, "Prints a newline.");
   RegisterDoc("flush", BFlush, "Flushes output (no-op).");
-  RegisterDoc("pr-str", BPrintStr, "Returns string of printed representation.");
+  RegisterDoc("pr-str", BPrStr, "Returns readable string of printed representation (with quotes, escapes).");
   RegisterDoc("print-str", BPrintStr, "Returns string of printed representation.");
   RegisterDoc("read-string", BReadString, "Reads one object from a string.");
 
@@ -5558,6 +5672,9 @@ BEGIN
 
   Eval1('(defn memoize [f] (let [mem (atom {})] (fn [& args] (let [cached (get @mem args ::not-found)] (if (= cached ::not-found) (let [result (apply f args)] (swap! mem assoc args result) result) cached)))))');
   Eval1('(defmacro time [expr] (let [s (gensym "start") r (gensym "ret")] `(let [~s (current-time-ms) ~r ~expr] (println (str "Elapsed time: " (- (current-time-ms) ~s) " msecs")) ~r)))');
+
+  (* doto: evaluate each form with obj inserted as first arg, return obj *)
+  Eval1('(defmacro doto [x & forms] (let [g (gensym "dt")] `(let [~g ~x] ~@(map (fn [f] (cons (first f) (cons g (rest f)))) forms) ~g)))');
 END Init;
 
 (* ---------- REPL loop ---------- *)
