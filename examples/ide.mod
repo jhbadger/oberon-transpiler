@@ -61,6 +61,7 @@ CmdHelp    = 50;
 CmdJumpError = 51;
 CmdCopy    = 60;   CmdCut     = 61;   CmdPaste   = 62;   CmdSelAll  = 63;
 CmdReindent = 80;
+CmdFocusPane = 90;
 
 (* ── Recent files ── *)
 MaxRecent      = 8;
@@ -2216,7 +2217,7 @@ BEGIN
   RETURN FALSE
 END AnyModified;
 
-PROCEDURE OpenFromPane(path: ARRAY OF CHAR);
+PROCEDURE OpenFromPane(path: ARRAY 512 OF CHAR);
 VAR ew: EditorWin;
 i:  INTEGER;
 BEGIN
@@ -2392,7 +2393,8 @@ BEGIN
 ELSIF cmd = CmdCut      THEN  IF ew # NIL THEN  DoCut(ew)      END
 ELSIF cmd = CmdPaste    THEN  IF ew # NIL THEN  DoPaste(ew)    END
 ELSIF cmd = CmdSelAll   THEN  IF ew # NIL THEN  DoSelAll(ew)   END
-ELSIF cmd = CmdReindent THEN  IF ew # NIL THEN  DoReindent(ew) END
+ELSIF cmd = CmdReindent  THEN  IF ew # NIL THEN  DoReindent(ew) END
+ELSIF cmd = CmdFocusPane THEN  IF pane # NIL THEN  TUI.SetFocus(pane) END
 
 ELSIF cmd = CmdHelp THEN
   (* F1: help on word under cursor; open dialog with empty query if no editor *)
@@ -2889,7 +2891,7 @@ ELSIF ev.kind = TUI.EvResize THEN
   END;
   IF pane # NIL THEN
     pane.h := TUI.Rows - 2;
-  END
+  END;
   TUI.InvalidateFront();
 END
 END;
