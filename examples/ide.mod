@@ -34,6 +34,7 @@ MODULE IDE;
  *   Ctrl+Left/Right Word left / right
  * Emacs-style (in editor)
  *   Ctrl+Space      Set mark (start region); second press cancels
+ *   F10             Autocomplete
  *   Ctrl+W          Kill region (cut) when mark is set
  *   Ctrl+X          Close window
  *   Ctrl+A          Beginning of line
@@ -2934,14 +2935,16 @@ ELSIF ORD(ch) = 17 THEN    (* Ctrl+Q *)
 acActive := FALSE;  OnMenuCmd(CmdQuit)
 ELSIF ORD(ch) = 9  THEN    (* Tab — route to focused view *)
 IF ~TUI.Dispatch(ev) THEN  END
-ELSIF ORD(ch) = 0  THEN    (* Ctrl+Space: set mark / autocomplete *)
+ELSIF ORD(ch) = 0  THEN    (* Ctrl+Space: set mark *)
 ew := FocusedEditor();
 IF ew # NIL THEN
   IF ew.selActive & ew.markMode THEN  ClearSel(ew)  (* second press cancels mark *)
-ELSE  StartSel(ew);  ew.markMode := TRUE           (* first press sets mark      *)
-END;
-TriggerAC(ew)
+  ELSE  StartSel(ew);  ew.markMode := TRUE           (* first press sets mark      *)
+  END
 END
+ELSIF ch = TUI.KF10 THEN   (* F10: autocomplete *)
+ew := FocusedEditor();
+IF ew # NIL THEN  TriggerAC(ew)  END
 ELSIF ch = TUI.KF1  THEN   acActive := FALSE;  OnMenuCmd(CmdHelp)
 ELSIF ch = TUI.KF2  THEN   acActive := FALSE;  OnMenuCmd(CmdJumpError)
 ELSIF ch = TUI.KF4 THEN acActive := FALSE;  OnMenuCmd(CmdTogglePane)
