@@ -131,6 +131,7 @@ VAR
 pane:      ProjectPane.Pane;
 paneShown: BOOLEAN;
 mbar:      Widgets.MenuBar;
+pendingMenuRebuild: BOOLEAN;
 sline:     Widgets.StatusLine;
 running:   BOOLEAN;
 statusMsg: ARRAY 128 OF CHAR;
@@ -507,9 +508,11 @@ BEGIN
     PushUndo(ew, UOpEdit, ew.cy);
     InsertBytesAt(ew, ew.cy, ew.cx, ew.killBuf, klen);
     INC(ew.cx, klen)
+  ELSE
+    DoPaste(ew)
   END
 END DoYank;
-
+                        
 PROCEDURE DoFind(ew: EditorWin): BOOLEAN;
 VAR li, col, i, qlen, count: INTEGER;
 found: BOOLEAN;
@@ -940,30 +943,44 @@ END SysClipCopy;
 PROCEDURE SysClipPaste;
 VAR f: Files.File;  r: Files.Rider;
 ch: CHAR;  li, j: INTEGER;  done: BOOLEAN;
+newLines: ARRAY MaxClipLines, LLEN OF CHAR;
+newCount: INTEGER;
 BEGIN
   OS.ClipPasteCmd(".obc_clipboard");
   f := Files.Old(".obc_clipboard");
   IF f = NIL THEN  RETURN  END;
   Files.Set(r, f, 0);
-  li := 0;  j := 0;  clipNLines := 0;  done := FALSE;
+  li := 0;  j := 0;  newCount := 0;  done := FALSE;
+  newLines[0][0] := 0X;
   WHILE ~done & (li < MaxClipLines) DO
     Files.Read(r, ch);
     IF r.eof THEN
-      clipLines[li][j] := 0X;
-      IF j > 0 THEN
-        INC(li)
-      END;
+      newLines[li][j] := 0X;
+      IF j > 0 THEN  INC(li)  END;
       done := TRUE
-    ELSIF ch = 0AX THEN  (* newline — advance to next line *)
-    clipLines[li][j] := 0X;
-    INC(li);  j := 0
-  ELSIF j < LLEN - 1 THEN
-    clipLines[li][j] := ch;
-    INC(j)
+    ELSIF ch = 0AX THEN
+      newLines[li][j] := 0X;
+      INC(li);  j := 0;
+      IF li < MaxClipLines THEN  newLines[li][0] := 0X  END
+    ELSIF j < LLEN - 1 THEN
+      newLines[li][j] := ch;
+      INC(j)
+    END
+  END;
+  Files.Close(f);
+  (* Only replace internal clipboard if we actually read something *)
+  IF li > 0 THEN
+    FOR j := 0 TO li - 1 DO
+      newCount := 0;
+      WHILE newCount < LLEN DO
+        clipLines[j][newCount] := newLines[j][newCount];
+        INC(newCount)
+      END
+    END;
+    clipNLines := li
   END
-END;
-IF li > 0 THEN  clipNLines := li  END
 END SysClipPaste;
+                                                                                                                                                      
 
 (* Copy selection into the module clipboard. *)
 PROCEDURE DoCopy(ew: EditorWin);
@@ -1534,13 +1551,13 @@ ELSIF ch = TUI.KTab THEN
   (* ── Control commands ── *)
 ELSIF ORD(ch) = 1  THEN  ClearSel(v);  v.cx := 0  (* Ctrl+A: line beginning *)
 ELSIF ORD(ch) = 2  THEN                            (* Ctrl+B: backward char  *)
-  ClearSel(v);
-  IF v.cx > 0 THEN  Utf8Back(v.lines[v.cy], v.cx)
-  ELSIF v.cy > 0 THEN  DEC(v.cy);  v.cx := LineLen(v, v.cy)
-  END
+ClearSel(v);
+IF v.cx > 0 THEN  Utf8Back(v.lines[v.cy], v.cx)
+ELSIF v.cy > 0 THEN  DEC(v.cy);  v.cx := LineLen(v, v.cy)
+END
 ELSIF ORD(ch) = 3  THEN  DoCopy(v)         (* Ctrl+C: copy        *)
 ELSIF ORD(ch) = 4  THEN                    (* Ctrl+D: delete forward char *)
-  IF v.selActive THEN  DeleteSel(v)  ELSE  DoDelete(v)  END
+IF v.selActive THEN  DeleteSel(v)  ELSE  DoDelete(v)  END
 ELSIF ORD(ch) = 5  THEN  ClearSel(v);  v.cx := LineLen(v, v.cy)  (* Ctrl+E: line end *)
 ELSIF ORD(ch) = 16 THEN  ClearSel(v);  DEC(v.cy);  ClampCursor(v) (* Ctrl+P: prev line *)
 ELSIF ORD(ch) = 22 THEN  DoPaste(v)        (* Ctrl+V: paste       *)
@@ -2299,7 +2316,7 @@ BEGIN
     IF ~LoadFile(ew, path) THEN
       Strings.Copy("Could not open file.", statusMsg)
     ELSE
-      AddRecentFile(path);  RebuildMenuBar
+      AddRecentFile(path); pendingMenuRebuild := TRUE;
     END
   ELSE
     Strings.Copy("Too many windows.", statusMsg)
@@ -2332,7 +2349,7 @@ BEGIN
           Strings.Copy("Could not open file.", statusMsg)
         ELSE
           AddRecentFile(path);
-          RebuildMenuBar
+          pendingMenuRebuild := TRUE
         END
       ELSE
         Strings.Copy("Too many windows.", statusMsg)
@@ -2350,7 +2367,7 @@ BEGIN
             Strings.Copy("Save failed.", statusMsg)
           ELSE
             Strings.Copy("Saved.", statusMsg);
-            AddRecentFile(path);  RebuildMenuBar
+            AddRecentFile(path);  pendingMenuRebuild := TRUE;
           END
         END
       ELSE
@@ -2358,7 +2375,7 @@ BEGIN
           Strings.Copy("Save failed.", statusMsg)
         ELSE
           Strings.Copy("Saved.", statusMsg);
-          AddRecentFile(ew.title);  RebuildMenuBar
+          AddRecentFile(ew.title); pendingMenuRebuild := TRUE;
         END
       END
     END
@@ -2373,7 +2390,7 @@ BEGIN
           Strings.Copy("Save failed.", statusMsg)
         ELSE
           Strings.Copy("Saved.", statusMsg);
-          AddRecentFile(path);  RebuildMenuBar
+          AddRecentFile(path);  pendingMenuRebuild := TRUE;
         END
       END
     END
@@ -2478,7 +2495,7 @@ ELSIF (cmd >= CmdRecentBase) & (cmd < CmdRecentBase + MaxRecent) THEN
         Strings.Copy("Could not open file.", statusMsg)
       ELSE
         AddRecentFile(recentFiles[i]);
-        RebuildMenuBar
+        pendingMenuRebuild := TRUE;
       END
     ELSE
       Strings.Copy("Too many windows.", statusMsg)
@@ -2640,6 +2657,9 @@ label: ARRAY 64 OF CHAR;
 name:  ARRAY 512 OF CHAR;
 slen, j: INTEGER;
 BEGIN
+  IF (TUI.Focused = mbar) OR (TUI.Focused = sline) THEN
+    TUI.SetFocus(NIL);
+  END;
   TUI.RemoveView(mbar);
   TUI.RemoveView(sline);
 
@@ -2793,6 +2813,7 @@ BEGIN
   winCount  := 0;
   lastEditor := NIL;
   zoomedWin  := NIL;
+  pendingMenuRebuild := FALSE;
   running   := TRUE;
   promptMode := 0;
   statusMsg[0] := 0X;
@@ -2904,23 +2925,23 @@ BEGIN
 ELSIF ORD(ch) = 19 THEN    (* Ctrl+S *)
 acActive := FALSE;  OnMenuCmd(CmdSave)
 ELSIF ORD(ch) = 23 THEN    (* Ctrl+W: kill region *)
-  acActive := FALSE;
-  ew := FocusedEditor();
-  IF ew # NIL THEN  DoCut(ew)  END
+acActive := FALSE;
+ew := FocusedEditor();
+IF ew # NIL THEN  DoCut(ew)  END
 ELSIF ORD(ch) = 24 THEN    (* Ctrl+X: close window *)
-  acActive := FALSE;  OnMenuCmd(CmdClose)
+acActive := FALSE;  OnMenuCmd(CmdClose)
 ELSIF ORD(ch) = 17 THEN    (* Ctrl+Q *)
 acActive := FALSE;  OnMenuCmd(CmdQuit)
 ELSIF ORD(ch) = 9  THEN    (* Tab — route to focused view *)
 IF ~TUI.Dispatch(ev) THEN  END
 ELSIF ORD(ch) = 0  THEN    (* Ctrl+Space: set mark / autocomplete *)
-  ew := FocusedEditor();
-  IF ew # NIL THEN
-    IF ew.selActive & ew.markMode THEN  ClearSel(ew)  (* second press cancels mark *)
-    ELSE  StartSel(ew);  ew.markMode := TRUE           (* first press sets mark      *)
-    END;
-    TriggerAC(ew)
-  END
+ew := FocusedEditor();
+IF ew # NIL THEN
+  IF ew.selActive & ew.markMode THEN  ClearSel(ew)  (* second press cancels mark *)
+ELSE  StartSel(ew);  ew.markMode := TRUE           (* first press sets mark      *)
+END;
+TriggerAC(ew)
+END
 ELSIF ch = TUI.KF1  THEN   acActive := FALSE;  OnMenuCmd(CmdHelp)
 ELSIF ch = TUI.KF2  THEN   acActive := FALSE;  OnMenuCmd(CmdJumpError)
 ELSIF ch = TUI.KF4 THEN acActive := FALSE;  OnMenuCmd(CmdTogglePane)
@@ -2944,8 +2965,8 @@ ELSIF ev.kind = TUI.EvMouse THEN
   (* Dismiss autocomplete on any real click *)
   IF (ev.mb # 32) & (ev.mb # 3) THEN  acActive := FALSE  END;
   IF ~TUI.Dispatch(ev) THEN  END;
-  IF pendingClose THEN  pendingClose := FALSE;  OnMenuCmd(CmdClose)  END
-
+  IF pendingClose THEN  pendingClose := FALSE;  OnMenuCmd(CmdClose);  END;
+  IF pendingMenuRebuild THEN  pendingMenuRebuild := FALSE;  RebuildMenuBar  END
 ELSIF ev.kind = TUI.EvResize THEN
   sline.y := TUI.Rows;
   sline.w := TUI.Cols;
@@ -2966,6 +2987,11 @@ END;
 
 TUI.Done()
 END IDE.
+
+
+
+
+
 
 
 
