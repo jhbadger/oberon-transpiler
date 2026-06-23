@@ -18,7 +18,8 @@ MODULE IDE;
  *   Ctrl+N          New editor window
  *   Ctrl+O          Open file
  *   Ctrl+S          Save
- *   Ctrl+W          Kill region (cut selection); close window if no selection
+ *   Ctrl+W          Kill region (cut selection)
+ *   Ctrl+X          Close window
  *   Ctrl+Q          Quit
  *   F4              Toggle project panel
  *   F7              Next window
@@ -34,6 +35,7 @@ MODULE IDE;
  * Emacs-style (in editor)
  *   Ctrl+Space      Set mark (start region); second press cancels
  *   Ctrl+W          Kill region (cut) when mark is set
+ *   Ctrl+X          Close window
  *   Ctrl+A          Beginning of line
  *   Ctrl+E          End of line
  *   Ctrl+B          Backward char
@@ -2637,7 +2639,7 @@ BEGIN
   Widgets.MenuBarAddItem(mbar, 0, "Save          Ctrl+S", CmdSave);
   Widgets.MenuBarAddItem(mbar, 0, "Save As...", CmdSaveAs);
   Widgets.MenuBarAddSep (mbar, 0);
-  Widgets.MenuBarAddItem(mbar, 0, "Close         Ctrl+W", CmdClose);
+  Widgets.MenuBarAddItem(mbar, 0, "Close         Ctrl+X", CmdClose);
   Widgets.MenuBarAddSep (mbar, 0);
   Widgets.MenuBarAddItem(mbar, 0, "Quit          Ctrl+Q", CmdQuit);
   IF recentCount > 0 THEN
@@ -2706,7 +2708,7 @@ BEGIN
   Widgets.MenuBarAddItem(mbar, 0, "Save          Ctrl+S", CmdSave);
   Widgets.MenuBarAddItem(mbar, 0, "Save As...", CmdSaveAs);
   Widgets.MenuBarAddSep (mbar, 0);
-  Widgets.MenuBarAddItem(mbar, 0, "Close         Ctrl+W", CmdClose);
+  Widgets.MenuBarAddItem(mbar, 0, "Close         Ctrl+X", CmdClose);
   Widgets.MenuBarAddSep (mbar, 0);
   Widgets.MenuBarAddItem(mbar, 0, "Quit          Ctrl+Q", CmdQuit);
 
@@ -2796,16 +2798,6 @@ BEGIN
   BuildMenus();
   RebuildMenuBar();   (* re-adds mbar and sline with recent files populated *)
 
-  (* Decide project root from argv[1]: file → its parent dir, dir → use as-is,
-   nothing → current working directory. *)
-  IF Args.Count() > 0 THEN
-    Args.Get(1, fn);
-    (* If fn looks like a directory (no '.' in basename, or ends with '/'),
-     treat it as the project root.  Otherwise use cwd. *)
-    IF (fn[Strings.Length(fn) - 1] = '/') OR ~LoadFile(NIL, fn) THEN
-      (* Heuristic: try opening as file first; if it works it's a file. *)
-    END
-  END;
 
   (* Simple approach: always use cwd as the project root. *)
   pane := ProjectPane.New(1, 2, ProjPaneW, TUI.Rows - 2);
@@ -2898,12 +2890,12 @@ BEGIN
   acActive := FALSE;  OnMenuCmd(CmdOpen)
 ELSIF ORD(ch) = 19 THEN    (* Ctrl+S *)
 acActive := FALSE;  OnMenuCmd(CmdSave)
-ELSIF ORD(ch) = 23 THEN    (* Ctrl+W: kill-region if selection, else close window *)
+ELSIF ORD(ch) = 23 THEN    (* Ctrl+W: kill region *)
   acActive := FALSE;
   ew := FocusedEditor();
-  IF (ew # NIL) & ew.selActive THEN  DoCut(ew)
-  ELSE  OnMenuCmd(CmdClose)
-  END
+  IF ew # NIL THEN  DoCut(ew)  END
+ELSIF ORD(ch) = 24 THEN    (* Ctrl+X: close window *)
+  acActive := FALSE;  OnMenuCmd(CmdClose)
 ELSIF ORD(ch) = 17 THEN    (* Ctrl+Q *)
 acActive := FALSE;  OnMenuCmd(CmdQuit)
 ELSIF ORD(ch) = 9  THEN    (* Tab — route to focused view *)
