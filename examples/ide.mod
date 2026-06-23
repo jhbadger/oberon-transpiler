@@ -20,6 +20,7 @@ MODULE IDE;
  *   Ctrl+S          Save
  *   Ctrl+W          Close window
  *   Ctrl+Q          Quit
+ *   F4              Toggle project panel
  *   F7              Next window
  *   F8              Toggle full screen for current window
  *   F5              Compile current file
@@ -62,6 +63,7 @@ CmdJumpError = 51;
 CmdCopy    = 60;   CmdCut     = 61;   CmdPaste   = 62;   CmdSelAll  = 63;
 CmdReindent = 80;
 CmdFocusPane = 90;
+CmdTogglePane = 91;
 
 (* ── Recent files ── *)
 MaxRecent      = 8;
@@ -116,6 +118,7 @@ END;
 
 VAR
 pane:      ProjectPane.Pane;
+paneShown: BOOLEAN;
 mbar:      Widgets.MenuBar;
 sline:     Widgets.StatusLine;
 running:   BOOLEAN;
@@ -1602,7 +1605,7 @@ BEGIN
   END;
   IF n = 0 THEN  RETURN  END;
 
-  IF pane # NIL THEN
+  IF (pane # NIL) & paneShown THEN
     edLeft := ProjPaneW + 1;
     edCols := TUI.Cols - ProjPaneW
   ELSE
@@ -1716,8 +1719,11 @@ BEGIN
         wins[i].y := 2
       END
     END;
-    ew.x := ProjPaneW + 1;
-    ew.w := TUI.Cols - ProjPaneW;
+    IF (pane # NIL) & paneShown THEN
+      ew.x := ProjPaneW + 1;  ew.w := TUI.Cols - ProjPaneW
+    ELSE
+      ew.x := 1;  ew.w := TUI.Cols
+    END;
     ew.y := 2;
     ew.h := TUI.Rows - 2;
     TUI.BringToFront(ew);
@@ -1726,6 +1732,33 @@ BEGIN
     COPY("Full screen.", statusMsg)
   END
 END ZoomCurrentWin;
+
+PROCEDURE TogglePane;
+VAR ew: EditorWin;
+BEGIN
+  IF pane = NIL THEN  RETURN  END;
+  IF paneShown THEN
+    TUI.RemoveView(pane);
+    paneShown := FALSE;
+    ew := FocusedEditor();
+    IF ew = NIL THEN  ew := lastEditor  END;
+    IF ew # NIL THEN  TUI.SetFocus(ew)  END
+  ELSE
+    TUI.AddView(pane);
+    paneShown := TRUE;
+    TUI.SetFocus(pane)
+  END;
+  IF zoomedWin # NIL THEN
+    IF (pane # NIL) & paneShown THEN
+      zoomedWin.x := ProjPaneW + 1;  zoomedWin.w := TUI.Cols - ProjPaneW
+    ELSE
+      zoomedWin.x := 1;  zoomedWin.w := TUI.Cols
+    END
+  ELSE
+    TileEditorWins
+  END;
+  TUI.InvalidateFront()
+END TogglePane;
 
 PROCEDURE NextEditorWin;
 VAR i, cur, next: INTEGER;
@@ -2395,6 +2428,7 @@ ELSIF cmd = CmdPaste    THEN  IF ew # NIL THEN  DoPaste(ew)    END
 ELSIF cmd = CmdSelAll   THEN  IF ew # NIL THEN  DoSelAll(ew)   END
 ELSIF cmd = CmdReindent  THEN  IF ew # NIL THEN  DoReindent(ew) END
 ELSIF cmd = CmdFocusPane THEN  IF pane # NIL THEN  TUI.SetFocus(pane) END
+ELSIF cmd = CmdTogglePane THEN  TogglePane
 
 ELSIF cmd = CmdHelp THEN
   (* F1: help on word under cursor; open dialog with empty query if no editor *)
@@ -2589,7 +2623,6 @@ BEGIN
   Widgets.MenuBarAddItem(mbar, 0, "Close         Ctrl+W", CmdClose);
   Widgets.MenuBarAddSep (mbar, 0);
   Widgets.MenuBarAddItem(mbar, 0, "Quit          Ctrl+Q", CmdQuit);
-  Widgets.MenuBarAddItem(mbar, 3, "Project Pane  F4", CmdFocusPane);
   IF recentCount > 0 THEN
     Widgets.MenuBarAddSep(mbar, 0);
     FOR i := 0 TO recentCount - 1 DO
@@ -2633,6 +2666,8 @@ BEGIN
   Widgets.MenuBarAddItem(mbar, 3, "Next Window   F7",       CmdNextWin);
   Widgets.MenuBarAddItem(mbar, 3, "Full Screen   F8",       CmdFullScreen);
   Widgets.MenuBarAddItem(mbar, 3, "Tile Windows",           CmdTile);
+  Widgets.MenuBarAddSep (mbar, 3);
+  Widgets.MenuBarAddItem(mbar, 3, "Toggle Panel  F4",       CmdTogglePane);
 
   (* Help menu *)
   Widgets.MenuBarAddMenu(mbar, "Help");
@@ -2686,6 +2721,8 @@ BEGIN
   Widgets.MenuBarAddItem(mbar, 3, "Next Window   F7",       CmdNextWin);
   Widgets.MenuBarAddItem(mbar, 3, "Full Screen   F8",       CmdFullScreen);
   Widgets.MenuBarAddItem(mbar, 3, "Tile Windows",           CmdTile);
+  Widgets.MenuBarAddSep (mbar, 3);
+  Widgets.MenuBarAddItem(mbar, 3, "Toggle Panel  F4",       CmdTogglePane);
 
   (* Help menu *)
   Widgets.MenuBarAddMenu(mbar, "Help");
@@ -2759,6 +2796,7 @@ BEGIN
   OS.GetCwd(fn);
   ProjectPane.SetRoot(pane, fn);
   TUI.AddView(pane);
+  paneShown := TRUE;
   (* Open file from command line, or start with empty window *)
   ew := NewEditorWin();
   lastEditor := ew;   (* prime lastEditor so menu commands work before any mouse motion *)
@@ -2854,8 +2892,7 @@ ew := FocusedEditor();
 IF ew # NIL THEN  TriggerAC(ew)  END
 ELSIF ch = TUI.KF1  THEN   acActive := FALSE;  OnMenuCmd(CmdHelp)
 ELSIF ch = TUI.KF2  THEN   acActive := FALSE;  OnMenuCmd(CmdJumpError)
-ELSIF ch = TUI.KF4 THEN acActive := FALSE;
-IF pane # NIL THEN  TUI.SetFocus(pane)  END
+ELSIF ch = TUI.KF4 THEN acActive := FALSE;  OnMenuCmd(CmdTogglePane)
 ELSIF ch = TUI.KF5  THEN   acActive := FALSE;  OnMenuCmd(CmdCompile)
 ELSIF ch = TUI.KF6  THEN   acActive := FALSE;  OnMenuCmd(CmdRun)
 ELSIF ch = TUI.KF9  THEN   acActive := FALSE;  OnMenuCmd(CmdCompRun)
