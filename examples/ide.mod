@@ -18,7 +18,7 @@ MODULE IDE;
  *   Ctrl+N          New editor window
  *   Ctrl+O          Open file
  *   Ctrl+S          Save
- *   Ctrl+W          Close window
+ *   Ctrl+W          Kill region (cut selection); close window if no selection
  *   Ctrl+Q          Quit
  *   F4              Toggle project panel
  *   F7              Next window
@@ -31,6 +31,14 @@ MODULE IDE;
  *   Ctrl+G          Go to line
  *   Ctrl+K / Ctrl+Y Kill line / yank
  *   Ctrl+Left/Right Word left / right
+ * Emacs-style (in editor)
+ *   Ctrl+Space      Set mark (start region); second press cancels
+ *   Ctrl+W          Kill region (cut) when mark is set
+ *   Ctrl+A          Beginning of line
+ *   Ctrl+E          End of line
+ *   Ctrl+B          Backward char
+ *   Ctrl+P          Previous line
+ *   Ctrl+D          Delete forward char
  *)
 IMPORT TUI, Widgets, FileDialog, Help, Strings, Terminal, ProjectPane, Files, OS, Out, Args;
 
@@ -1511,8 +1519,17 @@ ELSIF ch = TUI.KTab THEN
   INC(v.cx, 4)
 
   (* ── Control commands ── *)
-ELSIF ORD(ch) = 1  THEN  DoSelAll(v)       (* Ctrl+A: select all  *)
+ELSIF ORD(ch) = 1  THEN  ClearSel(v);  v.cx := 0  (* Ctrl+A: line beginning *)
+ELSIF ORD(ch) = 2  THEN                            (* Ctrl+B: backward char  *)
+  ClearSel(v);
+  IF v.cx > 0 THEN  Utf8Back(v.lines[v.cy], v.cx)
+  ELSIF v.cy > 0 THEN  DEC(v.cy);  v.cx := LineLen(v, v.cy)
+  END
 ELSIF ORD(ch) = 3  THEN  DoCopy(v)         (* Ctrl+C: copy        *)
+ELSIF ORD(ch) = 4  THEN                    (* Ctrl+D: delete forward char *)
+  IF v.selActive THEN  DeleteSel(v)  ELSE  DoDelete(v)  END
+ELSIF ORD(ch) = 5  THEN  ClearSel(v);  v.cx := LineLen(v, v.cy)  (* Ctrl+E: line end *)
+ELSIF ORD(ch) = 16 THEN  ClearSel(v);  DEC(v.cy);  ClampCursor(v) (* Ctrl+P: prev line *)
 ELSIF ORD(ch) = 22 THEN  DoPaste(v)        (* Ctrl+V: paste       *)
 ELSIF ORD(ch) = 24 THEN  DoCut(v)          (* Ctrl+X: cut         *)
 ELSIF ORD(ch) = 11 THEN  ClearSel(v);  DoKillLine(v)  (* Ctrl+K  *)
@@ -2881,15 +2898,24 @@ BEGIN
   acActive := FALSE;  OnMenuCmd(CmdOpen)
 ELSIF ORD(ch) = 19 THEN    (* Ctrl+S *)
 acActive := FALSE;  OnMenuCmd(CmdSave)
-ELSIF ORD(ch) = 23 THEN    (* Ctrl+W *)
-acActive := FALSE;  OnMenuCmd(CmdClose)
+ELSIF ORD(ch) = 23 THEN    (* Ctrl+W: kill-region if selection, else close window *)
+  acActive := FALSE;
+  ew := FocusedEditor();
+  IF (ew # NIL) & ew.selActive THEN  DoCut(ew)
+  ELSE  OnMenuCmd(CmdClose)
+  END
 ELSIF ORD(ch) = 17 THEN    (* Ctrl+Q *)
 acActive := FALSE;  OnMenuCmd(CmdQuit)
 ELSIF ORD(ch) = 9  THEN    (* Tab — route to focused view *)
 IF ~TUI.Dispatch(ev) THEN  END
-ELSIF ORD(ch) = 0  THEN    (* Ctrl+Space — trigger autocomplete *)
-ew := FocusedEditor();
-IF ew # NIL THEN  TriggerAC(ew)  END
+ELSIF ORD(ch) = 0  THEN    (* Ctrl+Space: set mark / autocomplete *)
+  ew := FocusedEditor();
+  IF ew # NIL THEN
+    IF ew.selActive THEN  ClearSel(ew)  (* second press cancels mark *)
+    ELSE  StartSel(ew)                  (* first press sets mark      *)
+    END;
+    TriggerAC(ew)
+  END
 ELSIF ch = TUI.KF1  THEN   acActive := FALSE;  OnMenuCmd(CmdHelp)
 ELSIF ch = TUI.KF2  THEN   acActive := FALSE;  OnMenuCmd(CmdJumpError)
 ELSIF ch = TUI.KF4 THEN acActive := FALSE;  OnMenuCmd(CmdTogglePane)
