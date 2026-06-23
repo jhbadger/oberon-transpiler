@@ -116,6 +116,7 @@ undoTop:   INTEGER;   (* next write slot *)
 undoCount: INTEGER;   (* number of valid entries *)
 (* selection *)
 selActive:      BOOLEAN;
+markMode:       BOOLEAN;   (* TRUE when set via Ctrl+Space; plain arrows extend region *)
 selAnchorLine:  INTEGER;
 selAnchorCol:   INTEGER;
 (* mouse drag tracking *)
@@ -850,7 +851,7 @@ END WordRight;
    ════════════════════════════════════════════════════════════════ *)
 
 PROCEDURE ClearSel(ew: EditorWin);
-BEGIN  ew.selActive := FALSE  END ClearSel;
+BEGIN  ew.selActive := FALSE;  ew.markMode := FALSE  END ClearSel;
 
 PROCEDURE StartSel(ew: EditorWin);
 BEGIN
@@ -1451,37 +1452,47 @@ BEGIN
     IF ev.kind = TUI.EvKey THEN
       ch := ev.key;
 
-      (* ── Plain movement: clear selection ── *)
+      (* ── Plain movement: clear selection unless in mark mode ── *)
       IF ch = TUI.KUp THEN
-        ClearSel(v);  DEC(v.cy);  ClampCursor(v)
+        IF ~v.markMode THEN  ClearSel(v)  END;
+        DEC(v.cy);  ClampCursor(v)
       ELSIF ch = TUI.KDown THEN
-        ClearSel(v);  INC(v.cy);  ClampCursor(v)
+        IF ~v.markMode THEN  ClearSel(v)  END;
+        INC(v.cy);  ClampCursor(v)
       ELSIF ch = TUI.KLeft THEN
-        ClearSel(v);
+        IF ~v.markMode THEN  ClearSel(v)  END;
         IF v.cx > 0 THEN  Utf8Back(v.lines[v.cy], v.cx)
       ELSIF v.cy > 0 THEN  DEC(v.cy);  v.cx := LineLen(v, v.cy)
     END
   ELSIF ch = TUI.KRight THEN
-    ClearSel(v);
+    IF ~v.markMode THEN  ClearSel(v)  END;
     IF v.cx < LineLen(v, v.cy) THEN  Utf8Fwd(v.lines[v.cy], v.cx)
   ELSIF v.cy < v.nlines - 1 THEN  INC(v.cy);  v.cx := 0
 END
 ELSIF ch = TUI.KHome THEN
-  ClearSel(v);  v.cy := 0;  v.cx := 0
+  IF ~v.markMode THEN  ClearSel(v)  END;
+  v.cy := 0;  v.cx := 0
 ELSIF ch = TUI.KEnd THEN
-  ClearSel(v);  v.cy := v.nlines - 1;  v.cx := LineLen(v, v.cy)
+  IF ~v.markMode THEN  ClearSel(v)  END;
+  v.cy := v.nlines - 1;  v.cx := LineLen(v, v.cy)
 ELSIF ch = TUI.KCtrlHome THEN
-  ClearSel(v);  v.cx := 0
+  IF ~v.markMode THEN  ClearSel(v)  END;
+  v.cx := 0
 ELSIF ch = TUI.KCtrlEnd THEN
-  ClearSel(v);  v.cx := LineLen(v, v.cy)
+  IF ~v.markMode THEN  ClearSel(v)  END;
+  v.cx := LineLen(v, v.cy)
 ELSIF ch = TUI.KCtrlLeft THEN
-  ClearSel(v);  WordLeft(v)
+  IF ~v.markMode THEN  ClearSel(v)  END;
+  WordLeft(v)
 ELSIF ch = TUI.KCtrlRight THEN
-  ClearSel(v);  WordRight(v)
+  IF ~v.markMode THEN  ClearSel(v)  END;
+  WordRight(v)
 ELSIF ch = TUI.KPgUp THEN
-  ClearSel(v);  DEC(v.cy, v.h - 2);  ClampCursor(v)
+  IF ~v.markMode THEN  ClearSel(v)  END;
+  DEC(v.cy, v.h - 2);  ClampCursor(v)
 ELSIF ch = TUI.KPgDn THEN
-  ClearSel(v);  INC(v.cy, v.h - 2);  ClampCursor(v)
+  IF ~v.markMode THEN  ClearSel(v)  END;
+  INC(v.cy, v.h - 2);  ClampCursor(v)
 
   (* ── Shift+Arrow: extend selection ── *)
 ELSIF ch = TUI.KShiftLeft THEN
@@ -1672,6 +1683,7 @@ BEGIN
   ew.srchBuf[0] := 0X;
   ew.undoTop := 0;  ew.undoCount := 0;
   ew.selActive    := FALSE;
+  ew.markMode     := FALSE;
   ew.mouseSelDrag := FALSE;
   (* Find a free slot *)
   i := 0;
@@ -1877,6 +1889,7 @@ ew.topLine := 0;  ew.leftCol := 0;
 ew.modified := FALSE;
 ew.undoTop := 0;  ew.undoCount := 0;
 ew.selActive := FALSE;
+ew.markMode  := FALSE;
 RETURN TRUE
 END LoadFile;
 
@@ -2903,8 +2916,8 @@ IF ~TUI.Dispatch(ev) THEN  END
 ELSIF ORD(ch) = 0  THEN    (* Ctrl+Space: set mark / autocomplete *)
   ew := FocusedEditor();
   IF ew # NIL THEN
-    IF ew.selActive THEN  ClearSel(ew)  (* second press cancels mark *)
-    ELSE  StartSel(ew)                  (* first press sets mark      *)
+    IF ew.selActive & ew.markMode THEN  ClearSel(ew)  (* second press cancels mark *)
+    ELSE  StartSel(ew);  ew.markMode := TRUE           (* first press sets mark      *)
     END;
     TriggerAC(ew)
   END
