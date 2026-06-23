@@ -12,7 +12,7 @@ MODULE ProjectPane;
  *   ProjectPane.SetRoot(pane, projectRoot);
  *   TUI.AddView(pane);
  *)
-IMPORT TUI, Strings, Files, OS, Out;
+IMPORT TUI, Strings, OS, Out;
 
 CONST
   MaxEntries = 2000;
@@ -127,81 +127,33 @@ END RemoveRange;
 
 (* Insert all children of entries[parentIdx] right after it. *)
 PROCEDURE ExpandDir(p: Pane; parentIdx: INTEGER);
-VAR names:     ARRAY 256 OF ARRAY 128 OF CHAR;
-    kinds:     ARRAY 256 OF INTEGER;
-    n, i, insertAt, childDepth: INTEGER;
+VAR i, insertAt, childDepth, n: INTEGER;
     parentPath: ARRAY 512 OF CHAR;
     e: Entry;
-    keep: BOOLEAN;
-    cmd: ARRAY 1024 OF CHAR;
-    f: Files.File;  r: Files.Rider;  b: BYTE;
-    buf: ARRAY 128 OF CHAR;
-    col, rc, nameLen: INTEGER;
+    name: ARRAY 128 OF CHAR;
+    keep, isDir: BOOLEAN;
 BEGIN
   IF p.entries[parentIdx].kind # KindDir THEN  RETURN  END;
   Strings.Copy(p.entries[parentIdx].path, parentPath);
   childDepth := p.entries[parentIdx].depth + 1;
   IF childDepth >= MaxDepth THEN  RETURN  END;
 
-  n := 0;
-  Strings.Copy("ls -1Ap '", cmd);
-  Strings.Append(parentPath, cmd);
-  Strings.Append("' > .obc_dirlist 2>/dev/null", cmd);
-  rc := OS.Exec(cmd);
-  IF rc = 0 THEN
-    f := Files.Old(".obc_dirlist");
-    IF f # NIL THEN
-      Files.Set(r, f, 0);
-      col := 0;
-      Files.Read(r, b);
-      WHILE ~r.eof DO
-        IF b = 10 THEN
-          buf[col] := 0X;
-          nameLen  := col;
-          IF (nameLen > 0) & (n < 256) THEN
-            IF buf[nameLen - 1] = '/' THEN
-              buf[nameLen - 1] := 0X;
-              kinds[n] := KindDir
-            ELSE
-              kinds[n] := KindFile
-            END;
-            Strings.Copy(buf, names[n]);
-            INC(n)
-          END;
-          col := 0
-        ELSIF col < 127 THEN
-          buf[col] := CHR(b);  INC(col)
-        END;
-        Files.Read(r, b)
-      END;
-      Files.Close(f)
-    END
-  END;
-
+  OS.DirOpen(parentPath, "");
+  n        := OS.DirCount();
   insertAt := parentIdx + 1;
 
+  (* OS.DirOpen sorts dirs first then files, both alphabetically.
+     Inserting in reverse at the same position preserves that order. *)
   FOR i := n - 1 TO 0 BY -1 DO
-    IF kinds[i] = KindFile THEN
-      keep := IsShownFile(names[i])
-    ELSE
-      keep := ~IsSkipDir(names[i])
+    isDir := OS.DirIsDir(i);
+    OS.DirName(i, name);
+    IF isDir THEN  keep := ~IsSkipDir(name)
+    ELSE           keep := IsShownFile(name)
     END;
-    IF keep & (kinds[i] = KindFile) THEN
-      Strings.Copy(names[i], e.name);
-      JoinPath(parentPath, names[i], e.path);
-      e.kind     := KindFile;
-      e.depth    := childDepth;
-      e.expanded := FALSE;
-      e.scanned  := FALSE;
-      e.visible  := TRUE;
-      InsertEntry(p, insertAt, e)
-    END
-  END;
-  FOR i := n - 1 TO 0 BY -1 DO
-    IF (kinds[i] = KindDir) & ~IsSkipDir(names[i]) THEN
-      Strings.Copy(names[i], e.name);
-      JoinPath(parentPath, names[i], e.path);
-      e.kind     := KindDir;
+    IF keep THEN
+      Strings.Copy(name, e.name);
+      JoinPath(parentPath, name, e.path);
+      IF isDir THEN  e.kind := KindDir  ELSE  e.kind := KindFile  END;
       e.depth    := childDepth;
       e.expanded := FALSE;
       e.scanned  := FALSE;

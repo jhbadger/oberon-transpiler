@@ -2953,6 +2953,7 @@ ELSIF ch = TUI.KF7  THEN   acActive := FALSE;  OnMenuCmd(CmdNextWin)
 ELSIF ch = TUI.KF8  THEN   acActive := FALSE;  OnMenuCmd(CmdFullScreen)
 ELSE
   IF ~TUI.Dispatch(ev) THEN  END;
+  IF pendingMenuRebuild THEN  pendingMenuRebuild := FALSE;  RebuildMenuBar  END;
   (* After a printable char or backspace, re-filter if AC is active *)
   IF acActive & ((ORD(ch) >= 32) & (ORD(ch) < 127) OR (ORD(ch) = 8)) THEN
     ew := FocusedEditor();
