@@ -219,11 +219,17 @@ static Node *find_type_decl(const char *name) {
 #define MAX_TYPE_TAGS 256
 static char g_type_tags[MAX_TYPE_TAGS][MAX_IDENT];
 static int  g_n_type_tags = 0;
+static int  g_type_tag_base = 0;   /* per-module offset so tags are globally unique */
+static int  g_module_index = 0;    /* incremented each time a module is compiled */
 
-static void type_tags_reset(void) { g_n_type_tags = 0; }
+static void type_tags_reset(void) {
+    g_n_type_tags = 0;
+    g_type_tag_base = g_module_index * 100;
+    g_module_index++;
+}
 static int  type_tag_of(const char *name) {
     for (int i=0;i<g_n_type_tags;i++)
-        if (!strcmp(g_type_tags[i],name)) return i+1;
+        if (!strcmp(g_type_tags[i],name)) return g_type_tag_base + i + 1;
     return 0;
 }
 static int type_tag_add(const char *name) {
@@ -231,7 +237,7 @@ static int type_tag_add(const char *name) {
     if (t) return t;
     if (g_n_type_tags < MAX_TYPE_TAGS)
         strncpy(g_type_tags[g_n_type_tags++],name,MAX_IDENT-1);
-    return g_n_type_tags;
+    return g_type_tag_base + g_n_type_tags;
 }
 static int is_known_record_type(const char *name) { return type_tag_of(name)!=0; }
 
@@ -3606,7 +3612,7 @@ void codegen(Node *module, FILE *out, int is_main, const char *srcfile) {
     /* Emit _TAG_* defines for every registered record type */
     if (g_n_type_tags > 0) {
         for (int i=0;i<g_n_type_tags;i++)
-            emit(g,"#define _TAG_%s %d\n", g_type_tags[i], i+1);
+            emit(g,"#define _TAG_%s %d\n", g_type_tags[i], g_type_tag_base + i + 1);
         emit(g,"\n");
     } else if (has_types) {
         emit(g,"\n");
@@ -3851,7 +3857,7 @@ void codegen_header(Node *module, FILE *out) {
      * can perform IS/WITH type tests on this module's exported record types. */
     for (int _ti = 0; _ti < g_n_type_tags; _ti++) {
         fprintf(out,"#define _TAG_%s_%s %d\n",
-                module->str, g_type_tags[_ti], _ti + 1);
+                module->str, g_type_tags[_ti], g_type_tag_base + _ti + 1);
     }
     fprintf(out,"\n");
 
