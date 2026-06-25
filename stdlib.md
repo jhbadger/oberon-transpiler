@@ -2174,3 +2174,163 @@ PCM audio playback via SDL2 and SDL2_sound.  Decodes audio files to 44100 Hz / S
 | `SDL2Sound.Queued(): INTEGER` | Approximate bytes still waiting to be played.  Returns 0 when playback is finished. |
 | `SDL2Sound.WriteSineWAV(path: ARRAY OF CHAR; hz, ms: INTEGER): INTEGER` | Write a sine-wave WAV file to `path` with frequency `hz` Hz and duration `ms` ms.  Returns 1 on success. |
 
+---
+
+## Raylib - Game Window, 2D Graphics, Input, and Audio
+
+```
+IMPORT Raylib;
+```
+
+Self-contained game library: window management, hardware-accelerated 2D rendering, keyboard/mouse input, and audio.  Requires Raylib 4+ (`pkg-config raylib`).
+
+### Color Encoding
+
+All color parameters are a single `INTEGER` packed as `(a SHL 24) OR (r SHL 16) OR (g SHL 8) OR b`.  Fully-opaque colors have the high bit set and appear **negative** in Oberon — this is expected.  Use `Raylib.RGBA(r,g,b,a)` to build custom colors, or the named procedures (`Raylib.Black()`, `Raylib.Red()`, etc.) for the built-in palette.  Store color values in `INTEGER` variables at startup; do not compare them numerically.
+
+### Types
+
+| Type | Description |
+|------|-------------|
+| `Raylib.Texture` | Opaque handle to a GPU texture loaded from a file. |
+| `Raylib.Sound` | Opaque handle to a loaded sound effect. |
+| `Raylib.Music` | Opaque handle to a streaming music track. |
+| `Raylib.Font` | Opaque handle to a loaded TTF/BMP font. |
+
+### Window / Core
+
+| Procedure / Function | Description |
+|----------------------|-------------|
+| `Raylib.InitWindow(w, h: INTEGER; title: ARRAY OF CHAR)` | Create a window of size `w`×`h` with the given title. |
+| `Raylib.CloseWindow` | Destroy the window and free resources. |
+| `Raylib.WindowShouldClose(): INTEGER` | Returns 1 when the user closes the window or presses Esc. |
+| `Raylib.SetTargetFPS(fps: INTEGER)` | Cap the frame rate.  60 is typical. |
+| `Raylib.GetFrameTime(): REAL` | Seconds elapsed since last frame (delta time). |
+| `Raylib.GetTime(): REAL` | Seconds elapsed since `InitWindow`. |
+| `Raylib.GetScreenWidth(): INTEGER` | Current window width in pixels. |
+| `Raylib.GetScreenHeight(): INTEGER` | Current window height in pixels. |
+| `Raylib.IsWindowResized(): INTEGER` | Returns 1 if the window was resized this frame. |
+| `Raylib.ToggleFullscreen` | Toggle fullscreen mode. |
+| `Raylib.SetWindowTitle(title: ARRAY OF CHAR)` | Change the window title. |
+| `Raylib.SetWindowSize(w, h: INTEGER)` | Resize the window. |
+
+### Drawing
+
+Call `BeginDrawing` / `EndDrawing` around all draw calls each frame.
+
+| Procedure | Description |
+|-----------|-------------|
+| `Raylib.BeginDrawing` | Begin the frame; set up the render target. |
+| `Raylib.EndDrawing` | Flush the frame to the screen and wait for vsync/FPS cap. |
+| `Raylib.ClearBackground(color: INTEGER)` | Fill the frame with `color`. |
+
+### 2D Shapes
+
+| Procedure | Description |
+|-----------|-------------|
+| `Raylib.DrawPixel(x, y: INTEGER; color: INTEGER)` | Draw a single pixel. |
+| `Raylib.DrawLine(x1, y1, x2, y2: INTEGER; color: INTEGER)` | Draw a 1-pixel line. |
+| `Raylib.DrawLineEx(x1, y1, x2, y2, thick: REAL; color: INTEGER)` | Draw a thick antialiased line. |
+| `Raylib.DrawCircle(cx, cy: INTEGER; radius: REAL; color: INTEGER)` | Filled circle. |
+| `Raylib.DrawCircleLines(cx, cy: INTEGER; radius: REAL; color: INTEGER)` | Circle outline. |
+| `Raylib.DrawEllipse(cx, cy: INTEGER; rx, ry: REAL; color: INTEGER)` | Filled ellipse. |
+| `Raylib.DrawRectangle(x, y, w, h: INTEGER; color: INTEGER)` | Filled rectangle. |
+| `Raylib.DrawRectangleLines(x, y, w, h: INTEGER; color: INTEGER)` | Rectangle outline. |
+| `Raylib.DrawRectangleRounded(x, y, w, h, roundness: REAL; segs: INTEGER; color: INTEGER)` | Filled rectangle with rounded corners.  `roundness` in 0.0–1.0. |
+| `Raylib.DrawTriangle(x1, y1, x2, y2, x3, y3: REAL; color: INTEGER)` | Filled triangle (vertices must be counter-clockwise). |
+| `Raylib.DrawPoly(cx, cy: REAL; sides: INTEGER; radius, rot: REAL; color: INTEGER)` | Filled regular polygon. |
+
+### Text
+
+| Procedure / Function | Description |
+|----------------------|-------------|
+| `Raylib.DrawText(text: ARRAY OF CHAR; x, y, size: INTEGER; color: INTEGER)` | Draw text using the default font. |
+| `Raylib.DrawTextEx(font: Font; text: ARRAY OF CHAR; x, y, size, spacing: REAL; color: INTEGER)` | Draw text with a custom font, size, and character spacing. |
+| `Raylib.MeasureText(text: ARRAY OF CHAR; size: INTEGER): INTEGER` | Width in pixels of `text` at `size` using the default font. |
+
+### Textures
+
+| Procedure / Function | Description |
+|----------------------|-------------|
+| `Raylib.LoadTexture(path: ARRAY OF CHAR): Texture` | Load an image file (PNG, JPG, BMP, TGA…) as a GPU texture.  Returns NIL on error. |
+| `Raylib.UnloadTexture(tex: Texture)` | Free the texture. |
+| `Raylib.DrawTexture(tex: Texture; x, y: INTEGER; color: INTEGER)` | Draw texture at `(x,y)`.  Use `Raylib.White()` as `color` for no tint. |
+| `Raylib.DrawTextureEx(tex: Texture; x, y, rot, scale: REAL; color: INTEGER)` | Draw texture with rotation and uniform scale. |
+| `Raylib.DrawTextureRec(tex: Texture; sx, sy, sw, sh: INTEGER; dx, dy: REAL; color: INTEGER)` | Draw a sub-rectangle of the texture at `(dx,dy)`. |
+| `Raylib.DrawTexturePro(tex: Texture; sx, sy, sw, sh, dx, dy, dw, dh: INTEGER; color: INTEGER)` | Draw a sub-rectangle of the texture scaled to a destination rectangle. |
+| `Raylib.TextureWidth(tex: Texture): INTEGER` | Width of the texture in pixels. |
+| `Raylib.TextureHeight(tex: Texture): INTEGER` | Height of the texture in pixels. |
+
+### Fonts
+
+| Procedure / Function | Description |
+|----------------------|-------------|
+| `Raylib.LoadFont(path: ARRAY OF CHAR): Font` | Load a TTF or BMFont file.  Returns NIL on error. |
+| `Raylib.UnloadFont(font: Font)` | Free the font. |
+
+### Input — Keyboard
+
+Printable key codes are their ASCII value (e.g. `ORD("A")` = 65).  Special keys use the constants below.
+
+`Raylib.KeySpace` `Raylib.KeyEsc` `Raylib.KeyEnter` `Raylib.KeyTab` `Raylib.KeyBackspace` `Raylib.KeyInsert` `Raylib.KeyDelete` `Raylib.KeyRight` `Raylib.KeyLeft` `Raylib.KeyDown` `Raylib.KeyUp` `Raylib.KeyPgUp` `Raylib.KeyPgDn` `Raylib.KeyHome` `Raylib.KeyEnd` `Raylib.KeyF1`…`Raylib.KeyF12` `Raylib.KeyLShift` `Raylib.KeyRShift` `Raylib.KeyLCtrl` `Raylib.KeyRCtrl` `Raylib.KeyLAlt` `Raylib.KeyRAlt`
+
+| Function | Description |
+|----------|-------------|
+| `Raylib.IsKeyDown(key: INTEGER): INTEGER` | 1 while the key is held. |
+| `Raylib.IsKeyPressed(key: INTEGER): INTEGER` | 1 on the frame the key was first pressed. |
+| `Raylib.IsKeyReleased(key: INTEGER): INTEGER` | 1 on the frame the key was released. |
+| `Raylib.GetKeyPressed(): INTEGER` | Key code of the next queued keypress, or 0 if none. |
+
+### Input — Mouse
+
+`Raylib.BtnLeft` `Raylib.BtnRight` `Raylib.BtnMiddle`
+
+| Function | Description |
+|----------|-------------|
+| `Raylib.IsMouseButtonDown(btn: INTEGER): INTEGER` | 1 while the button is held. |
+| `Raylib.IsMouseButtonPressed(btn: INTEGER): INTEGER` | 1 on the frame the button was first pressed. |
+| `Raylib.IsMouseButtonReleased(btn: INTEGER): INTEGER` | 1 on the frame the button was released. |
+| `Raylib.GetMouseX(): INTEGER` | Current mouse X position. |
+| `Raylib.GetMouseY(): INTEGER` | Current mouse Y position. |
+| `Raylib.GetMouseWheelMove(): REAL` | Wheel scroll delta this frame (positive = up). |
+| `Raylib.SetMousePosition(x, y: INTEGER)` | Warp the mouse cursor. |
+| `Raylib.ShowCursor` | Make the OS cursor visible. |
+| `Raylib.HideCursor` | Hide the OS cursor. |
+
+### Audio
+
+| Procedure / Function | Description |
+|----------------------|-------------|
+| `Raylib.InitAudioDevice` | Open the audio device.  Call once before loading sounds. |
+| `Raylib.CloseAudioDevice` | Close the audio device. |
+| `Raylib.LoadSound(path: ARRAY OF CHAR): Sound` | Load a sound effect (WAV, OGG, MP3…).  Returns NIL on error. |
+| `Raylib.UnloadSound(snd: Sound)` | Free a sound. |
+| `Raylib.PlaySound(snd: Sound)` | Play the sound from the start. |
+| `Raylib.StopSound(snd: Sound)` | Stop playback. |
+| `Raylib.PauseSound(snd: Sound)` | Pause playback. |
+| `Raylib.ResumeSound(snd: Sound)` | Resume paused playback. |
+| `Raylib.IsSoundPlaying(snd: Sound): INTEGER` | 1 if the sound is currently playing. |
+| `Raylib.SetSoundVolume(snd: Sound; vol: REAL)` | Set volume 0.0–1.0. |
+| `Raylib.LoadMusicStream(path: ARRAY OF CHAR): Music` | Load a music file for streaming.  Returns NIL on error. |
+| `Raylib.UnloadMusicStream(mus: Music)` | Free a music stream. |
+| `Raylib.PlayMusicStream(mus: Music)` | Start streaming playback. |
+| `Raylib.UpdateMusicStream(mus: Music)` | Refill the stream buffer — call once per frame while playing. |
+| `Raylib.StopMusicStream(mus: Music)` | Stop and rewind. |
+| `Raylib.PauseMusicStream(mus: Music)` | Pause streaming. |
+| `Raylib.ResumeMusicStream(mus: Music)` | Resume streaming. |
+| `Raylib.IsMusicStreamPlaying(mus: Music): INTEGER` | 1 if streaming is active. |
+| `Raylib.SetMusicVolume(mus: Music; vol: REAL)` | Set volume 0.0–1.0. |
+
+### Color Utilities
+
+| Function | Description |
+|----------|-------------|
+| `Raylib.RGBA(r, g, b, a: INTEGER): INTEGER` | Pack r/g/b/a (0–255 each) into a color value. |
+| `Raylib.Fade(color: INTEGER; alpha: REAL): INTEGER` | Return `color` with alpha multiplied by `alpha` (0.0–1.0). |
+
+### Named Colors
+
+`Raylib.Black()` `Raylib.White()` `Raylib.RayWhite()` `Raylib.Red()` `Raylib.Green()` `Raylib.Blue()` `Raylib.Yellow()` `Raylib.Gold()` `Raylib.Orange()` `Raylib.Pink()` `Raylib.Maroon()` `Raylib.LightGray()` `Raylib.Gray()` `Raylib.DarkGray()` `Raylib.SkyBlue()` `Raylib.DarkBlue()` `Raylib.DarkGreen()` `Raylib.Purple()` `Raylib.DarkPurple()` `Raylib.Beige()` `Raylib.Brown()` `Raylib.DarkBrown()` `Raylib.Magenta()` `Raylib.Lime()` `Raylib.Violet()` `Raylib.Blank()`
+
+Each returns an `INTEGER` color value.  Store the result in a variable at startup rather than calling repeatedly in the draw loop.
+
