@@ -10,5 +10,7 @@ BEGIN
   Raylib.ClearBackground(black);
   Raylib.DrawText("hello", 10, 10, 20, white);
   Raylib.EndDrawing();
+  REPEAT UNTIL Raylib.GetKeyPressed() > 0;
   Raylib.CloseWindow()
 END rltest.
+
