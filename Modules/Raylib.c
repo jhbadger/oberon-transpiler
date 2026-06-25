@@ -6,7 +6,7 @@
  * is an int _tag (required by the obc type system).
  */
 
-#include "Raylib.h"
+#include "OBCRaylib.h"
 
 /* ── Window / Core ───────────────────────────────────────────────────────── */
 

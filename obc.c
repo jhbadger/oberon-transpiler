@@ -781,12 +781,12 @@ int main(int argc, char *argv[]) {
             char cxxcmd[4096];
             int cpos = snprintf(cxxcmd, sizeof(cxxcmd),
                                 "g++ -c -O -w -o %s", opath);
-            for (int j = 0; j < g_nincdirs; j++)
-                cpos += snprintf(cxxcmd + cpos, sizeof(cxxcmd) - (size_t)cpos,
-                                 " -I%s", g_incdirs[j]);
             for (int j = 0; j < g_n_extra_cflags; j++)
                 cpos += snprintf(cxxcmd + cpos, sizeof(cxxcmd) - (size_t)cpos,
                                  " %s", g_extra_cflags[j]);
+            for (int j = 0; j < g_nincdirs; j++)
+                cpos += snprintf(cxxcmd + cpos, sizeof(cxxcmd) - (size_t)cpos,
+                                 " -I%s", g_incdirs[j]);
             snprintf(cxxcmd + cpos, sizeof(cxxcmd) - (size_t)cpos,
                      " %s", g_csrcfiles[i]);
 
@@ -808,14 +808,14 @@ int main(int argc, char *argv[]) {
                 : "-w ",
             binpath);
 
-        for (int i = 0; i < g_nincdirs && pos < (int)sizeof(cmd); i++) {
-            pos += snprintf(cmd + pos, sizeof(cmd) - (size_t)pos,
-                            " -I%s", g_incdirs[i]);
-        }
-
         for (int i = 0; i < g_n_extra_cflags && pos < (int)sizeof(cmd); i++) {
             pos += snprintf(cmd + pos, sizeof(cmd) - (size_t)pos,
                             " %s", g_extra_cflags[i]);
+        }
+
+        for (int i = 0; i < g_nincdirs && pos < (int)sizeof(cmd); i++) {
+            pos += snprintf(cmd + pos, sizeof(cmd) - (size_t)pos,
+                            " -I%s", g_incdirs[i]);
         }
 
         for (int i = 0; i < g_ncfiles && pos < (int)sizeof(cmd); i++) {
