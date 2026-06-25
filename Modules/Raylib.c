@@ -335,5 +335,78 @@ int Raylib_Lime(void)       { return RL_I(LIME);       }
 int Raylib_Violet(void)     { return RL_I(VIOLET);     }
 int Raylib_Blank(void)      { return RL_I(BLANK);      }
 
+/* ── RenderTexture ───────────────────────────────────────────────────────── */
+
+Raylib_RenderTexture Raylib_LoadRenderTexture(int w, int h) {
+    Raylib_RenderTexture rt = (Raylib_RenderTexture)calloc(1, sizeof(Raylib_RenderTextureRec));
+    if (!rt) return NULL;
+    rt->_tag = _TAG_Raylib_RenderTextureRec;
+    rt->rt   = LoadRenderTexture(w, h);
+    return rt;
+}
+
+void Raylib_UnloadRenderTexture(Raylib_RenderTexture rt) {
+    if (!rt) return;
+    UnloadRenderTexture(rt->rt);
+    free(rt);
+}
+
+void Raylib_BeginTextureMode(Raylib_RenderTexture rt) {
+    if (!rt) return;
+    BeginTextureMode(rt->rt);
+}
+
+void Raylib_EndTextureMode(void) {
+    EndTextureMode();
+}
+
+void Raylib_DrawRenderTexture(Raylib_RenderTexture rt, int x, int y, int w, int h, int color) {
+    if (!rt) return;
+    /* Negative source height flips the texture (RT is stored upside-down by OpenGL). */
+    Rectangle src = {0, 0, (float)rt->rt.texture.width, (float)-rt->rt.texture.height};
+    Rectangle dst = {(float)x, (float)y, (float)w, (float)h};
+    DrawTexturePro(rt->rt.texture, src, dst, (Vector2){0, 0}, 0.0f, RL_C(color));
+}
+
+void Raylib_SaveRTPNG(Raylib_RenderTexture rt, char *filename) {
+    if (!rt || !filename || filename[0] == '\0') return;
+    Image img = LoadImageFromTexture(rt->rt.texture);
+    ImageFlipVertical(&img);
+    ExportImage(img, filename);
+    UnloadImage(img);
+}
+
+void Raylib_LoadPNGIntoRT(Raylib_RenderTexture rt, char *filename) {
+    if (!rt || !filename || filename[0] == '\0') return;
+    Image img = LoadImage(filename);
+    if (!img.data) return;
+    Texture2D tex = LoadTextureFromImage(img);
+    UnloadImage(img);
+    BeginTextureMode(rt->rt);
+    ClearBackground(WHITE);
+    Rectangle src = {0, 0, (float)tex.width, (float)tex.height};
+    Rectangle dst = {0, 0, (float)rt->rt.texture.width, (float)rt->rt.texture.height};
+    DrawTexturePro(tex, src, dst, (Vector2){0, 0}, 0.0f, WHITE);
+    EndTextureMode();
+    UnloadTexture(tex);
+}
+
+/* ── Additional shapes ───────────────────────────────────────────────────── */
+
+void Raylib_DrawEllipseLines(int cx, int cy, double rx, double ry, int color) {
+    DrawEllipseLines(cx, cy, (float)rx, (float)ry, RL_C(color));
+}
+
+void Raylib_DrawRectangleLinesEx(int x, int y, int w, int h, double thick, int color) {
+    Rectangle r = {(float)x, (float)y, (float)w, (float)h};
+    DrawRectangleLinesEx(r, (float)thick, RL_C(color));
+}
+
+/* ── Extended input ──────────────────────────────────────────────────────── */
+
+int Raylib_GetCharPressed(void) {
+    return GetCharPressed();
+}
+
 /* ── Module init ─────────────────────────────────────────────────────────── */
 void Raylib_init(void) { }

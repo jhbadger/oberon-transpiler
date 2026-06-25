@@ -201,6 +201,26 @@ int Raylib_Lime(void);
 int Raylib_Violet(void);
 int Raylib_Blank(void);
 
+/* ── RenderTexture ───────────────────────────────────────────────────────── */
+typedef struct Raylib_RenderTextureRec_s { int _tag; RenderTexture2D rt; } Raylib_RenderTextureRec;
+typedef Raylib_RenderTextureRec *Raylib_RenderTexture;
+#define _TAG_Raylib_RenderTextureRec 5
+
+Raylib_RenderTexture Raylib_LoadRenderTexture(int w, int h);
+void Raylib_UnloadRenderTexture(Raylib_RenderTexture rt);
+void Raylib_BeginTextureMode(Raylib_RenderTexture rt);
+void Raylib_EndTextureMode(void);
+void Raylib_DrawRenderTexture(Raylib_RenderTexture rt, int x, int y, int w, int h, int color);
+void Raylib_SaveRTPNG(Raylib_RenderTexture rt, char *filename);
+void Raylib_LoadPNGIntoRT(Raylib_RenderTexture rt, char *filename);
+
+/* ── Additional shapes ───────────────────────────────────────────────────── */
+void Raylib_DrawEllipseLines(int cx, int cy, double rx, double ry, int color);
+void Raylib_DrawRectangleLinesEx(int x, int y, int w, int h, double thick, int color);
+
+/* ── Extended input ──────────────────────────────────────────────────────── */
+int Raylib_GetCharPressed(void);
+
 /* ── Module init (no-op — called by obc runtime) ─────────────────────────── */
 void Raylib_init(void);
 

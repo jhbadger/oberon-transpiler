@@ -2334,3 +2334,32 @@ Printable key codes are their ASCII value (e.g. `ORD("A")` = 65).  Special keys 
 
 Each returns an `INTEGER` color value.  Store the result in a variable at startup rather than calling repeatedly in the draw loop.
 
+### RenderTexture (off-screen canvas)
+
+A `Raylib.RenderTexture` is an off-screen framebuffer you can draw into, then blit to the screen.  Useful for paint programs, post-processing, or any persistent pixel canvas.
+
+| Procedure / Function | Description |
+|----------------------|-------------|
+| `Raylib.LoadRenderTexture(w, h: INTEGER): RenderTexture` | Create an off-screen canvas of size `w`×`h`. |
+| `Raylib.UnloadRenderTexture(rt: RenderTexture)` | Free the render texture. |
+| `Raylib.BeginTextureMode(rt: RenderTexture)` | Redirect subsequent draw calls into `rt`.  Call before any drawing you want captured. |
+| `Raylib.EndTextureMode` | Stop drawing into the render texture; resume normal screen rendering. |
+| `Raylib.DrawRenderTexture(rt: RenderTexture; x, y, w, h: INTEGER; color: INTEGER)` | Blit the render texture to the screen at `(x,y)` scaled to `w`×`h`.  Handles the OpenGL Y-flip automatically. |
+| `Raylib.SaveRTPNG(rt: RenderTexture; filename: ARRAY OF CHAR)` | Export the canvas to a PNG file (Y-flip corrected). |
+| `Raylib.LoadPNGIntoRT(rt: RenderTexture; filename: ARRAY OF CHAR)` | Load a PNG and draw it into `rt`, scaling to fit. |
+
+**Coordinate note:** Inside `BeginTextureMode`/`EndTextureMode`, `y=0` is the top of the texture and increases downward — identical to normal screen drawing.  `DrawRenderTexture` corrects the OpenGL Y-flip when displaying.
+
+### Additional Shapes
+
+| Procedure | Description |
+|-----------|-------------|
+| `Raylib.DrawEllipseLines(cx, cy: INTEGER; rx, ry: REAL; color: INTEGER)` | Ellipse outline. |
+| `Raylib.DrawRectangleLinesEx(x, y, w, h: INTEGER; thick: REAL; color: INTEGER)` | Rectangle outline with specified line thickness. |
+
+### Extended Input
+
+| Function | Description |
+|----------|-------------|
+| `Raylib.GetCharPressed(): INTEGER` | Unicode codepoint of the character typed this frame (0 if none).  Call in a loop until 0 to drain the queue.  Use `CHR()` to convert to `CHAR`. |
+
