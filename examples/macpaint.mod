@@ -406,19 +406,19 @@ VAR y0 : INTEGER;
 BEGIN
   y0 := MENU_H;
   IF menuOpen = MNU_FILE THEN
-    IF Released(100, y0+4+0*MI_H, MI_W, MI_H) THEN
+    IF Clicked(100, y0+4+0*MI_H, MI_W, MI_H) THEN
       ClearCanvas; menuOpen := MNU_NONE
-    ELSIF Released(100, y0+4+1*MI_H, MI_W, MI_H) THEN
+    ELSIF Clicked(100, y0+4+1*MI_H, MI_W, MI_H) THEN
       OpenDlg(DLG_OPEN)
-    ELSIF Released(100, y0+4+2*MI_H, MI_W, MI_H) THEN
+    ELSIF Clicked(100, y0+4+2*MI_H, MI_W, MI_H) THEN
       OpenDlg(DLG_SAVE)
-    ELSIF Released(100, y0+4+3*MI_H, MI_W, MI_H) THEN
+    ELSIF Clicked(100, y0+4+3*MI_H, MI_W, MI_H) THEN
       Raylib.CloseWindow; menuOpen := MNU_NONE
     ELSIF Clicked(0, 0, W, H) THEN
       menuOpen := MNU_NONE
     END
   ELSIF menuOpen = MNU_EDIT THEN
-    IF Released(156, y0+4, MI_W, MI_H) THEN
+    IF Clicked(156, y0+4, MI_W, MI_H) THEN
       ClearCanvas; menuOpen := MNU_NONE
     ELSIF Clicked(0, 0, W, H) THEN
       menuOpen := MNU_NONE
@@ -511,10 +511,12 @@ BEGIN
   (* Menu bar clicks *)
   IF Clicked(100, 0, 56, MENU_H) THEN
     IF menuOpen = MNU_FILE THEN menuOpen := MNU_NONE
-    ELSE menuOpen := MNU_FILE END
+    ELSE menuOpen := MNU_FILE END;
+    RETURN
   ELSIF Clicked(156, 0, 56, MENU_H) THEN
     IF menuOpen = MNU_EDIT THEN menuOpen := MNU_NONE
-    ELSE menuOpen := MNU_EDIT END
+    ELSE menuOpen := MNU_EDIT END;
+    RETURN
   END;
 
   IF menuOpen # MNU_NONE THEN
