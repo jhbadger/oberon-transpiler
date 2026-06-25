@@ -77,6 +77,7 @@ static void pkgconfig_query(const char *pkgname) {
     char cmd[256];
     char buf[1024];
     FILE *pipe;
+    int got_cflags = 0;
 
     /* --cflags */
     snprintf(cmd, sizeof(cmd), "pkg-config --cflags %s 2>/dev/null", pkgname);
@@ -85,7 +86,7 @@ static void pkgconfig_query(const char *pkgname) {
         if (fgets(buf, sizeof(buf), pipe)) {
             char *tok = strtok(buf, " \t\r\n");
             while (tok) {
-                if (tok[0] != '\0') add_extra_cflag(tok);
+                if (tok[0] != '\0') { add_extra_cflag(tok); got_cflags = 1; }
                 tok = strtok(NULL, " \t\r\n");
             }
         }
@@ -118,6 +119,26 @@ static void pkgconfig_query(const char *pkgname) {
             }
         }
         pclose(pipe);
+    }
+
+    /* Homebrew fallback: if pkg-config found nothing, try brew --prefix */
+    if (!got_cflags) {
+        snprintf(cmd, sizeof(cmd), "brew --prefix %s 2>/dev/null", pkgname);
+        pipe = popen(cmd, "r");
+        if (pipe) {
+            if (fgets(buf, sizeof(buf), pipe)) {
+                buf[strcspn(buf, "\r\n")] = '\0';
+                if (buf[0] != '\0') {
+                    char flag[512];
+                    snprintf(flag, sizeof(flag), "-I%s/include", buf);
+                    add_extra_cflag(flag);
+                    snprintf(flag, sizeof(flag), "-L%s/lib", buf);
+                    add_extra_ldir(flag);
+                    add_ldflag(pkgname);
+                }
+            }
+            pclose(pipe);
+        }
     }
 }
 
