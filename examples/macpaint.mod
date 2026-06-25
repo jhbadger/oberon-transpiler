@@ -42,6 +42,7 @@ VAR
   cBlack, cWhite, cGray, cDkGray, cLtGray : INTEGER;
   cRed, cGreen, cBlue, cYellow, cCyan, cMagenta : INTEGER;
 
+  uiFont       : Raylib.Font;
   canvas       : Raylib.RenderTexture;
   curTool      : INTEGER;
   brushIdx     : INTEGER;
@@ -213,7 +214,7 @@ BEGIN
 
   (* Brush size row: 4 sizes × HALF wide *)
   py := py + 4;
-  Raylib.DrawText("SZ", 2, py, 8, cDkGray);
+  Raylib.DrawTextEx(uiFont, "SZ", 2.0, FLT(py), 13.0, 1.0, cDkGray);
   py := py + 10;
   FOR i := 0 TO 3 DO
     Raised(i*HALF, py, HALF, BTN, i = brushIdx);
@@ -223,7 +224,7 @@ BEGIN
 
   (* Color palette: 8 swatches in 2 rows × 4 cols *)
   py := py + BTN + 6;
-  Raylib.DrawText("COL", 2, py, 8, cDkGray);
+  Raylib.DrawTextEx(uiFont, "COL", 2.0, FLT(py), 13.0, 1.0, cDkGray);
   py := py + 10;
   FOR i := 0 TO 7 DO
     bx := (i MOD 4) * HALF;
@@ -247,17 +248,17 @@ VAR hilite : INTEGER;
 BEGIN
   Raylib.DrawRectangle(0, 0, W, MENU_H, cBlack);
   (* App name - decorative *)
-  Raylib.DrawText("MacPaint", 6, 4, 14, cLtGray);
+  Raylib.DrawTextEx(uiFont, "MacPaint", 6.0, 4.0, 13.0, 1.0, cLtGray);
 
   hilite := cBlack;
   IF menuOpen = MNU_FILE THEN hilite := cDkGray END;
   Raylib.DrawRectangle(100, 0, 56, MENU_H, hilite);
-  Raylib.DrawText("File", 108, 4, 14, cWhite);
+  Raylib.DrawTextEx(uiFont, "File", 108.0, 4.0, 13.0, 1.0, cWhite);
 
   hilite := cBlack;
   IF menuOpen = MNU_EDIT THEN hilite := cDkGray END;
   Raylib.DrawRectangle(156, 0, 56, MENU_H, hilite);
-  Raylib.DrawText("Edit", 164, 4, 14, cWhite);
+  Raylib.DrawTextEx(uiFont, "Edit", 164.0, 4.0, 13.0, 1.0, cWhite);
 END DrawMenuBar;
 
 PROCEDURE DrawMenuDropdown;
@@ -267,16 +268,16 @@ BEGIN
     y0 := MENU_H;
     Raylib.DrawRectangle(100, y0, MI_W, 4*MI_H+8, cLtGray);
     Raylib.DrawRectangleLines(100, y0, MI_W, 4*MI_H+8, cDkGray);
-    Raylib.DrawText("New",     110, y0 + 4 + 0*MI_H, 14, cBlack);
-    Raylib.DrawText("Open...", 110, y0 + 4 + 1*MI_H, 14, cBlack);
-    Raylib.DrawText("Save...", 110, y0 + 4 + 2*MI_H, 14, cBlack);
+    Raylib.DrawTextEx(uiFont, "New",     110.0, FLT(y0 + 4 + 0*MI_H), 13.0, 1.0, cBlack);
+    Raylib.DrawTextEx(uiFont, "Open...", 110.0, FLT(y0 + 4 + 1*MI_H), 13.0, 1.0, cBlack);
+    Raylib.DrawTextEx(uiFont, "Save...", 110.0, FLT(y0 + 4 + 2*MI_H), 13.0, 1.0, cBlack);
     Raylib.DrawLine(104, y0 + 4 + 3*MI_H - 3, 218, y0 + 4 + 3*MI_H - 3, cGray);
-    Raylib.DrawText("Quit",    110, y0 + 4 + 3*MI_H, 14, cBlack)
+    Raylib.DrawTextEx(uiFont, "Quit",    110.0, FLT(y0 + 4 + 3*MI_H), 13.0, 1.0, cBlack)
   ELSIF menuOpen = MNU_EDIT THEN
     y0 := MENU_H;
     Raylib.DrawRectangle(156, y0, MI_W, MI_H+8, cLtGray);
     Raylib.DrawRectangleLines(156, y0, MI_W, MI_H+8, cDkGray);
-    Raylib.DrawText("Clear Canvas", 164, y0+4, 14, cBlack)
+    Raylib.DrawTextEx(uiFont, "Clear Canvas", 164.0, FLT(y0+4), 13.0, 1.0, cBlack)
   END;
 END DrawMenuDropdown;
 
@@ -323,22 +324,22 @@ BEGIN
   (* Title bar *)
   Raylib.DrawRectangle(dx, dy, DW, 20, cBlack);
   IF dlgMode = DLG_SAVE THEN
-    Raylib.DrawText("Save As...", dx+6, dy+3, 14, cWhite)
+    Raylib.DrawTextEx(uiFont, "Save As...", FLT(dx+6), FLT(dy+3), 13.0, 1.0, cWhite)
   ELSE
-    Raylib.DrawText("Open File...", dx+6, dy+3, 14, cWhite)
+    Raylib.DrawTextEx(uiFont, "Open File...", FLT(dx+6), FLT(dy+3), 13.0, 1.0, cWhite)
   END;
   (* Input field *)
   Raylib.DrawRectangle(dx+8, dy+28, DW-16, 22, cWhite);
   Raylib.DrawRectangleLines(dx+8, dy+28, DW-16, 22, cBlack);
-  Raylib.DrawText(dlgText, dx+11, dy+32, 14, cBlack);
+  Raylib.DrawTextEx(uiFont, dlgText, FLT(dx+11), FLT(dy+32), 13.0, 1.0, cBlack);
   (* Text cursor *)
-  cw := Raylib.MeasureText(dlgText, 14);
+  cw := Raylib.MeasureTextEx(uiFont, dlgText, 13.0, 1.0);
   Raylib.DrawLine(dx+11+cw, dy+31, dx+11+cw, dy+46, cBlack);
   (* Hint *)
-  Raylib.DrawText("Enter = confirm   Esc = cancel", dx+8, dy+58, 11, cDkGray);
+  Raylib.DrawTextEx(uiFont, "Enter = confirm   Esc = cancel", FLT(dx+8), FLT(dy+58), 13.0, 1.0, cDkGray);
   (* OK button *)
   Raised(dx+DW-72, dy+DH-26, 64, 20, FALSE);
-  Raylib.DrawText("OK", dx+DW-52, dy+DH-20, 14, cBlack);
+  Raylib.DrawTextEx(uiFont, "OK", FLT(dx+DW-52), FLT(dy+DH-20), 13.0, 1.0, cBlack);
 END DrawFileDialog;
 
 PROCEDURE Draw;
@@ -568,6 +569,7 @@ BEGIN
   dlgLen     := 0;
   shapeDragging := FALSE;
 
+  uiFont := Raylib.LoadFontSharpAppDir("Lato-Regular.ttf", 13);
   canvas := Raylib.LoadRenderTexture(CW, CH);
   ClearCanvas;
 END Init;
@@ -581,5 +583,6 @@ BEGIN
     Draw
   END;
   Raylib.UnloadRenderTexture(canvas);
+  Raylib.UnloadFont(uiFont);
   Raylib.CloseWindow;
 END MacPaint.

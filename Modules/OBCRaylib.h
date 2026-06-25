@@ -129,7 +129,13 @@ int            Raylib_TextureHeight(Raylib_Texture tex);
 
 /* ── Fonts ───────────────────────────────────────────────────────────────── */
 Raylib_Font Raylib_LoadFont(char *path);
+Raylib_Font Raylib_LoadFontSharp(char *path, int size);
+Raylib_Font Raylib_LoadFontSharpAppDir(char *filename, int size);
 void        Raylib_UnloadFont(Raylib_Font font);
+int         Raylib_MeasureTextEx(Raylib_Font font, char *text, double size, double spacing);
+
+/* ── Filesystem ──────────────────────────────────────────────────────────── */
+void Raylib_GetAppDir(char *buf, int buf_len);
 
 /* ── Input — Keyboard ────────────────────────────────────────────────────── */
 int Raylib_IsKeyDown(int key);

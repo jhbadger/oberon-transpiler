@@ -205,10 +205,44 @@ Raylib_Font Raylib_LoadFont(char *path) {
     return f;
 }
 
+/* Load a TTF at a specific pixel size with nearest-neighbour filtering for crisp rendering. */
+Raylib_Font Raylib_LoadFontSharp(char *path, int size) {
+    Raylib_Font f = (Raylib_Font)calloc(1, sizeof(Raylib_FontRec));
+    if (!f) return NULL;
+    f->_tag = _TAG_Raylib_FontRec;
+    f->fnt  = LoadFontEx(path, size, NULL, 0);
+    SetTextureFilter(f->fnt.texture, TEXTURE_FILTER_POINT);
+    return f;
+}
+
+Raylib_Font Raylib_LoadFontSharpAppDir(char *filename, int size) {
+    const char *dir = GetApplicationDirectory();
+    char path[4096];
+    snprintf(path, sizeof(path), "%s%s", dir, filename);
+    Raylib_Font f = (Raylib_Font)calloc(1, sizeof(Raylib_FontRec));
+    if (!f) return NULL;
+    f->_tag = _TAG_Raylib_FontRec;
+    f->fnt  = LoadFontEx(path, size, NULL, 0);
+    SetTextureFilter(f->fnt.texture, TEXTURE_FILTER_POINT);
+    return f;
+}
+
+void Raylib_GetAppDir(char *buf, int buf_len) {
+    const char *dir = GetApplicationDirectory();
+    strncpy(buf, dir, buf_len - 1);
+    buf[buf_len - 1] = '\0';
+}
+
 void Raylib_UnloadFont(Raylib_Font font) {
     if (!font) return;
     UnloadFont(font->fnt);
     free(font);
+}
+
+int Raylib_MeasureTextEx(Raylib_Font font, char *text, double size, double spacing) {
+    if (!font) return 0;
+    Vector2 v = MeasureTextEx(font->fnt, text, (float)size, (float)spacing);
+    return (int)v.x;
 }
 
 /* ── Input — Keyboard ────────────────────────────────────────────────────── */
