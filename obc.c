@@ -77,7 +77,7 @@ static void pkgconfig_query(const char *pkgname) {
     char cmd[256];
     char buf[1024];
     FILE *pipe;
-    int got_cflags = 0;
+    int got_include = 0;  /* set only when pkg-config returns an actual -I flag */
 
     /* --cflags */
     snprintf(cmd, sizeof(cmd), "pkg-config --cflags %s 2>/dev/null", pkgname);
@@ -86,7 +86,10 @@ static void pkgconfig_query(const char *pkgname) {
         if (fgets(buf, sizeof(buf), pipe)) {
             char *tok = strtok(buf, " \t\r\n");
             while (tok) {
-                if (tok[0] != '\0') { add_extra_cflag(tok); got_cflags = 1; }
+                if (tok[0] != '\0') {
+                    add_extra_cflag(tok);
+                    if (tok[0] == '-' && tok[1] == 'I') got_include = 1;
+                }
                 tok = strtok(NULL, " \t\r\n");
             }
         }
@@ -121,8 +124,10 @@ static void pkgconfig_query(const char *pkgname) {
         pclose(pipe);
     }
 
-    /* Homebrew fallback: if pkg-config found nothing, try brew --prefix */
-    if (!got_cflags) {
+    /* Homebrew fallback: if pkg-config gave no -I path, try brew --prefix.
+     * On macOS, pkg-config may return only -D flags (e.g. -D_THREAD_SAFE)
+     * without an include path when PKG_CONFIG_PATH isn't set for homebrew. */
+    if (!got_include) {
         snprintf(cmd, sizeof(cmd), "brew --prefix %s 2>/dev/null", pkgname);
         pipe = popen(cmd, "r");
         if (pipe) {
