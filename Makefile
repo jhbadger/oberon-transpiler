@@ -17,12 +17,10 @@ OBERON_MODS = $(wildcard Modules/*.mod) $(wildcard examples/*.mod)
 oberon: obc $(OBERON_MODS)
 	./obc -I Modules/ examples/ide.mod -o oberon
 
-cloj: obc $(OBERON_MODS)
-	./obc -I Modules/ examples/clojrepl.mod -o cloj
-
 install: all
 	install -m 755 obc     $(PREFIX)/bin/
 	install -m 755 oberon  $(PREFIX)/bin/
+	install -m 444 stdlib.md  $(PREFIX)/bin/
 
 clean:
 	rm -f obc oberon
