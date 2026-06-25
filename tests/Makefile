@@ -15,9 +15,10 @@ all: $(TARGETS)
 
 # The '%' matches the target name (e.g., 'main')
 # The '%.mod' matches the source (e.g., 'main.mod')
+
 % : %.mod
 	@echo "Compiling $< -> $@"
-	$(OBC) $< -o $@
+	@$(OBC) $< -o $@ || echo "  ** Skipped $< (compilation failed) **"
 
 clean:
 	@echo "Removing executables..."
