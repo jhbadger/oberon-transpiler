@@ -142,11 +142,13 @@ Reusable library modules live in `Modules/`. Pass `--mod-path Modules` to use th
 
 | Module | Purpose |
 |--------|---------|
+| `Raylib` | Game window, 2D/3D rendering, input, and audio (Raylib 4+) |
 | `Sixel` | DEC Sixel high-resolution terminal graphics (640-wide pixel buffer) |
 | `Turtle` | Turtle graphics on top of `Terminal` |
 | `Base64` | Standard Base64 encode/decode |
 | `Ollama` | REST client for a local Ollama LLM server |
 | `NumberTheory` | Primality test, GCD/LCM |
+| `Parallel` | Multi-core parallel loops via POSIX threads |
 | `XHTML` | HTML/XHTML to plain-text converter, attribute extraction |
 
 ## Examples
@@ -179,6 +181,16 @@ Reusable library modules live in `Modules/`. Pass `--mod-path Modules` to use th
 | `examples/wireworld.mod` | Wireworld cellular automaton |
 | `examples/immsim.mod` | Celada-Seiden immune system cellular automaton |
 
+### Raylib (graphical)
+
+| File | Description |
+|------|-------------|
+| `examples/invaders.mod` | Space Invaders — Raylib sprites, sound effects, wave progression |
+| `examples/macpaint.mod` | Retro paint program in the spirit of the 1984 Mac original |
+| `examples/piano.mod` | Two-octave piano (C4–C6) with Raylib synthesised tones |
+| `examples/glbviewer.mod` | GLB/GLTF 3D model viewer with orbital camera |
+| `examples/pdbviewer.mod` | Graphical PDB/CIF/SDF/XYZ molecular structure viewer |
+
 ### Games
 
 | File | Description |
@@ -202,6 +214,7 @@ Reusable library modules live in `Modules/`. Pass `--mod-path Modules` to use th
 | `examples/baduk9.mod` | 9×9 Go — human vs computer |
 | `examples/xiangqi.mod` | Xiangqi (Chinese Chess) — TUI with engine |
 | `examples/chainmail.mod` | Chainmail medieval miniatures wargame (Gygax & Perren, 1971) |
+| `examples/swords.mod` | Swords & Spells fantastic miniatures rules (Gygax, 1976) |
 | `examples/wargame.mod` | One Hour Wargames (Neil Thomas rules) |
 
 ### Text / tools
@@ -216,6 +229,8 @@ Reusable library modules live in `Modules/`. Pass `--mod-path Modules` to use th
 | `examples/speedscript.mod` | Recreation of 1980s word processor |
 | `examples/chatbot.mod` | Keyword-driven chatbot (personality loaded from config file) |
 | `examples/ollamachat.mod` | Interactive chat client for a local Ollama server |
+| `examples/obemacs.mod` | Emacs-style editor implementing core GNU Emacs tutorial commands |
+| `examples/newickview.mod` | Terminal phylogenetic tree viewer (cladogram and phylogram) |
 
 
 ### Bioinformatics / data science
@@ -229,6 +244,8 @@ Reusable library modules live in `Modules/`. Pass `--mod-path Modules` to use th
 | `examples/CodonAlign.mod` | Per-orthogroup nucleotide alignment with codon annotation |
 | `examples/OrthoAlign.mod` | Concatenated supermatrix alignment from ortholog groups |
 | `examples/OrthoFind.mod` | Reciprocal best hit ortholog finder for protein FASTA files |
+| `examples/MSAIdentity.mod` | Per-column identity scores for multiple sequence alignments |
+| `examples/PeptideContext.mod` | Extract genomic neighbourhood context for protein IDs |
 | `examples/pdbview.mod` | Terminal PDB structure viewer |
 | `examples/SeqBlast.mod` | BLAST-like local alignment search with gapped extension |
 | `examples/SeqHMM.mod` | Profile HMM builder and sequence-database searcher |
