@@ -154,7 +154,7 @@ BEGIN
   Strings.Append('","messages":[{"role":"user","content":"', body);
   Strings.Append(escaped, body);
   Strings.Append('"}],"stream":false}', body);
-  RETURN WriteReq(body) & ExecCurl(host, '/api/chat', TRUE)
+  RETURN WriteReq(body) & ExecCurl(host, '/v1/chat/completions', TRUE)
        & ReadResp(buf)  & ExtractStr(buf, '"content":', response)
 END Chat;
 
@@ -189,3 +189,4 @@ BEGIN
 END Models;
 
 END Ollama.
+
