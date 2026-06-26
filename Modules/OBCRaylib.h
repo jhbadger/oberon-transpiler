@@ -171,6 +171,7 @@ Raylib_Sound Raylib_LoadSound(char *path);
 Raylib_Sound Raylib_GenShootSound(void);
 Raylib_Sound Raylib_GenMarchSound(int phase);
 Raylib_Sound Raylib_GenExplodeSound(void);
+Raylib_Sound Raylib_GenToneSound(double freq, int ms);
 void         Raylib_UnloadSound(Raylib_Sound snd);
 void         Raylib_PlaySound(Raylib_Sound snd);
 void         Raylib_StopSound(Raylib_Sound snd);

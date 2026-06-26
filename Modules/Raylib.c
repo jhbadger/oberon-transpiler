@@ -363,6 +363,23 @@ Raylib_Sound Raylib_GenExplodeSound(void) {
     free(d); return rs;
 }
 
+Raylib_Sound Raylib_GenToneSound(double freq, int ms) {
+    int sr = 44100;
+    int n  = sr * ms / 1000;
+    if (n <= 0) return NULL;
+    float *d = (float *)malloc(n * sizeof(float));
+    if (!d) return NULL;
+    for (int i = 0; i < n; i++) {
+        float t   = (float)i / sr;
+        float att = (i < sr / 100) ? (float)i / (sr / 100.0f) : 1.0f;
+        float dec = (i >= n * 3 / 4) ? 1.0f - (float)(i - n * 3 / 4) / (n / 4.0f) : 1.0f;
+        d[i] = sinf(2.0f * 3.14159265f * (float)freq * t) * 0.5f * att * dec;
+    }
+    Raylib_Sound rs = sound_from_floats(d, n, sr);
+    free(d);
+    return rs;
+}
+
 Raylib_Music Raylib_LoadMusicStream(char *path) {
     Raylib_Music m = (Raylib_Music)calloc(1, sizeof(Raylib_MusicRec));
     if (!m) return NULL;
