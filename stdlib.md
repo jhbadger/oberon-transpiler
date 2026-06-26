@@ -2213,6 +2213,8 @@ All color parameters are a single `INTEGER` packed as `(a SHL 24) OR (r SHL 16) 
 | `Raylib.ToggleFullscreen` | Toggle fullscreen mode. |
 | `Raylib.SetWindowTitle(title: ARRAY OF CHAR)` | Change the window title. |
 | `Raylib.SetWindowSize(w, h: INTEGER)` | Resize the window. |
+| `Raylib.SetWindowResizable` | Allow the window to be resized by the user. |
+| `Raylib.SetWindowShouldClose` | Signal the event loop to exit on the next `WindowShouldClose` check. |
 
 ### Drawing
 
@@ -2266,7 +2268,11 @@ Call `BeginDrawing` / `EndDrawing` around all draw calls each frame.
 | Procedure / Function | Description |
 |----------------------|-------------|
 | `Raylib.LoadFont(path: ARRAY OF CHAR): Font` | Load a TTF or BMFont file.  Returns NIL on error. |
+| `Raylib.LoadFontSharp(path: ARRAY OF CHAR; size: INTEGER): Font` | Load a TTF at a specific pixel `size` with nearest-neighbour filtering for crisp pixel fonts.  Returns NIL on error. |
+| `Raylib.LoadFontSharpAppDir(filename: ARRAY OF CHAR; size: INTEGER): Font` | Like `LoadFontSharp` but resolves `filename` relative to the application's executable directory. |
 | `Raylib.UnloadFont(font: Font)` | Free the font. |
+| `Raylib.MeasureTextEx(font: Font; text: ARRAY OF CHAR; size, spacing: REAL): INTEGER` | Width in pixels of `text` rendered with `font` at `size` and `spacing`. |
+| `Raylib.GetAppDir(buf: ARRAY OF CHAR)` | Fill `buf` with the path to the directory containing the running executable (trailing `/` included). |
 
 ### Input — Keyboard
 
@@ -2293,6 +2299,8 @@ Printable key codes are their ASCII value (e.g. `ORD("A")` = 65).  Special keys 
 | `Raylib.GetMouseX(): INTEGER` | Current mouse X position. |
 | `Raylib.GetMouseY(): INTEGER` | Current mouse Y position. |
 | `Raylib.GetMouseWheelMove(): REAL` | Wheel scroll delta this frame (positive = up). |
+| `Raylib.GetMouseDeltaX(): REAL` | Mouse movement in X since last frame. |
+| `Raylib.GetMouseDeltaY(): REAL` | Mouse movement in Y since last frame. |
 | `Raylib.SetMousePosition(x, y: INTEGER)` | Warp the mouse cursor. |
 | `Raylib.ShowCursor` | Make the OS cursor visible. |
 | `Raylib.HideCursor` | Hide the OS cursor. |
@@ -2320,6 +2328,10 @@ Printable key codes are their ASCII value (e.g. `ORD("A")` = 65).  Special keys 
 | `Raylib.ResumeMusicStream(mus: Music)` | Resume streaming. |
 | `Raylib.IsMusicStreamPlaying(mus: Music): INTEGER` | 1 if streaming is active. |
 | `Raylib.SetMusicVolume(mus: Music; vol: REAL)` | Set volume 0.0–1.0. |
+| `Raylib.GenToneSound(freq: REAL; ms: INTEGER): Sound` | Synthesise a sine-wave tone at `freq` Hz lasting `ms` milliseconds (44 100 Hz, with 10 ms attack and 25 % decay tail).  No file needed. |
+| `Raylib.GenShootSound(): Sound` | Synthesise a square-wave frequency-sweep shoot/laser effect (800→200 Hz, ~250 ms). |
+| `Raylib.GenMarchSound(phase: INTEGER): Sound` | Synthesise a short march-step blip (~83 ms).  Alternate `phase` 0/1 between left and right footsteps (160 Hz / 100 Hz). |
+| `Raylib.GenExplodeSound(): Sound` | Synthesise a noise-burst explosion effect (~450 ms). |
 
 ### Color Utilities
 
@@ -2347,6 +2359,7 @@ A `Raylib.RenderTexture` is an off-screen framebuffer you can draw into, then bl
 | `Raylib.DrawRenderTexture(rt: RenderTexture; x, y, w, h: INTEGER; color: INTEGER)` | Blit the render texture to the screen at `(x,y)` scaled to `w`×`h`.  Handles the OpenGL Y-flip automatically. |
 | `Raylib.SaveRTPNG(rt: RenderTexture; filename: ARRAY OF CHAR)` | Export the canvas to a PNG file (Y-flip corrected). |
 | `Raylib.LoadPNGIntoRT(rt: RenderTexture; filename: ARRAY OF CHAR)` | Load a PNG and draw it into `rt`, scaling to fit. |
+| `Raylib.FloodFillRT(rt: RenderTexture; x, y: INTEGER; fillColor: INTEGER)` | Flood-fill the render texture starting at pixel `(x,y)` with `fillColor`, replacing all contiguous pixels of the same original color (4-connected). |
 
 **Coordinate note:** Inside `BeginTextureMode`/`EndTextureMode`, `y=0` is the top of the texture and increases downward — identical to normal screen drawing.  `DrawRenderTexture` corrects the OpenGL Y-flip when displaying.
 
@@ -2356,6 +2369,7 @@ A `Raylib.RenderTexture` is an off-screen framebuffer you can draw into, then bl
 |-----------|-------------|
 | `Raylib.DrawEllipseLines(cx, cy: INTEGER; rx, ry: REAL; color: INTEGER)` | Ellipse outline. |
 | `Raylib.DrawRectangleLinesEx(x, y, w, h: INTEGER; thick: REAL; color: INTEGER)` | Rectangle outline with specified line thickness. |
+| `Raylib.DrawCircleGradient(cx, cy: INTEGER; radius: REAL; c1, c2: INTEGER)` | Filled circle with a radial gradient from center color `c1` to edge color `c2`. |
 
 ### Extended Input
 
@@ -2391,6 +2405,7 @@ A `Raylib.RenderTexture` is an off-screen framebuffer you can draw into, then bl
 | `Raylib.UpdateCamera(cam: Camera; mode: INTEGER)` | Apply built-in input to move/rotate the camera this frame.  Pass one of the `CameraFree`, `CameraOrbital`, etc. constants. |
 | `Raylib.SetCameraPosition(cam: Camera; x, y, z: REAL)` | Move the camera eye to `(x, y, z)`. |
 | `Raylib.SetCameraTarget(cam: Camera; x, y, z: REAL)` | Aim the camera at `(x, y, z)`. |
+| `Raylib.SetCameraUp(cam: Camera; x, y, z: REAL)` | Set the camera's up vector to `(x, y, z)`.  Defaults to `(0,1,0)` after `NewCamera`. |
 | `Raylib.BeginMode3D(cam: Camera)` | Enter 3D drawing mode.  Must follow `BeginDrawing` and precede all 3D draw calls. |
 | `Raylib.EndMode3D` | Exit 3D drawing mode.  Resume 2D drawing (text/UI overlay) after this. |
 
