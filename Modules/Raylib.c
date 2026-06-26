@@ -7,6 +7,7 @@
  */
 
 #include "OBCRaylib.h"
+#include <math.h>
 
 /* ── Window / Core ───────────────────────────────────────────────────────── */
 
@@ -300,6 +301,60 @@ int Raylib_IsSoundPlaying(Raylib_Sound snd) {
 
 void Raylib_SetSoundVolume(Raylib_Sound snd, double vol) {
     if (snd) SetSoundVolume(snd->snd, (float)vol);
+}
+
+static Raylib_Sound sound_from_floats(float *data, int n, int sr) {
+    Wave w = { (unsigned)n, (unsigned)sr, 32, 1, data };
+    Raylib_Sound rs = (Raylib_Sound)calloc(1, sizeof(Raylib_SoundRec));
+    if (rs) { rs->_tag = _TAG_Raylib_SoundRec; rs->snd = LoadSoundFromWave(w); }
+    return rs;
+}
+
+Raylib_Sound Raylib_GenShootSound(void) {
+    int sr = 22050, n = sr / 4;
+    float *d = (float *)malloc(n * sizeof(float));
+    if (!d) return NULL;
+    float pa = 0.0f;
+    for (int i = 0; i < n; i++) {
+        float frac = (float)i / n;
+        float freq = 800.0f - 600.0f * frac;   /* sweep 800→200 Hz */
+        pa += freq / (float)sr;
+        float amp = (1.0f - frac) * 0.35f;
+        d[i] = amp * (fmodf(pa, 1.0f) < 0.5f ? 1.0f : -1.0f);
+    }
+    Raylib_Sound rs = sound_from_floats(d, n, sr);
+    free(d); return rs;
+}
+
+/* phase 0/1 for alternating march tones (160 Hz / 100 Hz) */
+Raylib_Sound Raylib_GenMarchSound(int phase) {
+    float freq = (phase & 1) ? 100.0f : 160.0f;
+    int sr = 22050, n = sr / 12;   /* ~83 ms */
+    float *d = (float *)malloc(n * sizeof(float));
+    if (!d) return NULL;
+    float pa = 0.0f;
+    for (int i = 0; i < n; i++) {
+        float t = (float)i / n;
+        float amp = (t < 0.1f ? t / 0.1f : 1.0f - t) * 0.5f;
+        pa += freq / (float)sr;
+        d[i] = amp * (fmodf(pa, 1.0f) < 0.5f ? 1.0f : -1.0f);
+    }
+    Raylib_Sound rs = sound_from_floats(d, n, sr);
+    free(d); return rs;
+}
+
+Raylib_Sound Raylib_GenExplodeSound(void) {
+    int sr = 22050, n = (int)(sr * 0.45f);
+    float *d = (float *)malloc(n * sizeof(float));
+    if (!d) return NULL;
+    unsigned seed = 0xDEADBEEFu;
+    for (int i = 0; i < n; i++) {
+        seed = seed * 1664525u + 1013904223u;
+        float noise = (float)(int)(seed >> 16) / 32768.0f - 1.0f;
+        d[i] = expf(-5.0f * (float)i / n) * 0.5f * noise;
+    }
+    Raylib_Sound rs = sound_from_floats(d, n, sr);
+    free(d); return rs;
 }
 
 Raylib_Music Raylib_LoadMusicStream(char *path) {

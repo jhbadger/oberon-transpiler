@@ -69,6 +69,11 @@ VAR
   animAccum : REAL;
   dt        : REAL;
 
+  sndShoot   : Raylib.Sound;
+  sndMarch0  : Raylib.Sound;
+  sndMarch1  : Raylib.Sound;
+  sndExplode : Raylib.Sound;
+
 (* ── Index helpers ─────────────────────────────────────────── *)
 
 PROCEDURE AlienRow(i : INTEGER) : INTEGER;
@@ -208,7 +213,9 @@ BEGIN
   animAccum := animAccum + dt;
   IF animAccum >= 0.5 THEN
     animAccum := animAccum - 0.5;
-    animTick  := 1 - animTick
+    animTick  := 1 - animTick;
+    IF animTick = 0 THEN Raylib.PlaySound(sndMarch0)
+    ELSE Raylib.PlaySound(sndMarch1) END
   END;
 
   (* move player *)
@@ -225,7 +232,8 @@ BEGIN
   IF (Raylib.IsKeyPressed(Raylib.KeySpace) = 1) & ~pbActive THEN
     pbActive := TRUE;
     pbX      := playerX - FLT(PBUL_W DIV 2);
-    pbY      := FLT(PLAYER_Y - PBUL_H)
+    pbY      := FLT(PLAYER_Y - PBUL_H);
+    Raylib.PlaySound(sndShoot)
   END;
 
   (* move player bullet & check alien hits *)
@@ -244,6 +252,7 @@ BEGIN
             alienAlive[i] := FALSE;
             pbActive      := FALSE;
             DEC(alienCount);
+            Raylib.PlaySound(sndExplode);
             row := AlienRow(i);
             IF row = 0 THEN INC(score, 30)
             ELSIF row < 3 THEN INC(score, 20)
@@ -423,6 +432,11 @@ BEGIN
 
   Raylib.InitWindow(W, H, "Space Invaders");
   Raylib.SetTargetFPS(60);
+  Raylib.InitAudioDevice;
+  sndShoot   := Raylib.GenShootSound();
+  sndMarch0  := Raylib.GenMarchSound(0);
+  sndMarch1  := Raylib.GenMarchSound(1);
+  sndExplode := Raylib.GenExplodeSound();
   InitGame;
 
   WHILE Raylib.WindowShouldClose() = 0 DO
@@ -434,5 +448,10 @@ BEGIN
     Draw
   END;
 
+  Raylib.UnloadSound(sndShoot);
+  Raylib.UnloadSound(sndMarch0);
+  Raylib.UnloadSound(sndMarch1);
+  Raylib.UnloadSound(sndExplode);
+  Raylib.CloseAudioDevice;
   Raylib.CloseWindow
 END Invaders.
