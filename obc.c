@@ -772,11 +772,13 @@ int main(int argc, char *argv[]) {
                          && strcmp(ext, ".cxx") != 0))
                 continue;
 
-            /* Build temp .o path: /tmp/obc_<basename>.o */
+            /* Build temp .o path: $TMPDIR/obc_<basename>.o */
             const char *base = strrchr(g_csrcfiles[i], '/');
             base = base ? base + 1 : g_csrcfiles[i];
             char opath[512];
-            snprintf(opath, sizeof(opath), "/tmp/obc_%s.o", base);
+            const char *tmpdir = getenv("TMPDIR");
+            if (!tmpdir || !*tmpdir) tmpdir = "/tmp";
+            snprintf(opath, sizeof(opath), "%s/obc_%s.o", tmpdir, base);
 
             char cxxcmd[4096];
             int cpos = snprintf(cxxcmd, sizeof(cxxcmd),
