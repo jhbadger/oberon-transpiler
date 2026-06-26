@@ -84,6 +84,7 @@ enum { Raylib_BtnMiddle = MOUSE_BUTTON_MIDDLE };
 void   Raylib_InitWindow(int w, int h, char *title);
 void   Raylib_CloseWindow(void);
 int    Raylib_WindowShouldClose(void);
+void   Raylib_SetWindowShouldClose(void);
 void   Raylib_SetTargetFPS(int fps);
 double Raylib_GetFrameTime(void);
 double Raylib_GetTime(void);
@@ -219,6 +220,7 @@ void Raylib_EndTextureMode(void);
 void Raylib_DrawRenderTexture(Raylib_RenderTexture rt, int x, int y, int w, int h, int color);
 void Raylib_SaveRTPNG(Raylib_RenderTexture rt, char *filename);
 void Raylib_LoadPNGIntoRT(Raylib_RenderTexture rt, char *filename);
+void Raylib_FloodFillRT(Raylib_RenderTexture rt, int x, int y, int color);
 
 /* ── Additional shapes ───────────────────────────────────────────────────── */
 void Raylib_DrawEllipseLines(int cx, int cy, double rx, double ry, int color);

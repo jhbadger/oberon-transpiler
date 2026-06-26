@@ -24,11 +24,11 @@ CONST
   BTN     = 28;
   HALF    = 14;
 
-  T_PENCIL = 0; T_ERASER = 1; T_LINE  = 2;
-  T_RECT   = 3; T_RFILL  = 4; T_OVAL  = 5; T_OFILL = 6;
+  T_PENCIL = 0; T_ERASER = 1; T_LINE   = 2;
+  T_RECT   = 3; T_RFILL  = 4; T_OVAL   = 5; T_OFILL = 6; T_BUCKET = 7;
 
   MNU_NONE = 0; MNU_FILE = 1; MNU_EDIT = 2;
-  DLG_NONE = 0; DLG_SAVE = 1; DLG_OPEN = 2;
+  DLG_NONE = 0; DLG_SAVE = 1; DLG_OPEN = 2; DLG_ABOUT = 3;
 
   (* File menu item Y positions (relative to menu bar bottom) *)
   MI_H    = 20;
@@ -179,9 +179,9 @@ BEGIN
                         FLT(bx+9),  FLT(by+23),
                         FLT(bx+7),  FLT(by+19), ic)
   ELSIF tool = T_ERASER THEN
-    Raylib.DrawRectangle(bx+5, by+9,  18, 12, ic);
-    Raylib.DrawRectangle(bx+5, by+9,  18, 12, ic);
-    Raylib.DrawLine(bx+4, by+22, bx+23, by+22, ic)
+    Raylib.DrawRectangle(bx+4, by+9, 20, 5, ic);
+    Raylib.DrawRectangleLines(bx+4, by+9, 20, 13, ic);
+    Raylib.DrawLine(bx+3, by+23, bx+24, by+23, ic)
   ELSIF tool = T_LINE THEN
     Raylib.DrawLineEx(FLT(bx+6), FLT(by+22), FLT(bx+22), FLT(by+6), 2.0, ic)
   ELSIF tool = T_RECT THEN
@@ -192,6 +192,18 @@ BEGIN
     Raylib.DrawEllipseLines(cx, cy, 11.0, 8.0, ic)
   ELSIF tool = T_OFILL THEN
     Raylib.DrawEllipse(cx, cy, 11.0, 8.0, ic)
+  ELSIF tool = T_BUCKET THEN
+    (* handle *)
+    Raylib.DrawLine(bx+9,  by+8,  bx+9,  by+5,  ic);
+    Raylib.DrawLine(bx+9,  by+5,  bx+19, by+5,  ic);
+    Raylib.DrawLine(bx+19, by+5,  bx+19, by+8,  ic);
+    (* bucket body *)
+    Raylib.DrawLine(bx+6,  by+8,  bx+22, by+8,  ic);
+    Raylib.DrawLine(bx+7,  by+9,  bx+7,  by+21, ic);
+    Raylib.DrawLine(bx+21, by+9,  bx+21, by+21, ic);
+    Raylib.DrawLine(bx+7,  by+21, bx+21, by+21, ic);
+    (* paint drip *)
+    Raylib.DrawCircle(bx+14, by+24, 2.0, ic)
   END;
 END DrawToolIcon;
 
@@ -201,8 +213,8 @@ BEGIN
   Raylib.DrawRectangle(0, MENU_H, PANEL_W, H - MENU_H, cGray);
   Raylib.DrawLine(PANEL_W-1, MENU_H, PANEL_W-1, H, cDkGray);
 
-  (* 7 tool buttons in 2-column grid *)
-  FOR i := 0 TO 6 DO
+  (* 8 tool buttons in 2-column grid *)
+  FOR i := 0 TO 7 DO
     bx := (i MOD 2) * BTN;
     by := MENU_H + (i DIV 2) * BTN;
     DrawToolIcon(bx, by, i, i = curTool)
@@ -309,11 +321,33 @@ BEGIN
   END;
 END DrawPreview;
 
+PROCEDURE DrawAboutBox;
+CONST DW = 320; DH = 160;
+VAR dx, dy : INTEGER;
+BEGIN
+  IF dlgMode # DLG_ABOUT THEN RETURN END;
+  dx := (W - DW) DIV 2;
+  dy := (H - DH) DIV 2;
+  Raylib.DrawRectangle(dx+5, dy+5, DW, DH, cDkGray);
+  Raylib.DrawRectangle(dx, dy, DW, DH, cLtGray);
+  Raylib.DrawRectangleLines(dx, dy, DW, DH, cBlack);
+  Raylib.DrawRectangle(dx, dy, DW, 20, cBlack);
+  Raylib.DrawTextEx(uiFont, "About MacPaint", FLT(dx+6), FLT(dy+3), 13.0, 1.0, cWhite);
+  Raylib.DrawTextEx(uiFont, "MacPaint", FLT(dx+16), FLT(dy+28), 22.0, 1.0, cBlack);
+  Raylib.DrawLine(dx+8, dy+56, dx+DW-8, dy+56, cDkGray);
+  Raylib.DrawTextEx(uiFont, "Version 1.0", FLT(dx+16), FLT(dy+62), 13.0, 1.0, cDkGray);
+  Raylib.DrawTextEx(uiFont, "A retro paint program in the spirit", FLT(dx+16), FLT(dy+82), 13.0, 1.0, cBlack);
+  Raylib.DrawTextEx(uiFont, "of the 1984 original.", FLT(dx+16), FLT(dy+98), 13.0, 1.0, cBlack);
+  Raylib.DrawTextEx(uiFont, "Written in Oberon.", FLT(dx+16), FLT(dy+114), 13.0, 1.0, cBlack);
+  Raised(dx+DW-72, dy+DH-30, 64, 22, FALSE);
+  Raylib.DrawTextEx(uiFont, "OK", FLT(dx+DW-52), FLT(dy+DH-24), 13.0, 1.0, cBlack);
+END DrawAboutBox;
+
 PROCEDURE DrawFileDialog;
 CONST DW = 400; DH = 104;
 VAR dx, dy, cw : INTEGER;
 BEGIN
-  IF dlgMode = DLG_NONE THEN RETURN END;
+  IF (dlgMode # DLG_SAVE) & (dlgMode # DLG_OPEN) THEN RETURN END;
   dx := (W - DW) DIV 2;
   dy := (H - DH) DIV 2;
   (* Drop shadow *)
@@ -359,6 +393,7 @@ BEGIN
   DrawMenuBar;
   DrawMenuDropdown;
   DrawFileDialog;
+  DrawAboutBox;
   Raylib.EndDrawing;
 END Draw;
 
@@ -375,6 +410,13 @@ END OpenDlg;
 PROCEDURE UpdateDialog;
 VAR ch : INTEGER;
 BEGIN
+  IF dlgMode = DLG_ABOUT THEN
+    IF (Raylib.IsKeyPressed(Raylib.KeyEsc) = 1) OR
+       (Raylib.IsMouseButtonPressed(Raylib.BtnLeft) = 1) THEN
+      dlgMode := DLG_NONE
+    END;
+    RETURN
+  END;
   (* Collect typed characters *)
   ch := Raylib.GetCharPressed();
   WHILE ch # 0 DO
@@ -414,7 +456,7 @@ BEGIN
     ELSIF Clicked(100, y0+4+2*MI_H, MI_W, MI_H) THEN
       OpenDlg(DLG_SAVE)
     ELSIF Clicked(100, y0+4+3*MI_H, MI_W, MI_H) THEN
-      Raylib.CloseWindow; menuOpen := MNU_NONE
+      Raylib.SetWindowShouldClose; menuOpen := MNU_NONE
     ELSIF Clicked(0, 0, W, H) THEN
       menuOpen := MNU_NONE
     END
@@ -431,7 +473,7 @@ PROCEDURE HandlePanelClick;
 VAR i, bx, by, py : INTEGER;
 BEGIN
   (* Tool buttons *)
-  FOR i := 0 TO 6 DO
+  FOR i := 0 TO 7 DO
     bx := (i MOD 2) * BTN;
     by := MENU_H + (i DIV 2) * BTN;
     IF Clicked(bx, by, BTN, BTN) THEN
@@ -473,6 +515,8 @@ BEGIN
           PaintStroke(cx, cy, cx, cy, cWhite, thick * 3.0)
         END;
         prevCX := cx; prevCY := cy
+      ELSIF curTool = T_BUCKET THEN
+        Raylib.FloodFillRT(canvas, cx, cy, drawColor)
       ELSE
         (* Begin shape drag *)
         startCX := cx; startCY := cy;
@@ -510,7 +554,9 @@ BEGIN
   END;
 
   (* Menu bar clicks *)
-  IF Clicked(100, 0, 56, MENU_H) THEN
+  IF Clicked(6, 0, 94, MENU_H) THEN
+    dlgMode := DLG_ABOUT; menuOpen := MNU_NONE; RETURN
+  ELSIF Clicked(100, 0, 56, MENU_H) THEN
     IF menuOpen = MNU_FILE THEN menuOpen := MNU_NONE
     ELSE menuOpen := MNU_FILE END;
     RETURN

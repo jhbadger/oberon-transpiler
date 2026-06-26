@@ -18,9 +18,11 @@ void Raylib_CloseWindow(void) {
     CloseWindow();
 }
 
+static int _rl_quit = 0;
 int Raylib_WindowShouldClose(void) {
-    return WindowShouldClose() ? 1 : 0;
+    return (WindowShouldClose() || _rl_quit) ? 1 : 0;
 }
+void Raylib_SetWindowShouldClose(void) { _rl_quit = 1; }
 
 void Raylib_SetTargetFPS(int fps) {
     SetTargetFPS(fps);
@@ -423,6 +425,51 @@ void Raylib_LoadPNGIntoRT(Raylib_RenderTexture rt, char *filename) {
     DrawTexturePro(tex, src, dst, (Vector2){0, 0}, 0.0f, WHITE);
     EndTextureMode();
     UnloadTexture(tex);
+}
+
+void Raylib_FloodFillRT(Raylib_RenderTexture rt, int x, int y, int fillColor) {
+    if (!rt) return;
+    Image img = LoadImageFromTexture(rt->rt.texture);
+    ImageFormat(&img, PIXELFORMAT_UNCOMPRESSED_R8G8B8A8);
+    int w = img.width, h = img.height;
+    int fy = h - 1 - y;  /* RT stored bottom-up */
+    if (x < 0 || x >= w || fy < 0 || fy >= h) { UnloadImage(img); return; }
+
+    unsigned char *data = (unsigned char *)img.data;
+    int stride = w * 4;
+    unsigned char *tp = data + fy * stride + x * 4;
+    unsigned char tr = tp[0], tg = tp[1], tb = tp[2], ta = tp[3];
+    Color fc = RL_C(fillColor);
+    if (tr == fc.r && tg == fc.g && tb == fc.b && ta == fc.a) {
+        UnloadImage(img); return;
+    }
+
+    int *sx = malloc(w * h * sizeof(int));
+    int *sy = malloc(w * h * sizeof(int));
+    if (!sx || !sy) { free(sx); free(sy); UnloadImage(img); return; }
+
+    int sp = 0;
+    tp[0] = fc.r; tp[1] = fc.g; tp[2] = fc.b; tp[3] = fc.a;
+    sx[sp] = x; sy[sp] = fy; sp++;
+
+    static const int dx[4] = {1, -1, 0, 0};
+    static const int dy[4] = {0, 0, 1, -1};
+    while (sp > 0) {
+        sp--;
+        int cx = sx[sp], cy = sy[sp];
+        for (int d = 0; d < 4; d++) {
+            int nx = cx + dx[d], ny = cy + dy[d];
+            if (nx < 0 || nx >= w || ny < 0 || ny >= h) continue;
+            unsigned char *np = data + ny * stride + nx * 4;
+            if (np[0] == tr && np[1] == tg && np[2] == tb && np[3] == ta) {
+                np[0] = fc.r; np[1] = fc.g; np[2] = fc.b; np[3] = fc.a;
+                sx[sp] = nx; sy[sp] = ny; sp++;
+            }
+        }
+    }
+    free(sx); free(sy);
+    UpdateTexture(rt->rt.texture, img.data);
+    UnloadImage(img);
 }
 
 /* ── Additional shapes ───────────────────────────────────────────────────── */
