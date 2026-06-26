@@ -1,6 +1,12 @@
 #ifndef OBC_RAYLIB_H_
 #define OBC_RAYLIB_H_
 
+/* Rename raylib's 'Model' typedef before including raylib.h so it doesn't clash
+ * with other Oberon modules (e.g. BioPDB) that export their own 'Model' type.
+ * All internal OBCRaylib code uses _Raylib_3DModel; the macro is undefined at
+ * the end of this header so downstream includes see an unoccupied 'Model' name. */
+#define Model _Raylib_3DModel
+
 #include <raylib.h>
 #include <stdlib.h>
 #include <string.h>
@@ -310,5 +316,8 @@ int Raylib_GetCharPressed(void);
 
 /* ── Module init (no-op — called by obc runtime) ─────────────────────────── */
 void Raylib_init(void);
+
+/* Release the 'Model' macro so subsequent headers can use that name freely. */
+#undef Model
 
 #endif /* OBC_RAYLIB_H_ */
