@@ -310,6 +310,7 @@ int  Raylib_GetRayCollisionBox(double rox, double roy, double roz,
 /* ── Additional shapes ───────────────────────────────────────────────────── */
 void Raylib_DrawEllipseLines(int cx, int cy, double rx, double ry, int color);
 void Raylib_DrawRectangleLinesEx(int x, int y, int w, int h, double thick, int color);
+void Raylib_DrawCircleGradient(int cx, int cy, double radius, int c1, int c2);
 
 /* ── Extended input ──────────────────────────────────────────────────────── */
 int Raylib_GetCharPressed(void);

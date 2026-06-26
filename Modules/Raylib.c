@@ -695,6 +695,10 @@ void Raylib_DrawRectangleLinesEx(int x, int y, int w, int h, double thick, int c
     DrawRectangleLinesEx(r, (float)thick, RL_C(color));
 }
 
+void Raylib_DrawCircleGradient(int cx, int cy, double radius, int c1, int c2) {
+    DrawCircleGradient((Vector2){(float)cx, (float)cy}, (float)radius, RL_C(c1), RL_C(c2));
+}
+
 /* ── Extended input ──────────────────────────────────────────────────────── */
 
 int Raylib_GetCharPressed(void) {

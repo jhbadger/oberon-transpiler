@@ -198,7 +198,7 @@ BEGIN
   END
 END AtomRGB;
 
-PROCEDURE ShadedColor(r, g, b: INTEGER; pz, zMin, zMax: REAL): INTEGER;
+PROCEDURE DiffuseColor(r, g, b: INTEGER; pz, zMin, zMax: REAL): INTEGER;
 VAR lum: REAL; ri, gi, bi: INTEGER;
 BEGIN
   IF zMax > zMin THEN
@@ -217,7 +217,41 @@ BEGIN
   IF gi > 255 THEN gi := 255 END;
   IF bi > 255 THEN bi := 255 END;
   RETURN Raylib.RGBA(ri, gi, bi, 255)
-END ShadedColor;
+END DiffuseColor;
+
+(* Draw a shaded sphere: radial gradient from bright diffuse centre to dark rim,
+   plus a Phong specular highlight offset toward the upper-left light source. *)
+PROCEDURE DrawAtomSphere(cx, cy, rad, cr, cg, cb: INTEGER; pz, zMin, zMax: REAL);
+VAR diffCol, rimCol, specCol: INTEGER;
+    hx, hy, hr: INTEGER;
+    lum: REAL; rimR, rimG, rimB: INTEGER;
+BEGIN
+  diffCol := DiffuseColor(cr, cg, cb, pz, zMin, zMax);
+  IF rad >= 4 THEN
+    IF zMax > zMin THEN
+      lum := (pz - zMin) / (zMax - zMin);
+      IF lum < 0.0 THEN lum := 0.0 END;
+      IF lum > 1.0 THEN lum := 1.0 END;
+      lum := 0.04 + 0.06 * lum
+    ELSE
+      lum := 0.05
+    END;
+    rimR := FLOOR(FLT(cr) * lum); IF rimR > 255 THEN rimR := 255 END;
+    rimG := FLOOR(FLT(cg) * lum); IF rimG > 255 THEN rimG := 255 END;
+    rimB := FLOOR(FLT(cb) * lum); IF rimB > 255 THEN rimB := 255 END;
+    rimCol := Raylib.RGBA(rimR, rimG, rimB, 255);
+    Raylib.DrawCircleGradient(cx, cy, FLT(rad), diffCol, rimCol);
+    (* Specular: small bright circle offset toward upper-left light *)
+    hx := cx - rad * 3 DIV 10;
+    hy := cy - rad * 35 DIV 100;
+    hr := rad * 30 DIV 100;
+    IF hr < 1 THEN hr := 1 END;
+    specCol := Raylib.Fade(Raylib.RGBA(255, 255, 255, 255), 0.55);
+    Raylib.DrawCircle(hx, hy, FLT(hr), specCol)
+  ELSE
+    Raylib.DrawCircle(cx, cy, FLT(rad), diffCol)
+  END
+END DrawAtomSphere;
 
 (* ── Sort draw buffer descending by z (front first) ─────────────────── *)
 
@@ -311,11 +345,11 @@ BEGIN
           IF Project(i, px, py, pz) &
              (px >= 0) & (px < W) & (py >= 0) & (py < ViewH) THEN
             AtomRGB(i, cr, cg, cb);
-            col := ShadedColor(cr, cg, cb, pz, zMin, zMax);
+            col := DiffuseColor(cr, cg, cb, pz, zMin, zMax);
             IF prevOK & (a.chainID = prevChain) THEN
               Raylib.DrawLineEx(FLT(prevPX), FLT(prevPY), FLT(px), FLT(py), 2.0, col)
             END;
-            Raylib.DrawCircle(px, py, 3.0, col);
+            DrawAtomSphere(px, py, 3, cr, cg, cb, pz, zMin, zMax);
             prevPX := px; prevPY := py; prevChain := a.chainID; prevOK := TRUE
           ELSE prevOK := FALSE
           END
@@ -353,9 +387,8 @@ BEGIN
         py := drawBuf[j].projY;
         IF (px >= 0) & (px < W) & (py >= 0) & (py < ViewH) THEN
           AtomRGB(i, cr, cg, cb);
-          col := ShadedColor(cr, cg, cb, drawBuf[j].z, zMin, zMax);
           IF model.atoms[i].element[0] = 'H' THEN r2 := 3 ELSE r2 := 5 END;
-          Raylib.DrawCircle(px, py, FLT(r2), col)
+          DrawAtomSphere(px, py, r2, cr, cg, cb, drawBuf[j].z, zMin, zMax)
         END
       END
 
@@ -366,7 +399,6 @@ BEGIN
         py := drawBuf[j].projY;
         IF (px >= -200) & (px < W+200) & (py >= -200) & (py < ViewH+200) THEN
           AtomRGB(i, cr, cg, cb);
-          col := ShadedColor(cr, cg, cb, drawBuf[j].z, zMin, zMax);
           CASE model.atoms[i].element[0] OF
             'H': r2 := FLOOR(1.2  * scale)
           | 'C': r2 := FLOOR(1.7  * scale)
@@ -377,7 +409,7 @@ BEGIN
           END;
           IF r2 < 2   THEN r2 := 2   END;
           IF r2 > 300 THEN r2 := 300 END;
-          Raylib.DrawCircle(px, py, FLT(r2), col)
+          DrawAtomSphere(px, py, r2, cr, cg, cb, drawBuf[j].z, zMin, zMax)
         END
       END
     END
