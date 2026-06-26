@@ -1,3 +1,0 @@
-HEADER "SDL2.h"
-CSRC   SDL2.c
-PKGCONFIG sdl2

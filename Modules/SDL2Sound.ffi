@@ -1,3 +1,0 @@
-HEADER "SDL2Sound.h"
-CSRC   SDL2Sound.c
-PKGCONFIG sdl2 SDL2_sound
