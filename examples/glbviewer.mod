@@ -6,8 +6,9 @@ MODULE GLBViewer;
  * Usage:  glbviewer <model.glb>
  *
  * Controls:
- *   Left-drag / arrow keys : orbit
- *   Scroll                 : zoom in / out
+ *   Left-drag / arrow keys : orbit (360 rotation)
+ *   Scroll / + -           : zoom in / out
+ *   W A S D                : pan
  *   Esc / close            : quit
  *)
 
@@ -28,6 +29,8 @@ VAR
   maxX, maxY, maxZ     : REAL;
   yaw, pitch, dist     : REAL;
   px, py, pz           : REAL;
+  panSpeed, upY        : REAL;
+  scrW, scrH           : INTEGER;
 
 BEGIN
   IF Args.Count() < 1 THEN
@@ -44,6 +47,7 @@ BEGIN
   Strings.Append(path, title);
 
   Raylib.InitWindow(W, H, title);
+  Raylib.SetWindowResizable();
   Raylib.SetTargetFPS(60);
 
   mdl := GLBLoad.LoadModel(path);
@@ -76,13 +80,12 @@ BEGIN
     45.0, Raylib.CameraPerspective);
 
   WHILE Raylib.WindowShouldClose() = 0 DO
+    panSpeed := dist * 0.01;
 
     (* Orbit on left-drag *)
     IF Raylib.IsMouseButtonDown(MOUSE_LEFT) # 0 THEN
       yaw   := yaw   - Raylib.GetMouseDeltaX() * 0.005;
-      pitch := pitch - Raylib.GetMouseDeltaY() * 0.005;
-      IF pitch >  1.4 THEN pitch :=  1.4 END;
-      IF pitch < -1.4 THEN pitch := -1.4 END
+      pitch := pitch - Raylib.GetMouseDeltaY() * 0.005
     END;
 
     (* Orbit on arrow keys *)
@@ -90,19 +93,40 @@ BEGIN
     IF Raylib.IsKeyDown(Raylib.KeyRight) = 1 THEN yaw   := yaw   - 0.03 END;
     IF Raylib.IsKeyDown(Raylib.KeyUp)    = 1 THEN pitch := pitch + 0.03 END;
     IF Raylib.IsKeyDown(Raylib.KeyDown)  = 1 THEN pitch := pitch - 0.03 END;
-    IF pitch >  1.4 THEN pitch :=  1.4 END;
-    IF pitch < -1.4 THEN pitch := -1.4 END;
 
     (* Zoom on scroll *)
     dist := dist - Raylib.GetMouseWheelMove() * span * 0.15;
+    (* Zoom on + / - keys (= shares key with +) *)
+    IF Raylib.IsKeyDown(ORD('=')) = 1 THEN dist := dist * 0.99 END;
+    IF Raylib.IsKeyDown(ORD('-')) = 1 THEN dist := dist * 1.01 END;
     IF dist < span * 0.3  THEN dist := span * 0.3  END;
     IF dist > span * 10.0 THEN dist := span * 10.0 END;
+
+    (* WASD pan: W/S move world-Y, A/D move perpendicular to yaw *)
+    IF Raylib.IsKeyDown(ORD('W')) = 1 THEN cy := cy + panSpeed END;
+    IF Raylib.IsKeyDown(ORD('S')) = 1 THEN cy := cy - panSpeed END;
+    IF Raylib.IsKeyDown(ORD('A')) = 1 THEN
+      cx := cx - panSpeed * Math.cos(yaw);
+      cz := cz + panSpeed * Math.sin(yaw)
+    END;
+    IF Raylib.IsKeyDown(ORD('D')) = 1 THEN
+      cx := cx + panSpeed * Math.cos(yaw);
+      cz := cz - panSpeed * Math.sin(yaw)
+    END;
+
+    (* Flip up vector when pitch passes over zenith or nadir *)
+    IF Math.cos(pitch) >= 0.0 THEN upY := 1.0 ELSE upY := -1.0 END;
 
     (* Recompute camera position from spherical coords *)
     px := cx + dist * Math.cos(pitch) * Math.sin(yaw);
     py := cy + dist * Math.sin(pitch);
     pz := cz + dist * Math.cos(pitch) * Math.cos(yaw);
     Raylib.SetCameraPosition(cam, px, py, pz);
+    Raylib.SetCameraTarget(cam, cx, cy, cz);
+    Raylib.SetCameraUp(cam, 0.0, upY, 0.0);
+
+    scrW := Raylib.GetScreenWidth();
+    scrH := Raylib.GetScreenHeight();
 
     Raylib.BeginDrawing;
     Raylib.ClearBackground(cDark);
@@ -116,8 +140,8 @@ BEGIN
       cWhite);
 
     Raylib.EndMode3D;
-    Raylib.DrawText("Drag/arrows: orbit  |  Scroll: zoom  |  Esc: quit",
-                    10, H - 28, 18, cGray);
+    Raylib.DrawText("Drag/arrows: orbit  |  Scroll/+/-: zoom  |  WASD: pan  |  Esc: quit",
+                    10, scrH - 28, 18, cGray);
     Raylib.EndDrawing
   END;
 

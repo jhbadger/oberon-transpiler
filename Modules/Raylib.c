@@ -61,6 +61,10 @@ void Raylib_SetWindowSize(int w, int h) {
     SetWindowSize(w, h);
 }
 
+void Raylib_SetWindowResizable(void) {
+    SetWindowState(FLAG_WINDOW_RESIZABLE);
+}
+
 /* ── Drawing ─────────────────────────────────────────────────────────────── */
 
 void Raylib_BeginDrawing(void) {
@@ -560,6 +564,10 @@ void Raylib_SetCameraPosition(Raylib_Camera cam, double x, double y, double z) {
 
 void Raylib_SetCameraTarget(Raylib_Camera cam, double x, double y, double z) {
     if (cam) cam->cam.target = (Vector3){(float)x, (float)y, (float)z};
+}
+
+void Raylib_SetCameraUp(Raylib_Camera cam, double x, double y, double z) {
+    if (cam) cam->cam.up = (Vector3){(float)x, (float)y, (float)z};
 }
 
 void Raylib_BeginMode3D(Raylib_Camera cam) {

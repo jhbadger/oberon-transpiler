@@ -100,6 +100,7 @@ int    Raylib_IsWindowResized(void);
 void   Raylib_ToggleFullscreen(void);
 void   Raylib_SetWindowTitle(char *title);
 void   Raylib_SetWindowSize(int w, int h);
+void   Raylib_SetWindowResizable(void);
 
 /* ── Drawing ─────────────────────────────────────────────────────────────── */
 void Raylib_BeginDrawing(void);
@@ -263,6 +264,7 @@ void Raylib_FreeCamera(Raylib_Camera cam);
 void Raylib_UpdateCamera(Raylib_Camera cam, int mode);
 void Raylib_SetCameraPosition(Raylib_Camera cam, double x, double y, double z);
 void Raylib_SetCameraTarget(Raylib_Camera cam, double x, double y, double z);
+void Raylib_SetCameraUp(Raylib_Camera cam, double x, double y, double z);
 void Raylib_BeginMode3D(Raylib_Camera cam);
 void Raylib_EndMode3D(void);
 
