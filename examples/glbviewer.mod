@@ -6,9 +6,9 @@ MODULE GLBViewer;
  * Usage:  glbviewer <model.glb>
  *
  * Controls:
- *   Left-drag  : orbit
- *   Scroll     : zoom in / out
- *   Esc / close : quit
+ *   Left-drag / arrow keys : orbit
+ *   Scroll                 : zoom in / out
+ *   Esc / close            : quit
  *)
 
 IMPORT Raylib, GLBLoad, Args, Strings, Math;
@@ -85,6 +85,14 @@ BEGIN
       IF pitch < -1.4 THEN pitch := -1.4 END
     END;
 
+    (* Orbit on arrow keys *)
+    IF Raylib.IsKeyDown(Raylib.KeyLeft)  = 1 THEN yaw   := yaw   + 0.03 END;
+    IF Raylib.IsKeyDown(Raylib.KeyRight) = 1 THEN yaw   := yaw   - 0.03 END;
+    IF Raylib.IsKeyDown(Raylib.KeyUp)    = 1 THEN pitch := pitch + 0.03 END;
+    IF Raylib.IsKeyDown(Raylib.KeyDown)  = 1 THEN pitch := pitch - 0.03 END;
+    IF pitch >  1.4 THEN pitch :=  1.4 END;
+    IF pitch < -1.4 THEN pitch := -1.4 END;
+
     (* Zoom on scroll *)
     dist := dist - Raylib.GetMouseWheelMove() * span * 0.15;
     IF dist < span * 0.3  THEN dist := span * 0.3  END;
@@ -108,7 +116,7 @@ BEGIN
       cWhite);
 
     Raylib.EndMode3D;
-    Raylib.DrawText("Drag: orbit  |  Scroll: zoom  |  Esc: quit",
+    Raylib.DrawText("Drag/arrows: orbit  |  Scroll: zoom  |  Esc: quit",
                     10, H - 28, 18, cGray);
     Raylib.EndDrawing
   END;
