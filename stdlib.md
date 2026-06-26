@@ -2363,3 +2363,96 @@ A `Raylib.RenderTexture` is an off-screen framebuffer you can draw into, then bl
 |----------|-------------|
 | `Raylib.GetCharPressed(): INTEGER` | Unicode codepoint of the character typed this frame (0 if none).  Call in a loop until 0 to drain the queue.  Use `CHR()` to convert to `CHAR`. |
 
+### 3D Types
+
+| Type | Description |
+|------|-------------|
+| `Raylib.Camera` | Opaque handle to a 3D camera (position, target, up, fovy, projection). |
+| `Raylib.Model` | Opaque handle to a 3D model loaded from a file (GLB, OBJ, etc.). |
+
+### 3D Camera Constants
+
+| Constant | Description |
+|----------|-------------|
+| `Raylib.CameraPerspective` | Perspective projection (default for 3D scenes). |
+| `Raylib.CameraOrthographic` | Orthographic projection. |
+| `Raylib.CameraCustom` | No auto-update; move camera manually each frame. |
+| `Raylib.CameraFree` | Free-fly camera controlled by mouse + WASD. |
+| `Raylib.CameraOrbital` | Orbit around the target with left-drag + scroll. |
+| `Raylib.CameraFirstPerson` | First-person mode. |
+| `Raylib.CameraThirdPerson` | Third-person mode. |
+
+### 3D Camera
+
+| Procedure / Function | Description |
+|----------------------|-------------|
+| `Raylib.NewCamera(posX, posY, posZ, tarX, tarY, tarZ, upX, upY, upZ, fovy: REAL; projType: INTEGER): Camera` | Allocate a camera.  `fovy` is field-of-view in degrees.  `projType` is `Raylib.CameraPerspective` or `Raylib.CameraOrthographic`. |
+| `Raylib.FreeCamera(cam: Camera)` | Free the camera handle. |
+| `Raylib.UpdateCamera(cam: Camera; mode: INTEGER)` | Apply built-in input to move/rotate the camera this frame.  Pass one of the `CameraFree`, `CameraOrbital`, etc. constants. |
+| `Raylib.SetCameraPosition(cam: Camera; x, y, z: REAL)` | Move the camera eye to `(x, y, z)`. |
+| `Raylib.SetCameraTarget(cam: Camera; x, y, z: REAL)` | Aim the camera at `(x, y, z)`. |
+| `Raylib.BeginMode3D(cam: Camera)` | Enter 3D drawing mode.  Must follow `BeginDrawing` and precede all 3D draw calls. |
+| `Raylib.EndMode3D` | Exit 3D drawing mode.  Resume 2D drawing (text/UI overlay) after this. |
+
+**Typical 3D frame loop:**
+```oberon
+Raylib.BeginDrawing;
+Raylib.ClearBackground(cBlack);
+Raylib.BeginMode3D(cam);
+  (* 3D draw calls here *)
+Raylib.EndMode3D;
+  (* 2D overlay draw calls here *)
+Raylib.EndDrawing
+```
+
+### 3D Model
+
+| Procedure / Function | Description |
+|----------------------|-------------|
+| `Raylib.LoadModel(path: ARRAY OF CHAR): Model` | Load a 3D model from file (GLB, GLTF, OBJ, M3D…).  Returns NIL on error. |
+| `Raylib.UnloadModel(mdl: Model)` | Unload a model and free GPU resources. |
+| `Raylib.DrawModel(mdl: Model; x, y, z: REAL; scale: REAL; color: INTEGER)` | Draw the model at world position `(x,y,z)` with uniform `scale` and tint `color`.  Use `Raylib.White()` for no tint. |
+| `Raylib.DrawModelEx(mdl: Model; posX, posY, posZ: REAL; axisX, axisY, axisZ: REAL; angle: REAL; scaleX, scaleY, scaleZ: REAL; color: INTEGER)` | Draw with explicit rotation axis/angle and per-axis scale.  `angle` is in degrees. |
+| `Raylib.QueryModelBounds(mdl: Model)` | Compute the model's axis-aligned bounding box and cache it internally. Call once after loading. |
+| `Raylib.ModelBBMinX(): REAL` | Cached bounding-box minimum X (call `QueryModelBounds` first). |
+| `Raylib.ModelBBMinY(): REAL` | Cached bounding-box minimum Y. |
+| `Raylib.ModelBBMinZ(): REAL` | Cached bounding-box minimum Z. |
+| `Raylib.ModelBBMaxX(): REAL` | Cached bounding-box maximum X. |
+| `Raylib.ModelBBMaxY(): REAL` | Cached bounding-box maximum Y. |
+| `Raylib.ModelBBMaxZ(): REAL` | Cached bounding-box maximum Z. |
+
+### 3D Shapes
+
+All positions are world-space `(x,y,z)`.
+
+| Procedure | Description |
+|-----------|-------------|
+| `Raylib.DrawGrid(slices: INTEGER; spacing: REAL)` | Draw a grid on the XZ plane.  `slices` lines per half-axis, `spacing` units apart.  Good for a chess board background. |
+| `Raylib.DrawCube(x, y, z, w, h, len: REAL; color: INTEGER)` | Filled axis-aligned box. `w`=X width, `h`=Y height, `len`=Z depth. |
+| `Raylib.DrawCubeWires(x, y, z, w, h, len: REAL; color: INTEGER)` | Wireframe box outline. |
+| `Raylib.DrawSphere(x, y, z, radius: REAL; color: INTEGER)` | Filled sphere. |
+| `Raylib.DrawCylinder(x, y, z, radTop, radBot, height: REAL; slices: INTEGER; color: INTEGER)` | Filled cylinder or cone. |
+| `Raylib.DrawPlane(x, y, z, w, len: REAL; color: INTEGER)` | Flat XZ plane quad of size `w` × `len`. |
+
+### 3D Picking
+
+Cast a ray from the mouse cursor and test it against geometry.
+
+| Procedure / Function | Description |
+|----------------------|-------------|
+| `Raylib.GetMouseRay(mx, my: INTEGER; cam: Camera; VAR ox, oy, oz: REAL; VAR dx, dy, dz: REAL)` | Compute a world-space ray from screen pixel `(mx,my)` through `cam`.  `(ox,oy,oz)` = ray origin, `(dx,dy,dz)` = normalised direction. |
+| `Raylib.GetRayCollisionBox(rox, roy, roz, rdx, rdy, rdz: REAL; minX, minY, minZ, maxX, maxY, maxZ: REAL; VAR dist: REAL; VAR hx, hy, hz: REAL): INTEGER` | Test ray against an axis-aligned box.  Returns 1 on hit; sets `dist` = distance to hit, `(hx,hy,hz)` = hit point. |
+
+**Typical pick pattern:**
+```oberon
+VAR ox, oy, oz, dx, dy, dz, dist, hx, hy, hz : REAL;
+Raylib.GetMouseRay(Raylib.GetMouseX(), Raylib.GetMouseY(), cam,
+                   ox, oy, oz, dx, dy, dz);
+IF Raylib.GetRayCollisionBox(ox,oy,oz, dx,dy,dz,
+                              minX,minY,minZ, maxX,maxY,maxZ,
+                              dist, hx,hy,hz) = 1 THEN
+  (* piece was clicked *)
+END
+```
+
+

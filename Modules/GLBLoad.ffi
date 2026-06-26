@@ -1,0 +1,5 @@
+HEADER "OBCGLBLoad.h"
+CSRC   GLBLoad.c
+PKGCONFIG raylib
+PKGCONFIG libwebp
+CSRC meshopt/meshopt_all.cpp

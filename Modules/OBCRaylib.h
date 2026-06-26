@@ -151,6 +151,8 @@ int    Raylib_IsMouseButtonReleased(int btn);
 int    Raylib_GetMouseX(void);
 int    Raylib_GetMouseY(void);
 double Raylib_GetMouseWheelMove(void);
+double Raylib_GetMouseDeltaX(void);
+double Raylib_GetMouseDeltaY(void);
 void   Raylib_SetMousePosition(int x, int y);
 void   Raylib_ShowCursor(void);
 void   Raylib_HideCursor(void);
@@ -216,6 +218,27 @@ typedef struct Raylib_RenderTextureRec_s { int _tag; RenderTexture2D rt; } Rayli
 typedef Raylib_RenderTextureRec *Raylib_RenderTexture;
 #define _TAG_Raylib_RenderTextureRec 5
 
+/* ── 3D: Camera and Model ────────────────────────────────────────────────── */
+typedef struct Raylib_CameraRec_s { int _tag; Camera3D cam; } Raylib_CameraRec;
+typedef struct Raylib_ModelRec_s  { int _tag; Model    mdl; } Raylib_ModelRec;
+
+typedef Raylib_CameraRec *Raylib_Camera;
+typedef Raylib_ModelRec  *Raylib_Model;
+
+#define _TAG_Raylib_CameraRec 6
+#define _TAG_Raylib_ModelRec  7
+
+/* Camera projection types */
+enum { Raylib_CameraPerspective  = CAMERA_PERSPECTIVE  };
+enum { Raylib_CameraOrthographic = CAMERA_ORTHOGRAPHIC };
+
+/* Camera update modes */
+enum { Raylib_CameraCustom      = CAMERA_CUSTOM       };
+enum { Raylib_CameraFree        = CAMERA_FREE         };
+enum { Raylib_CameraOrbital     = CAMERA_ORBITAL      };
+enum { Raylib_CameraFirstPerson = CAMERA_FIRST_PERSON };
+enum { Raylib_CameraThirdPerson = CAMERA_THIRD_PERSON };
+
 Raylib_RenderTexture Raylib_LoadRenderTexture(int w, int h);
 void Raylib_UnloadRenderTexture(Raylib_RenderTexture rt);
 void Raylib_BeginTextureMode(Raylib_RenderTexture rt);
@@ -224,6 +247,59 @@ void Raylib_DrawRenderTexture(Raylib_RenderTexture rt, int x, int y, int w, int 
 void Raylib_SaveRTPNG(Raylib_RenderTexture rt, char *filename);
 void Raylib_LoadPNGIntoRT(Raylib_RenderTexture rt, char *filename);
 void Raylib_FloodFillRT(Raylib_RenderTexture rt, int x, int y, int color);
+
+/* ── 3D Camera ───────────────────────────────────────────────────────────── */
+Raylib_Camera Raylib_NewCamera(double posX, double posY, double posZ,
+                               double tarX, double tarY, double tarZ,
+                               double upX,  double upY,  double upZ,
+                               double fovy, int projType);
+void Raylib_FreeCamera(Raylib_Camera cam);
+void Raylib_UpdateCamera(Raylib_Camera cam, int mode);
+void Raylib_SetCameraPosition(Raylib_Camera cam, double x, double y, double z);
+void Raylib_SetCameraTarget(Raylib_Camera cam, double x, double y, double z);
+void Raylib_BeginMode3D(Raylib_Camera cam);
+void Raylib_EndMode3D(void);
+
+/* ── 3D Model ────────────────────────────────────────────────────────────── */
+Raylib_Model Raylib_LoadModel(char *path);
+void         Raylib_UnloadModel(Raylib_Model mdl);
+void         Raylib_DrawModel(Raylib_Model mdl, double x, double y, double z,
+                              double scale, int color);
+void         Raylib_DrawModelEx(Raylib_Model mdl,
+                                double posX, double posY, double posZ,
+                                double axisX, double axisY, double axisZ,
+                                double angle,
+                                double scaleX, double scaleY, double scaleZ,
+                                int color);
+void   Raylib_QueryModelBounds(Raylib_Model mdl);
+double Raylib_ModelBBMinX(void);
+double Raylib_ModelBBMinY(void);
+double Raylib_ModelBBMinZ(void);
+double Raylib_ModelBBMaxX(void);
+double Raylib_ModelBBMaxY(void);
+double Raylib_ModelBBMaxZ(void);
+
+/* ── 3D Shapes ───────────────────────────────────────────────────────────── */
+void Raylib_DrawGrid(int slices, double spacing);
+void Raylib_DrawCube(double x, double y, double z,
+                     double w, double h, double len, int color);
+void Raylib_DrawCubeWires(double x, double y, double z,
+                          double w, double h, double len, int color);
+void Raylib_DrawSphere(double x, double y, double z, double radius, int color);
+void Raylib_DrawCylinder(double x, double y, double z,
+                         double radTop, double radBot, double height,
+                         int slices, int color);
+void Raylib_DrawPlane(double x, double y, double z, double w, double len, int color);
+
+/* ── 3D Picking ──────────────────────────────────────────────────────────── */
+void Raylib_GetMouseRay(int mx, int my, Raylib_Camera cam,
+                        double *ox, double *oy, double *oz,
+                        double *dx, double *dy, double *dz);
+int  Raylib_GetRayCollisionBox(double rox, double roy, double roz,
+                               double rdx, double rdy, double rdz,
+                               double minX, double minY, double minZ,
+                               double maxX, double maxY, double maxZ,
+                               double *dist, double *hx, double *hy, double *hz);
 
 /* ── Additional shapes ───────────────────────────────────────────────────── */
 void Raylib_DrawEllipseLines(int cx, int cy, double rx, double ry, int color);

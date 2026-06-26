@@ -262,7 +262,9 @@ int    Raylib_IsMouseButtonPressed(int btn)  { return IsMouseButtonPressed(btn) 
 int    Raylib_IsMouseButtonReleased(int btn) { return IsMouseButtonReleased(btn) ? 1 : 0; }
 int    Raylib_GetMouseX(void)  { return GetMouseX(); }
 int    Raylib_GetMouseY(void)  { return GetMouseY(); }
-double Raylib_GetMouseWheelMove(void) { return (double)GetMouseWheelMove(); }
+double Raylib_GetMouseWheelMove(void)  { return (double)GetMouseWheelMove(); }
+double Raylib_GetMouseDeltaX(void)     { return (double)GetMouseDelta().x; }
+double Raylib_GetMouseDeltaY(void)     { return (double)GetMouseDelta().y; }
 
 void Raylib_SetMousePosition(int x, int y) {
     SetMousePosition(x, y);
@@ -525,6 +527,161 @@ void Raylib_FloodFillRT(Raylib_RenderTexture rt, int x, int y, int fillColor) {
     free(sx); free(sy);
     UpdateTexture(rt->rt.texture, img.data);
     UnloadImage(img);
+}
+
+/* ── 3D Camera ───────────────────────────────────────────────────────────── */
+
+Raylib_Camera Raylib_NewCamera(double posX, double posY, double posZ,
+                               double tarX, double tarY, double tarZ,
+                               double upX,  double upY,  double upZ,
+                               double fovy, int projType) {
+    Raylib_Camera c = (Raylib_Camera)calloc(1, sizeof(Raylib_CameraRec));
+    if (!c) return NULL;
+    c->_tag = _TAG_Raylib_CameraRec;
+    c->cam.position   = (Vector3){(float)posX, (float)posY, (float)posZ};
+    c->cam.target     = (Vector3){(float)tarX, (float)tarY, (float)tarZ};
+    c->cam.up         = (Vector3){(float)upX,  (float)upY,  (float)upZ};
+    c->cam.fovy       = (float)fovy;
+    c->cam.projection = projType;
+    return c;
+}
+
+void Raylib_FreeCamera(Raylib_Camera cam) {
+    free(cam);
+}
+
+void Raylib_UpdateCamera(Raylib_Camera cam, int mode) {
+    if (cam) UpdateCamera(&cam->cam, mode);
+}
+
+void Raylib_SetCameraPosition(Raylib_Camera cam, double x, double y, double z) {
+    if (cam) cam->cam.position = (Vector3){(float)x, (float)y, (float)z};
+}
+
+void Raylib_SetCameraTarget(Raylib_Camera cam, double x, double y, double z) {
+    if (cam) cam->cam.target = (Vector3){(float)x, (float)y, (float)z};
+}
+
+void Raylib_BeginMode3D(Raylib_Camera cam) {
+    if (cam) BeginMode3D(cam->cam);
+}
+
+void Raylib_EndMode3D(void) {
+    EndMode3D();
+}
+
+/* ── 3D Model ────────────────────────────────────────────────────────────── */
+
+Raylib_Model Raylib_LoadModel(char *path) {
+    Raylib_Model m = (Raylib_Model)calloc(1, sizeof(Raylib_ModelRec));
+    if (!m) return NULL;
+    m->_tag = _TAG_Raylib_ModelRec;
+    m->mdl = LoadModel(path);
+    return m;
+}
+
+void Raylib_UnloadModel(Raylib_Model mdl) {
+    if (!mdl) return;
+    UnloadModel(mdl->mdl);
+    free(mdl);
+}
+
+void Raylib_DrawModel(Raylib_Model mdl, double x, double y, double z,
+                      double scale, int color) {
+    if (!mdl) return;
+    DrawModel(mdl->mdl, (Vector3){(float)x,(float)y,(float)z},
+              (float)scale, RL_C(color));
+}
+
+void Raylib_DrawModelEx(Raylib_Model mdl,
+                        double posX, double posY, double posZ,
+                        double axisX, double axisY, double axisZ,
+                        double angle,
+                        double scaleX, double scaleY, double scaleZ,
+                        int color) {
+    if (!mdl) return;
+    DrawModelEx(mdl->mdl,
+                (Vector3){(float)posX, (float)posY, (float)posZ},
+                (Vector3){(float)axisX,(float)axisY,(float)axisZ},
+                (float)angle,
+                (Vector3){(float)scaleX,(float)scaleY,(float)scaleZ},
+                RL_C(color));
+}
+
+static double _bb_minX, _bb_minY, _bb_minZ;
+static double _bb_maxX, _bb_maxY, _bb_maxZ;
+
+void Raylib_QueryModelBounds(Raylib_Model mdl) {
+    if (!mdl) { _bb_minX=_bb_minY=_bb_minZ=_bb_maxX=_bb_maxY=_bb_maxZ=0.0; return; }
+    BoundingBox bb = GetModelBoundingBox(mdl->mdl);
+    _bb_minX = bb.min.x; _bb_minY = bb.min.y; _bb_minZ = bb.min.z;
+    _bb_maxX = bb.max.x; _bb_maxY = bb.max.y; _bb_maxZ = bb.max.z;
+}
+double Raylib_ModelBBMinX(void) { return _bb_minX; }
+double Raylib_ModelBBMinY(void) { return _bb_minY; }
+double Raylib_ModelBBMinZ(void) { return _bb_minZ; }
+double Raylib_ModelBBMaxX(void) { return _bb_maxX; }
+double Raylib_ModelBBMaxY(void) { return _bb_maxY; }
+double Raylib_ModelBBMaxZ(void) { return _bb_maxZ; }
+
+/* ── 3D Shapes ───────────────────────────────────────────────────────────── */
+
+void Raylib_DrawGrid(int slices, double spacing) {
+    DrawGrid(slices, (float)spacing);
+}
+
+void Raylib_DrawCube(double x, double y, double z,
+                     double w, double h, double len, int color) {
+    DrawCube((Vector3){(float)x,(float)y,(float)z},
+             (float)w, (float)h, (float)len, RL_C(color));
+}
+
+void Raylib_DrawCubeWires(double x, double y, double z,
+                          double w, double h, double len, int color) {
+    DrawCubeWires((Vector3){(float)x,(float)y,(float)z},
+                  (float)w, (float)h, (float)len, RL_C(color));
+}
+
+void Raylib_DrawSphere(double x, double y, double z, double radius, int color) {
+    DrawSphere((Vector3){(float)x,(float)y,(float)z}, (float)radius, RL_C(color));
+}
+
+void Raylib_DrawCylinder(double x, double y, double z,
+                         double radTop, double radBot, double height,
+                         int slices, int color) {
+    DrawCylinder((Vector3){(float)x,(float)y,(float)z},
+                 (float)radTop, (float)radBot, (float)height, slices, RL_C(color));
+}
+
+void Raylib_DrawPlane(double x, double y, double z, double w, double len, int color) {
+    DrawPlane((Vector3){(float)x,(float)y,(float)z},
+              (Vector2){(float)w,(float)len}, RL_C(color));
+}
+
+/* ── 3D Picking ──────────────────────────────────────────────────────────── */
+
+void Raylib_GetMouseRay(int mx, int my, Raylib_Camera cam,
+                        double *ox, double *oy, double *oz,
+                        double *dx, double *dy, double *dz) {
+    if (!cam) { *ox=*oy=*oz=*dx=*dy=*dz=0.0; return; }
+    Ray r = GetMouseRay((Vector2){(float)mx,(float)my}, cam->cam);
+    *ox = r.position.x;  *oy = r.position.y;  *oz = r.position.z;
+    *dx = r.direction.x; *dy = r.direction.y; *dz = r.direction.z;
+}
+
+int Raylib_GetRayCollisionBox(double rox, double roy, double roz,
+                              double rdx, double rdy, double rdz,
+                              double minX, double minY, double minZ,
+                              double maxX, double maxY, double maxZ,
+                              double *dist, double *hx, double *hy, double *hz) {
+    Ray r = { .position  = {(float)rox,(float)roy,(float)roz},
+              .direction = {(float)rdx,(float)rdy,(float)rdz} };
+    BoundingBox bb = { .min = {(float)minX,(float)minY,(float)minZ},
+                       .max = {(float)maxX,(float)maxY,(float)maxZ} };
+    RayCollision rc = GetRayCollisionBox(r, bb);
+    *dist = rc.distance;
+    *hx   = rc.point.x; *hy = rc.point.y; *hz = rc.point.z;
+    return rc.hit ? 1 : 0;
 }
 
 /* ── Additional shapes ───────────────────────────────────────────────────── */
