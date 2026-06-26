@@ -3,6 +3,8 @@
 !*/
 *.tmp
 *.h
+*.o
+*.a
 .DS_Store
 .obc_clipboard
 .obc_errors
