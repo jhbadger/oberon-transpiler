@@ -2,20 +2,23 @@ MODULE Jigsaw;
 (*
  * Mouse-driven jigsaw puzzle.
  * Usage: jigsaw <image.jpg> [approx-pieces]
+ *        jigsaw <savefile.sav>
  *
  * Left-click and drag pieces into the outlined grid.
  * Release near the correct slot to snap it into place.
  * Press R to reshuffle all pieces.
  * Press H to toggle the faint hint image.
+ * Press S to save progress.
  *)
 
-IMPORT Raylib, Args, Strings, Random, Out;
+IMPORT Raylib, Args, Strings, Random, Files, Out;
 
 CONST
-  MAXPIECES = 400;
-  WIN_W     = 1100;
-  WIN_H     = 750;
-  BORDER    = 60;   (* margin around the solved-image area *)
+  MAXPIECES  = 400;
+  WIN_W      = 1100;
+  WIN_H      = 750;
+  BORDER     = 60;   (* margin around the solved-image area *)
+  SAVE_MAGIC = 20260628;
 
 VAR
   imgTex         : Raylib.Texture;
@@ -47,9 +50,12 @@ VAR
   cGreen     : INTEGER;
   cYellow    : INTEGER;
 
-  filename : ARRAY 256 OF CHAR;
-  numStr   : ARRAY 32 OF CHAR;
-  nTarget  : INTEGER;
+  filename     : ARRAY 256 OF CHAR;
+  saveName     : ARRAY 256 OF CHAR;
+  numStr       : ARRAY 32 OF CHAR;
+  nTarget      : INTEGER;
+  saveMsgTimer : INTEGER;
+  resuming     : BOOLEAN;
 
 (* ── Helpers ──────────────────────────────────────────────────────────────── *)
 
@@ -147,6 +153,92 @@ BEGIN
   drawOrd[nPieces - 1] := tmp
 END BringToFront;
 
+(* ── Save / Load ─────────────────────────────────────────────────────────── *)
+
+PROCEDURE IsSaveFile(name : ARRAY OF CHAR) : BOOLEAN;
+VAR len : INTEGER;
+BEGIN
+  len := Strings.Length(name);
+  RETURN (len > 4) & (name[len-4] = '.') & (name[len-3] = 's') &
+         (name[len-2] = 'a') & (name[len-1] = 'v')
+END IsSaveFile;
+
+PROCEDURE MakeSaveName(img : ARRAY OF CHAR; VAR sav : ARRAY OF CHAR);
+VAR i, dot : INTEGER;
+BEGIN
+  dot := 0;
+  i   := 0;
+  WHILE img[i] # 0X DO
+    IF img[i] = '.' THEN dot := i END;
+    INC(i)
+  END;
+  IF dot = 0 THEN dot := i END;
+  COPY(img, sav);
+  sav[dot]   := '.';
+  sav[dot+1] := 's';
+  sav[dot+2] := 'a';
+  sav[dot+3] := 'v';
+  sav[dot+4] := 0X
+END MakeSaveName;
+
+PROCEDURE SaveGame;
+VAR f : Files.File;  r : Files.Rider;
+    i : INTEGER;
+BEGIN
+  f := Files.New(saveName);
+  IF f = NIL THEN RETURN END;
+  Files.Set(r, f, 0);
+  Files.WriteInt(r, SAVE_MAGIC);
+  Files.WriteString(r, filename);
+  Files.WriteInt(r, nTarget);
+  Files.WriteInt(r, nCols);
+  Files.WriteInt(r, nRows);
+  Files.WriteInt(r, nPieces);
+  Files.WriteInt(r, pieceW);
+  Files.WriteInt(r, pieceH);
+  FOR i := 0 TO nPieces - 1 DO
+    Files.WriteInt(r, FLOOR(pieceX[i]));
+    Files.WriteInt(r, FLOOR(pieceY[i]));
+    IF placed[i] THEN Files.WriteInt(r, 1) ELSE Files.WriteInt(r, 0) END;
+    Files.WriteInt(r, drawOrd[i])
+  END;
+  Files.WriteInt(r, solvedCount);
+  IF won       THEN Files.WriteInt(r, 1) ELSE Files.WriteInt(r, 0) END;
+  IF showGhost THEN Files.WriteInt(r, 1) ELSE Files.WriteInt(r, 0) END;
+  Files.Register(f);
+  Files.Close(f)
+END SaveGame;
+
+PROCEDURE LoadGame(savefile : ARRAY OF CHAR) : BOOLEAN;
+VAR f : Files.File;  r : Files.Rider;
+    n, i : INTEGER;
+BEGIN
+  f := Files.Old(savefile);
+  IF f = NIL THEN RETURN FALSE END;
+  Files.Set(r, f, 0);
+  Files.ReadInt(r, n);
+  IF r.eof OR (n # SAVE_MAGIC) THEN Files.Close(f); RETURN FALSE END;
+  Files.ReadString(r, filename);
+  Files.ReadInt(r, nTarget);
+  Files.ReadInt(r, nCols);
+  Files.ReadInt(r, nRows);
+  Files.ReadInt(r, nPieces);
+  Files.ReadInt(r, pieceW);
+  Files.ReadInt(r, pieceH);
+  FOR i := 0 TO nPieces - 1 DO
+    Files.ReadInt(r, n);  pieceX[i] := FLT(n);
+    Files.ReadInt(r, n);  pieceY[i] := FLT(n);
+    Files.ReadInt(r, n);  placed[i] := n # 0;
+    Files.ReadInt(r, drawOrd[i])
+  END;
+  Files.ReadInt(r, solvedCount);
+  Files.ReadInt(r, n);  won       := n # 0;
+  Files.ReadInt(r, n);  showGhost := n # 0;
+  isDragging := FALSE;
+  Files.Close(f);
+  RETURN TRUE
+END LoadGame;
+
 (* ── Update ───────────────────────────────────────────────────────────────── *)
 
 PROCEDURE Update;
@@ -190,6 +282,12 @@ BEGIN
 
   IF Raylib.IsKeyPressed(ORD('H')) = 1 THEN
     showGhost := ~showGhost;
+    RETURN
+  END;
+
+  IF Raylib.IsKeyPressed(ORD('S')) = 1 THEN
+    SaveGame;
+    saveMsgTimer := 120;
     RETURN
   END;
 
@@ -287,9 +385,16 @@ BEGIN
   Strings.Append(ns, s);
   Raylib.DrawText(s, 10, 10, 20, cWhite);
 
-  s := "R = reshuffle   H = hint";
+  s := "R = reshuffle   H = hint   S = save";
   Raylib.DrawText(s, WIN_W - Raylib.MeasureText(s, 16) - 10, 10, 16,
                   Raylib.Fade(cWhite, 0.7));
+
+  IF saveMsgTimer > 0 THEN
+    s := "Saved!";
+    tw := Raylib.MeasureText(s, 20);
+    Raylib.DrawText(s, (WIN_W - tw) DIV 2, WIN_H - 36, 20, cGreen);
+    DEC(saveMsgTimer)
+  END;
 
   IF won THEN
     s  := "Puzzle Complete!";
@@ -319,17 +424,34 @@ BEGIN
   IF Args.Count() < 1 THEN
     Out.String("Usage: jigsaw <image.jpg> [approx-pieces]");
     Out.Ln;
+    Out.String("       jigsaw <savefile.sav>");
+    Out.Ln;
     RETURN
   END;
 
+  saveMsgTimer := 0;
+  resuming     := FALSE;
   Args.Get(1, filename);
-  nTarget := 20;
-  IF Args.Count() >= 2 THEN
-    Args.Get(2, numStr);
-    IF ~Strings.StrToInt(numStr, nTarget) THEN nTarget := 20 END
+
+  IF IsSaveFile(filename) THEN
+    COPY(filename, saveName);
+    IF ~LoadGame(saveName) THEN
+      Out.String("Error: could not load save file: ");
+      Out.String(saveName);
+      Out.Ln;
+      RETURN
+    END;
+    resuming := TRUE
+  ELSE
+    MakeSaveName(filename, saveName);
+    nTarget := 20;
+    IF Args.Count() >= 2 THEN
+      Args.Get(2, numStr);
+      IF ~Strings.StrToInt(numStr, nTarget) THEN nTarget := 20 END
+    END;
+    IF nTarget < 1 THEN nTarget := 1 END;
+    IF nTarget > MAXPIECES THEN nTarget := MAXPIECES END
   END;
-  IF nTarget < 1 THEN nTarget := 1 END;
-  IF nTarget > MAXPIECES THEN nTarget := MAXPIECES END;
 
   Raylib.InitWindow(WIN_W, WIN_H, "Jigsaw Puzzle");
   Raylib.SetTargetFPS(60);
@@ -346,12 +468,16 @@ BEGIN
     RETURN
   END;
 
-  showGhost := FALSE;
-  ComputeGrid(nTarget);
-  pieceW := imgW DIV nCols;
-  pieceH := imgH DIV nRows;
-  InitLayout;
-  Scatter;
+  IF resuming THEN
+    InitLayout
+  ELSE
+    showGhost := FALSE;
+    ComputeGrid(nTarget);
+    pieceW := imgW DIV nCols;
+    pieceH := imgH DIV nRows;
+    InitLayout;
+    Scatter
+  END;
 
   WHILE Raylib.WindowShouldClose() = 0 DO
     Update;
