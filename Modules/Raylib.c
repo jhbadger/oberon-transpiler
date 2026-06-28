@@ -8,6 +8,61 @@
 
 #include "OBCRaylib.h"
 #include <math.h>
+#include <stdio.h>
+#include <setjmp.h>
+#include <jpeglib.h>
+
+/* ── JPEG fallback loader (used when raylib's stb doesn't support JPEG) ───── */
+
+struct _obc_jpeg_err_mgr {
+    struct jpeg_error_mgr pub;
+    jmp_buf jmp;
+};
+
+static void _obc_jpeg_error_exit(j_common_ptr cinfo) {
+    struct _obc_jpeg_err_mgr *e = (struct _obc_jpeg_err_mgr *)cinfo->err;
+    longjmp(e->jmp, 1);
+}
+
+static unsigned char *_obc_load_jpeg(const char *path, int *w, int *h) {
+    struct jpeg_decompress_struct cinfo;
+    struct _obc_jpeg_err_mgr err;
+    FILE *fp;
+    unsigned char *data = NULL;
+
+    fp = fopen(path, "rb");
+    if (!fp) return NULL;
+
+    cinfo.err = jpeg_std_error(&err.pub);
+    err.pub.error_exit = _obc_jpeg_error_exit;
+    if (setjmp(err.jmp)) {
+        jpeg_destroy_decompress(&cinfo);
+        fclose(fp);
+        free(data);
+        return NULL;
+    }
+
+    jpeg_create_decompress(&cinfo);
+    jpeg_stdio_src(&cinfo, fp);
+    jpeg_read_header(&cinfo, TRUE);
+    cinfo.out_color_space = JCS_RGB;
+    jpeg_start_decompress(&cinfo);
+
+    *w = (int)cinfo.output_width;
+    *h = (int)cinfo.output_height;
+    data = (unsigned char *)malloc((size_t)(*w) * (size_t)(*h) * 3);
+    if (!data) { jpeg_destroy_decompress(&cinfo); fclose(fp); return NULL; }
+
+    while (cinfo.output_scanline < cinfo.output_height) {
+        JSAMPROW row = data + cinfo.output_scanline * (*w) * 3;
+        jpeg_read_scanlines(&cinfo, &row, 1);
+    }
+
+    jpeg_finish_decompress(&cinfo);
+    jpeg_destroy_decompress(&cinfo);
+    fclose(fp);
+    return data;
+}
 
 /* ── Window / Core ───────────────────────────────────────────────────────── */
 
@@ -156,6 +211,16 @@ Raylib_Texture Raylib_LoadTexture(char *path) {
     if (!t) return NULL;
     t->_tag = _TAG_Raylib_TextureRec;
     t->tex  = LoadTexture(path);
+    if (t->tex.width == 0) {
+        /* raylib's stb build lacks JPEG support — try libjpeg fallback */
+        int w = 0, h = 0;
+        unsigned char *data = _obc_load_jpeg(path, &w, &h);
+        if (data && w > 0 && h > 0) {
+            Image img = { data, w, h, 1, PIXELFORMAT_UNCOMPRESSED_R8G8B8 };
+            t->tex = LoadTextureFromImage(img);
+            free(data);
+        }
+    }
     return t;
 }
 
