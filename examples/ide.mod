@@ -2271,11 +2271,13 @@ END JumpToError;
 
 PROCEDURE Compile(ew: EditorWin);
 VAR cmd: ARRAY 512 OF CHAR;
-f: Files.File;
-r: Files.Rider;
-b: BYTE;
-outBuf: ARRAY 200 OF CHAR;
-i, rc: INTEGER;
+    f: Files.File;
+    r: Files.Rider;
+    b: BYTE;
+    line: ARRAY 512 OF CHAR;
+    bestLine: ARRAY 512 OF CHAR;
+    i, rc, col: INTEGER;
+    foundLoc: BOOLEAN;
 BEGIN
   IF ew = NIL THEN
     Strings.Copy("No file open.", statusMsg);  RETURN
@@ -2288,31 +2290,65 @@ BEGIN
   Strings.Append(" > .obc_errors 2>&1", cmd);
   rc := OS.Exec(cmd);
   IF rc = 0 THEN
-    Strings.Copy("Compiled OK.", statusMsg)
+    Strings.Copy("Compiled OK.", statusMsg);
+    errorLine := 0
   ELSE
+    errorFile[0] := 0X;  errorLine := 0;
+    bestLine[0] := 0X;
     f := Files.Old(".obc_errors");
     IF f # NIL THEN
       Files.Set(r, f, 0);
-      i := 0;
-      Files.Read(r, b);
-      WHILE ~r.eof & (CHR(b) # 0AX) & (i < 199) DO
-        outBuf[i] := CHR(b);  INC(i);
-        Files.Read(r, b)
+      foundLoc := FALSE;
+      (* Scan every line; keep the most informative one *)
+      LOOP
+        col := 0;
+        Files.Read(r, b);
+        WHILE ~r.eof & (CHR(b) # 0AX) & (col < 511) DO
+          line[col] := CHR(b);  INC(col);
+          Files.Read(r, b)
+        END;
+        line[col] := 0X;
+        (* Skip ahead through any overflow on overly long lines *)
+        WHILE ~r.eof & (CHR(b) # 0AX) DO  Files.Read(r, b)  END;
+
+        IF col > 0 THEN
+          (* Priority 1: a transpiler error with file:line:col *)
+          IF ~foundLoc THEN
+            ParseErrorLoc(line, errorFile, errorLine);
+            IF errorFile[0] # 0X THEN
+              Strings.Copy(line, bestLine);
+              foundLoc := TRUE
+            END
+          END;
+          (* Priority 2: a linker line naming the missing symbol.
+             macOS:  '  "_Foo_Foobar", referenced from:'
+             Linux:  'undefined reference to `Foo_Foobar' *)
+          IF ~foundLoc THEN
+            IF (Strings.Pos("undefined reference", line, 0) >= 0) OR
+               (Strings.Pos("referenced from", line, 0) >= 0) OR
+               (Strings.Pos("Undefined symbol", line, 0) >= 0) THEN
+              Strings.Copy(line, bestLine)
+            END
+          END;
+          (* Fallback: remember the first non-empty line in case nothing better turns up *)
+          IF bestLine[0] = 0X THEN  Strings.Copy(line, bestLine)  END
+        END;
+
+        IF r.eof THEN  EXIT  END
       END;
-      outBuf[i] := 0X;
       Files.Close(f);
-      ParseErrorLoc(outBuf, errorFile, errorLine);
-      IF errorFile[0] # 0X THEN
-        (* skip "file:line:col: " prefix — show only the message part *)
+
+      IF foundLoc THEN
+        (* Strip "file:line:col: " prefix — show only the message *)
         i := Strings.Length(errorFile) + 1;
-        WHILE (outBuf[i] # 0X) & (outBuf[i] # ':') DO INC(i) END;  (* past line digits *)
-        IF outBuf[i] = ':' THEN INC(i) END;
-        WHILE (outBuf[i] # 0X) & (outBuf[i] # ':') DO INC(i) END;  (* past col digits *)
-        IF outBuf[i] = ':' THEN INC(i) END;
-        IF outBuf[i] = ' ' THEN INC(i) END;
-        Strings.Extract(outBuf, i, Strings.Length(outBuf) - i, statusMsg)
+        WHILE (bestLine[i] # 0X) & (bestLine[i] # ':') DO INC(i) END;
+        IF bestLine[i] = ':' THEN INC(i) END;
+        WHILE (bestLine[i] # 0X) & (bestLine[i] # ':') DO INC(i) END;
+        IF bestLine[i] = ':' THEN INC(i) END;
+        IF bestLine[i] = ' ' THEN INC(i) END;
+        Strings.Extract(bestLine, i, Strings.Length(bestLine) - i, statusMsg)
       ELSE
-        Strings.Copy(outBuf, statusMsg)
+        Strings.Copy(bestLine, statusMsg)
       END
     ELSE
       Strings.Copy("Compile failed.", statusMsg);
@@ -3234,6 +3270,7 @@ END;
 
 TUI.Done()
 END IDE.
+
 
 
 
