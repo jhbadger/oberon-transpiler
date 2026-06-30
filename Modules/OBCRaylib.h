@@ -127,6 +127,8 @@ int  Raylib_MeasureText(char *text, int size);
 
 /* ── Textures ────────────────────────────────────────────────────────────── */
 Raylib_Texture Raylib_LoadTexture(char *path);
+int            Raylib_CountPDFPages(char *path);
+Raylib_Texture Raylib_LoadTexturePDF(char *path, int page);
 void           Raylib_UnloadTexture(Raylib_Texture tex);
 void           Raylib_DrawTexture(Raylib_Texture tex, int x, int y, int color);
 void           Raylib_DrawTextureEx(Raylib_Texture tex, double x, double y, double rot, double scale, int color);

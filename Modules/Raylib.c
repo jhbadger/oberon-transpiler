@@ -795,5 +795,70 @@ int Raylib_GetCharPressed(void) {
     return GetCharPressed();
 }
 
+/* ── PDF support via MuPDF ───────────────────────────────────────────────── */
+
+#ifdef __APPLE__
+#include <mupdf/fitz.h>
+
+int Raylib_CountPDFPages(char *path) {
+    fz_context *ctx = fz_new_context(NULL, NULL, FZ_STORE_DEFAULT);
+    if (!ctx) return 0;
+    fz_register_document_handlers(ctx);
+    fz_document *doc = NULL;
+    int count = 0;
+    fz_try(ctx) {
+        doc = fz_open_document(ctx, path);
+        count = fz_count_pages(ctx, doc);
+    }
+    fz_catch(ctx) { count = 0; }
+    if (doc) fz_drop_document(ctx, doc);
+    fz_drop_context(ctx);
+    return count;
+}
+
+Raylib_Texture Raylib_LoadTexturePDF(char *path, int page) {
+    fz_context *ctx = fz_new_context(NULL, NULL, FZ_STORE_DEFAULT);
+    if (!ctx) return NULL;
+    fz_register_document_handlers(ctx);
+    Raylib_Texture t = NULL;
+    fz_document *doc = NULL;
+    fz_page *pg = NULL;
+    fz_pixmap *pixmap = NULL;
+    fz_try(ctx) {
+        doc = fz_open_document(ctx, path);
+        pg = fz_load_page(ctx, doc, page);
+        fz_rect bounds = fz_bound_page(ctx, pg);
+        fz_matrix matrix = fz_scale(2.0f, 2.0f);  /* 144 dpi */
+        fz_irect bbox = fz_round_rect(fz_transform_rect(bounds, matrix));
+        pixmap = fz_new_pixmap_with_bbox(ctx, fz_device_rgb(ctx), bbox, NULL, 0);
+        fz_clear_pixmap_with_value(ctx, pixmap, 0xff);
+        fz_device *dev = fz_new_draw_device(ctx, fz_identity, pixmap);
+        fz_run_page(ctx, pg, dev, matrix, NULL);
+        fz_close_device(ctx, dev);
+        fz_drop_device(ctx, dev);
+        int w = fz_pixmap_width(ctx, pixmap);
+        int h = fz_pixmap_height(ctx, pixmap);
+        unsigned char *samples = fz_pixmap_samples(ctx, pixmap);
+        Image img = { samples, w, h, 1, PIXELFORMAT_UNCOMPRESSED_R8G8B8 };
+        t = (Raylib_Texture)calloc(1, sizeof(Raylib_TextureRec));
+        if (t) {
+            t->_tag = _TAG_Raylib_TextureRec;
+            t->tex  = LoadTextureFromImage(img);
+        }
+    }
+    fz_catch(ctx) { /* t stays NULL on error */ }
+    if (pixmap) fz_drop_pixmap(ctx, pixmap);
+    if (pg)     fz_drop_page(ctx, pg);
+    if (doc)    fz_drop_document(ctx, doc);
+    fz_drop_context(ctx);
+    return t;
+}
+#else
+int Raylib_CountPDFPages(char *path) { (void)path; return 0; }
+Raylib_Texture Raylib_LoadTexturePDF(char *path, int page) {
+    (void)path; (void)page; return NULL;
+}
+#endif
+
 /* ── Module init ─────────────────────────────────────────────────────────── */
 void Raylib_init(void) { }

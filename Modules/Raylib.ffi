@@ -1,3 +1,5 @@
 HEADER "OBCRaylib.h"
 CSRC   Raylib.c
 PKGCONFIG raylib libjpeg
+PKGCONFIG mupdf
+LINK_MACOS mupdf

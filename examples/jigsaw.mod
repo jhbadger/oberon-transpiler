@@ -1,9 +1,10 @@
 MODULE Jigsaw;
 (*
  * Mouse-driven jigsaw puzzle.
- * Usage: jigsaw <image.jpg> [approx-pieces]
+ * Usage: jigsaw <image.jpg|image.png|image.pdf> [approx-pieces]
  *        jigsaw <savefile.sav>
  *
+ * For PDF input a random page is chosen automatically.
  * Left-click and drag pieces into the outlined grid.
  * Release near the correct slot to snap it into place.
  * Press R to reshuffle all pieces.
@@ -18,7 +19,7 @@ CONST
   WIN_W      = 1100;
   WIN_H      = 750;
   BORDER     = 60;   (* margin around the solved-image area *)
-  SAVE_MAGIC = 20260628;
+  SAVE_MAGIC = 20260630;
 
 VAR
   imgTex         : Raylib.Texture;
@@ -54,6 +55,7 @@ VAR
   saveName     : ARRAY 256 OF CHAR;
   numStr       : ARRAY 32 OF CHAR;
   nTarget      : INTEGER;
+  pdfPage      : INTEGER;   (* -1 if not a PDF, otherwise the chosen page index *)
   saveMsgTimer : INTEGER;
   resuming     : BOOLEAN;
 
@@ -163,6 +165,16 @@ BEGIN
          (name[len-2] = 'a') & (name[len-1] = 'v')
 END IsSaveFile;
 
+PROCEDURE IsPDFFile(name : ARRAY OF CHAR) : BOOLEAN;
+VAR len : INTEGER;
+BEGIN
+  len := Strings.Length(name);
+  RETURN (len > 4) & (name[len-4] = '.') &
+         ((name[len-3] = 'p') OR (name[len-3] = 'P')) &
+         ((name[len-2] = 'd') OR (name[len-2] = 'D')) &
+         ((name[len-1] = 'f') OR (name[len-1] = 'F'))
+END IsPDFFile;
+
 PROCEDURE MakeSaveName(img : ARRAY OF CHAR; VAR sav : ARRAY OF CHAR);
 VAR i, dot : INTEGER;
 BEGIN
@@ -190,6 +202,7 @@ BEGIN
   Files.Set(r, f, 0);
   Files.WriteInt(r, SAVE_MAGIC);
   Files.WriteString(r, filename);
+  Files.WriteInt(r, pdfPage);
   Files.WriteInt(r, nTarget);
   Files.WriteInt(r, nCols);
   Files.WriteInt(r, nRows);
@@ -219,6 +232,7 @@ BEGIN
   Files.ReadInt(r, n);
   IF r.eof OR (n # SAVE_MAGIC) THEN Files.Close(f); RETURN FALSE END;
   Files.ReadString(r, filename);
+  Files.ReadInt(r, pdfPage);
   Files.ReadInt(r, nTarget);
   Files.ReadInt(r, nCols);
   Files.ReadInt(r, nRows);
@@ -422,7 +436,7 @@ BEGIN
   cYellow    := Raylib.Yellow();
 
   IF Args.Count() < 1 THEN
-    Out.String("Usage: jigsaw <image.jpg> [approx-pieces]");
+    Out.String("Usage: jigsaw <image.jpg|image.png|image.pdf> [approx-pieces]");
     Out.Ln;
     Out.String("       jigsaw <savefile.sav>");
     Out.Ln;
@@ -431,6 +445,7 @@ BEGIN
 
   saveMsgTimer := 0;
   resuming     := FALSE;
+  pdfPage      := -1;
   Args.Get(1, filename);
 
   IF IsSaveFile(filename) THEN
@@ -450,13 +465,27 @@ BEGIN
       IF ~Strings.StrToInt(numStr, nTarget) THEN nTarget := 20 END
     END;
     IF nTarget < 1 THEN nTarget := 1 END;
-    IF nTarget > MAXPIECES THEN nTarget := MAXPIECES END
+    IF nTarget > MAXPIECES THEN nTarget := MAXPIECES END;
+    IF IsPDFFile(filename) THEN
+      pdfPage := Raylib.CountPDFPages(filename);
+      IF pdfPage < 1 THEN
+        Out.String("Error: could not count PDF pages: ");
+        Out.String(filename);
+        Out.Ln;
+        RETURN
+      END;
+      pdfPage := Random.Int(pdfPage)
+    END
   END;
 
   Raylib.InitWindow(WIN_W, WIN_H, "Jigsaw Puzzle");
   Raylib.SetTargetFPS(60);
 
-  imgTex := Raylib.LoadTexture(filename);
+  IF pdfPage >= 0 THEN
+    imgTex := Raylib.LoadTexturePDF(filename, pdfPage)
+  ELSE
+    imgTex := Raylib.LoadTexture(filename)
+  END;
   imgW   := Raylib.TextureWidth(imgTex);
   imgH   := Raylib.TextureHeight(imgTex);
 
