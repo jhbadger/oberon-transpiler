@@ -21,8 +21,9 @@ MODULE IDE;
  *   Ctrl+W          Kill region (cut selection)
  *   Ctrl+X          Close window
  *   Ctrl+Q          Quit
- *   F4              Toggle project panel
+ *   F4              Toggle file panel (closes proc panel if open)
  *   F7              Next window
+ *   F12             Toggle procedure panel (closes file panel if open)
  *   F8              Toggle full screen for current window
  *   F5              Compile current file
  *   F9              Compile & run
@@ -75,6 +76,15 @@ CmdCopy    = 60;   CmdCut     = 61;   CmdPaste   = 62;   CmdSelAll  = 63;
 CmdReindent = 80;
 CmdFocusPane = 90;
 CmdTogglePane = 91;
+CmdToggleProcPane = 92;
+
+(* ── Panel modes ── *)
+PanelNone = 0;
+PanelFile = 1;
+PanelProc = 2;
+
+(* ── Procedure panel ── *)
+MaxProcs = 500;
 
 (* ── Recent files ── *)
 MaxRecent      = 8;
@@ -124,13 +134,30 @@ selAnchorCol:   INTEGER;
 mouseSelDrag:   BOOLEAN
 END;
 
+JumpLineProc = PROCEDURE(line: INTEGER);
+
+ProcEntry = RECORD
+  name: ARRAY 64 OF CHAR;
+  line: INTEGER
+END;
+
+ProcPaneRec = RECORD (TUI.ViewRec)
+  entries:  ARRAY MaxProcs OF ProcEntry;
+  nEntries: INTEGER;
+  sel:      INTEGER;
+  scroll:   INTEGER;
+  onJump:   JumpLineProc
+END;
+ProcPane = POINTER TO ProcPaneRec;
+
 (* ════════════════════════════════════════════════════════════════
    Module globals
    ════════════════════════════════════════════════════════════════ *)
 
 VAR
 pane:      ProjectPane.Pane;
-paneShown: BOOLEAN;
+procPane:  ProcPane;
+panelMode: INTEGER;   (* PanelNone / PanelFile / PanelProc *)
 mbar:      Widgets.MenuBar;
 pendingMenuRebuild: BOOLEAN;
 sline:     Widgets.StatusLine;
@@ -834,6 +861,21 @@ BEGIN
   (* Snap leftCol to a UTF-8 character boundary *)
   WHILE (ew.leftCol > 0) & IsUtf8Cont(ew.lines[ew.cy][ew.leftCol]) DO  DEC(ew.leftCol)  END
 END ScrollToCursor;
+
+PROCEDURE JumpToLine(line: INTEGER);
+VAR ew: EditorWin;
+BEGIN
+  ew := lastEditor;
+  IF ew = NIL THEN  RETURN  END;
+  ew.cy := line;
+  ew.cx := 0;
+  ClampCursor(ew);
+  ew.topLine := line;
+  ew.leftCol := 0;
+  TUI.SetFocus(ew);
+  TUI.BringToFront(ew);
+  TUI.InvalidateFront()
+END JumpToLine;
 
 PROCEDURE WordLeft(ew: EditorWin);
 BEGIN
@@ -1653,7 +1695,7 @@ BEGIN
   END;
   IF n = 0 THEN  RETURN  END;
 
-  IF (pane # NIL) & paneShown THEN
+  IF panelMode # PanelNone THEN
     edLeft := ProjPaneW + 1;
     edCols := TUI.Cols - ProjPaneW
   ELSE
@@ -1768,7 +1810,7 @@ BEGIN
         wins[i].y := 2
       END
     END;
-    IF (pane # NIL) & paneShown THEN
+    IF panelMode # PanelNone THEN
       ew.x := ProjPaneW + 1;  ew.w := TUI.Cols - ProjPaneW
     ELSE
       ew.x := 1;  ew.w := TUI.Cols
@@ -1782,23 +1824,176 @@ BEGIN
   END
 END ZoomCurrentWin;
 
-PROCEDURE TogglePane;
-VAR ew: EditorWin;
+PROCEDURE ScanProcs(pp: ProcPane; ew: EditorWin);
+VAR li, i, k: INTEGER;
+    ch: CHAR;
+    match: BOOLEAN;
 BEGIN
-  IF pane = NIL THEN  RETURN  END;
-  IF paneShown THEN
-    TUI.RemoveView(pane);
-    paneShown := FALSE;
-    ew := FocusedEditor();
-    IF ew = NIL THEN  ew := lastEditor  END;
-    IF ew # NIL THEN  TUI.SetFocus(ew)  END
-  ELSE
-    TUI.AddView(pane);
-    paneShown := TRUE;
-    TUI.SetFocus(pane)
+  pp.nEntries := 0;
+  IF ew = NIL THEN  RETURN  END;
+  FOR li := 0 TO ew.nlines - 1 DO
+    i := 0;
+    WHILE (i < LLEN) & (ew.lines[li][i] = ' ') DO  INC(i)  END;
+    match := (i + 8 < LLEN) &
+             (ew.lines[li][i]     = 'P') & (ew.lines[li][i + 1] = 'R') &
+             (ew.lines[li][i + 2] = 'O') & (ew.lines[li][i + 3] = 'C') &
+             (ew.lines[li][i + 4] = 'E') & (ew.lines[li][i + 5] = 'D') &
+             (ew.lines[li][i + 6] = 'U') & (ew.lines[li][i + 7] = 'R') &
+             (ew.lines[li][i + 8] = 'E');
+    IF match THEN
+      IF i + 9 < LLEN THEN  ch := ew.lines[li][i + 9]  ELSE  ch := 0X  END;
+      IF (ch # ' ') & (ch # '(') & (ch # 0X) THEN  match := FALSE  END
+    END;
+    IF match & (pp.nEntries < MaxProcs) THEN
+      INC(i, 9);
+      WHILE (i < LLEN) & (ew.lines[li][i] = ' ') DO  INC(i)  END;
+      k := 0;
+      WHILE (i < LLEN) & (k < 63) DO
+        ch := ew.lines[li][i];
+        IF (ch = 0X) OR (ch = '(') OR (ch = ' ') OR (ch = ';') THEN
+          i := LLEN
+        ELSE
+          pp.entries[pp.nEntries].name[k] := ch;
+          INC(k);  INC(i)
+        END
+      END;
+      pp.entries[pp.nEntries].name[k] := 0X;
+      pp.entries[pp.nEntries].line    := li;
+      IF k > 0 THEN  INC(pp.nEntries)  END
+    END
   END;
+  IF pp.sel >= pp.nEntries THEN  pp.sel := pp.nEntries - 1  END;
+  IF pp.sel < 0 THEN  pp.sel := 0  END
+END ScanProcs;
+
+PROCEDURE EnsureProcSelVisible(pp: ProcPane);
+VAR innerH: INTEGER;
+BEGIN
+  innerH := pp.h - 2;
+  IF pp.sel < pp.scroll THEN  pp.scroll := pp.sel  END;
+  IF pp.sel >= pp.scroll + innerH THEN  pp.scroll := pp.sel - innerH + 1  END;
+  IF pp.scroll < 0 THEN  pp.scroll := 0  END
+END EnsureProcSelVisible;
+
+PROCEDURE DrawProcPane(v: TUI.View);
+VAR pp: ProcPane;
+    innerX, innerY, innerW, innerH, row, idx: INTEGER;
+    borderFg, borderBg, fg, bg: INTEGER;
+    nameBuf: ARRAY 64 OF CHAR;
+    nameMax: INTEGER;
+BEGIN
+  WITH v: ProcPaneRec DO  pp := v  END;
+  ScanProcs(pp, lastEditor);
+  innerX := pp.x + 1;
+  innerY := pp.y + 1;
+  innerW := pp.w - 2;
+  innerH := pp.h - 2;
+  IF pp.focused THEN
+    borderFg := TUI.White;  borderBg := TUI.Blue
+  ELSE
+    borderFg := TUI.White;  borderBg := TUI.Black
+  END;
+  TUI.FillRect(innerX, innerY, innerW, innerH, ' ', TUI.White, TUI.Black);
+  TUI.DrawBox(pp.x, pp.y, pp.w, pp.h, borderFg, borderBg);
+  TUI.PutStr(pp.x + 2, pp.y, " Procs ", TUI.Yellow, borderBg);
+  FOR row := 0 TO innerH - 1 DO
+    idx := pp.scroll + row;
+    IF idx < pp.nEntries THEN
+      IF idx = pp.sel THEN
+        fg := TUI.Black;  bg := TUI.Cyan
+      ELSE
+        fg := TUI.White;  bg := TUI.Black
+      END;
+      TUI.FillRect(innerX, innerY + row, innerW, 1, ' ', fg, bg);
+      nameMax := innerW - 1;
+      IF nameMax > 63 THEN  nameMax := 63  END;
+      Strings.Extract(pp.entries[idx].name, 0, nameMax, nameBuf);
+      TUI.PutStr(innerX, innerY + row, nameBuf, fg, bg)
+    END
+  END
+END DrawProcPane;
+
+PROCEDURE HandleProcPane(v: TUI.View; ev: TUI.Event): BOOLEAN;
+VAR pp: ProcPane;
+    ch: CHAR;
+    innerH, clickIdx: INTEGER;
+BEGIN
+  WITH v: ProcPaneRec DO  pp := v  END;
+  IF ev.kind = TUI.EvKey THEN
+    ch := ev.key;
+    IF ch = TUI.KUp THEN
+      IF pp.sel > 0 THEN  DEC(pp.sel);  EnsureProcSelVisible(pp)  END
+    ELSIF ch = TUI.KDown THEN
+      IF pp.sel < pp.nEntries - 1 THEN  INC(pp.sel);  EnsureProcSelVisible(pp)  END
+    ELSIF ch = TUI.KPgUp THEN
+      innerH := pp.h - 2;
+      DEC(pp.sel, innerH);  IF pp.sel < 0 THEN  pp.sel := 0  END;
+      EnsureProcSelVisible(pp)
+    ELSIF ch = TUI.KPgDn THEN
+      innerH := pp.h - 2;
+      INC(pp.sel, innerH);
+      IF pp.sel >= pp.nEntries THEN  pp.sel := pp.nEntries - 1  END;
+      EnsureProcSelVisible(pp)
+    ELSIF ch = TUI.KHome THEN
+      pp.sel := 0;  EnsureProcSelVisible(pp)
+    ELSIF ch = TUI.KEnd THEN
+      pp.sel := pp.nEntries - 1;  EnsureProcSelVisible(pp)
+    ELSIF (ch = TUI.KEnter) OR (ch = TUI.KRight) THEN
+      IF (pp.sel >= 0) & (pp.sel < pp.nEntries) & (pp.onJump # NIL) THEN
+        pp.onJump(pp.entries[pp.sel].line)
+      END
+    END;
+    RETURN TRUE
+  ELSIF ev.kind = TUI.EvMouse THEN
+    IF ev.mb = 64 THEN
+      IF pp.scroll > 0 THEN  DEC(pp.scroll, 3) END;
+      IF pp.scroll < 0 THEN  pp.scroll := 0 END;
+      RETURN TRUE
+    ELSIF ev.mb = 65 THEN
+      INC(pp.scroll, 3);
+      IF (pp.nEntries > 0) & (pp.scroll > pp.nEntries - 1) THEN
+        pp.scroll := pp.nEntries - 1
+      END;
+      RETURN TRUE
+    ELSIF (ev.mb = 0) &
+          (ev.mx >= pp.x + 1) & (ev.mx <= pp.x + pp.w - 2) &
+          (ev.my >= pp.y + 1) & (ev.my <= pp.y + pp.h - 2) THEN
+      clickIdx := pp.scroll + (ev.my - pp.y - 1);
+      IF (clickIdx >= 0) & (clickIdx < pp.nEntries) THEN
+        IF (clickIdx = pp.sel) & (pp.onJump # NIL) THEN
+          pp.onJump(pp.entries[pp.sel].line)
+        ELSE
+          pp.sel := clickIdx
+        END
+      END;
+      RETURN TRUE
+    END
+  END;
+  RETURN FALSE
+END HandleProcPane;
+
+PROCEDURE NewProcPane(): ProcPane;
+VAR pp: ProcPane;
+BEGIN
+  NEW(pp);
+  pp.x := 1;  pp.y := 2;  pp.w := ProjPaneW;  pp.h := TUI.Rows - 2;
+  pp.draw        := DrawProcPane;
+  pp.handle      := HandleProcPane;
+  pp.next        := NIL;
+  pp.child       := NIL;
+  pp.focused     := FALSE;
+  pp.alwaysOnTop := FALSE;
+  pp.nEntries    := 0;
+  pp.sel         := 0;
+  pp.scroll      := 0;
+  pp.onJump      := JumpToLine;
+  RETURN pp
+END NewProcPane;
+
+PROCEDURE ApplyPanelLayout;
+BEGIN
   IF zoomedWin # NIL THEN
-    IF (pane # NIL) & paneShown THEN
+    IF panelMode # PanelNone THEN
       zoomedWin.x := ProjPaneW + 1;  zoomedWin.w := TUI.Cols - ProjPaneW
     ELSE
       zoomedWin.x := 1;  zoomedWin.w := TUI.Cols
@@ -1807,7 +2002,44 @@ BEGIN
     TileEditorWins
   END;
   TUI.InvalidateFront()
-END TogglePane;
+END ApplyPanelLayout;
+
+PROCEDURE ToggleFilePanel;
+VAR ew: EditorWin;
+BEGIN
+  IF panelMode = PanelFile THEN
+    TUI.RemoveView(pane);
+    panelMode := PanelNone;
+    ew := FocusedEditor();
+    IF ew = NIL THEN  ew := lastEditor  END;
+    IF ew # NIL THEN  TUI.SetFocus(ew)  END
+  ELSE
+    IF panelMode = PanelProc THEN  TUI.RemoveView(procPane)  END;
+    TUI.AddView(pane);
+    panelMode := PanelFile;
+    TUI.SetFocus(pane)
+  END;
+  ApplyPanelLayout
+END ToggleFilePanel;
+
+PROCEDURE ToggleProcPanel;
+VAR ew: EditorWin;
+BEGIN
+  IF panelMode = PanelProc THEN
+    TUI.RemoveView(procPane);
+    panelMode := PanelNone;
+    ew := FocusedEditor();
+    IF ew = NIL THEN  ew := lastEditor  END;
+    IF ew # NIL THEN  TUI.SetFocus(ew)  END
+  ELSE
+    IF panelMode = PanelFile THEN  TUI.RemoveView(pane)  END;
+    procPane.sel := 0;  procPane.scroll := 0;
+    TUI.AddView(procPane);
+    panelMode := PanelProc;
+    TUI.SetFocus(procPane)
+  END;
+  ApplyPanelLayout
+END ToggleProcPanel;
 
 PROCEDURE NextEditorWin;
 VAR i, cur, next: INTEGER;
@@ -2477,8 +2709,12 @@ ELSIF cmd = CmdCut      THEN  IF ew # NIL THEN  DoCut(ew)      END
 ELSIF cmd = CmdPaste    THEN  IF ew # NIL THEN  DoPaste(ew)    END
 ELSIF cmd = CmdSelAll   THEN  IF ew # NIL THEN  DoSelAll(ew)   END
 ELSIF cmd = CmdReindent  THEN  IF ew # NIL THEN  DoReindent(ew) END
-ELSIF cmd = CmdFocusPane THEN  IF pane # NIL THEN  TUI.SetFocus(pane) END
-ELSIF cmd = CmdTogglePane THEN  TogglePane
+ELSIF cmd = CmdFocusPane THEN
+  IF panelMode = PanelFile THEN  TUI.SetFocus(pane)
+  ELSIF panelMode = PanelProc THEN  TUI.SetFocus(procPane)
+  END
+ELSIF cmd = CmdTogglePane THEN  ToggleFilePanel
+ELSIF cmd = CmdToggleProcPane THEN  ToggleProcPanel
 
 ELSIF cmd = CmdHelp THEN
   (* F1: help on word under cursor; open dialog with empty query if no editor *)
@@ -2720,7 +2956,8 @@ BEGIN
   Widgets.MenuBarAddItem(mbar, 3, "Full Screen   F8",       CmdFullScreen);
   Widgets.MenuBarAddItem(mbar, 3, "Tile Windows",           CmdTile);
   Widgets.MenuBarAddSep (mbar, 3);
-  Widgets.MenuBarAddItem(mbar, 3, "Toggle Panel  F4",       CmdTogglePane);
+  Widgets.MenuBarAddItem(mbar, 3, "File Panel    F4",       CmdTogglePane);
+  Widgets.MenuBarAddItem(mbar, 3, "Proc Panel    F12",      CmdToggleProcPane);
 
   (* Help menu *)
   Widgets.MenuBarAddMenu(mbar, "Help");
@@ -2775,7 +3012,8 @@ BEGIN
   Widgets.MenuBarAddItem(mbar, 3, "Full Screen   F8",       CmdFullScreen);
   Widgets.MenuBarAddItem(mbar, 3, "Tile Windows",           CmdTile);
   Widgets.MenuBarAddSep (mbar, 3);
-  Widgets.MenuBarAddItem(mbar, 3, "Toggle Panel  F4",       CmdTogglePane);
+  Widgets.MenuBarAddItem(mbar, 3, "File Panel    F4",       CmdTogglePane);
+  Widgets.MenuBarAddItem(mbar, 3, "Proc Panel    F12",      CmdToggleProcPane);
 
   (* Help menu *)
   Widgets.MenuBarAddMenu(mbar, "Help");
@@ -2840,7 +3078,8 @@ BEGIN
   OS.GetCwd(fn);
   ProjectPane.SetRoot(pane, fn);
   TUI.AddView(pane);
-  paneShown := TRUE;
+  procPane := NewProcPane();
+  panelMode := PanelFile;
   (* Open file from command line, or start with empty window *)
   ew := NewEditorWin();
   lastEditor := ew;   (* prime lastEditor so menu commands work before any mouse motion *)
@@ -2954,6 +3193,7 @@ ELSIF ch = TUI.KF9  THEN   acActive := FALSE;  OnMenuCmd(CmdCompRun)
 ELSIF ch = TUI.KF3  THEN   acActive := FALSE;  OnMenuCmd(CmdFindNext)
 ELSIF ch = TUI.KF7  THEN   acActive := FALSE;  OnMenuCmd(CmdNextWin)
 ELSIF ch = TUI.KF8  THEN   acActive := FALSE;  OnMenuCmd(CmdFullScreen)
+ELSIF ch = TUI.KF12 THEN   acActive := FALSE;  OnMenuCmd(CmdToggleProcPane)
 ELSE
   IF ~TUI.Dispatch(ev) THEN  END;
   IF pendingMenuRebuild THEN  pendingMenuRebuild := FALSE;  RebuildMenuBar  END;
@@ -2984,6 +3224,9 @@ ELSIF ev.kind = TUI.EvResize THEN
   END;
   IF pane # NIL THEN
     pane.h := TUI.Rows - 2;
+  END;
+  IF procPane # NIL THEN
+    procPane.h := TUI.Rows - 2;
   END;
   TUI.InvalidateFront();
 END
