@@ -21,8 +21,8 @@ CONST
   WIN_W    = 1100;
   WIN_H    = 750;
   BORDER   = 30;
-  DEPTH_X  = 6;
-  DEPTH_Y  = 6;
+  DEPTH_X  = 10;
+  DEPTH_Y  = 10;
   MAXUNDO  = 40;
 
 VAR
@@ -45,6 +45,7 @@ VAR
   texW     : ARRAY MAXTYPES OF INTEGER;
   texH     : ARRAY MAXTYPES OF INTEGER;
 
+  scrW, scrH : INTEGER;
   tileW, tileH : INTEGER;
   boardX, boardY : INTEGER;
 
@@ -54,6 +55,10 @@ VAR
 
   undoA, undoB : ARRAY MAXUNDO OF INTEGER;
   undoTop      : INTEGER;
+
+  lastClickTime : REAL;
+  lastClickTile : INTEGER;
+  zoomTile      : INTEGER;
 
   cWhite, cBlack, cGray, cDarkGray, cLightGray : INTEGER;
   cYellow, cOrange, cRed : INTEGER;
@@ -231,8 +236,8 @@ END Restart;
 PROCEDURE ComputeDisplay;
 VAR availW, availH, tw, th : INTEGER;
 BEGIN
-  availW := WIN_W - 2 * BORDER - maxLay * DEPTH_X;
-  availH := WIN_H - 2 * BORDER - 44 - maxLay * DEPTH_Y;
+  availW := scrW - 2 * BORDER - maxLay * DEPTH_X;
+  availH := scrH - 2 * BORDER - 44 - maxLay * DEPTH_Y;
   tw := availW DIV (maxCol + 1);
   th := availH DIV (maxRow + 1);
   IF tw * 14 < th * 10 THEN
@@ -242,7 +247,7 @@ BEGIN
     tileH := th
   END;
   tileW  := tw;
-  boardX := (WIN_W - ((maxCol + 1) * tileW + maxLay * DEPTH_X)) DIV 2;
+  boardX := (scrW - ((maxCol + 1) * tileW + maxLay * DEPTH_X)) DIV 2;
   boardY := BORDER + maxLay * DEPTH_Y
 END ComputeDisplay;
 
@@ -274,7 +279,16 @@ END HitTile;
 
 PROCEDURE Update;
 VAR mx, my, hit : INTEGER;
+    now : REAL;
 BEGIN
+  (* Dismiss zoom on any click or R/U key *)
+  IF zoomTile >= 0 THEN
+    IF Raylib.IsMouseButtonPressed(Raylib.BtnLeft) = 1 THEN
+      zoomTile := -1
+    END;
+    RETURN
+  END;
+
   IF Raylib.IsKeyPressed(ORD('R')) = 1 THEN Restart; RETURN END;
 
   IF Raylib.IsKeyPressed(ORD('U')) = 1 THEN
@@ -293,6 +307,18 @@ BEGIN
   IF Raylib.IsMouseButtonPressed(Raylib.BtnLeft) = 1 THEN
     mx := Raylib.GetMouseX();  my := Raylib.GetMouseY();
     hit := HitTile(mx, my);
+    now := Raylib.GetTime();
+
+    (* Double-click on same tile → zoom *)
+    IF (hit >= 0) & (hit = lastClickTile) &
+       (now - lastClickTime < 0.35) THEN
+      zoomTile      := tileType[hit];
+      lastClickTile := -1;
+      RETURN
+    END;
+    lastClickTime := now;
+    lastClickTile := hit;
+
     IF (hit >= 0) & IsFree(hit) THEN
       IF selected < 0 THEN
         selected := hit
@@ -317,25 +343,79 @@ END Update;
 (* ── Drawing ───────────────────────────────────────────────────────────────── *)
 
 PROCEDURE DrawTile(i : INTEGER);
-VAR sx, sy, t, pad, bgCol, brCol : INTEGER;
+VAR sx, sy, t, pad, bgCol : INTEGER;
+    free : BOOLEAN;
 BEGIN
-  sx := TileX(i);  sy := TileY(i);  t := tileType[i];  pad := 3;
-  Raylib.DrawRectangle(sx + 3, sy + 3, tileW, tileH, Raylib.Fade(cBlack, 0.25));
-  IF i = selected THEN         bgCol := cYellow
-  ELSIF IsFree(i) THEN         bgCol := cWhite
-  ELSE                         bgCol := cLightGray
+  sx := TileX(i);  sy := TileY(i);  t := tileType[i];  pad := 4;
+  free := IsFree(i);
+
+  (* Drop shadow only for raised (free/selected) tiles *)
+  IF free OR (i = selected) THEN
+    Raylib.DrawRectangle(sx + 5, sy + 5, tileW, tileH, Raylib.Fade(cBlack, 0.50))
+  END;
+
+  IF i = selected THEN  bgCol := cYellow
+  ELSIF free THEN        bgCol := cWhite
+  ELSE                   bgCol := cLightGray
   END;
   Raylib.DrawRectangle(sx, sy, tileW, tileH, bgCol);
+
+  (* Texture *)
   IF texW[t] > 0 THEN
     Raylib.DrawTexturePro(textures[t], 0, 0, texW[t], texH[t],
                           sx+pad, sy+pad, tileW-2*pad, tileH-2*pad, cWhite)
   END;
-  IF i = selected THEN         brCol := cOrange
-  ELSIF IsFree(i) THEN         brCol := cGray
-  ELSE                         brCol := cDarkGray
+
+  (* Dark overlay dims covered tiles so free tiles stand out clearly *)
+  IF ~free & (i # selected) THEN
+    Raylib.DrawRectangle(sx, sy, tileW, tileH, Raylib.Fade(cBlack, 0.38))
   END;
-  Raylib.DrawRectangleLines(sx, sy, tileW, tileH, brCol)
+
+  (* Raised bevel for free tiles: bright top/left, dark bottom/right *)
+  IF free & (i # selected) THEN
+    Raylib.DrawLine(sx,          sy,          sx + tileW - 1, sy,          cWhite);
+    Raylib.DrawLine(sx + 1,      sy + 1,      sx + tileW - 2, sy + 1,      Raylib.Fade(cWhite, 0.55));
+    Raylib.DrawLine(sx,          sy,          sx,             sy + tileH - 1, cWhite);
+    Raylib.DrawLine(sx + 1,      sy + 1,      sx + 1,         sy + tileH - 2, Raylib.Fade(cWhite, 0.55));
+    Raylib.DrawLine(sx + tileW - 1, sy,        sx + tileW - 1, sy + tileH - 1, cGray);
+    Raylib.DrawLine(sx + tileW - 2, sy + 1,    sx + tileW - 2, sy + tileH - 2, Raylib.Fade(cGray, 0.55));
+    Raylib.DrawLine(sx,          sy + tileH - 1, sx + tileW - 1, sy + tileH - 1, cGray);
+    Raylib.DrawLine(sx + 1,      sy + tileH - 2, sx + tileW - 2, sy + tileH - 2, Raylib.Fade(cGray, 0.55))
+  ELSIF i = selected THEN
+    Raylib.DrawRectangleLines(sx,     sy,     tileW,     tileH,     cOrange);
+    Raylib.DrawRectangleLines(sx + 1, sy + 1, tileW - 2, tileH - 2, cOrange)
+  ELSE
+    Raylib.DrawRectangleLines(sx, sy, tileW, tileH, cDarkGray)
+  END
 END DrawTile;
+
+PROCEDURE DrawZoom;
+VAR t, tw, th, dispW, dispH, dstX, dstY : INTEGER;
+    s : ARRAY 80 OF CHAR;
+BEGIN
+  Raylib.DrawRectangle(0, 0, scrW, scrH, Raylib.Fade(cBlack, 0.85));
+  t    := zoomTile;
+  tw   := texW[t];  th := texH[t];
+  dispW := scrW - 6 * BORDER;
+  dispH := scrH - 6 * BORDER - 40;
+  IF (tw > 0) & (th > 0) THEN
+    IF tw * dispH > th * dispW THEN
+      dispH := dispW * th DIV tw
+    ELSE
+      dispW := dispH * tw DIV th
+    END
+  END;
+  dstX := (scrW - dispW) DIV 2;
+  dstY := (scrH - dispH - 40) DIV 2;
+  Raylib.DrawRectangle(dstX - 10, dstY - 10, dispW + 20, dispH + 20, cWhite);
+  Raylib.DrawRectangleLines(dstX - 10, dstY - 10, dispW + 20, dispH + 20, cYellow);
+  IF (tw > 0) & (th > 0) THEN
+    Raylib.DrawTexturePro(textures[t], 0, 0, tw, th, dstX, dstY, dispW, dispH, cWhite)
+  END;
+  s := "Click anywhere to close";
+  Raylib.DrawText(s, (scrW - Raylib.MeasureText(s, 18)) DIV 2,
+                  dstY + dispH + 16, 18, Raylib.Fade(cWhite, 0.80))
+END DrawZoom;
 
 PROCEDURE Draw;
 VAR i, l, tw : INTEGER;
@@ -354,30 +434,32 @@ BEGIN
   Strings.IntToStr(nLayout - removedCount, ns);  Strings.Append(ns, s);
   Strings.Append(" / ", s);
   Strings.IntToStr(nLayout, ns);  Strings.Append(ns, s);
-  Raylib.DrawText(s, 10, WIN_H - 32, 20, cWhite);
+  Raylib.DrawText(s, 10, scrH - 32, 20, cWhite);
 
   s := "R = new game   U = undo";
-  Raylib.DrawText(s, WIN_W - Raylib.MeasureText(s, 16) - 10,
-                  WIN_H - 30, 16, Raylib.Fade(cWhite, 0.65));
+  Raylib.DrawText(s, scrW - Raylib.MeasureText(s, 16) - 10,
+                  scrH - 30, 16, Raylib.Fade(cWhite, 0.65));
 
   IF stuck & ~won THEN
     s  := "No moves — press R";
     tw := Raylib.MeasureText(s, 28);
-    Raylib.DrawRectangle((WIN_W - tw - 30) DIV 2, WIN_H DIV 2 - 30,
+    Raylib.DrawRectangle((scrW - tw - 30) DIV 2, scrH DIV 2 - 30,
                          tw + 30, 56, Raylib.Fade(cBlack, 0.78));
-    Raylib.DrawText(s, (WIN_W - tw) DIV 2, WIN_H DIV 2 - 16, 28, cRed)
+    Raylib.DrawText(s, (scrW - tw) DIV 2, scrH DIV 2 - 16, 28, cRed)
   END;
 
   IF won THEN
     s  := "You Win!";
     tw := Raylib.MeasureText(s, 60);
-    Raylib.DrawRectangle((WIN_W - tw - 40) DIV 2, WIN_H DIV 2 - 60,
+    Raylib.DrawRectangle((scrW - tw - 40) DIV 2, scrH DIV 2 - 60,
                          tw + 40, 110, Raylib.Fade(cBlack, 0.78));
-    Raylib.DrawText(s, (WIN_W - tw) DIV 2, WIN_H DIV 2 - 44, 60, cYellow);
+    Raylib.DrawText(s, (scrW - tw) DIV 2, scrH DIV 2 - 44, 60, cYellow);
     s  := "Press R for a new game";
     tw := Raylib.MeasureText(s, 24);
-    Raylib.DrawText(s, (WIN_W - tw) DIV 2, WIN_H DIV 2 + 22, 24, cWhite)
+    Raylib.DrawText(s, (scrW - tw) DIV 2, scrH DIV 2 + 22, 24, cWhite)
   END;
+
+  IF zoomTile >= 0 THEN DrawZoom END;
 
   Raylib.EndDrawing
 END Draw;
@@ -393,6 +475,10 @@ BEGIN
   cYellow    := Raylib.Yellow();
   cOrange    := Raylib.Orange();
   cRed       := Raylib.Red();
+
+  lastClickTime := 0.0;
+  lastClickTile := -1;
+  zoomTile      := -1;
 
   IF Args.Count() < 1 THEN
     Out.String("Usage: mahjong <file.pdf> [num-types]");
@@ -427,16 +513,21 @@ BEGIN
     RETURN
   END;
 
+  scrW := WIN_W;  scrH := WIN_H;
   ComputeDisplay;
   ChoosePages;
 
   Raylib.InitWindow(WIN_W, WIN_H, "Mahjong Solitaire");
+  Raylib.SetWindowResizable();
   Raylib.SetTargetFPS(60);
 
   LoadTextures;
   ShuffleTiles;
 
   WHILE Raylib.WindowShouldClose() = 0 DO
+    scrW := Raylib.GetScreenWidth();
+    scrH := Raylib.GetScreenHeight();
+    ComputeDisplay;
     Update;
     Draw
   END;
