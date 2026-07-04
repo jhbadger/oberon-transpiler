@@ -1967,7 +1967,9 @@ All color parameters are a single `INTEGER` packed as `(a SHL 24) OR (r SHL 16) 
 
 | Type | Description |
 |------|-------------|
-| `Raylib.Texture` | Opaque handle to a GPU texture loaded from a file. |
+| `Raylib.Texture` | Opaque handle to a GPU texture loaded from a file or generated. |
+| `Raylib.RenderTexture` | Opaque handle to an off-screen framebuffer (render target). |
+| `Raylib.Image` | Opaque handle to a CPU-side RGBA pixel buffer (not on the GPU). Use for pixel-level read/write; upload with `TextureFromImage`. |
 | `Raylib.Sound` | Opaque handle to a loaded sound effect. |
 | `Raylib.Music` | Opaque handle to a streaming music track. |
 | `Raylib.Font` | Opaque handle to a loaded TTF/BMP font. |
@@ -2030,6 +2032,8 @@ Call `BeginDrawing` / `EndDrawing` around all draw calls each frame.
 | Procedure / Function | Description |
 |----------------------|-------------|
 | `Raylib.LoadTexture(path: ARRAY OF CHAR): Texture` | Load an image file (PNG, JPG, BMP, TGA…) as a GPU texture.  Returns NIL on error. |
+| `Raylib.CountPDFPages(path: ARRAY OF CHAR): INTEGER` | Return the number of pages in a PDF file (via MuPDF).  Returns 0 on error. |
+| `Raylib.LoadTexturePDF(path: ARRAY OF CHAR; page: INTEGER): Texture` | Render page `page` (1-based) of a PDF file to a GPU texture at screen resolution.  Returns NIL on error.  Requires MuPDF. |
 | `Raylib.UnloadTexture(tex: Texture)` | Free the texture. |
 | `Raylib.DrawTexture(tex: Texture; x, y: INTEGER; color: INTEGER)` | Draw texture at `(x,y)`.  Use `Raylib.White()` as `color` for no tint. |
 | `Raylib.DrawTextureEx(tex: Texture; x, y, rot, scale: REAL; color: INTEGER)` | Draw texture with rotation and uniform scale. |
@@ -2244,5 +2248,32 @@ IF Raylib.GetRayCollisionBox(ox,oy,oz, dx,dy,dz,
   (* piece was clicked *)
 END
 ```
+
+### CPU Images
+
+A `Raylib.Image` is a CPU-side RGBA pixel buffer — it lives in normal RAM, not on the GPU.  Use it to read back a rendered texture or to build a custom texture pixel-by-pixel before uploading.  All pixel values are packed `INTEGER` colors in the same `(a SHL 24) OR (r SHL 16) OR (g SHL 8) OR b` format used everywhere in the Raylib module.
+
+| Procedure / Function | Description |
+|----------------------|-------------|
+| `Raylib.NewImage(w, h, color: INTEGER): Image` | Allocate a blank CPU image of size `w`×`h` filled with `color`.  All pixels are RGBA.  Returns NIL on allocation failure. |
+| `Raylib.LoadImageFromTexture(tex: Texture): Image` | Read back a GPU texture into a CPU image.  Useful for inspecting or manipulating previously rendered content.  Returns NIL on error. |
+| `Raylib.UnloadImage(img: Image)` | Free a CPU image and its pixel data. |
+| `Raylib.ImageWidth(img: Image): INTEGER` | Width of the image in pixels. |
+| `Raylib.ImageHeight(img: Image): INTEGER` | Height of the image in pixels. |
+| `Raylib.GetImagePixel(img: Image; x, y: INTEGER): INTEGER` | Read one pixel at `(x, y)` as a packed color.  Returns 0 for out-of-bounds coordinates. |
+| `Raylib.SetImagePixel(img: Image; x, y, color: INTEGER)` | Write one pixel at `(x, y)` from a packed color.  No-op for out-of-bounds coordinates. |
+| `Raylib.TextureFromImage(img: Image): Texture` | Upload a CPU image to the GPU as a new `Texture`.  The `Image` is not freed; call `UnloadImage` separately when done. |
+
+**Typical custom-texture pattern:**
+```oberon
+VAR img : Raylib.Image;  tex : Raylib.Texture;
+img := Raylib.NewImage(w, h, Raylib.Blank());
+(* ... fill pixels with Raylib.SetImagePixel ... *)
+tex := Raylib.TextureFromImage(img);
+Raylib.UnloadImage(img);
+(* use tex with DrawTexture; call UnloadTexture when done *)
+```
+
+**Color packing note:** Pixel colors are `(a SHL 24) OR (r SHL 16) OR (g SHL 8) OR b`.  For fully-opaque pixels avoid overflow with `pix := -16777216 + r * 65536 + g * 256 + b` (the constant `-16777216` is the signed 32-bit representation of `0xFF000000`).  Extract channels with Oberon floor division: `b := pix MOD 256; g := (pix DIV 256) MOD 256; r := (pix DIV 65536) MOD 256`.
 
 

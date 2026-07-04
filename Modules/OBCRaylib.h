@@ -320,6 +320,20 @@ void Raylib_DrawCircleGradient(int cx, int cy, double radius, int c1, int c2);
 /* ── Extended input ──────────────────────────────────────────────────────── */
 int Raylib_GetCharPressed(void);
 
+/* ── CPU Image (read/write pixel access) ─────────────────────────────────── */
+typedef struct Raylib_ImageRec_s { int _tag; Image img; } Raylib_ImageRec;
+typedef Raylib_ImageRec *Raylib_Image;
+#define _TAG_Raylib_ImageRec 8
+
+Raylib_Image   Raylib_LoadImageFromTexture(Raylib_Texture tex);
+void           Raylib_UnloadImage(Raylib_Image img);
+int            Raylib_ImageWidth(Raylib_Image img);
+int            Raylib_ImageHeight(Raylib_Image img);
+int            Raylib_GetImagePixel(Raylib_Image img, int x, int y);
+void           Raylib_SetImagePixel(Raylib_Image img, int x, int y, int color);
+Raylib_Image   Raylib_NewImage(int w, int h, int color);
+Raylib_Texture Raylib_TextureFromImage(Raylib_Image img);
+
 /* ── Module init (no-op — called by obc runtime) ─────────────────────────── */
 void Raylib_init(void);
 

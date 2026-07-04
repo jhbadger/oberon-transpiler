@@ -860,5 +860,61 @@ Raylib_Texture Raylib_LoadTexturePDF(char *path, int page) {
 }
 #endif
 
+/* ── CPU Image (read/write pixel access) ─────────────────────────────────── */
+
+Raylib_Image Raylib_LoadImageFromTexture(Raylib_Texture tex) {
+    if (!tex) return NULL;
+    Raylib_Image img = (Raylib_Image)calloc(1, sizeof(Raylib_ImageRec));
+    if (!img) return NULL;
+    img->_tag = _TAG_Raylib_ImageRec;
+    img->img  = LoadImageFromTexture(tex->tex);
+    ImageFormat(&img->img, PIXELFORMAT_UNCOMPRESSED_R8G8B8A8);
+    return img;
+}
+
+void Raylib_UnloadImage(Raylib_Image img) {
+    if (!img) return;
+    UnloadImage(img->img);
+    free(img);
+}
+
+int Raylib_ImageWidth(Raylib_Image img)  { return img ? img->img.width  : 0; }
+int Raylib_ImageHeight(Raylib_Image img) { return img ? img->img.height : 0; }
+
+int Raylib_GetImagePixel(Raylib_Image img, int x, int y) {
+    if (!img || !img->img.data) return 0;
+    int w = img->img.width, h = img->img.height;
+    if (x < 0 || x >= w || y < 0 || y >= h) return 0;
+    unsigned char *d = (unsigned char *)img->img.data + (y * w + x) * 4;
+    return RL_I((Color){d[0], d[1], d[2], d[3]});
+}
+
+void Raylib_SetImagePixel(Raylib_Image img, int x, int y, int color) {
+    if (!img || !img->img.data) return;
+    int w = img->img.width, h = img->img.height;
+    if (x < 0 || x >= w || y < 0 || y >= h) return;
+    Color c = RL_C(color);
+    unsigned char *d = (unsigned char *)img->img.data + (y * w + x) * 4;
+    d[0] = c.r; d[1] = c.g; d[2] = c.b; d[3] = c.a;
+}
+
+Raylib_Image Raylib_NewImage(int w, int h, int color) {
+    Raylib_Image img = (Raylib_Image)calloc(1, sizeof(Raylib_ImageRec));
+    if (!img) return NULL;
+    img->_tag = _TAG_Raylib_ImageRec;
+    img->img  = GenImageColor(w, h, RL_C(color));
+    ImageFormat(&img->img, PIXELFORMAT_UNCOMPRESSED_R8G8B8A8);
+    return img;
+}
+
+Raylib_Texture Raylib_TextureFromImage(Raylib_Image img) {
+    if (!img) return NULL;
+    Raylib_Texture t = (Raylib_Texture)calloc(1, sizeof(Raylib_TextureRec));
+    if (!t) return NULL;
+    t->_tag = _TAG_Raylib_TextureRec;
+    t->tex  = LoadTextureFromImage(img->img);
+    return t;
+}
+
 /* ── Module init ─────────────────────────────────────────────────────────── */
 void Raylib_init(void) { }
