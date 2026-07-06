@@ -6,9 +6,9 @@ MODULE GLBViewer;
  * Usage:  glbviewer <model.glb>
  *
  * Controls:
- *   Left-drag / arrow keys : orbit (360 rotation)
+ *   Left-drag / arrow keys : orbit (trackball, all axes)
  *   Scroll / + -           : zoom in / out
- *   W A S D                : pan
+ *   W A S D                : pan in camera space
  *   Esc / close            : quit
  *)
 
@@ -27,10 +27,53 @@ VAR
   cx, cy, cz, span    : REAL;
   minX, minY, minZ     : REAL;
   maxX, maxY, maxZ     : REAL;
-  yaw, pitch, dist     : REAL;
+  dist                 : REAL;
   px, py, pz           : REAL;
-  panSpeed, upY        : REAL;
+  panSpeed             : REAL;
   scrW, scrH           : INTEGER;
+  frameCount           : INTEGER;
+  (* Trackball rotation matrix stored as column vectors:
+     rx = camera right, ry = camera up, rz = back (camera pos = target + dist*rz) *)
+  rx0, rx1, rx2        : REAL;
+  ry0, ry1, ry2        : REAL;
+  rz0, rz1, rz2        : REAL;
+
+(* Rotate ry and rz around the right axis (rx) by angle in radians. *)
+PROCEDURE RotateAroundRight(angle: REAL);
+VAR lc, ls, ty0, ty1, ty2, tz0, tz1, tz2: REAL;
+BEGIN
+  lc := Math.cos(angle);  ls := Math.sin(angle);
+  ty0 := ry0*lc + rz0*ls;  ty1 := ry1*lc + rz1*ls;  ty2 := ry2*lc + rz2*ls;
+  tz0 := rz0*lc - ry0*ls;  tz1 := rz1*lc - ry1*ls;  tz2 := rz2*lc - ry2*ls;
+  ry0 := ty0;  ry1 := ty1;  ry2 := ty2;
+  rz0 := tz0;  rz1 := tz1;  rz2 := tz2
+END RotateAroundRight;
+
+(* Rotate rx and rz around the up axis (ry) by angle in radians. *)
+PROCEDURE RotateAroundUp(angle: REAL);
+VAR lc, ls, tx0, tx1, tx2, tz0, tz1, tz2: REAL;
+BEGIN
+  lc := Math.cos(angle);  ls := Math.sin(angle);
+  tx0 := rx0*lc - rz0*ls;  tx1 := rx1*lc - rz1*ls;  tx2 := rx2*lc - rz2*ls;
+  tz0 := rz0*lc + rx0*ls;  tz1 := rz1*lc + rx1*ls;  tz2 := rz2*lc + rx2*ls;
+  rx0 := tx0;  rx1 := tx1;  rx2 := tx2;
+  rz0 := tz0;  rz1 := tz1;  rz2 := tz2
+END RotateAroundUp;
+
+(* Gram-Schmidt reorthogonalization to prevent floating-point drift. *)
+PROCEDURE Reorthogonalize;
+VAR llen, ldot: REAL;
+BEGIN
+  llen := Math.sqrt(rx0*rx0 + rx1*rx1 + rx2*rx2);
+  IF llen > 0.0 THEN rx0 := rx0/llen;  rx1 := rx1/llen;  rx2 := rx2/llen END;
+  ldot := ry0*rx0 + ry1*rx1 + ry2*rx2;
+  ry0 := ry0 - ldot*rx0;  ry1 := ry1 - ldot*rx1;  ry2 := ry2 - ldot*rx2;
+  llen := Math.sqrt(ry0*ry0 + ry1*ry1 + ry2*ry2);
+  IF llen > 0.0 THEN ry0 := ry0/llen;  ry1 := ry1/llen;  ry2 := ry2/llen END;
+  rz0 := rx1*ry2 - rx2*ry1;
+  rz1 := rx2*ry0 - rx0*ry2;
+  rz2 := rx0*ry1 - rx1*ry0
+END Reorthogonalize;
 
 BEGIN
   IF Args.Count() < 1 THEN
@@ -64,66 +107,75 @@ BEGIN
   IF maxZ - minZ > span THEN span := maxZ - minZ END;
   IF span < 0.001 THEN span := 1.0 END;
 
-  (* Spherical-coordinate orbit state *)
-  yaw   := 0.0;
-  pitch := 0.2;
-  dist  := span * 2.5;
+  dist := span * 2.5;
 
-  px := cx + dist * Math.cos(pitch) * Math.sin(yaw);
-  py := cy + dist * Math.sin(pitch);
-  pz := cz + dist * Math.cos(pitch) * Math.cos(yaw);
+  (* Initialise trackball to identity (camera behind model on +Z), then tilt slightly *)
+  rx0 := 1.0;  rx1 := 0.0;  rx2 := 0.0;
+  ry0 := 0.0;  ry1 := 1.0;  ry2 := 0.0;
+  rz0 := 0.0;  rz1 := 0.0;  rz2 := 1.0;
+  RotateAroundRight(-0.2);
+
+  px := cx + dist * rz0;
+  py := cy + dist * rz1;
+  pz := cz + dist * rz2;
 
   cam := Raylib.NewCamera(
     px, py, pz,
     cx, cy, cz,
-    0.0, 1.0, 0.0,
+    ry0, ry1, ry2,
     45.0, Raylib.CameraPerspective);
+
+  frameCount := 0;
 
   WHILE Raylib.WindowShouldClose() = 0 DO
     panSpeed := dist * 0.01;
 
-    (* Orbit on left-drag *)
+    (* Trackball orbit on left-drag: mouse axes map to camera axes *)
     IF Raylib.IsMouseButtonDown(MOUSE_LEFT) # 0 THEN
-      yaw   := yaw   - Raylib.GetMouseDeltaX() * 0.005;
-      pitch := pitch - Raylib.GetMouseDeltaY() * 0.005
+      RotateAroundUp(   -Raylib.GetMouseDeltaX() * 0.005);
+      RotateAroundRight( Raylib.GetMouseDeltaY() * 0.005)
     END;
 
     (* Orbit on arrow keys *)
-    IF Raylib.IsKeyDown(Raylib.KeyLeft)  = 1 THEN yaw   := yaw   + 0.03 END;
-    IF Raylib.IsKeyDown(Raylib.KeyRight) = 1 THEN yaw   := yaw   - 0.03 END;
-    IF Raylib.IsKeyDown(Raylib.KeyUp)    = 1 THEN pitch := pitch + 0.03 END;
-    IF Raylib.IsKeyDown(Raylib.KeyDown)  = 1 THEN pitch := pitch - 0.03 END;
+    IF Raylib.IsKeyDown(Raylib.KeyLeft)  = 1 THEN RotateAroundUp(  0.03) END;
+    IF Raylib.IsKeyDown(Raylib.KeyRight) = 1 THEN RotateAroundUp( -0.03) END;
+    IF Raylib.IsKeyDown(Raylib.KeyUp)    = 1 THEN RotateAroundRight(-0.03) END;
+    IF Raylib.IsKeyDown(Raylib.KeyDown)  = 1 THEN RotateAroundRight( 0.03) END;
 
-    (* Zoom on scroll *)
+    (* Zoom *)
     dist := dist - Raylib.GetMouseWheelMove() * span * 0.15;
-    (* Zoom on + / - keys (= shares key with +) *)
     IF Raylib.IsKeyDown(ORD('=')) = 1 THEN dist := dist * 0.99 END;
     IF Raylib.IsKeyDown(ORD('-')) = 1 THEN dist := dist * 1.01 END;
     IF dist < span * 0.3  THEN dist := span * 0.3  END;
     IF dist > span * 10.0 THEN dist := span * 10.0 END;
 
-    (* WASD pan: W/S move world-Y, A/D move perpendicular to yaw *)
-    IF Raylib.IsKeyDown(ORD('W')) = 1 THEN cy := cy + panSpeed END;
-    IF Raylib.IsKeyDown(ORD('S')) = 1 THEN cy := cy - panSpeed END;
+    (* WASD pan in camera space: A/D along right, W/S along up *)
+    IF Raylib.IsKeyDown(ORD('W')) = 1 THEN
+      cx := cx + panSpeed*ry0;  cy := cy + panSpeed*ry1;  cz := cz + panSpeed*ry2
+    END;
+    IF Raylib.IsKeyDown(ORD('S')) = 1 THEN
+      cx := cx - panSpeed*ry0;  cy := cy - panSpeed*ry1;  cz := cz - panSpeed*ry2
+    END;
     IF Raylib.IsKeyDown(ORD('A')) = 1 THEN
-      cx := cx - panSpeed * Math.cos(yaw);
-      cz := cz + panSpeed * Math.sin(yaw)
+      cx := cx - panSpeed*rx0;  cy := cy - panSpeed*rx1;  cz := cz - panSpeed*rx2
     END;
     IF Raylib.IsKeyDown(ORD('D')) = 1 THEN
-      cx := cx + panSpeed * Math.cos(yaw);
-      cz := cz - panSpeed * Math.sin(yaw)
+      cx := cx + panSpeed*rx0;  cy := cy + panSpeed*rx1;  cz := cz + panSpeed*rx2
     END;
 
-    (* Flip up vector when pitch passes over zenith or nadir *)
-    IF Math.cos(pitch) >= 0.0 THEN upY := 1.0 ELSE upY := -1.0 END;
+    (* Reorthogonalize every 60 frames to prevent floating-point drift *)
+    frameCount := frameCount + 1;
+    IF frameCount >= 60 THEN
+      Reorthogonalize;
+      frameCount := 0
+    END;
 
-    (* Recompute camera position from spherical coords *)
-    px := cx + dist * Math.cos(pitch) * Math.sin(yaw);
-    py := cy + dist * Math.sin(pitch);
-    pz := cz + dist * Math.cos(pitch) * Math.cos(yaw);
+    px := cx + dist * rz0;
+    py := cy + dist * rz1;
+    pz := cz + dist * rz2;
     Raylib.SetCameraPosition(cam, px, py, pz);
     Raylib.SetCameraTarget(cam, cx, cy, cz);
-    Raylib.SetCameraUp(cam, 0.0, upY, 0.0);
+    Raylib.SetCameraUp(cam, ry0, ry1, ry2);
 
     scrW := Raylib.GetScreenWidth();
     scrH := Raylib.GetScreenHeight();
