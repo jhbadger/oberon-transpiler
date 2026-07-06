@@ -32,6 +32,8 @@ VAR
   dispW, dispH   : INTEGER;   (* display size of the full solved image *)
   dispX, dispY   : INTEGER;   (* screen top-left of the solved-image area *)
   dPW, dPH       : INTEGER;   (* display pixels per piece *)
+  scrW, scrH     : INTEGER;
+  prevScrW, prevScrH : INTEGER;
 
   pieceX, pieceY : ARRAY MAXPIECES OF REAL;
   placed         : ARRAY MAXPIECES OF BOOLEAN;
@@ -116,8 +118,8 @@ PROCEDURE InitLayout;
 VAR ratio : REAL;
     maxW, maxH : INTEGER;
 BEGIN
-  maxW  := WIN_W - 2 * BORDER;
-  maxH  := WIN_H - 2 * BORDER;
+  maxW  := scrW - 2 * BORDER;
+  maxH  := scrH - 2 * BORDER;
   ratio := FLT(imgW) / FLT(imgH);
   IF FLT(maxW) / FLT(maxH) > ratio THEN
     dispH := maxH;
@@ -126,8 +128,8 @@ BEGIN
     dispW := maxW;
     dispH := FLOOR(FLT(dispW) / ratio)
   END;
-  dispX := (WIN_W - dispW) DIV 2;
-  dispY := (WIN_H - dispH) DIV 2;
+  dispX := (scrW - dispW) DIV 2;
+  dispY := (scrH - dispH) DIV 2;
   dPW   := dispW DIV nCols;
   dPH   := dispH DIV nRows
 END InitLayout;
@@ -308,8 +310,8 @@ BEGIN
   FOR i := 0 TO nPieces - 1 DO
     drawOrd[i] := i;
     placed[i]  := FALSE;
-    pieceX[i]  := FLT(Random.Int(WIN_W - dPW));
-    pieceY[i]  := FLT(Random.Int(WIN_H - dPH))
+    pieceX[i]  := FLT(Random.Int(scrW - dPW));
+    pieceY[i]  := FLT(Random.Int(scrH - dPH))
   END;
   FOR i := nPieces - 1 TO 1 BY -1 DO
     j          := Random.Int(i + 1);
@@ -321,6 +323,20 @@ BEGIN
   solvedCount := 0;
   won         := FALSE
 END Scatter;
+
+PROCEDURE RescalePieces(oldW, oldH, newW, newH : INTEGER);
+VAR i : INTEGER;
+BEGIN
+  FOR i := 0 TO nPieces - 1 DO
+    IF placed[i] THEN
+      pieceX[i] := TargetX(i);
+      pieceY[i] := TargetY(i)
+    ELSE
+      pieceX[i] := pieceX[i] * FLT(newW) / FLT(oldW);
+      pieceY[i] := pieceY[i] * FLT(newH) / FLT(oldH)
+    END
+  END
+END RescalePieces;
 
 PROCEDURE BringToFront(k : INTEGER);
 VAR i, tmp : INTEGER;
@@ -605,25 +621,25 @@ BEGIN
   Raylib.DrawText(s, 10, 10, 20, cWhite);
 
   s := "R = reshuffle   H = hint   S = save";
-  Raylib.DrawText(s, WIN_W - Raylib.MeasureText(s, 16) - 10, 10, 16,
+  Raylib.DrawText(s, scrW - Raylib.MeasureText(s, 16) - 10, 10, 16,
                   Raylib.Fade(cWhite, 0.7));
 
   IF saveMsgTimer > 0 THEN
     s := "Saved!";
     tw := Raylib.MeasureText(s, 20);
-    Raylib.DrawText(s, (WIN_W - tw) DIV 2, WIN_H - 36, 20, cGreen);
+    Raylib.DrawText(s, (scrW - tw) DIV 2, scrH - 36, 20, cGreen);
     DEC(saveMsgTimer)
   END;
 
   IF won THEN
     s  := "Puzzle Complete!";
     tw := Raylib.MeasureText(s, 52);
-    Raylib.DrawRectangle((WIN_W - tw - 40) DIV 2, WIN_H DIV 2 - 60,
+    Raylib.DrawRectangle((scrW - tw - 40) DIV 2, scrH DIV 2 - 60,
                          tw + 40, 110, Raylib.Fade(cBlack, 0.75));
-    Raylib.DrawText(s, (WIN_W - tw) DIV 2, WIN_H DIV 2 - 46, 52, cYellow);
+    Raylib.DrawText(s, (scrW - tw) DIV 2, scrH DIV 2 - 46, 52, cYellow);
     s  := "Press R to reshuffle";
     tw := Raylib.MeasureText(s, 24);
-    Raylib.DrawText(s, (WIN_W - tw) DIV 2, WIN_H DIV 2 + 16, 24, cWhite)
+    Raylib.DrawText(s, (scrW - tw) DIV 2, scrH DIV 2 + 16, 24, cWhite)
   END;
 
   Raylib.EndDrawing
@@ -652,6 +668,8 @@ BEGIN
   resuming     := FALSE;
   pdfPage      := -1;
   knobPad      := 0;
+  scrW         := WIN_W;
+  scrH         := WIN_H;
   Args.Get(1, filename);
 
   IF IsSaveFile(filename) THEN
@@ -685,6 +703,7 @@ BEGIN
   END;
 
   Raylib.InitWindow(WIN_W, WIN_H, "Jigsaw Puzzle");
+  Raylib.SetWindowResizable();
   Raylib.SetTargetFPS(60);
 
   IF pdfPage >= 0 THEN
@@ -716,8 +735,19 @@ BEGIN
     GenPieceTex;
     Scatter
   END;
+  prevScrW := scrW;
+  prevScrH := scrH;
 
   WHILE Raylib.WindowShouldClose() = 0 DO
+    scrW := Raylib.GetScreenWidth();
+    scrH := Raylib.GetScreenHeight();
+    IF (scrW # prevScrW) OR (scrH # prevScrH) THEN
+      InitLayout;
+      RescalePieces(prevScrW, prevScrH, scrW, scrH);
+      GenPieceTex;
+      prevScrW := scrW;
+      prevScrH := scrH
+    END;
     Update;
     Draw
   END;
