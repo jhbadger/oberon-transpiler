@@ -2032,7 +2032,7 @@ PROCEDURE Eval*(expr: Value; env: Env): Value;
     forms := args.tail;
     WHILE ~IsNil(forms) & ~err DO
       form := forms.head;
-      IF form.tag = tSym THEN
+      IF (form.tag = tSym) OR (form.tag = tResolved) THEN
         fn := EvalRef(form, env);
         IF err THEN RETURN NilV END;
         acc := Apply(fn, Cons(acc, NilV), env)
@@ -4747,6 +4747,19 @@ BEGIN
   RETURN result
 END BReadString;
 
+PROCEDURE BReadLine(args: Value; env: Env): Value;
+VAR prompt, line: ARRAY 256 OF CHAR;
+BEGIN
+  IF ~IsNil(args) & (args.head.tag = tStr) THEN
+    Strings.Copy(args.head.s, prompt)
+  ELSE
+    prompt[0] := 0X
+  END;
+  History.ReadLine(prompt, line);
+  IF line[0] = 0X THEN RETURN NilV END;
+  RETURN MkStr(line)
+END BReadLine;
+
 PROCEDURE BPrintStr(args: Value; env: Env): Value;
 VAR buf: ARRAY MaxStrVal OF CHAR; n: INTEGER;
     tmp: ARRAY MaxStr OF CHAR; first: BOOLEAN; v: Value;
@@ -5559,6 +5572,7 @@ BEGIN
   RegisterDoc("pr-str", BPrStr, "Returns readable string of printed representation (with quotes, escapes).");
   RegisterDoc("print-str", BPrintStr, "Returns string of printed representation.");
   RegisterDoc("read-string", BReadString, "Reads one object from a string.");
+  RegisterDoc("read-line", BReadLine, "Reads a line from stdin. Optional prompt string.");
 
   (* Functional *)
   RegisterDoc("identity", BIdentity, "Returns its argument.");
