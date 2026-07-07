@@ -188,17 +188,26 @@
         ; regular NP: [det] [adj*] noun [rel-clause]
         :else
         (let [tokens1 (skip-det tokens)
-              [desc tokens2] (parse-adjs tokens1 {})
-              noun (when (and (not (empty? tokens2))
-                              (contains? shape-vocab (first tokens2)))
-                     (norm-shape (first tokens2)))
-              tokens3 (if noun (rest tokens2) tokens2)
-              desc (if noun (assoc desc :shape noun) desc)]
-          (if (and (empty? desc) (nil? noun))
-            [nil tokens]   ; nothing recognised
-            ; check for relative clause
-            (let [rc-w (first tokens3)]
-              (cond
+              id-tok (first tokens1)]
+          (let [id-up (when (and id-tok (= (count id-tok) 1)) (upper-case id-tok))]
+            (if (and id-up (wblk id-up))
+              [{:specific-id id-up} (rest tokens1)]
+              (let [[desc tokens2] (parse-adjs tokens1 {})
+                    noun (when (and (not (empty? tokens2))
+                                    (contains? shape-vocab (first tokens2)))
+                           (norm-shape (first tokens2)))
+                    tokens3 (if noun (rest tokens2) tokens2)
+                    desc (if noun (assoc desc :shape noun) desc)
+                    id-tok2 (first tokens3)
+                    id-up2 (when (and id-tok2 (= (count id-tok2) 1)) (upper-case id-tok2))
+                    [desc tokens3] (if (and id-up2 (wblk id-up2))
+                                     [(assoc desc :specific-id id-up2) (rest tokens3)]
+                                     [desc tokens3])]
+              (if (and (empty? desc) (nil? noun))
+                [nil tokens]   ; nothing recognised
+                ; check for relative clause
+                (let [rc-w (first tokens3)]
+                  (cond
                 ; "that is …" / "which is …"
                 (and rc-w
                      (or (= rc-w "that") (= rc-w "which"))
@@ -214,7 +223,7 @@
                 (= rc-w "in")
                 (parse-rel-clause tokens3 desc)
 
-                :else [desc tokens3]))))))))
+                :else [desc tokens3])))))))))))
 
 ;;; ═══ WORLD MANIPULATION ═════════════════════════════════════════════════════
 
@@ -480,8 +489,9 @@
 ;;; ═══ TOKENIZER ══════════════════════════════════════════════════════════════
 
 (defn tokenize [s]
-  (let [clean (string/replace (lower-case (trim s)) #"[^a-z ]" " ")]
-    (filter (fn [w] (not (empty? w))) (split clean " "))))
+  (let [words (filter (fn [w] (not (empty? w)))
+                      (split (string/replace (trim s) #"[^a-zA-Z ]" " ") " "))]
+    (map (fn [w] (if (= (count w) 1) w (lower-case w))) words)))
 
 ;;; ═══ SENTENCE DISPATCHER ════════════════════════════════════════════════════
 
