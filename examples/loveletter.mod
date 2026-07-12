@@ -293,7 +293,12 @@ BEGIN
   IF pi >= 0 THEN
     IF pi = 0 THEN RETURN 1 ELSE RETURN 0 END
   END;
-  RETURN Random.Int(2)
+  (* Neither card is forced or the Princess: keep the higher-value card
+     for Baron comparisons / a deck-empty showdown, play the lower one. *)
+  IF players[p].hand[0] < players[p].hand[1] THEN RETURN 0
+  ELSIF players[p].hand[1] < players[p].hand[0] THEN RETURN 1
+  ELSE RETURN Random.Int(2)
+  END
 END AIChooseDiscardIndex;
 
 PROCEDURE AISelectTarget(actor, card : INTEGER; VAR cand : ARRAY OF INTEGER; n : INTEGER) : INTEGER;
