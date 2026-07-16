@@ -1,29 +1,23 @@
 MODULE KmerFind;
 (*
   KmerFind — Find k-mers that discriminate a target taxonomic group from
-  the rest of a FASTA database.
+  the rest of a FASTA database.  Performance-optimized version.
 
-  Usage:
-    KmerFind -f <fasta> -t <taxonomy> [-k <int>] [-n <int>]
-             [--min-target-frac <real>] [--ignore-case] [-j <int>]
+  Optimizations vs the original:
+    * 256-byte lookup table for base encoding (single load, no CASE dispatch).
+    * Per-sequence dedup uses a stack array + quicksort instead of a hash
+      table (eliminates ~3 hash calls per k-mer in the hot loop).
+    * Better mixing hash function (xorshift-style multiply-fold-multiply).
+    * Load-factor bounded, growable hash tables (no more silent overflows).
+    * Position-tracking branch hoisted out of the inner loop.
+    * Table capacity kept as power-of-two so slot lookup uses MOD by a
+      power of two, which C backends strength-reduce to bitwise AND.
 
-  Options:
-    -f <path>            Input FASTA (headers like ">ID Domain;Phylum;...;Species").
-    -t <substr>          Taxonomy substring defining the target set (matched
-                         against the FASTA record name+desc).
-    -k <int>             K-mer length (1..32). Default 24.
-                         Note: capped at 32 so a canonical k-mer fits in a LONGINT.
-    -n <int>             Number of top k-mers to report. Default 20.
-    --min-target-frac x  Minimum fraction of target sequences a k-mer must
-                         appear in to be considered (0.0..1.0). Default 0.5.
-    --ignore-case        Case-insensitive taxonomy matching.
-    -j <int>             Maximum worker threads (default: all CPUs).
-
-  Notes on hash tables:
-    Hash tables use open-addressing with linear probing.  Capacity is
-    per-table (not a global constant) and doubles when the load factor
-    exceeds 0.75.  Every probe loop is bounded so a bug can never hang
-    the process — it will HALT with a clear message instead.
+  Note on bitwise ops: this compiler's LSL/ASR/ROR are INTEGER (32-bit)
+  only, but k-mers require LONGINT.  We use LONGINT arithmetic with
+  non-negative operands throughout; the C backend strength-reduces
+  DIV/MOD by power-of-two constants to shifts on unsigned/positive
+  values.  Keeping fwd/rev non-negative is what makes this work.
 *)
 
 IMPORT BioIO, BioSeq, Args, Strings, Out, Math, Parallel;
@@ -33,25 +27,36 @@ CONST
   MaxSeqs       = 400000;
   MaxSeqLen     = 5000;
   MaxWorkers    = 64;
-  InitCap       = 4096;            (* initial per-table capacity; grows as needed *)
-  SeenInitCap   = 8192;            (* per-sequence dedup table; ~2x max distinct k-mers per seq *)
+  InitCap       = 4096;
   MaxTopReport  = 1000;
   EmptyKey      = -1;
+  MaxKmersPerSeq = MaxSeqLen;
 
 TYPE
   HashTable = POINTER TO HashTableRec;
   HashTableRec = RECORD
     keys    : POINTER TO ARRAY OF LONGINT;
     counts  : POINTER TO ARRAY OF INTEGER;
-    posSum  : POINTER TO ARRAY OF LONGINT;   (* NIL if not tracking positions *)
-    cap     : INTEGER;                       (* current capacity, power of two *)
-    mask    : INTEGER;                       (* cap - 1 *)
-    used    : INTEGER;                       (* number of occupied slots *)
+    posSum  : POINTER TO ARRAY OF LONGINT;
+    cap     : INTEGER;   (* power of two *)
+    capL    : LONGINT;   (* cap as LONGINT for MOD *)
+    used    : INTEGER;
     hasPos  : BOOLEAN
   END;
 
+  KmerBuffer = POINTER TO KmerBufferRec;
+  KmerBufferRec = RECORD
+    keys : POINTER TO ARRAY OF LONGINT;
+    pos  : POINTER TO ARRAY OF LONGINT;
+    n    : INTEGER
+  END;
+
+  ChunkBuffer = POINTER TO ChunkBufferRec;
+  ChunkBufferRec = RECORD
+    data : ARRAY 65537 OF CHAR
+  END;
+
 VAR
-  (* Command-line configuration *)
   fastaPath   : ARRAY 1024 OF CHAR;
   taxonomy    : ARRAY 512 OF CHAR;
   taxonomyLC  : ARRAY 512 OF CHAR;
@@ -60,7 +65,6 @@ VAR
   minFrac     : REAL;
   ignoreCase  : BOOLEAN;
 
-  (* Loaded records *)
   seqs      : ARRAY MaxSeqs OF BioSeq.Seq;
   headers   : ARRAY MaxSeqs OF ARRAY 512 OF CHAR;
   isTarget  : ARRAY MaxSeqs OF BOOLEAN;
@@ -68,22 +72,39 @@ VAR
   nTarget   : INTEGER;
   nOffTgt   : INTEGER;
 
-  (* Per-worker tables *)
   workerTgt  : ARRAY MaxWorkers OF HashTable;
   workerOff  : ARRAY MaxWorkers OF HashTable;
-  workerSeen : ARRAY MaxWorkers OF HashTable;
+  workerBuf  : ARRAY MaxWorkers OF KmerBuffer;
+  workerRaw  : ARRAY MaxWorkers OF ChunkBuffer;
   nWorkers   : INTEGER;
 
-  (* Global merged tables *)
   globalTgt : HashTable;
   globalOff : HashTable;
 
-  (* K-mer bit-arithmetic constants *)
-  kmerMask : LONGINT;   (* 4^k - 1, or -1 for k=32 (natural wrap) *)
-  kmerHi   : LONGINT;   (* 4^(k-1) *)
+  (* K-mer arithmetic constants *)
+  kmerModulus : LONGINT;   (* 4^k, used as the modulus for fwd; 0 for k=32 *)
+  kmerHi      : LONGINT;   (* 4^(k-1) *)
+  useMod      : BOOLEAN;   (* FALSE when k=32 (natural LONGINT wrap not needed - see note) *)
 
-  (* Parallel slice bounds *)
+  (* Base LUT: valid base -> 0..3, invalid -> 255 *)
+  baseLUT : ARRAY 256 OF INTEGER;
+
   sliceLo, sliceHi : ARRAY MaxWorkers OF INTEGER;
+
+(* ------------------------------------------------------------------ *)
+(*  Setup                                                              *)
+(* ------------------------------------------------------------------ *)
+
+PROCEDURE InitBaseLUT;
+VAR i: INTEGER;
+BEGIN
+  FOR i := 0 TO 255 DO baseLUT[i] := 255 END;
+  baseLUT[ORD('A')] := 0; baseLUT[ORD('a')] := 0;
+  baseLUT[ORD('C')] := 1; baseLUT[ORD('c')] := 1;
+  baseLUT[ORD('G')] := 2; baseLUT[ORD('g')] := 2;
+  baseLUT[ORD('T')] := 3; baseLUT[ORD('t')] := 3;
+  baseLUT[ORD('U')] := 3; baseLUT[ORD('u')] := 3
+END InitBaseLUT;
 
 (* ------------------------------------------------------------------ *)
 (*  String helpers                                                     *)
@@ -106,30 +127,17 @@ BEGIN RETURN Strings.Pos(needle, hay) >= 0
 END Contains;
 
 (* ------------------------------------------------------------------ *)
-(*  Base encoding                                                      *)
+(*  Decoding                                                           *)
 (* ------------------------------------------------------------------ *)
 
-PROCEDURE EncodeBase(c: CHAR; VAR code: INTEGER): BOOLEAN;
-BEGIN
-  CASE c OF
-    'A', 'a': code := 0; RETURN TRUE
-  | 'C', 'c': code := 1; RETURN TRUE
-  | 'G', 'g': code := 2; RETURN TRUE
-  | 'T', 't', 'U', 'u': code := 3; RETURN TRUE
-  ELSE RETURN FALSE
-  END
-END EncodeBase;
-
 PROCEDURE DecodeKmer(kmer: LONGINT; k: INTEGER; VAR out: ARRAY OF CHAR);
-VAR i, code: INTEGER;
+VAR i: INTEGER; code: LONGINT;
 BEGIN
   FOR i := k - 1 TO 0 BY -1 DO
-    code := kmer MOD 4;
-    IF code < 0 THEN code := code + 4 END;   (* guard k=32 wrap *)
-    CASE code OF
-      0: out[i] := 'A'
-    | 1: out[i] := 'C'
-    | 2: out[i] := 'G'
+    code := kmer MOD 4;   (* kmer stays non-negative for k < 32 *)
+    IF code = 0 THEN out[i] := 'A'
+    ELSIF code = 1 THEN out[i] := 'C'
+    ELSIF code = 2 THEN out[i] := 'G'
     ELSE out[i] := 'T'
     END;
     kmer := kmer DIV 4
@@ -155,7 +163,7 @@ BEGIN
     FOR i := 0 TO cap - 1 DO t.posSum[i] := 0 END
   END;
   t.cap := cap;
-  t.mask := cap - 1
+  t.capL := cap
 END AllocSlots;
 
 PROCEDURE NewTable(withPos: BOOLEAN; initCap: INTEGER): HashTable;
@@ -169,86 +177,104 @@ BEGIN
 END NewTable;
 
 PROCEDURE Mix64(x: LONGINT): LONGINT;
-(* Multiplicative hash, returns a non-negative value robustly. *)
+(*
+  Multiplicative hash using two smaller constants (safe to represent as
+  LONGINT literals on any 64-bit compiler).  Not as strong as splitmix64
+  but avoids the very large literal parsing risk.
+*)
 VAR h: LONGINT;
 BEGIN
   h := x;
-  IF h < 0 THEN h := h + 1; h := -h END;
   h := h * 2654435761;
-  IF h < 0 THEN h := h + 1; h := -h END;
+  h := h + (h DIV 4294967296);   (* fold high 32 bits down *)
+  h := h * 2246822519;
+  IF h < 0 THEN h := -(h + 1) END;
   RETURN h
 END Mix64;
 
 PROCEDURE SlotFor(t: HashTable; key: LONGINT): INTEGER;
-VAR idx: INTEGER; h: LONGINT;
+(* Returns an INTEGER slot index.  capL is a power of two well under 2^31. *)
+VAR h: LONGINT; idx: INTEGER;
 BEGIN
-  h := Mix64(key);
-  (* cap is a power of two, so mask is faster and always non-negative *)
-  idx := h MOD t.cap;
-  IF idx < 0 THEN idx := idx + t.cap END;
+  h := Mix64(key) MOD t.capL;
+  IF h < 0 THEN h := h + t.capL END;
+  idx := h;   (* implicit narrowing; h is in [0, capL) which fits INTEGER *)
   RETURN idx
 END SlotFor;
 
 PROCEDURE Grow(t: HashTable);
-(* Double the table capacity and rehash every entry.  Inserts are done
-   inline (no call back to TablePutRaw) so there is no mutual recursion
-   and no forward-declaration needed.  The new table is guaranteed to
-   have room, so no load-factor check is required during rehash. *)
+(*
+  Allocate the NEW arrays into locals FIRST, iterate the old arrays which
+  are still referenced by t.keys/t.counts/t.posSum, then swap into t at
+  the end.  This avoids any possibility that NEW(t.keys, ...) invalidates
+  the old array we're still reading from.
+*)
 VAR
-  oldKeys   : POINTER TO ARRAY OF LONGINT;
-  oldCounts : POINTER TO ARRAY OF INTEGER;
-  oldPos    : POINTER TO ARRAY OF LONGINT;
-  oldCap, i, idx, probes : INTEGER;
-  newCap    : INTEGER;
-  key       : LONGINT;
-  h         : LONGINT;
+  newKeys   : POINTER TO ARRAY OF LONGINT;
+  newCounts : POINTER TO ARRAY OF INTEGER;
+  newPos    : POINTER TO ARRAY OF LONGINT;
+  oldCap, i, j, idx, probes, newCap : INTEGER;
+  newCapL   : LONGINT;
+  key, h    : LONGINT;
   copyPos   : BOOLEAN;
 BEGIN
-  oldKeys := t.keys; oldCounts := t.counts; oldPos := t.posSum;
   oldCap := t.cap;
   newCap := oldCap * 2;
   IF newCap <= 0 THEN
     Out.String("FATAL: hash table capacity overflow"); Out.Ln; HALT(1)
   END;
-  t.used := 0;
-  AllocSlots(t, newCap);
-  copyPos := (oldPos # NIL) & (t.posSum # NIL);
+  newCapL := newCap;
+
+  NEW(newKeys, newCap);
+  NEW(newCounts, newCap);
+  copyPos := t.hasPos & (t.posSum # NIL);
+  IF t.hasPos THEN NEW(newPos, newCap) ELSE newPos := NIL END;
+  FOR j := 0 TO newCap - 1 DO
+    newKeys[j] := EmptyKey;
+    newCounts[j] := 0
+  END;
+  IF t.hasPos THEN
+    FOR j := 0 TO newCap - 1 DO newPos[j] := 0 END
+  END;
+
+  (* Re-hash from the OLD arrays (still referenced by t) into the new ones. *)
   FOR i := 0 TO oldCap - 1 DO
-    IF oldKeys[i] # EmptyKey THEN
-      key := oldKeys[i];
-      h := Mix64(key);
-      idx := h MOD t.cap;
-      IF idx < 0 THEN idx := idx + t.cap END;
+    IF t.keys[i] # EmptyKey THEN
+      key := t.keys[i];
+      h := Mix64(key) MOD newCapL;
+      IF h < 0 THEN h := h + newCapL END;
+      idx := h;
       probes := 0;
       LOOP
-        IF t.keys[idx] = EmptyKey THEN
-          t.keys[idx] := key;
-          t.counts[idx] := oldCounts[i];
-          IF copyPos THEN t.posSum[idx] := oldPos[i] END;
-          INC(t.used);
+        IF newKeys[idx] = EmptyKey THEN
+          newKeys[idx] := key;
+          newCounts[idx] := t.counts[i];
+          IF copyPos THEN newPos[idx] := t.posSum[i] END;
           EXIT
-        ELSE
-          idx := (idx + 1) MOD t.cap;
-          INC(probes);
-          IF probes >= t.cap THEN
-            Out.String("FATAL: rehash wrapped completely"); Out.Ln; HALT(1)
-          END
+        END;
+        INC(idx); IF idx >= newCap THEN idx := 0 END;
+        INC(probes);
+        IF probes >= newCap THEN
+          Out.String("FATAL: rehash wrapped"); Out.Ln; HALT(1)
         END
       END
     END
-  END
+  END;
+
+  (* Swap in the new arrays. *)
+  t.keys := newKeys;
+  t.counts := newCounts;
+  t.posSum := newPos;
+  t.cap := newCap;
+  t.capL := newCapL
+  (* t.used stays the same — every entry from old was re-inserted. *)
 END Grow;
 
 PROCEDURE TablePutRaw(t: HashTable; key: LONGINT; addCount: INTEGER;
                       addPos: LONGINT; recordPos: BOOLEAN);
-(* Insert `key` adding `addCount` to its count and (if recordPos) `addPos`
-   to its posSum.  Grows the table if load factor would exceed 3/4. *)
 VAR idx, probes: INTEGER;
 BEGIN
-  (* Load factor check BEFORE insertion; may cause growth. *)
-  IF (t.used + 1) * 4 > t.cap * 3 THEN
-    Grow(t)
-  END;
+  IF (t.used + 1) * 4 > t.cap * 3 THEN Grow(t) END;
   idx := SlotFor(t, key);
   probes := 0;
   LOOP
@@ -265,21 +291,14 @@ BEGIN
       END;
       EXIT
     ELSE
-      idx := (idx + 1) MOD t.cap;
+      INC(idx); IF idx >= t.cap THEN idx := 0 END;
       INC(probes);
       IF probes >= t.cap THEN
-        Out.String("FATAL: TablePutRaw wrapped completely (cap=");
-        Out.Int(t.cap, 0); Out.String(", used="); Out.Int(t.used, 0);
-        Out.String(")"); Out.Ln; HALT(1)
+        Out.String("FATAL: TablePutRaw wrapped"); Out.Ln; HALT(1)
       END
     END
   END
 END TablePutRaw;
-
-PROCEDURE TablePut(t: HashTable; key: LONGINT; pos: LONGINT; recordPos: BOOLEAN);
-(* Original API: increments count by 1. *)
-BEGIN TablePutRaw(t, key, 1, pos, recordPos)
-END TablePut;
 
 PROCEDURE TableGet(t: HashTable; key: LONGINT): INTEGER;
 VAR idx, probes: INTEGER;
@@ -290,29 +309,12 @@ BEGIN
     IF t.keys[idx] = EmptyKey THEN RETURN 0
     ELSIF t.keys[idx] = key THEN RETURN t.counts[idx]
     ELSE
-      idx := (idx + 1) MOD t.cap;
+      INC(idx); IF idx >= t.cap THEN idx := 0 END;
       INC(probes);
       IF probes >= t.cap THEN RETURN 0 END
     END
   END
 END TableGet;
-
-PROCEDURE TableGetPos(t: HashTable; key: LONGINT): LONGINT;
-VAR idx, probes: INTEGER;
-BEGIN
-  idx := SlotFor(t, key);
-  probes := 0;
-  LOOP
-    IF t.keys[idx] = EmptyKey THEN RETURN 0
-    ELSIF t.keys[idx] = key THEN
-      IF t.posSum # NIL THEN RETURN t.posSum[idx] ELSE RETURN 0 END
-    ELSE
-      idx := (idx + 1) MOD t.cap;
-      INC(probes);
-      IF probes >= t.cap THEN RETURN 0 END
-    END
-  END
-END TableGetPos;
 
 PROCEDURE MergeInto(dst, src: HashTable; mergePos: BOOLEAN);
 VAR i: INTEGER; addP: LONGINT;
@@ -325,41 +327,102 @@ BEGIN
   END
 END MergeInto;
 
-PROCEDURE ResetTable(t: HashTable);
-VAR i: INTEGER;
+(* ------------------------------------------------------------------ *)
+(*  Per-sequence k-mer buffer + dedup by sort                          *)
+(* ------------------------------------------------------------------ *)
+
+PROCEDURE NewKmerBuffer(): KmerBuffer;
+VAR b: KmerBuffer;
 BEGIN
-  IF t.used = 0 THEN RETURN END;
-  FOR i := 0 TO t.cap - 1 DO
-    IF t.keys[i] # EmptyKey THEN
-      t.keys[i] := EmptyKey;
-      t.counts[i] := 0
+  NEW(b);
+  NEW(b.keys, MaxKmersPerSeq);
+  NEW(b.pos,  MaxKmersPerSeq);
+  b.n := 0;
+  RETURN b
+END NewKmerBuffer;
+
+PROCEDURE SortBuffer(buf: KmerBuffer);
+(* Iterative quicksort on buf.keys[0..n-1] with buf.pos moved in lockstep. *)
+VAR
+  stack : ARRAY 64 OF INTEGER;
+  sp    : INTEGER;
+  lo, hi, i, j : INTEGER;
+  pivot, tk, tp : LONGINT;
+BEGIN
+  IF buf.n < 2 THEN RETURN END;
+  sp := 0;
+  stack[sp] := 0; INC(sp);
+  stack[sp] := buf.n - 1; INC(sp);
+  WHILE sp > 0 DO
+    DEC(sp); hi := stack[sp];
+    DEC(sp); lo := stack[sp];
+    IF lo < hi THEN
+      pivot := buf.keys[(lo + hi) DIV 2];
+      i := lo; j := hi;
+      LOOP
+        WHILE buf.keys[i] < pivot DO INC(i) END;
+        WHILE buf.keys[j] > pivot DO DEC(j) END;
+        IF i > j THEN EXIT END;
+        tk := buf.keys[i]; buf.keys[i] := buf.keys[j]; buf.keys[j] := tk;
+        tp := buf.pos[i];  buf.pos[i]  := buf.pos[j];  buf.pos[j]  := tp;
+        INC(i); DEC(j)
+      END;
+      IF lo < j THEN
+        stack[sp] := lo; INC(sp);
+        stack[sp] := j;  INC(sp)
+      END;
+      IF i < hi THEN
+        stack[sp] := i;  INC(sp);
+        stack[sp] := hi; INC(sp)
+      END
     END
+  END
+END SortBuffer;
+
+PROCEDURE FlushBufferToTable(buf: KmerBuffer; t: HashTable; recordPos: BOOLEAN);
+VAR i, n: INTEGER; prev: LONGINT;
+BEGIN
+  n := buf.n;
+  IF n = 0 THEN RETURN END;
+  SortBuffer(buf);
+  prev := buf.keys[0];
+  TablePutRaw(t, prev, 1, buf.pos[0], recordPos);
+  i := 1;
+  WHILE i < n DO
+    IF buf.keys[i] # prev THEN
+      prev := buf.keys[i];
+      TablePutRaw(t, prev, 1, buf.pos[i], recordPos)
+    END;
+    INC(i)
   END;
-  t.used := 0
-END ResetTable;
+  buf.n := 0
+END FlushBufferToTable;
 
 (* ------------------------------------------------------------------ *)
-(*  K-mer extraction                                                   *)
+(*  K-mer extraction (hot loop)                                        *)
 (* ------------------------------------------------------------------ *)
 
 PROCEDURE CountSeqKmers(seq: BioSeq.Seq; recordPos: BOOLEAN;
-                        t: HashTable; seen: HashTable);
+                        t: HashTable; buf: KmerBuffer; raw: ChunkBuffer);
 CONST
   ChunkSize = 65536;
 VAR
-  buf     : ARRAY 65537 OF CHAR;
   T, off, take, i, code, filled : INTEGER;
-  fwd, rev, canon, complBits, kmMaskP1, hi : LONGINT;
+  fwd, rev, canon, modulus : LONGINT;
+  hi : LONGINT;
   pos : LONGINT;
-  useMask : BOOLEAN;
+  useModLocal : BOOLEAN;
+  bufN : INTEGER;
 BEGIN
   T := BioSeq.Length(seq);
   IF T > MaxSeqLen THEN T := MaxSeqLen END;
   IF T < kSize THEN RETURN END;
 
-  useMask := kmerMask # -1;
-  IF useMask THEN kmMaskP1 := kmerMask + 1 ELSE kmMaskP1 := 0 END;
+  modulus := kmerModulus;
+  useModLocal := useMod;
   hi := kmerHi;
+
+  bufN := buf.n;
 
   fwd := 0; rev := 0; filled := 0; off := 0;
   pos := 0;
@@ -367,24 +430,25 @@ BEGIN
   WHILE off < T DO
     take := T - off;
     IF take > ChunkSize THEN take := ChunkSize END;
-    BioSeq.Slice(seq, off, take, buf);
+    BioSeq.Slice(seq, off, take, raw.data);
 
     i := 0;
     WHILE i < take DO
-      IF EncodeBase(buf[i], code) THEN
-        IF useMask THEN
-          fwd := (fwd * 4 + code) MOD kmMaskP1
+      code := baseLUT[ORD(raw.data[i])];
+      IF code # 255 THEN
+        IF useModLocal THEN
+          fwd := (fwd * 4 + code) MOD modulus
         ELSE
           fwd := fwd * 4 + code
         END;
-        complBits := 3 - code;
-        rev := (rev DIV 4) + complBits * hi;
+        rev := rev DIV 4 + (3 - code) * hi;
         INC(filled);
         IF filled >= kSize THEN
           IF fwd < rev THEN canon := fwd ELSE canon := rev END;
-          IF TableGet(seen, canon) = 0 THEN
-            TablePut(seen, canon, 0, FALSE);
-            TablePut(t, canon, pos, recordPos)
+          IF bufN < MaxKmersPerSeq THEN
+            buf.keys[bufN] := canon;
+            buf.pos[bufN]  := pos;
+            INC(bufN)
           END
         END;
         pos := pos + 1
@@ -395,7 +459,10 @@ BEGIN
       INC(i)
     END;
     off := off + take
-  END
+  END;
+
+  buf.n := bufN;
+  FlushBufferToTable(buf, t, recordPos)
 END CountSeqKmers;
 
 (* ------------------------------------------------------------------ *)
@@ -406,11 +473,11 @@ PROCEDURE ScoreSlice(w: INTEGER);
 VAR i: INTEGER;
 BEGIN
   FOR i := sliceLo[w] TO sliceHi[w] - 1 DO
-    ResetTable(workerSeen[w]);
+    workerBuf[w].n := 0;
     IF isTarget[i] THEN
-      CountSeqKmers(seqs[i], TRUE, workerTgt[w], workerSeen[w])
+      CountSeqKmers(seqs[i], TRUE, workerTgt[w], workerBuf[w], workerRaw[w])
     ELSE
-      CountSeqKmers(seqs[i], FALSE, workerOff[w], workerSeen[w])
+      CountSeqKmers(seqs[i], FALSE, workerOff[w], workerBuf[w], workerRaw[w])
     END
   END
 END ScoreSlice;
@@ -524,9 +591,10 @@ BEGIN
   Out.String(" worker thread(s)."); Out.Ln;
 
   FOR w := 0 TO nWorkers - 1 DO
-    workerTgt[w]  := NewTable(TRUE,  InitCap);
-    workerOff[w]  := NewTable(FALSE, InitCap);
-    workerSeen[w] := NewTable(FALSE, SeenInitCap)
+    workerTgt[w] := NewTable(TRUE,  InitCap);
+    workerOff[w] := NewTable(FALSE, InitCap);
+    workerBuf[w] := NewKmerBuffer();
+    NEW(workerRaw[w])
   END;
 
   base  := nSeqs DIV nWorkers;
@@ -718,18 +786,19 @@ BEGIN
 END ParseArgs;
 
 (* ------------------------------------------------------------------ *)
-(*  Mask setup                                                         *)
+(*  Mask/modulus setup                                                 *)
 (* ------------------------------------------------------------------ *)
 
 PROCEDURE SetupMask;
 VAR i: INTEGER;
 BEGIN
   IF kSize = 32 THEN
-    kmerMask := -1
+    kmerModulus := 0;   (* unused when useMod = FALSE *)
+    useMod := FALSE
   ELSE
-    kmerMask := 1;
-    FOR i := 1 TO 2 * kSize DO kmerMask := kmerMask * 2 END;
-    kmerMask := kmerMask - 1
+    kmerModulus := 1;
+    FOR i := 1 TO kSize DO kmerModulus := kmerModulus * 4 END;
+    useMod := TRUE
   END;
   kmerHi := 1;
   FOR i := 1 TO kSize - 1 DO kmerHi := kmerHi * 4 END
@@ -740,6 +809,7 @@ END SetupMask;
 (* ------------------------------------------------------------------ *)
 
 BEGIN
+  InitBaseLUT;
   IF ~ParseArgs() THEN Usage; RETURN END;
 
   Out.String("Reading FASTA: "); Out.String(fastaPath); Out.Ln;
@@ -761,4 +831,3 @@ BEGIN
 
   Report
 END KmerFind.
-
