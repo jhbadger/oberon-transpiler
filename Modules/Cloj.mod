@@ -290,8 +290,27 @@ PROCEDURE IsNil*(v: Value): BOOLEAN;
 BEGIN
   IF (v = NIL) OR (v.tag = tNil) THEN RETURN TRUE END;
   IF v.tag = tLazy THEN ForceLazyRef(v); RETURN v.tag = tNil END;
+  (* An empty vector is a real, distinctly-tagged (tVec) sentinel with
+     head = NIL -- see MkEmptyVec -- so that it prints and type-tests as a
+     vector rather than degrading to the generic nil/empty-list value.
+     It still reports IsNil = TRUE so the countless "WHILE ~IsNil(p) DO
+     p := p.tail" traversal loops throughout this file terminate on it
+     exactly as they do on NilV. A populated vector cell's head is always
+     a real parsed/computed Value, never NIL, so this check cannot
+     misfire on real data. *)
+  IF (v.tag = tVec) & (v.head = NIL) THEN RETURN TRUE END;
   RETURN FALSE
 END IsNil;
+
+(* The canonical empty vector: tagged tVec (so vector?, type, and the
+   printer treat it as a vector) but with head = NIL so IsNil still
+   recognizes it as empty for traversal purposes. *)
+PROCEDURE MkEmptyVec*(): Value;
+VAR v: Value;
+BEGIN
+  NEW(v); v.tag := tVec; v.head := NIL; v.tail := NIL; v.symId := -1;
+  RETURN v
+END MkEmptyVec;
 
 PROCEDURE IsTruthy*(v: Value): BOOLEAN;
 BEGIN
@@ -615,6 +634,7 @@ PROCEDURE ParseExpr(): Value;
       NextTok
     END;
     IF tokKind # closeKind THEN Error("unbalanced delimiter") END;
+    IF (first = NilV) & (closeKind = 4) THEN RETURN MkEmptyVec() END;
     RETURN first
   END ParseSeq;
 
@@ -785,7 +805,7 @@ END WriteStr;
 PROCEDURE PrintValue*(v: Value; readable: BOOLEAN);
 VAR p, k, val: Value; first: BOOLEAN; buf: ARRAY 32 OF CHAR; i: INTEGER;
 BEGIN
-  IF IsNil(v) THEN WriteStr("nil"); RETURN END;
+  IF (v = NIL) OR (v.tag = tNil) THEN WriteStr("nil"); RETURN END;
   CASE v.tag OF
     tBool:
       IF v.b THEN WriteStr("true") ELSE WriteStr("false") END
@@ -877,7 +897,7 @@ BEGIN i := 0; WHILE t[i] # 0X DO BufAppendC(s, n, t[i]); INC(i) END END BufAppen
 PROCEDURE ValToStrBuf(v: Value; readable: BOOLEAN; VAR s: ARRAY OF CHAR; VAR n: INTEGER);
 VAR p, k, val: Value; first: BOOLEAN; buf: ARRAY 32 OF CHAR; i: INTEGER;
 BEGIN
-  IF IsNil(v) THEN BufAppendS(s, n, "nil"); RETURN END;
+  IF (v = NIL) OR (v.tag = tNil) THEN BufAppendS(s, n, "nil"); RETURN END;
   CASE v.tag OF
     tBool:
       IF v.b THEN BufAppendS(s, n, "true") ELSE BufAppendS(s, n, "false") END
@@ -2080,7 +2100,10 @@ VAR head: Value; fn, evArgs, looked: Value;
   vec, first, last, cell, v: Value;
 BEGIN
   IF err THEN RETURN NilV END;
-  IF IsNil(expr) THEN RETURN NilV END;
+  (* NB: strict nil check, not the general IsNil -- an empty vector also
+     satisfies IsNil (for traversal) but must fall through to the tVec
+     case below so it evaluates to itself with its tag intact. *)
+  IF (expr = NIL) OR (expr.tag = tNil) THEN RETURN NilV END;
   CASE expr.tag OF
     tBool, tInt, tReal, tStr, tKey, tFn, tBuiltin: RETURN expr
   | tResolved:
@@ -2124,7 +2147,7 @@ BEGIN
       END;
       RETURN looked
   | tVec:
-      first := NilV; last := NIL; vec := expr;
+      first := MkEmptyVec(); last := NIL; vec := expr;
       WHILE ~IsNil(vec) DO
         v := EvalRef(vec.head, env);
         IF err THEN RETURN NilV END;
@@ -2742,7 +2765,7 @@ BEGIN RETURN args END BList;
 PROCEDURE BVector(args: Value; env: Env): Value;
 VAR first, last, cell: Value;
 BEGIN
-  first := NilV; last := NIL;
+  first := MkEmptyVec(); last := NIL;
   WHILE ~IsNil(args) DO
     cell := MkVec(args.head, NilV);
     IF last = NIL THEN first := cell ELSE last.tail := cell END;
@@ -2755,9 +2778,9 @@ PROCEDURE BVec(args: Value; env: Env): Value;
 VAR coll, first, last, cell: Value;
 BEGIN
   coll := args.head;
-  IF IsNil(coll) THEN RETURN NilV END;
+  IF IsNil(coll) THEN RETURN MkEmptyVec() END;
   IF coll.tag = tSet THEN coll := coll.head END;
-  first := NilV; last := NIL;
+  first := MkEmptyVec(); last := NIL;
   WHILE ~IsNil(coll) & ((coll.tag = tList) OR (coll.tag = tVec)) DO
     cell := MkVec(coll.head, NilV);
     IF last = NIL THEN first := cell ELSE last.tail := cell END;
@@ -2834,7 +2857,11 @@ BEGIN
   coll := args.head; rest := args.tail;
   WHILE ~IsNil(rest) & ~err DO
     item := rest.head;
-    IF IsNil(coll) THEN
+    (* NB: check for a genuinely untyped nil (raw NIL or tag = tNil) here,
+       not the general IsNil -- an empty vector also satisfies IsNil (for
+       traversal purposes) but must still take the tVec branch below so
+       conj on [] appends rather than silently degrading to a list. *)
+    IF (coll = NIL) OR (coll.tag = tNil) THEN
       coll := Cons(item, NilV)
     ELSIF coll.tag = tList THEN
       coll := Cons(item, coll)
@@ -3042,7 +3069,7 @@ PROCEDURE BType(args: Value; env: Env): Value;
 VAR v: Value;
 BEGIN
   v := args.head;
-  IF IsNil(v) THEN RETURN MkKey("nil") END;
+  IF (v = NIL) OR (v.tag = tNil) THEN RETURN MkKey("nil") END;
   CASE v.tag OF
     tBool: RETURN MkKey("bool")
   | tInt: RETURN MkKey("int")
@@ -3429,7 +3456,7 @@ PROCEDURE BListQ(args: Value; env: Env): Value;
 BEGIN RETURN MkBool(IsNil(args.head) OR (~IsNil(args.head) & (args.head.tag = tList))) END BListQ;
 
 PROCEDURE BVectorQ(args: Value; env: Env): Value;
-BEGIN RETURN MkBool(~IsNil(args.head) & (args.head.tag = tVec)) END BVectorQ;
+BEGIN RETURN MkBool((args.head # NIL) & (args.head.tag = tVec)) END BVectorQ;
 
 PROCEDURE BMapQ(args: Value; env: Env): Value;
 BEGIN RETURN MkBool(~IsNil(args.head) & (args.head.tag = tMap)) END BMapQ;
@@ -3695,8 +3722,9 @@ BEGIN
     END;
     RETURN m
   END;
-  isVec := ~IsNil(dst) & (dst.tag = tVec);
-  first := NilV; last := NIL;
+  isVec := (dst # NIL) & (dst.tag = tVec);
+  IF isVec THEN first := MkEmptyVec() ELSE first := NilV END;
+  last := NIL;
   (* copy dst *)
   p := dst;
   WHILE ~IsNil(p) DO
