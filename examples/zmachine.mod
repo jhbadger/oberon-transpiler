@@ -869,7 +869,7 @@ BEGIN
   savedWin := curWin;
   curWin   := 1;            (* upper window: EmitChar just outputs *)
 
-  Esc("[s");                (* save cursor position *)
+  Esc("7");                (* save cursor position *)
   Terminal.Goto(1, 1);
   Esc("[7m");               (* reverse video *)
   (* Blank full line *)
@@ -887,7 +887,7 @@ BEGIN
   Strings.IntToStr(turns, numStr);
   Out.String(numStr);
   Esc("[0m");               (* reset video *)
-  Esc("[u");                (* restore cursor position *)
+  Esc("8");                (* restore cursor position *)
 
   curWin := savedWin
 END ShowStatus;
@@ -907,6 +907,10 @@ BEGIN
   IF zver >= 5 THEN WB(textBuf + 1, 0) END;
 
   Terminal.ShowCursor;
+  (* The game has almost always already printed its own prompt (e.g. "> ")
+     immediately before calling read. Return to column 1 first so our
+     prompt overwrites it in place instead of appending a second one. *)
+  Out.Char(0DX);
   History.ReadLine("> ", tmpLine);
   Terminal.HideCursor;
 
@@ -1447,29 +1451,32 @@ BEGIN
         IndSet(ops[0], Pop())
     | 10 :                                         (* split_window *)
         upperRows := ops[0];
+        (* Save the real cursor position *before* touching the scroll
+           region: DECSTBM itself homes the cursor as a side effect, so
+           saving after would just capture that clobbered position. *)
+        Esc("7");
         IF upperRows = 0 THEN
           SetScrollRegion(1, screenH)   (* full screen scrolls *)
         ELSE
           SetScrollRegion(upperRows + 1, screenH);  (* lower window only *)
           (* Clear upper rows *)
-          Terminal.Goto(1, 1);
           FOR i := 1 TO upperRows DO
             Terminal.Goto(1, i);
             FOR val := 1 TO screenW DO Out.Char(' ') END
-          END;
-          Terminal.Goto(1, upperRows + 1)
-        END
+          END
+        END;
+        Esc("8")                        (* restore the lower window's cursor *)
     | 11 :                                         (* set_window *)
         IF ops[0] = 1 THEN
           (* Switch to upper window: save lower cursor, go to upper *)
-          IF curWin = 0 THEN Esc("[s") END;
+          IF curWin = 0 THEN Esc("7") END;
           curWin := 1;
           upperX := 1;  upperY := 1;
           Terminal.Goto(upperX, upperY)
         ELSE
           (* Switch to lower window: restore saved lower cursor *)
           curWin := 0;
-          Esc("[u")
+          Esc("8")
         END
     | 12 :                                         (* call_vs2 (v4+) *)
         storeVar := RB(pc);  INC(pc);
@@ -1510,7 +1517,14 @@ BEGIN
         ELSE
           WW(ops[0], screenH);  WW(ops[0] + 2, curCol)
         END
-    | 17 :                                         (* set_text_style: ignore *)
+    | 17 :                                         (* set_text_style *)
+        IF ops[0] = 0 THEN
+          Esc("[0m")                              (* roman: reset styles *)
+        ELSE
+          IF BitTst(ops[0], 0) THEN Esc("[7m") END;  (* reverse video *)
+          IF BitTst(ops[0], 1) THEN Esc("[1m") END;  (* bold *)
+          IF BitTst(ops[0], 2) THEN Esc("[3m") END   (* italic *)
+        END
     | 18 :                                         (* buffer_mode: ignore *)
     | 19 :                                         (* output_stream *)
         IF S16(ops[0]) = 3 THEN
@@ -1792,7 +1806,7 @@ BEGIN
   END;
   Terminal.Goto(1, upperRows + 1);
   (* Save this as the initial lower-window cursor position *)
-  Esc("[s");
+  Esc("7");
 
   WHILE running DO
     Step
@@ -1806,7 +1820,7 @@ BEGIN
   Esc("[0m");        (* reset attributes *)
   curWin := 0;
   Terminal.Goto(1, upperRows + 1);
-  Esc("[u");
+  Esc("8");
 
   FlushWord;
   EmitNewline;
