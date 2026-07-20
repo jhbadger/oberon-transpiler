@@ -1142,6 +1142,25 @@ VAR
     END
   END ReadOps1;
 
+  (* Double-variable opcodes (call_vs2/call_vn2): per spec both type
+     bytes precede ALL operand data, giving up to 8 operands total
+     (first 4 typed by tb1, next 4 by tb2). *)
+  PROCEDURE ReadOps2(tb1, tb2: INTEGER);
+  VAR j, tp, tb: INTEGER;
+  BEGIN
+    nops := 0;
+    FOR j := 0 TO 7 DO
+      IF j < 4 THEN tb := tb1 ELSE tb := tb2 END;
+      tp := (tb DIV pw2[6 - (j MOD 4)*2]) MOD 4;
+      IF tp = 3 THEN RETURN END;
+      IF tp = 0 THEN ops[nops] := RW(pc); INC(pc, 2)
+      ELSIF tp = 1 THEN ops[nops] := RB(pc); INC(pc)
+      ELSE ops[nops] := GetVar(RB(pc)); INC(pc)
+      END;
+      INC(nops)
+    END
+  END ReadOps2;
+
 VAR dbgPC : INTEGER;
 BEGIN
   IF (dbgF # NIL) & (dbgN < DBGMAX) THEN
@@ -1161,21 +1180,14 @@ BEGIN
     form   := 2;
     opcode := opbyte MOD 32;
     typeByte := RB(pc);  INC(pc);
-    IF (opcode = 12) OR (opcode = 26) THEN  (* call_vs2 / call_vn2: two type bytes *)
-      ReadOps1(typeByte);
-      typeByte := RB(pc);  INC(pc);
-      (* read 4 more operands and append *)
-      FOR i := 0 TO 3 DO
-        t := (typeByte DIV pw2[6 - i*2]) MOD 4;
-        IF t = 3 THEN i := 4
-        ELSE
-          IF t = 0 THEN ops[nops] := RW(pc); INC(pc, 2)
-          ELSIF t = 1 THEN ops[nops] := RB(pc); INC(pc)
-          ELSE ops[nops] := GetVar(RB(pc)); INC(pc)
-          END;
-          INC(nops)
-        END
-      END
+    IF (opbyte >= 0E0H) & ((opcode = 12) OR (opcode = 26)) THEN
+      (* call_vs2 / call_vn2 (VAR-table opcodes 12/26): two type bytes,
+         both read before any operand data (Standard 1.1 sec 14.2.1).
+         Opcodes 0xC0-0xDF are 2OP instructions in variable encoding
+         (e.g. clear_attr=12, call_2n=26) and must NOT take a second
+         type byte, else the return address gets corrupted. *)
+      t := RB(pc);  INC(pc);
+      ReadOps2(typeByte, t)
     ELSE
       ReadOps1(typeByte)
     END;
