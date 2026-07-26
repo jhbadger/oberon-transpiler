@@ -44,6 +44,7 @@ CONST
   AC_BRISTOL=12; AC_DH4US=13; AC_STRUTTER=14; AC_DH4GB=15;
   NAIRCRAFT = 16;
   NSELECTABLE = 10;  (* single-seat Allied fighters the player may fly *)
+  MAXVARIANT = 7;    (* most colour/squadron variants any one aircraft has on the counter sheets *)
 
   MAXPLANES = 4;
   NENEMIES = 2;
@@ -79,6 +80,8 @@ TYPE
     maxDive           : INTEGER;
     ceiling           : INTEGER;
     hitE, hitFF, hitRF, hitT, hitLW, hitCW, hitRW : INTEGER;
+    texBase           : ARRAY 16 OF CHAR;  (* counter image filename prefix, e.g. "Camel" *)
+    texCount          : INTEGER;           (* number of _N colour/squadron variants on disk *)
   END;
 
   Plane = RECORD
@@ -99,6 +102,7 @@ TYPE
     target    : INTEGER;   (* declared target this turn, -1 = none *)
     fired     : BOOLEAN;
     label     : ARRAY 16 OF CHAR;
+    texVariant: INTEGER;   (* which _N counter-sheet colour variant this individual plane uses *)
   END;
 
 VAR
@@ -145,6 +149,11 @@ VAR
 
   texCover, texSpad, texFokker, texAlbatros : Raylib.Texture;
   haveCover, haveSpad, haveFokker, haveAlbatros : BOOLEAN;
+
+  (* real counter-sheet artwork: planeTex[kind][variant], up to MAXVARIANT colour/squadron
+     variants per aircraft type (7 needed for the S.P.A.D. pool). *)
+  planeTex   : ARRAY NAIRCRAFT, MAXVARIANT OF Raylib.Texture;
+  planeTexOK : ARRAY NAIRCRAFT, MAXVARIANT OF BOOLEAN;
 
   cBlack, cWhite, cRed, cGreen, cBlue, cYellow, cLGray, cDGray, cSky,
     cBrown, cOrange, cGold : INTEGER;
@@ -235,71 +244,94 @@ BEGIN
   acTypes[idx].climb[band] := climb
 END DefBand;
 
+(* base: counter-sheet filename prefix, e.g. "Camel" for Camel_1.jpg..Camel_4.jpg *)
+PROCEDURE DefTex(idx : INTEGER; base : ARRAY OF CHAR; count : INTEGER);
+BEGIN
+  COPY(base, acTypes[idx].texBase);
+  acTypes[idx].texCount := count
+END DefTex;
+
 PROCEDURE InitAircraftTypes;
 BEGIN
   DefAC(AC_SNIPE, ALLIED, NAT_BRITISH, 1, 2, FALSE, 2,0, 1500,19500, 6,11,15,11,12,12,12, "Sopwith 7F.1 Snipe");
   DefBand(AC_SNIPE,0, 120,110,350); DefBand(AC_SNIPE,1, 120,110,300);
   DefBand(AC_SNIPE,2, 110,100,250); DefBand(AC_SNIPE,3, 110,100,200);
+  DefTex(AC_SNIPE, "Snipe", 2);
 
   DefAC(AC_CAMEL, ALLIED, NAT_BRITISH, 1, 2, FALSE, 2,0, 1500,22000, 6,11,15,11,12,12,12, "Sopwith F.1 Camel");
   DefBand(AC_CAMEL,0, 120,110,400); DefBand(AC_CAMEL,1, 110,110,350);
   DefBand(AC_CAMEL,2, 110,100,250); DefBand(AC_CAMEL,3, 100,90,200);
+  DefTex(AC_CAMEL, "Camel", 4);
 
   DefAC(AC_DOLPHIN, ALLIED, NAT_BRITISH, 1, 2, FALSE, 2,1, 1500,21000, 6,11,15,12,12,12,12, "Sopwith 5F.1 Dolphin");
   DefBand(AC_DOLPHIN,0, 130,100,400); DefBand(AC_DOLPHIN,1, 120,90,300);
   DefBand(AC_DOLPHIN,2, 120,90,250); DefBand(AC_DOLPHIN,3, 110,80,150);
+  DefTex(AC_DOLPHIN, "Dolphin", 2);
 
   DefAC(AC_DH5, ALLIED, NAT_BRITISH, 1, 2, FALSE, 1,0, 1550,16000, 6,10,15,10,11,11,11, "De Havilland 5");
   DefBand(AC_DH5,0, 110,90,300); DefBand(AC_DH5,1, 100,80,200);
   DefBand(AC_DH5,2, 90,70,100);  DefBand(AC_DH5,3, 80,60,50);
+  DefTex(AC_DH5, "DH5", 2);
 
   DefAC(AC_SPAD7, ALLIED, NAT_FRENCH, 1, 2, FALSE, 1,0, 1550,18000, 6,11,16,12,12,12,12, "S.P.A.D. VII");
   DefBand(AC_SPAD7,0, 120,90,300); DefBand(AC_SPAD7,1, 110,80,250);
   DefBand(AC_SPAD7,2, 110,70,200); DefBand(AC_SPAD7,3, 100,60,100);
+  DefTex(AC_SPAD7, "SPAD", 7);
 
   DefAC(AC_SPAD13, ALLIED, NAT_FRENCH, 1, 2, FALSE, 2,0, 1600,22300, 6,11,16,12,12,12,12, "S.P.A.D. XIII");
   DefBand(AC_SPAD13,0, 130,100,400); DefBand(AC_SPAD13,1, 120,90,300);
   DefBand(AC_SPAD13,2, 120,80,250); DefBand(AC_SPAD13,3, 110,70,150);
+  DefTex(AC_SPAD13, "SPAD", 7);
 
   DefAC(AC_NIEU17, ALLIED, NAT_FRENCH, 1, 2, FALSE, 1,0, 1350,17500, 6,10,14,10,10,10,10, "Nieuport 17");
   DefBand(AC_NIEU17,0, 100,100,400); DefBand(AC_NIEU17,1, 100,90,350);
   DefBand(AC_NIEU17,2, 90,80,300);   DefBand(AC_NIEU17,3, 80,70,200);
+  DefTex(AC_NIEU17, "Nieuport17", 4);
 
   DefAC(AC_NIEU28, ALLIED, NAT_AMERICAN, 1, 2, FALSE, 2,0, 1400,19000, 6,11,15,11,11,11,11, "Nieuport 28");
   DefBand(AC_NIEU28,0, 130,100,350); DefBand(AC_NIEU28,1, 120,100,300);
   DefBand(AC_NIEU28,2, 120,90,250);  DefBand(AC_NIEU28,3, 110,80,200);
+  DefTex(AC_NIEU28, "Nieuport28", 2);
 
   DefAC(AC_MSAI, ALLIED, NAT_FRENCH, 1, 1, FALSE, 2,0, 1500,23000, 6,11,15,11,11,11,11, "Morane-Saulnier AI");
   DefBand(AC_MSAI,0, 130,100,450); DefBand(AC_MSAI,1, 130,90,350);
   DefBand(AC_MSAI,2, 120,80,250);  DefBand(AC_MSAI,3, 110,80,150);
+  DefTex(AC_MSAI, "Morane", 2);
 
   DefAC(AC_HANRIOT, ALLIED, NAT_ITALIAN, 1, 2, FALSE, 1,0, 1500,21000, 6,10,15,10,11,11,11, "Hanriot HD-1");
   DefBand(AC_HANRIOT,0, 110,100,350); DefBand(AC_HANRIOT,1, 100,90,300);
   DefBand(AC_HANRIOT,2, 90,80,200);   DefBand(AC_HANRIOT,3, 80,70,150);
+  DefTex(AC_HANRIOT, "HanriotHD1", 3);
 
   DefAC(AC_DRI, GERMAN, NAT_GERMAN, 1, 3, FALSE, 2,0, 1450,19600, 6,10,14,10,11,12,11, "Fokker Dr.I");
   DefBand(AC_DRI,0, 110,110,450); DefBand(AC_DRI,1, 100,100,400);
   DefBand(AC_DRI,2, 90,90,300);   DefBand(AC_DRI,3, 80,80,200);
+  DefTex(AC_DRI, "FokkerDr1", 4);
 
   DefAC(AC_DVII, GERMAN, NAT_GERMAN, 1, 2, FALSE, 2,0, 1500,22900, 6,11,16,12,12,13,12, "Fokker D.VII");
   DefBand(AC_DVII,0, 120,110,400); DefBand(AC_DVII,1, 120,110,350);
   DefBand(AC_DVII,2, 110,100,300); DefBand(AC_DVII,3, 100,90,200);
+  DefTex(AC_DVII, "FokkerDVII", 5);
 
   DefAC(AC_BRISTOL, ALLIED, NAT_BRITISH, 2, 2, FALSE, 1,1, 1500,20000, 6,11,16,11,12,12,12, "Bristol F.2B");
   DefBand(AC_BRISTOL,0, 110,90,300); DefBand(AC_BRISTOL,1, 100,80,250);
   DefBand(AC_BRISTOL,2, 90,70,200);  DefBand(AC_BRISTOL,3, 90,70,100);
+  DefTex(AC_BRISTOL, "Bristol", 3);
 
   DefAC(AC_DH4US, ALLIED, NAT_AMERICAN, 2, 2, TRUE, 2,2, 1400,15800, 7,11,16,11,12,12,12, "American D.H.4");
   DefBand(AC_DH4US,0, 120,90,250); DefBand(AC_DH4US,1, 110,80,200);
   DefBand(AC_DH4US,2, 110,80,150); DefBand(AC_DH4US,3, 100,70,100);
+  DefTex(AC_DH4US, "DH4", 3);
 
   DefAC(AC_STRUTTER, ALLIED, NAT_BRITISH, 2, 1, TRUE, 1,1, 1400,15500, 6,10,15,10,10,10,10, "Sopwith 1 1/2 Strutter");
   DefBand(AC_STRUTTER,0, 100,70,250); DefBand(AC_STRUTTER,1, 90,70,150);
   DefBand(AC_STRUTTER,2, 80,60,100);  DefBand(AC_STRUTTER,3, 70,60,50);
+  DefTex(AC_STRUTTER, "Sopwith1_5", 2);
 
   DefAC(AC_DH4GB, ALLIED, NAT_BRITISH, 2, 2, TRUE, 1,1, 1400,16000, 6,11,16,11,12,12,12, "De Havilland 4");
   DefBand(AC_DH4GB,0, 120,80,250); DefBand(AC_DH4GB,1, 110,80,200);
   DefBand(AC_DH4GB,2, 100,70,100); DefBand(AC_DH4GB,3, 90,60,50);
+  DefTex(AC_DH4GB, "DH4", 3);
 
   selectable[0] := AC_SNIPE;    selectable[1] := AC_CAMEL;
   selectable[2] := AC_DOLPHIN;  selectable[3] := AC_DH5;
@@ -859,6 +891,7 @@ BEGIN
   planes[pi].dmgT  := 0; planes[pi].dmgLW := 0; planes[pi].dmgCW := 0; planes[pi].dmgRW := 0;
   planes[pi].pilotHit := FALSE;  planes[pi].obsHit := FALSE;
   planes[pi].tailing  := -1;     planes[pi].target := -1;  planes[pi].fired := FALSE;
+  planes[pi].texVariant := Random.Int(acTypes[kind].texCount);
   COPY(lbl, planes[pi].label)
 END MakePlane;
 
@@ -1176,15 +1209,18 @@ BEGIN
 END DrawHUD;
 
 PROCEDURE DrawPlay;
-VAR i : INTEGER; p : Plane;
+VAR i, sx, sy, tint : INTEGER; p : Plane;
 BEGIN
   Raylib.ClearBackground(cSky);
   DrawGrid;
   FOR i := 0 TO nplanes - 1 DO
     p := planes[i];
     IF p.alive OR (i = playerIdx) THEN
-      DrawPlaneIcon(ScreenX(p.gx), ScreenY(p.gy), p.dir, acTypes[p.kind].wings, p.side,
-                    14.0, ~p.alive)
+      sx := ScreenX(p.gx);  sy := ScreenY(p.gy);
+      IF p.alive THEN tint := cWhite ELSE tint := cDGray END;
+      IF ~DrawSprite(p.kind, p.texVariant, p.dir, sx, sy, 34.0, tint) THEN
+        DrawPlaneIcon(sx, sy, p.dir, acTypes[p.kind].wings, p.side, 14.0, ~p.alive)
+      END
     END
   END;
   DrawHUD
@@ -1228,7 +1264,9 @@ BEGIN
   END;
 
   kind := selectable[selType];  at := acTypes[kind];
-  DrawPlaneIcon(760, 160, DIR_N, at.wings, ALLIED, 40.0, FALSE);
+  IF ~DrawSprite(kind, 0, DIR_N, 760, 160, 90.0, cWhite) THEN
+    DrawPlaneIcon(760, 160, DIR_N, at.wings, ALLIED, 40.0, FALSE)
+  END;
 
   NationLabel(at.nation, s);
   Raylib.DrawText(s, 620, 260, 18, cSky);
@@ -1295,6 +1333,11 @@ END Draw;
    Raylib.LoadTexture also always returns a non-NIL wrapper, even when the
    file is missing (it only reports failure via TextureWidth = 0), so
    success has to be checked via the decoded width, not a NIL-check. *)
+PROCEDURE FolderFor(side : INTEGER; VAR s : ARRAY OF CHAR);
+BEGIN
+  IF side = ALLIED THEN COPY("allied", s) ELSE COPY("central", s) END
+END FolderFor;
+
 PROCEDURE TryLoad(VAR tex : Raylib.Texture; relPath : ARRAY OF CHAR) : BOOLEAN;
 VAR path : ARRAY 256 OF CHAR;
 BEGIN
@@ -1313,6 +1356,48 @@ BEGIN
   haveAlbatros := TryLoad(texAlbatros, "albatros_cxii.jpg")
 END LoadAssets;
 
+(* Real counter-sheet artwork for every aircraft type/variant, cut from the
+   two counter sheets into examples/dawnpatrol_gfx/counters/{allied,central}/. *)
+PROCEDURE LoadCounterTextures;
+VAR k, v : INTEGER; relPath, folder, ns : ARRAY 256 OF CHAR;
+BEGIN
+  FOR k := 0 TO NAIRCRAFT - 1 DO
+    FolderFor(acTypes[k].side, folder);
+    FOR v := 0 TO acTypes[k].texCount - 1 DO
+      COPY("counters/", relPath);
+      Strings.Append(folder, relPath);
+      Strings.Append("/", relPath);
+      Strings.Append(acTypes[k].texBase, relPath);
+      Strings.Append("_", relPath);
+      Strings.IntToStr(v + 1, ns);
+      Strings.Append(ns, relPath);
+      Strings.Append(".jpg", relPath);
+      planeTexOK[k][v] := TryLoad(planeTex[k][v], relPath)
+    END
+  END
+END LoadCounterTextures;
+
+(* Draw aircraft type/variant `kind`/`variant`, facing `dir` (0..7, 0=N),
+   centred at screen point (px,py), scaled so it is `targetW` pixels wide.
+   Returns FALSE (no draw) if that counter image failed to load, so the
+   caller can fall back to the vector silhouette. *)
+PROCEDURE DrawSprite(kind, variant, dir, px, py : INTEGER; targetW : REAL; tint : INTEGER) : BOOLEAN;
+VAR tex : Raylib.Texture; scale, ang, hw, hh, offx, offy, posx, posy : REAL;
+BEGIN
+  IF ~planeTexOK[kind][variant] THEN RETURN FALSE END;
+  tex := planeTex[kind][variant];
+  scale := targetW / FLT(Raylib.TextureWidth(tex));
+  hw := FLT(Raylib.TextureWidth(tex))  * scale * 0.5;
+  hh := FLT(Raylib.TextureHeight(tex)) * scale * 0.5;
+  ang := FLT(dir) * (Math.pi / 4.0);
+  offx := hw * Math.cos(ang) - hh * Math.sin(ang);
+  offy := hw * Math.sin(ang) + hh * Math.cos(ang);
+  posx := FLT(px) - offx;
+  posy := FLT(py) - offy;
+  Raylib.DrawTextureEx(tex, posx, posy, ang * 180.0 / Math.pi, scale, tint);
+  RETURN TRUE
+END DrawSprite;
+
 BEGIN
   cBlack  := Raylib.Black();   cWhite := Raylib.White();  cRed    := Raylib.Red();
   cGreen  := Raylib.Green();   cBlue  := Raylib.DarkBlue(); cYellow := Raylib.Yellow();
@@ -1326,6 +1411,7 @@ BEGIN
   InitAircraftTypes;
   InitHitTable;
   LoadAssets;
+  LoadCounterTextures;
 
   stage := ST_TITLE;
   turnNum := 0;
