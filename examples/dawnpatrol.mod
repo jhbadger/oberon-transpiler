@@ -12,13 +12,16 @@ MODULE DawnPatrol;
  * automatically follow them next turn, as the book's tailing rules intend.
  *
  * Controls:
- *   Title / briefing : Up/Down choose aircraft, Enter to fly, Esc quits.
+ *   Title screen      : Enter to choose your aircraft, T for the tutorial,
+ *                       Esc quits.
+ *   Tutorial          : Left/Right to page through, Enter also advances.
+ *   Briefing          : Up/Down choose aircraft, Enter to fly, Esc quits.
  *   Altitude step     : Up/Down adjust climb(+)/dive(-) 50ft, Enter locks in.
  *   Throttle step     : Up/Down adjust +-10 mph, Enter locks in.
  *   Move step         : Left/Right turn 45 (once per square), Space/Enter
  *                       advance one square, I = Immelmann, L = Loop.
  *   Target step       : Up/Down cycle targets in your arc, Enter to fire,
- *                       Esc to hold fire.
+ *                       Backspace to hold fire.
  *   Game over         : Enter restarts at the title screen.
  *)
 
@@ -50,7 +53,10 @@ CONST
   NENEMIES = 2;
 
   (* top-level stages *)
-  ST_TITLE=0; ST_BRIEF=1; ST_PLAY=2; ST_OVER=3;
+  ST_TITLE=0; ST_BRIEF=1; ST_PLAY=2; ST_OVER=3; ST_TUTORIAL=4;
+
+  NTUTPAGES   = 6;
+  MAXTUTLINES = 6;
 
   (* per-turn sub-stages *)
   SUB_ORDER=0; SUB_ALT=1; SUB_THROTTLE=2; SUB_STEP=3; SUB_TARGET=4;
@@ -140,6 +146,11 @@ VAR
   camX, camY : REAL;
 
   selType : INTEGER;   (* index into `selectable`, briefing screen cursor *)
+
+  tutTitle     : ARRAY NTUTPAGES OF ARRAY 40 OF CHAR;
+  tutLines     : ARRAY NTUTPAGES, MAXTUTLINES OF ARRAY 76 OF CHAR;
+  tutLineCount : ARRAY NTUTPAGES OF INTEGER;
+  tutPage      : INTEGER;
 
   msgLog   : ARRAY MAXLOG OF ARRAY 72 OF CHAR;
   msgCount : INTEGER;
@@ -389,6 +400,65 @@ BEGIN
   SetHit(6,ANG_HEAD,LOC_LW);  SetHit(6,ANG_SIDE,LOC_T);   SetHit(6,ANG_TAIL,LOC_RW);
   SetHit(6,ANG_TOP,LOC_T);    SetHit(6,ANG_BOTTOM,LOC_T)
 END InitHitTable;
+
+(* ════════════════════════════════════════════════════════════════════ *)
+(*  Tutorial content                                                      *)
+(* ════════════════════════════════════════════════════════════════════ *)
+
+PROCEDURE TT(page : INTEGER; title : ARRAY OF CHAR; count : INTEGER);
+BEGIN
+  COPY(title, tutTitle[page]);
+  tutLineCount[page] := count
+END TT;
+
+PROCEDURE TL(page, line : INTEGER; text : ARRAY OF CHAR);
+BEGIN COPY(text, tutLines[page][line]) END TL;
+
+PROCEDURE InitTutorial;
+BEGIN
+  TT(0, "OBJECTIVE", 5);
+  TL(0,0, "You fly one Allied fighter against a German patrol.");
+  TL(0,1, "Shoot down every enemy plane to win; if you are shot down, you lose.");
+  TL(0,2, "The game proceeds in turns. Each turn every plane moves once, in an");
+  TL(0,3, "order rolled by dice, then all that turn's attacks are resolved together.");
+  TL(0,4, "The right-hand panel always shows what the current stage wants from you.");
+
+  TT(1, "MOVEMENT ORDER & ALTITUDE", 5);
+  TL(1,0, "Each turn planes are ordered by a 2-dice roll (two-seaters add +1).");
+  TL(1,1, "A plane 2000+ feet below every other plane always moves first.");
+  TL(1,2, "A plane that ended last turn on an enemy's tail auto-follows them.");
+  TL(1,3, "ALTITUDE step: Up/Down climb or dive in 50ft steps, Enter locks it in.");
+  TL(1,4, "Diving grants bonus movement: one extra square per full 100ft dived.");
+
+  TT(2, "THROTTLE & MOVING", 6);
+  TL(2,0, "THROTTLE step: Up/Down adjust +-10mph (capped by your turn speed).");
+  TL(2,1, "Your squares this turn = throttle/10, plus any dive bonus -- and you");
+  TL(2,2, "must use all of it, so plan your speed before you commit to Enter.");
+  TL(2,3, "MOVE step: Left/Right turn 45 (once per square), Space/Enter advances.");
+  TL(2,4, "I = Immelmann: reverse facing in place, costs 3 squares.");
+  TL(2,5, "L = Loop: reverse position and keep facing, costs 4 squares.");
+
+  TT(3, "ATTACKS & TARGETS", 5);
+  TL(3,0, "After moving, if an enemy is in your forward gun arc within 500ft,");
+  TL(3,1, "you may declare it as your target (Up/Down choose, Enter fires).");
+  TL(3,2, "Two-seaters can also fire backward at planes in their rear arc.");
+  TL(3,3, "All declared shots are resolved together once everyone has moved.");
+  TL(3,4, "Each attack costs one burst of ammunition -- 15 bursts per plane.");
+
+  TT(4, "DAMAGE", 5);
+  TL(4,0, "A hit roll depends on range, then 1-6 hits are rolled, each landing");
+  TL(4,1, "on a random section: engine, fuselage, tail, or a wing.");
+  TL(4,2, "A plane is shot down when any one section reaches its damage limit.");
+  TL(4,3, "Unlucky hits can also wound the pilot (shot down outright) or the");
+  TL(4,4, "observer on a two-seater (rear gun disabled for the rest of the fight).");
+
+  TT(5, "TIPS", 5);
+  TL(5,0, "Get on an enemy's tail for the best shot -- and watch your own tail.");
+  TL(5,1, "Diving trades altitude for speed and extra movement squares.");
+  TL(5,2, "Climbing costs you speed options next turn but gains a height edge.");
+  TL(5,3, "Don't run out of ammo: 15 bursts must last the whole fight.");
+  TL(5,4, "Good hunting!")
+END InitTutorial;
 
 (* ════════════════════════════════════════════════════════════════════ *)
 (*  Plane accessors                                                      *)
@@ -922,8 +992,23 @@ PROCEDURE UpdateTitle;
 BEGIN
   IF Raylib.IsKeyPressed(Raylib.KeyEnter) = 1 THEN
     stage := ST_BRIEF;  selType := 0
+  ELSIF Raylib.IsKeyPressed(ORD("T")) = 1 THEN
+    stage := ST_TUTORIAL;  tutPage := 0
   END
 END UpdateTitle;
+
+(* NOTE: raylib's default exit key is Esc, and this binding doesn't expose
+   SetExitKey to change that -- pressing Esc always closes the whole window
+   (see WindowShouldClose), so Esc is never used here as an in-screen
+   "back"/"cancel" key, only Left/Right/Enter. *)
+PROCEDURE UpdateTutorial;
+BEGIN
+  IF (Raylib.IsKeyPressed(Raylib.KeyRight) = 1) OR (Raylib.IsKeyPressed(Raylib.KeyEnter) = 1) THEN
+    IF tutPage < NTUTPAGES - 1 THEN INC(tutPage) ELSE stage := ST_TITLE END
+  ELSIF Raylib.IsKeyPressed(Raylib.KeyLeft) = 1 THEN
+    IF tutPage > 0 THEN DEC(tutPage) ELSE stage := ST_TITLE END
+  END
+END UpdateTutorial;
 
 PROCEDURE UpdateBrief;
 BEGIN
@@ -998,7 +1083,10 @@ BEGIN
   ELSIF Raylib.IsKeyPressed(Raylib.KeyEnter) = 1 THEN
     planes[pi].target := targetList[targetSel];
     substage := SUB_NEXT
-  ELSIF Raylib.IsKeyPressed(Raylib.KeyEsc) = 1 THEN
+  ELSIF Raylib.IsKeyPressed(Raylib.KeyBackspace) = 1 THEN
+    (* NOTE: not Esc -- raylib's default exit key is Esc and this binding
+       can't change that, so Esc always closes the whole window rather
+       than just declining to fire. *)
     substage := SUB_NEXT
   END
 END UpdateTargetSel;
@@ -1174,7 +1262,7 @@ BEGIN
     SUB_ALT:      s := "ALTITUDE: Up/Dn adjust, Enter locks"
   | SUB_THROTTLE: s := "THROTTLE: Up/Dn adjust, Enter locks"
   | SUB_STEP:     s := "MOVE: Left/Right turn, Space steps, I/L maneuvers"
-  | SUB_TARGET:   s := "TARGET: Up/Dn choose, Enter fires, Esc holds"
+  | SUB_TARGET:   s := "TARGET: Up/Dn choose, Enter fires, Backspace holds"
   ELSE s := ""
   END;
   IF (s[0] # 0X) & planes[activePlane].isPlayer THEN
@@ -1236,14 +1324,37 @@ VAR tw : INTEGER;
 BEGIN
   Raylib.ClearBackground(cBlack);
   IF haveCover THEN FitTexture(texCover, 0, 0, W, H) END;
-  Raylib.DrawRectangle(0, H - 160, W, 160, Raylib.Fade(cBlack, 0.65));
+  Raylib.DrawRectangle(0, H - 190, W, 190, Raylib.Fade(cBlack, 0.65));
   tw := Raylib.MeasureText("DAWN PATROL", 56);
-  Raylib.DrawText("DAWN PATROL", W DIV 2 - tw DIV 2, H - 140, 56, cGold);
+  Raylib.DrawText("DAWN PATROL", W DIV 2 - tw DIV 2, H - 170, 56, cGold);
   tw := Raylib.MeasureText("WWI Aerial Combat -- Raylib Edition", 20);
-  Raylib.DrawText("WWI Aerial Combat -- Raylib Edition", W DIV 2 - tw DIV 2, H - 76, 20, cWhite);
+  Raylib.DrawText("WWI Aerial Combat -- Raylib Edition", W DIV 2 - tw DIV 2, H - 106, 20, cWhite);
   tw := Raylib.MeasureText("Press ENTER to choose your aircraft", 18);
-  Raylib.DrawText("Press ENTER to choose your aircraft", W DIV 2 - tw DIV 2, H - 40, 18, cLGray)
+  Raylib.DrawText("Press ENTER to choose your aircraft", W DIV 2 - tw DIV 2, H - 66, 18, cLGray);
+  tw := Raylib.MeasureText("Press T for a tutorial", 18);
+  Raylib.DrawText("Press T for a tutorial", W DIV 2 - tw DIV 2, H - 40, 18, cSky)
 END DrawTitle;
+
+PROCEDURE DrawTutorial;
+VAR i, y, tw : INTEGER; s, ns : ARRAY 40 OF CHAR;
+BEGIN
+  Raylib.ClearBackground(cBlack);
+  Raylib.DrawText("HOW TO PLAY", 40, 30, 28, cGold);
+  Raylib.DrawText(tutTitle[tutPage], 40, 76, 22, cYellow);
+
+  y := 120;
+  FOR i := 0 TO tutLineCount[tutPage] - 1 DO
+    Raylib.DrawText(tutLines[tutPage][i], 40, y, 18, cWhite);
+    INC(y, 28)
+  END;
+
+  s := "";  Strings.IntToStr(tutPage + 1, ns);  Strings.Append(ns, s);
+  Strings.Append(" / ", s);  Strings.IntToStr(NTUTPAGES, ns);  Strings.Append(ns, s);
+  tw := Raylib.MeasureText(s, 16);
+  Raylib.DrawText(s, W - tw - 40, H - 40, 16, cLGray);
+
+  Raylib.DrawText("Left/Right to page through -- Enter to continue", 40, H - 40, 16, cLGray)
+END DrawTutorial;
 
 PROCEDURE DrawBrief;
 VAR i, y, kind : INTEGER; s, ns : ARRAY 80 OF CHAR; at : AircraftType;
@@ -1311,10 +1422,11 @@ PROCEDURE Draw;
 BEGIN
   Raylib.BeginDrawing;
   CASE stage OF
-    ST_TITLE: DrawTitle
-  | ST_BRIEF: DrawBrief
-  | ST_PLAY:  DrawPlay
-  | ST_OVER:  DrawOver
+    ST_TITLE:    DrawTitle
+  | ST_TUTORIAL: DrawTutorial
+  | ST_BRIEF:    DrawBrief
+  | ST_PLAY:     DrawPlay
+  | ST_OVER:     DrawOver
   ELSE
   END;
   Raylib.EndDrawing
@@ -1410,6 +1522,7 @@ BEGIN
   InitDirs;
   InitAircraftTypes;
   InitHitTable;
+  InitTutorial;
   LoadAssets;
   LoadCounterTextures;
 
@@ -1419,10 +1532,11 @@ BEGIN
   WHILE Raylib.WindowShouldClose() = 0 DO
     dt := Raylib.GetFrameTime();
     CASE stage OF
-      ST_TITLE: UpdateTitle
-    | ST_BRIEF: UpdateBrief
-    | ST_PLAY:  UpdatePlay
-    | ST_OVER:  UpdateOver
+      ST_TITLE:    UpdateTitle
+    | ST_TUTORIAL: UpdateTutorial
+    | ST_BRIEF:    UpdateBrief
+    | ST_PLAY:     UpdatePlay
+    | ST_OVER:     UpdateOver
     ELSE
     END;
     Draw
