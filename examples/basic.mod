@@ -16,9 +16,14 @@ MODULE Basic;
  *                              are immediate commands; anything else is
  *                              executed immediately, e.g. "PRINT 2+2")
  *
- * Language summary (see Help(), printed by the interactive prompt's HELP
- * command):
- *   Statements : PRINT INPUT LET IF/THEN FOR/TO/STEP/NEXT GOTO GOSUB
+ * The interactive prompt and INPUT statement are read via the History
+ * module, so Up/Down recall previous lines and left/right/backspace edit
+ * in place (see History.mod). '?' is accepted everywhere PRINT is and is
+ * rewritten to PRINT in the stored program text, Applesoft-style.
+ *
+ * Language summary (see ShowHelp(), printed by the interactive prompt's
+ * HELP command; HELP topic, e.g. HELP SOUND, gives details on one item):
+ *   Statements : PRINT(?) INPUT LET IF/THEN FOR/TO/STEP/NEXT GOTO GOSUB
  *                RETURN ON...GOTO/GOSUB END STOP DIM DATA READ RESTORE
  *                CLS/HOME LOCATE RANDOMIZE
  *   Graphics   : SCREEN COLOR PSET LINE CIRCLE FCIRCLE RECT FRECT TEXT
@@ -29,7 +34,7 @@ MODULE Basic;
  *   Comments   : REM or '
  *)
 
-IMPORT Out, In, Strings, Random, Math, Time, Files, Args, Raylib;
+IMPORT Out, Strings, Random, Math, Time, Files, Args, Raylib, History;
 
 CONST
   MaxLines      = 4000;
@@ -848,8 +853,7 @@ BEGIN
     Strings.Append("? ", prompt);
     IF (CurKind(tb) = TkSemi) OR (CurKind(tb) = TkComma) THEN INC(tb.pos) END
   END;
-  POut(prompt);
-  In.Line(line);
+  History.ReadLine(prompt, line); outCol := 0;
   fieldN := 0;
   LOOP
     IF CurKind(tb) # TkIdent THEN EXIT END;
@@ -1392,6 +1396,7 @@ BEGIN
       IF Strings.StrToInt(tok, num) THEN
         Strings.Extract(line, pos, Strings.Length(line) - pos, rest);
         Strings.Trim(rest);
+        ExpandQuestionMarks(rest);
         InsertLine(num, rest)
       END
     END
@@ -1436,22 +1441,177 @@ BEGIN
   END
 END StripQuotes;
 
+(* '?' is shorthand for PRINT (Applesoft/GW-BASIC style). Rewrite every '?'
+ * that appears outside a quoted string into "PRINT" (with a separating
+ * space if it would otherwise fuse with the following identifier/number),
+ * so the stored program text -- and LIST output -- always reads PRINT. *)
+PROCEDURE ExpandQuestionMarks(VAR s: ARRAY OF CHAR);
+VAR i, j: INTEGER; c: CHAR; inStr: BOOLEAN; buf: STRING;
+BEGIN
+  i := 0; j := 0; inStr := FALSE;
+  WHILE (s[i] # 0X) & (j < MaxLineLen - 6) DO
+    c := s[i];
+    IF c = '"' THEN inStr := ~inStr END;
+    IF (c = '?') & ~inStr THEN
+      buf[j] := 'P'; INC(j); buf[j] := 'R'; INC(j); buf[j] := 'I'; INC(j);
+      buf[j] := 'N'; INC(j); buf[j] := 'T'; INC(j);
+      IF IsAlnum(s[i+1]) THEN buf[j] := ' '; INC(j) END
+    ELSE
+      buf[j] := c; INC(j)
+    END;
+    INC(i)
+  END;
+  buf[j] := 0X;
+  Strings.Copy(buf, s)
+END ExpandQuestionMarks;
+
 PROCEDURE ShowBanner;
 BEGIN
   POut("BASIC -- Raylib graphics & sound, terminal otherwise."); PNL;
-  POut("Type HELP for commands, BYE to quit."); PNL
+  POut("Type HELP for commands, HELP topic for details, BYE to quit."); PNL
 END ShowBanner;
 
 PROCEDURE ShowHelp;
 BEGIN
   POut("Commands   : RUN  LIST  NEW  LOAD file  SAVE file  CLEAR  BYE"); PNL;
-  POut("Statements : PRINT INPUT LET IF/THEN FOR/TO/STEP/NEXT GOTO GOSUB/RETURN"); PNL;
+  POut("Statements : PRINT(?) INPUT LET IF/THEN FOR/TO/STEP/NEXT GOTO GOSUB/RETURN"); PNL;
   POut("             ON..GOTO/GOSUB END STOP DIM DATA/READ/RESTORE CLS LOCATE"); PNL;
   POut("Graphics   : SCREEN COLOR PSET LINE CIRCLE FCIRCLE RECT FRECT TEXT"); PNL;
   POut("Sound      : SOUND BEEP DELAY"); PNL;
   POut("Type a numbered line to add/replace/delete it; anything else runs"); PNL;
-  POut("immediately, e.g. PRINT 2+2."); PNL
+  POut("immediately, e.g. PRINT 2+2 (or ? 2+2)."); PNL;
+  POut("Type HELP topic for details on one item, e.g. HELP SOUND, HELP FUNCTIONS."); PNL;
+  POut("Up/Down arrows recall previous input lines."); PNL
 END ShowHelp;
+
+PROCEDURE ShowHelpTopic(topic: ARRAY OF CHAR);
+BEGIN
+  IF (topic = "PRINT") OR ((Strings.Length(topic) = 1) & (topic[0] = '?')) THEN
+    POut("PRINT expr[,expr|;expr]...        (also spelled: ? expr...)"); PNL;
+    POut("  Prints values. ';' joins with no space; ',' pads to the next"); PNL;
+    POut("  14-column zone. TAB(n) moves to column n. Ending in ',' or ';'"); PNL;
+    POut("  suppresses the trailing newline. '?' is shorthand for PRINT and"); PNL;
+    POut("  is rewritten to PRINT wherever it appears."); PNL
+  ELSIF topic = "INPUT" THEN
+    POut("INPUT [prompt$;] var[,var]...        (prompt$ is a quoted string)"); PNL;
+    POut("  Reads a comma-separated line from the keyboard into the given"); PNL;
+    POut("  variables (numeric, or string$). An optional quoted prompt is"); PNL;
+    POut("  shown before the '?' prompt. Up/Down recall earlier input."); PNL
+  ELSIF topic = "LET" THEN
+    POut("[LET] var = expr          [LET] arr(i[,j]) = expr"); PNL;
+    POut("  Assigns expr to a scalar or array variable. LET is optional."); PNL
+  ELSIF (topic = "IF") OR (topic = "THEN") THEN
+    POut("IF expr THEN stmt[:stmt...]        IF expr THEN linenum"); PNL;
+    POut("  Runs the statement(s) after THEN, or jumps to linenum, only when"); PNL;
+    POut("  expr is true (nonzero, or a non-empty string). No ELSE."); PNL
+  ELSIF (topic = "FOR") OR (topic = "TO") OR (topic = "STEP") OR (topic = "NEXT") THEN
+    POut("FOR var = start TO limit [STEP step]"); PNL;
+    POut("  ... NEXT [var]"); PNL;
+    POut("  Repeats the enclosed statements, counting var from start to"); PNL;
+    POut("  limit (inclusive) by step (default 1; may be negative)."); PNL
+  ELSIF topic = "GOTO" THEN
+    POut("GOTO linenum"); PNL;
+    POut("  Jumps to the statement at linenum."); PNL
+  ELSIF (topic = "GOSUB") OR (topic = "RETURN") THEN
+    POut("GOSUB linenum   ...   RETURN"); PNL;
+    POut("  GOSUB jumps to linenum, remembering where it was called from;"); PNL;
+    POut("  RETURN jumps back to the statement after that GOSUB."); PNL
+  ELSIF topic = "ON" THEN
+    POut("ON expr GOTO linenum[,linenum...]        ON expr GOSUB linenum[,...]"); PNL;
+    POut("  Evaluates expr (1-based); jumps to (or GOSUBs) the linenum at"); PNL;
+    POut("  that position in the list. Out-of-range values do nothing."); PNL
+  ELSIF (topic = "END") OR (topic = "STOP") THEN
+    POut("END        STOP"); PNL;
+    POut("  Both halt the running program immediately (STOP is identical"); PNL;
+    POut("  to END; it exists for compatibility)."); PNL
+  ELSIF topic = "DIM" THEN
+    POut("DIM name(d1[,d2])[, name(d1[,d2])...]"); PNL;
+    POut("  Declares a 1- or 2-dimensional array, indices 0..d1 (and"); PNL;
+    POut("  0..d2). A$ arrays hold strings; other names hold numbers."); PNL;
+    POut("  Arrays are auto-created with bound 10 on first use if undimmed."); PNL
+  ELSIF (topic = "DATA") OR (topic = "READ") OR (topic = "RESTORE") THEN
+    POut("DATA val[,val...]      READ var[,var...]      RESTORE [linenum]"); PNL;
+    POut("  DATA lists constants anywhere in the program; READ consumes"); PNL;
+    POut("  them in order into variables. RESTORE resets the read pointer"); PNL;
+    POut("  to the start, or to the first DATA at/after linenum."); PNL
+  ELSIF (topic = "CLS") OR (topic = "HOME") THEN
+    POut("CLS        HOME"); PNL;
+    POut("  Clears the screen (the graphics canvas if SCREEN has been used,"); PNL;
+    POut("  otherwise the terminal). CLS and HOME are identical."); PNL
+  ELSIF topic = "LOCATE" THEN
+    POut("LOCATE row[,col]"); PNL;
+    POut("  Moves the terminal cursor to row,col (1-based) using ANSI"); PNL;
+    POut("  escapes; has no effect once graphics mode is active."); PNL
+  ELSIF topic = "RANDOMIZE" THEN
+    POut("RANDOMIZE [expr]"); PNL;
+    POut("  Reseeds the random-number generator used by RND."); PNL
+  ELSIF topic = "SCREEN" THEN
+    POut("SCREEN width[,height]"); PNL;
+    POut("  Opens (or resizes) the graphics window, default height 480."); PNL;
+    POut("  Any other graphics statement opens a 640x480 window if none"); PNL;
+    POut("  is open yet, so SCREEN is only needed for a custom size."); PNL
+  ELSIF topic = "COLOR" THEN
+    POut("COLOR fg[,bg]"); PNL;
+    POut("  Sets the current drawing color (0-15) and, optionally, the"); PNL;
+    POut("  background color used by CLS."); PNL
+  ELSIF topic = "PSET" THEN
+    POut("PSET x,y[,color]"); PNL;
+    POut("  Plots one pixel. color defaults to the current COLOR."); PNL
+  ELSIF topic = "LINE" THEN
+    POut("LINE x1,y1,x2,y2[,color]"); PNL;
+    POut("  Draws a straight line between the two points."); PNL
+  ELSIF (topic = "CIRCLE") OR (topic = "FCIRCLE") THEN
+    POut("CIRCLE x,y,r[,color]        FCIRCLE x,y,r[,color]"); PNL;
+    POut("  Draws a circle outline (CIRCLE) or filled disc (FCIRCLE) of"); PNL;
+    POut("  radius r centered at x,y."); PNL
+  ELSIF (topic = "RECT") OR (topic = "FRECT") THEN
+    POut("RECT x,y,w,h[,color]        FRECT x,y,w,h[,color]"); PNL;
+    POut("  Draws a rectangle outline (RECT) or filled box (FRECT), w wide"); PNL;
+    POut("  and h tall, with x,y as the top-left corner."); PNL
+  ELSIF topic = "TEXT" THEN
+    POut("TEXT x,y,expr[,size[,color]]"); PNL;
+    POut("  Draws expr (a string, or a number converted to one) at x,y."); PNL;
+    POut("  size defaults to 20 pixels tall."); PNL
+  ELSIF topic = "SOUND" THEN
+    POut("SOUND freq,ms"); PNL;
+    POut("  Plays a tone at freq Hz for ms milliseconds, blocking until it"); PNL;
+    POut("  finishes. Opens the audio device on first use."); PNL
+  ELSIF topic = "BEEP" THEN
+    POut("BEEP"); PNL;
+    POut("  Shorthand for SOUND 800,150 -- a short 800Hz beep."); PNL
+  ELSIF topic = "DELAY" THEN
+    POut("DELAY ms"); PNL;
+    POut("  Pauses execution for ms milliseconds."); PNL
+  ELSIF topic = "RUN" THEN
+    POut("RUN"); PNL;
+    POut("  Clears variables and runs the stored program from its lowest"); PNL;
+    POut("  line number."); PNL
+  ELSIF topic = "LIST" THEN
+    POut("LIST"); PNL;
+    POut("  Lists the stored program, in line-number order."); PNL
+  ELSIF topic = "NEW" THEN
+    POut("NEW"); PNL;
+    POut("  Erases the stored program and all variables."); PNL
+  ELSIF topic = "CLEAR" THEN
+    POut("CLEAR"); PNL;
+    POut("  Erases all variables and arrays, but keeps the stored program."); PNL
+  ELSIF (topic = "LOAD") OR (topic = "SAVE") THEN
+    POut("LOAD file        SAVE file"); PNL;
+    POut("  Loads or saves the program as plain text (linenum, space,"); PNL;
+    POut("  statement text per line). Quotes around file are optional."); PNL
+  ELSIF (topic = "BYE") OR (topic = "QUIT") OR (topic = "EXIT") OR (topic = "SYSTEM") THEN
+    POut("BYE   (aliases: QUIT, EXIT, SYSTEM)"); PNL;
+    POut("  Leaves the interpreter."); PNL
+  ELSIF (topic = "FUNCTIONS") OR (topic = "FUNCTION") THEN
+    POut("ABS(x) INT(x) SGN(x) SQR(x) SIN/COS/TAN/ATN(x) LOG(x) EXP(x) PI"); PNL;
+    POut("RND (0<=x<1) TIMER (secs since start) LEN(s$) VAL(s$) ASC(s$)"); PNL;
+    POut("CHR$(n) STR$(x) LEFT$/RIGHT$(s$,n) MID$(s$,start[,len])"); PNL;
+    POut("INSTR([start,]s$,find$) INKEY$ (last key pressed, or empty)"); PNL;
+    POut("SCRW/SCRH (window size) MOUSEX/MOUSEY/MOUSEB (mouse state)"); PNL
+  ELSE
+    POut("No help for "); POut(topic); POut(". Type HELP for the topic list."); PNL
+  END
+END ShowHelpTopic;
 
 PROCEDURE Shutdown;
 BEGIN
@@ -1465,8 +1625,7 @@ BEGIN
   ShowBanner;
   appRunning := TRUE;
   WHILE appRunning DO
-    POut("> ");
-    In.Line(line);
+    History.ReadLine("> ", line); outCol := 0;
     Strings.Trim(line);
     IF Strings.Length(line) > 0 THEN
       pos := 0;
@@ -1474,6 +1633,7 @@ BEGIN
       IF Strings.StrToInt(cmd, num) & (num >= 0) THEN
         Strings.Extract(line, pos, Strings.Length(line) - pos, rest);
         Strings.Trim(rest);
+        ExpandQuestionMarks(rest);
         InsertLine(num, rest)
       ELSE
         Upper(cmd);
@@ -1481,7 +1641,10 @@ BEGIN
         ELSIF cmd = "LIST" THEN DoList
         ELSIF cmd = "NEW" THEN nLines := 0; ClearVars
         ELSIF cmd = "CLEAR" THEN ClearVars
-        ELSIF cmd = "HELP" THEN ShowHelp
+        ELSIF cmd = "HELP" THEN
+          Strings.Extract(line, pos, Strings.Length(line) - pos, arg); Strings.Trim(arg);
+          Upper(arg);
+          IF Strings.Length(arg) = 0 THEN ShowHelp ELSE ShowHelpTopic(arg) END
         ELSIF (cmd = "BYE") OR (cmd = "QUIT") OR (cmd = "EXIT") OR (cmd = "SYSTEM") THEN
           appRunning := FALSE
         ELSIF cmd = "LOAD" THEN
@@ -1493,6 +1656,7 @@ BEGIN
           StripQuotes(arg);
           IF SaveFile(arg) THEN POut("SAVED"); PNL ELSE POut("SAVE FAILED"); PNL END
         ELSE
+          ExpandQuestionMarks(line);
           Strings.Copy(line, immText);
           startTime := Time.Now();
           Execute(-1, 0)
