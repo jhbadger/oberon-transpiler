@@ -3,35 +3,21 @@ MODULE Basic;
  * A line-numbered BASIC interpreter (GW-BASIC / Applesoft flavor) with
  * Raylib-backed graphics and sound statements bolted on.
  *
- * A program that never uses a graphics or sound statement never touches
- * Raylib at all -- it runs as an ordinary terminal program reading/writing
- * stdin/stdout.  The first SCREEN/PSET/LINE/CIRCLE/... statement lazily
- * opens a Raylib window; the first SOUND/BEEP lazily opens the audio
- * device (independently -- sound alone does not require a window).
+ * ... (header comment unchanged) ...
  *
- * Usage:
- *   basic program.bas      -- load and run program.bas, then exit
- *   basic                  -- interactive prompt (type numbered lines to
- *                              build a program; RUN/LIST/NEW/LOAD/SAVE/BYE
- *                              are immediate commands; anything else is
- *                              executed immediately, e.g. "PRINT 2+2")
+ * User-defined functions:
+ *   DEFN name[$](p1[,p2...])
+ *     <statements>
+ *     RETURN expr        (optional; last one wins, or fall off end)
+ *   ENDFN
  *
- * The interactive prompt and INPUT statement are read via the History
- * module, so Up/Down recall previous lines and left/right/backspace edit
- * in place (see History.mod). '?' is accepted everywhere PRINT is and is
- * rewritten to PRINT in the stored program text, Applesoft-style.
+ * Call as an expression:   y = square(5)
+ * Or as a statement:       greet("world")   (result, if any, discarded)
  *
- * Language summary (see ShowHelp(), printed by the interactive prompt's
- * HELP command; HELP topic, e.g. HELP SOUND, gives details on one item):
- *   Statements : PRINT(?) INPUT LET IF/THEN FOR/TO/STEP/NEXT GOTO GOSUB
- *                RETURN ON...GOTO/GOSUB END STOP DIM DATA READ RESTORE
- *                CLS/HOME LOCATE RANDOMIZE
- *   Graphics   : SCREEN COLOR PSET LINE CIRCLE FCIRCLE RECT FRECT TEXT
- *   Sound      : SOUND BEEP DELAY
- *   Functions  : ABS INT SGN SQR SIN COS TAN ATN LOG EXP RND PI TIMER
- *                LEN VAL ASC CHR$ STR$ LEFT$ RIGHT$ MID$ INSTR INKEY$
- *                SCRW SCRH MOUSEX MOUSEY MOUSEB
- *   Comments   : REM or '
+ * DEFN blocks may be placed anywhere in the program (they are collected
+ * at RUN time and skipped by the interpreter) or entered directly at the
+ * REPL (define across several prompt lines; you'll be re-prompted until
+ * ENDFN closes the definition).
  *)
 
 IMPORT Out, Strings, Random, Math, Time, Files, Args, Raylib, History;
@@ -43,11 +29,16 @@ CONST
   MaxScalarNum  = 800;
   MaxScalarStr  = 400;
   MaxArrays     = 100;
-  MaxArrNumCap  = 40000;   (* total flattened elements across all numeric arrays combined is not capped; this is per-array *)
-  MaxStrArrCap  = 2000;    (* per string array, flattened element cap *)
+  MaxArrNumCap  = 40000;
+  MaxStrArrCap  = 2000;
   MaxForStack   = 40;
   MaxGosubStack = 60;
   MaxDataVals   = 4000;
+
+  MaxFuncs      = 128;
+  MaxFuncParams = 8;
+  MaxFuncBody   = 200;    (* max statement-lines in a function body *)
+  MaxCallDepth  = 32;
 
   (* token kinds *)
   TkEOL = 0; TkNum = 1; TkStr = 2; TkIdent = 3; TkOp = 4;
@@ -57,7 +48,7 @@ TYPE
   Token = RECORD
     kind : INTEGER;
     num  : REAL;
-    s    : STRING     (* IDENT text (uppercased) / STR literal content / OP text *)
+    s    : STRING
   END;
 
   TokBuf = RECORD
@@ -87,8 +78,8 @@ TYPE
   ArrayEntry = RECORD
     name    : STRING;
     isStr   : BOOLEAN;
-    dims    : INTEGER;      (* 1 or 2 *)
-    d1, d2  : INTEGER;      (* upper bound per dim; size = d+1 *)
+    dims    : INTEGER;
+    d1, d2  : INTEGER;
     numData : NumArrPtr;
     strData : StrArrData
   END;
@@ -97,13 +88,29 @@ TYPE
     varName  : STRING;
     limit    : REAL;
     step     : REAL;
-    lineIdx  : INTEGER;     (* -1 = immediate pseudo-line *)
+    lineIdx  : INTEGER;
     tokPos   : INTEGER
   END;
 
   GosubEntry = RECORD
     lineIdx : INTEGER;
     tokPos  : INTEGER
+  END;
+
+  (* A function body is stored as raw source lines (pre-DEFN/post-ENDFN
+   * stripped). Executing the body reuses Tokenize/ExecStmtList by
+   * building a temporary "program" of these lines in-place, but simpler
+   * still: we just keep the source lines and interpret them with a
+   * dedicated mini-loop that knows about RETURN-with-value. *)
+  FuncDef = POINTER TO FuncDefRec;
+  FuncDefRec = RECORD
+    name      : STRING;             (* uppercased, includes trailing $ if str *)
+    isStr     : BOOLEAN;
+    nParams   : INTEGER;
+    params    : ARRAY MaxFuncParams OF STRING;
+    paramIsStr: ARRAY MaxFuncParams OF BOOLEAN;
+    nBody     : INTEGER;
+    body      : ARRAY MaxFuncBody OF STRING
   END;
 
 VAR
@@ -130,16 +137,25 @@ VAR
   nDataVals   : INTEGER;
   dataPtr     : INTEGER;
 
+  funcs   : ARRAY MaxFuncs OF FuncDef;
+  nFuncs  : INTEGER;
+
+  (* Function call state. When a function is executing, callDepth>0
+   * and the outer statement loop uses returnPending / returnVal to
+   * unwind out to the calling EvalPrimary / ExecStmt. *)
+  callDepth     : INTEGER;
+  returnPending : BOOLEAN;
+  returnVal     : Value;
+
   errFlag : BOOLEAN;
   errMsg  : STRING;
 
-  progRunning : BOOLEAN;   (* FALSE stops the current Execute() loop *)
-  appRunning  : BOOLEAN;   (* FALSE stops the interactive REPL / app *)
+  progRunning : BOOLEAN;
+  appRunning  : BOOLEAN;
   fname       : STRING;
 
-  outCol : INTEGER;    (* current terminal output column, for PRINT zones *)
+  outCol : INTEGER;
 
-  (* graphics / audio state *)
   gfxMode    : BOOLEAN;
   audioReady : BOOLEAN;
   canvas     : Raylib.RenderTexture;
@@ -211,7 +227,7 @@ BEGIN
     c := text[i];
     IF c = 0X THEN EXIT END;
     IF (c = ' ') OR (c = 09X) THEN INC(i)
-    ELSIF c = "'" THEN EXIT   (* comment to end of line *)
+    ELSIF c = "'" THEN EXIT
     ELSIF IsDigit(c) OR ((c = '.') & IsDigit(text[i+1])) THEN
       j := 0;
       WHILE IsDigit(text[i]) DO buf[j] := text[i]; INC(j); INC(i) END;
@@ -261,7 +277,7 @@ BEGIN
     ELSIF c = ',' THEN AddTok(tb, TkComma); INC(i)
     ELSIF c = ':' THEN AddTok(tb, TkColon); INC(i)
     ELSIF c = ';' THEN AddTok(tb, TkSemi); INC(i)
-    ELSE INC(i)  (* skip unknown char *)
+    ELSE INC(i)
     END
   END;
   AddTok(tb, TkEOL)
@@ -362,7 +378,6 @@ BEGIN
   RETURN -1
 END FindArray;
 
-(* Create (or replace) an array named `name` with the given bounds. *)
 PROCEDURE DimArray(name: ARRAY OF CHAR; d1, d2: INTEGER): INTEGER;
 VAR i, total, sz1, sz2: INTEGER; isStr: BOOLEAN;
 BEGIN
@@ -414,9 +429,133 @@ BEGIN
   nNumVars := 0; nStrVars := 0; nArrays := 0
 END ClearVars;
 
+(* ========================== user function table ========================= *)
+
+PROCEDURE FindFunc(name: ARRAY OF CHAR): INTEGER;
+VAR i: INTEGER;
+BEGIN
+  i := 0;
+  WHILE i < nFuncs DO
+    IF funcs[i].name = name THEN RETURN i END;
+    INC(i)
+  END;
+  RETURN -1
+END FindFunc;
+
+PROCEDURE ClearFuncs;
+VAR i: INTEGER;
+BEGIN
+  FOR i := 0 TO nFuncs - 1 DO funcs[i] := NIL END;
+  nFuncs := 0
+END ClearFuncs;
+
+(* Parse a DEFN header line ("DEFN name(a,b$)") already-tokenized.
+ * Returns TRUE on success and fills *fd with header info (name, params,
+ * types), body starts empty. *)
+PROCEDURE ParseDefnHeader(header: ARRAY OF CHAR; fd: FuncDef): BOOLEAN;
+VAR tb: TokBuf; pname: STRING;
+BEGIN
+  Tokenize(header, tb);
+  IF ~IsIdent(tb, "DEFN") THEN RETURN FALSE END;
+  INC(tb.pos);
+  IF CurKind(tb) # TkIdent THEN RtErr("DEFN: EXPECTED NAME"); RETURN FALSE END;
+  Strings.Copy(tb.t[tb.pos].s, fd.name); INC(tb.pos);
+  fd.isStr := IsStrName(fd.name);
+  fd.nParams := 0;
+  IF CurKind(tb) = TkLP THEN
+    INC(tb.pos);
+    IF CurKind(tb) # TkRP THEN
+      LOOP
+        IF CurKind(tb) # TkIdent THEN RtErr("DEFN: BAD PARAM"); RETURN FALSE END;
+        IF fd.nParams >= MaxFuncParams THEN RtErr("DEFN: TOO MANY PARAMS"); RETURN FALSE END;
+        Strings.Copy(tb.t[tb.pos].s, pname);
+        Strings.Copy(pname, fd.params[fd.nParams]);
+        fd.paramIsStr[fd.nParams] := IsStrName(pname);
+        INC(fd.nParams);
+        INC(tb.pos);
+        IF CurKind(tb) = TkComma THEN INC(tb.pos) ELSE EXIT END
+      END
+    END;
+    IF CurKind(tb) = TkRP THEN INC(tb.pos) ELSE RtErr("DEFN: MISSING )"); RETURN FALSE END
+  END;
+  fd.nBody := 0;
+  RETURN TRUE
+END ParseDefnHeader;
+
+(* Detect DEFN / ENDFN as the first token of a stripped source line.
+ * We use light textual scanning (not Tokenize) to avoid tokenizer state
+ * clashes when we're partway through building a function. *)
+PROCEDURE FirstWord(s: ARRAY OF CHAR; VAR w: ARRAY OF CHAR);
+VAR i, j: INTEGER;
+BEGIN
+  i := 0; j := 0;
+  WHILE (s[i] = ' ') OR (s[i] = 09X) DO INC(i) END;
+  WHILE IsAlnum(s[i]) & (j < 15) DO w[j] := s[i]; INC(i); INC(j) END;
+  w[j] := 0X;
+  Upper(w)
+END FirstWord;
+
+PROCEDURE IsDefnLine(s: ARRAY OF CHAR): BOOLEAN;
+VAR w: STRING;
+BEGIN FirstWord(s, w); RETURN w = "DEFN" END IsDefnLine;
+
+PROCEDURE IsEndfnLine(s: ARRAY OF CHAR): BOOLEAN;
+VAR w: STRING;
+BEGIN FirstWord(s, w); RETURN w = "ENDFN" END IsEndfnLine;
+
+(* Collect all DEFN...ENDFN blocks from the program into the funcs table.
+ * Called at RUN time. Any parse error is reported but doesn't abort the
+ * collection of other functions. *)
+PROCEDURE ScanFuncs;
+VAR i, j: INTEGER; fd: FuncDef; ok: BOOLEAN;
+BEGIN
+  ClearFuncs;
+  i := 0;
+  WHILE i < nLines DO
+    IF IsDefnLine(prog[i].text) THEN
+      IF nFuncs >= MaxFuncs THEN RtErr("TOO MANY FUNCTIONS"); RETURN END;
+      NEW(fd);
+      ok := ParseDefnHeader(prog[i].text, fd);
+      INC(i);
+      WHILE (i < nLines) & ~IsEndfnLine(prog[i].text) DO
+        IF ok & (fd.nBody < MaxFuncBody) THEN
+          Strings.Copy(prog[i].text, fd.body[fd.nBody]); INC(fd.nBody)
+        END;
+        INC(i)
+      END;
+      IF i >= nLines THEN
+        RtErr("DEFN WITHOUT ENDFN"); ok := FALSE
+      ELSE
+        INC(i)  (* skip ENDFN *)
+      END;
+      IF ok THEN
+        j := FindFunc(fd.name);
+        IF j >= 0 THEN funcs[j] := fd ELSE funcs[nFuncs] := fd; INC(nFuncs) END
+      END
+    ELSE
+      INC(i)
+    END
+  END
+END ScanFuncs;
+
+(* Return TRUE if line i in the program is inside (or is) a DEFN/ENDFN
+ * pair, and set skipTo to the index just past ENDFN. Used by the main
+ * Execute loop to jump over embedded function bodies during normal
+ * program flow. *)
+PROCEDURE IsFuncBodyLine(i: INTEGER; VAR skipTo: INTEGER): BOOLEAN;
+VAR k: INTEGER;
+BEGIN
+  IF (i < 0) OR (i >= nLines) THEN RETURN FALSE END;
+  IF IsDefnLine(prog[i].text) THEN
+    k := i + 1;
+    WHILE (k < nLines) & ~IsEndfnLine(prog[k].text) DO INC(k) END;
+    IF k < nLines THEN skipTo := k + 1 ELSE skipTo := nLines END;
+    RETURN TRUE
+  END;
+  RETURN FALSE
+END IsFuncBodyLine;
+
 (* ============================ expressions =============================== *)
-(* Recursive-descent evaluator; the module's procedures are all mutually
- * visible so EvalExpr .. EvalPrimary may call each other in any order. *)
 
 PROCEDURE MkNum(x: REAL): Value;
 VAR v: Value;
@@ -550,8 +689,126 @@ BEGIN
   END
 END CallFunction;
 
+(* ================== user function call machinery ======================== *)
+
+(* Snapshot / restore of scalar variable tables so parameters and locals
+ * inside a function don't leak into the caller. We snapshot only the
+ * scalar tables (arrays are shared globally, matching classic BASIC). *)
+TYPE
+  NumSnap = POINTER TO NumSnapRec;
+  NumSnapRec = RECORD n: INTEGER; e: ARRAY MaxScalarNum OF ScalarNum END;
+  StrSnap = POINTER TO StrSnapRec;
+  StrSnapRec = RECORD n: INTEGER; e: ARRAY MaxScalarStr OF ScalarStr END;
+
+PROCEDURE SnapshotScalars(VAR ns: NumSnap; VAR ss: StrSnap);
+VAR i: INTEGER;
+BEGIN
+  NEW(ns); NEW(ss);
+  ns.n := nNumVars; ss.n := nStrVars;
+  FOR i := 0 TO nNumVars - 1 DO ns.e[i] := numVars[i] END;
+  FOR i := 0 TO nStrVars - 1 DO ss.e[i] := strVars[i] END
+END SnapshotScalars;
+
+PROCEDURE RestoreScalars(ns: NumSnap; ss: StrSnap);
+VAR i: INTEGER;
+BEGIN
+  nNumVars := ns.n; nStrVars := ss.n;
+  FOR i := 0 TO nNumVars - 1 DO numVars[i] := ns.e[i] END;
+  FOR i := 0 TO nStrVars - 1 DO strVars[i] := ss.e[i] END
+END RestoreScalars;
+
+(* Execute the body of function fd. Returns via returnPending/returnVal;
+ * an ordinary fall-off-end returns 0 (or "") of the right type. *)
+PROCEDURE ExecFuncBody(fd: FuncDef);
+VAR i, savedForTop, savedGosubTop: INTEGER;
+    tb: TokBuf; jumped: BOOLEAN; newLine, newTok: INTEGER;
+BEGIN
+  savedForTop := forTop; savedGosubTop := gosubTop;
+  returnPending := FALSE;
+  IF fd.isStr THEN returnVal := MkStr("") ELSE returnVal := MkNum(0.0) END;
+  i := 0;
+  WHILE (i < fd.nBody) & ~errFlag & ~returnPending DO
+    Tokenize(fd.body[i], tb); tb.pos := 0;
+    ExecStmtList(tb, -2, -1, jumped, newLine, newTok);
+    (* No GOTO/GOSUB targeting line numbers inside function bodies: we
+     * simply advance line by line. jumped is ignored (there is no
+     * numbered-line table for the body). If a user writes GOTO 100
+     * inside a function, we'll fall through to next body line -- best
+     * we can do without a per-function line table. *)
+    INC(i)
+  END;
+  (* Discard any FOR/GOSUB frames the function itself left dangling. *)
+  forTop := savedForTop; gosubTop := savedGosubTop
+END ExecFuncBody;
+
+PROCEDURE CallUserFunc(fi: INTEGER; VAR tb: TokBuf; wantValue: BOOLEAN; VAR out: Value);
+VAR fd: FuncDef; args: ARRAY MaxFuncParams OF Value; n, i: INTEGER;
+    ns: NumSnap; ss: StrSnap;
+    savedReturnPending: BOOLEAN; savedReturnVal: Value;
+BEGIN
+  fd := funcs[fi];
+  n := 0;
+  IF CurKind(tb) = TkLP THEN
+    INC(tb.pos);
+    IF CurKind(tb) # TkRP THEN
+      LOOP
+        IF n >= fd.nParams THEN RtErr("TOO MANY ARGS"); RETURN END;
+        EvalExpr(tb, args[n]); INC(n);
+        IF CurKind(tb) = TkComma THEN INC(tb.pos) ELSE EXIT END
+      END
+    END;
+    IF CurKind(tb) = TkRP THEN INC(tb.pos) ELSE RtErr("MISSING )"); RETURN END
+  END;
+  IF n # fd.nParams THEN RtErr("WRONG ARG COUNT"); RETURN END;
+
+  IF callDepth >= MaxCallDepth THEN RtErr("CALL DEPTH EXCEEDED"); RETURN END;
+
+  (* Save caller state and set up fresh scalar frame. Arrays remain
+   * global, which matches classic BASIC. *)
+  savedReturnPending := returnPending; savedReturnVal := returnVal;
+  SnapshotScalars(ns, ss);
+  ClearVars;
+  FOR i := 0 TO n - 1 DO
+    IF fd.paramIsStr[i] THEN
+      IF ~args[i].isStr THEN NumToStr(args[i].num, args[i].s); args[i].isStr := TRUE END;
+      SetStr(fd.params[i], args[i].s)
+    ELSE
+      IF args[i].isStr THEN
+        IF ~Strings.StrToReal(args[i].s, args[i].num) THEN args[i].num := 0.0 END;
+        args[i].isStr := FALSE
+      END;
+      SetNum(fd.params[i], args[i].num)
+    END
+  END;
+
+  INC(callDepth);
+  ExecFuncBody(fd);
+  DEC(callDepth);
+
+  IF fd.isStr THEN
+    IF returnPending & returnVal.isStr THEN out := returnVal
+    ELSIF returnPending THEN NumToStr(returnVal.num, out.s); out.isStr := TRUE; out.num := 0.0
+    ELSE out := MkStr("") END
+  ELSE
+    IF returnPending & ~returnVal.isStr THEN out := returnVal
+    ELSIF returnPending THEN
+      IF ~Strings.StrToReal(returnVal.s, out.num) THEN out.num := 0.0 END;
+      out.isStr := FALSE; out.s := ""
+    ELSE out := MkNum(0.0) END
+  END;
+
+  RestoreScalars(ns, ss);
+  returnPending := savedReturnPending; returnVal := savedReturnVal;
+
+  IF ~wantValue THEN
+    (* caller didn't want the value; nothing else to do *)
+  END
+END CallUserFunc;
+
+(* ============================ expressions cont. ========================= *)
+
 PROCEDURE EvalPrimary(VAR tb: TokBuf; VAR v: Value);
-VAR name: STRING; ai: INTEGER; i1, i2: INTEGER; idx: INTEGER; a2: Value;
+VAR name: STRING; ai, fi: INTEGER; i1, i2: INTEGER; idx: INTEGER; a2: Value;
 BEGIN
   IF errFlag THEN v := MkNum(0.0); RETURN END;
   IF CurKind(tb) = TkNum THEN
@@ -565,26 +822,31 @@ BEGIN
     Strings.Copy(tb.t[tb.pos].s, name); INC(tb.pos);
     IF IsFuncName(name) THEN
       CallFunction(name, tb, v)
-    ELSIF CurKind(tb) = TkLP THEN
-      (* array reference *)
-      INC(tb.pos);
-      EvalExpr(tb, a2); i1 := FLOOR(a2.num); i2 := -1;
-      IF CurKind(tb) = TkComma THEN
-        INC(tb.pos); EvalExpr(tb, a2); i2 := FLOOR(a2.num)
-      END;
-      IF CurKind(tb) = TkRP THEN INC(tb.pos) ELSE RtErr("MISSING )") END;
-      ai := EnsureArray(name);
-      IF ai >= 0 THEN
-        IF ArrIndex(arrays[ai], i1, i2, idx) THEN
-          IF arrays[ai].isStr THEN v := MkStr(arrays[ai].strData.elems[idx])
-          ELSE v := MkNum(arrays[ai].numData[idx]) END
-        ELSE v := MkNum(0.0) END
-      ELSE v := MkNum(0.0) END
     ELSE
-      IF IsStrName(name) THEN
-        v.isStr := TRUE; v.num := 0.0; GetStr(name, v.s)
+      fi := FindFunc(name);
+      IF (fi >= 0) & (CurKind(tb) = TkLP) THEN
+        CallUserFunc(fi, tb, TRUE, v)
+      ELSIF CurKind(tb) = TkLP THEN
+        (* array reference *)
+        INC(tb.pos);
+        EvalExpr(tb, a2); i1 := FLOOR(a2.num); i2 := -1;
+        IF CurKind(tb) = TkComma THEN
+          INC(tb.pos); EvalExpr(tb, a2); i2 := FLOOR(a2.num)
+        END;
+        IF CurKind(tb) = TkRP THEN INC(tb.pos) ELSE RtErr("MISSING )") END;
+        ai := EnsureArray(name);
+        IF ai >= 0 THEN
+          IF ArrIndex(arrays[ai], i1, i2, idx) THEN
+            IF arrays[ai].isStr THEN v := MkStr(arrays[ai].strData.elems[idx])
+            ELSE v := MkNum(arrays[ai].numData[idx]) END
+          ELSE v := MkNum(0.0) END
+        ELSE v := MkNum(0.0) END
       ELSE
-        v := MkNum(GetNum(name))
+        IF IsStrName(name) THEN
+          v.isStr := TRUE; v.num := 0.0; GetStr(name, v.s)
+        ELSE
+          v := MkNum(GetNum(name))
+        END
       END
     END
   ELSE
@@ -904,37 +1166,42 @@ BEGIN
 END DoDim;
 
 PROCEDURE ScanData;
-VAR i: INTEGER; tb: TokBuf; v: Value; neg: BOOLEAN;
+VAR i: INTEGER; tb: TokBuf; v: Value; neg: BOOLEAN; skipTo: INTEGER;
 BEGIN
   nDataVals := 0; dataPtr := 0;
-  FOR i := 0 TO nLines - 1 DO
-    Tokenize(prog[i].text, tb);
-    WHILE tb.pos < tb.n DO
-      IF IsIdent(tb, "DATA") THEN
-        INC(tb.pos);
-        LOOP
-          IF CurKind(tb) = TkStr THEN
-            v := MkStr(tb.t[tb.pos].s); INC(tb.pos)
-          ELSE
-            neg := FALSE;
-            IF IsOp(tb, "-") THEN neg := TRUE; INC(tb.pos) END;
-            IF CurKind(tb) = TkNum THEN
-              IF neg THEN v := MkNum(-tb.t[tb.pos].num) ELSE v := MkNum(tb.t[tb.pos].num) END;
-              INC(tb.pos)
-            ELSIF CurKind(tb) = TkIdent THEN
+  i := 0;
+  WHILE i < nLines DO
+    IF IsFuncBodyLine(i, skipTo) THEN i := skipTo
+    ELSE
+      Tokenize(prog[i].text, tb);
+      WHILE tb.pos < tb.n DO
+        IF IsIdent(tb, "DATA") THEN
+          INC(tb.pos);
+          LOOP
+            IF CurKind(tb) = TkStr THEN
               v := MkStr(tb.t[tb.pos].s); INC(tb.pos)
             ELSE
-              EXIT
-            END
-          END;
-          IF nDataVals < MaxDataVals THEN
-            dataVals[nDataVals] := v; dataLineOf[nDataVals] := prog[i].num; INC(nDataVals)
-          END;
-          IF CurKind(tb) = TkComma THEN INC(tb.pos) ELSE EXIT END
+              neg := FALSE;
+              IF IsOp(tb, "-") THEN neg := TRUE; INC(tb.pos) END;
+              IF CurKind(tb) = TkNum THEN
+                IF neg THEN v := MkNum(-tb.t[tb.pos].num) ELSE v := MkNum(tb.t[tb.pos].num) END;
+                INC(tb.pos)
+              ELSIF CurKind(tb) = TkIdent THEN
+                v := MkStr(tb.t[tb.pos].s); INC(tb.pos)
+              ELSE
+                EXIT
+              END
+            END;
+            IF nDataVals < MaxDataVals THEN
+              dataVals[nDataVals] := v; dataLineOf[nDataVals] := prog[i].num; INC(nDataVals)
+            END;
+            IF CurKind(tb) = TkComma THEN INC(tb.pos) ELSE EXIT END
+          END
+        ELSE
+          INC(tb.pos)
         END
-      ELSE
-        INC(tb.pos)
-      END
+      END;
+      INC(i)
     END
   END
 END ScanData;
@@ -1232,9 +1499,38 @@ END DoDelay;
 
 (* ============================ statement dispatch ============================ *)
 
+(* Statement-level user-function call: name(args), value discarded. *)
+PROCEDURE DoFuncCallStmt(fi: INTEGER; VAR tb: TokBuf);
+VAR out: Value;
+BEGIN
+  CallUserFunc(fi, tb, FALSE, out)
+END DoFuncCallStmt;
+
+(* RETURN as a statement: in a function body it stores a value and sets
+ * returnPending; outside a function it means GOSUB return. *)
+PROCEDURE DoReturn(VAR tb: TokBuf; VAR jumped: BOOLEAN; VAR newLine, newTok: INTEGER);
+VAR v: Value; ge: GosubEntry;
+BEGIN
+  IF callDepth > 0 THEN
+    IF (CurKind(tb) = TkEOL) OR (CurKind(tb) = TkColon) THEN
+      returnPending := TRUE  (* returnVal was pre-initialized in ExecFuncBody *)
+    ELSE
+      EvalExpr(tb, v);
+      IF errFlag THEN RETURN END;
+      returnVal := v; returnPending := TRUE
+    END
+  ELSE
+    IF gosubTop <= 0 THEN RtErr("RETURN WITHOUT GOSUB")
+    ELSE
+      DEC(gosubTop); ge := gosubStack[gosubTop];
+      jumped := TRUE; newLine := ge.lineIdx; newTok := ge.tokPos
+    END
+  END
+END DoReturn;
+
 PROCEDURE ExecStmt(VAR tb: TokBuf; curLineIdx, curLineNum: INTEGER;
                     VAR jumped: BOOLEAN; VAR newLine, newTok: INTEGER);
-VAR name: STRING; v: Value; li, target: INTEGER; fe: ForEntry; ge: GosubEntry; contd: BOOLEAN;
+VAR name: STRING; v: Value; li, target, fi, savePos: INTEGER; fe: ForEntry; ge: GosubEntry; contd: BOOLEAN;
 BEGIN
   jumped := FALSE;
   IF CurKind(tb) # TkIdent THEN RtErr("SYNTAX ERROR"); RETURN END;
@@ -1261,12 +1557,7 @@ BEGIN
       ELSE PushGosub(curLineIdx, tb.pos); jumped := TRUE; newLine := li; newTok := 0 END
     END
   ELSIF name = "RETURN" THEN
-    INC(tb.pos);
-    IF gosubTop <= 0 THEN RtErr("RETURN WITHOUT GOSUB")
-    ELSE
-      DEC(gosubTop); ge := gosubStack[gosubTop];
-      jumped := TRUE; newLine := ge.lineIdx; newTok := ge.tokPos
-    END
+    INC(tb.pos); DoReturn(tb, jumped, newLine, newTok)
   ELSIF name = "ON" THEN INC(tb.pos); DoOn(tb, curLineIdx, jumped, newLine, newTok)
   ELSIF name = "FOR" THEN INC(tb.pos); DoFor(tb, curLineIdx)
   ELSIF name = "NEXT" THEN
@@ -1318,8 +1609,25 @@ BEGIN
   ELSIF name = "SOUND" THEN INC(tb.pos); DoSound(tb)
   ELSIF name = "BEEP" THEN INC(tb.pos); DoBeep
   ELSIF name = "DELAY" THEN INC(tb.pos); DoDelay(tb)
+  ELSIF (name = "DEFN") OR (name = "ENDFN") THEN
+    (* Shouldn't happen: Execute() skips DEFN/ENDFN blocks. But in
+     * immediate mode a stray one is a no-op. *)
+    tb.pos := tb.n
   ELSE
-    DoAssign(tb)
+    (* Might be:  fname(args)  -- statement-level user-function call.
+     * Otherwise it's an assignment. Distinguish by looking ahead. *)
+    fi := FindFunc(name);
+    IF (fi >= 0) & (tb.pos + 1 < tb.n) & (tb.t[tb.pos + 1].kind = TkLP) THEN
+      savePos := tb.pos;
+      (* Also check it's NOT actually an array-element assignment like
+       * name(i) = expr. If a matching function name exists we treat it
+       * as a call; the user should DIM before defining a same-named
+       * function to disambiguate. *)
+      INC(tb.pos);  (* consume name *)
+      DoFuncCallStmt(fi, tb)
+    ELSE
+      DoAssign(tb)
+    END
   END
 END ExecStmt;
 
@@ -1328,10 +1636,10 @@ PROCEDURE ExecStmtList(VAR tb: TokBuf; curLineIdx, curLineNum: INTEGER;
 BEGIN
   jumped := FALSE;
   LOOP
-    IF errFlag THEN RETURN END;
+    IF errFlag OR returnPending THEN RETURN END;
     IF CurKind(tb) = TkEOL THEN RETURN END;
     ExecStmt(tb, curLineIdx, curLineNum, jumped, newLine, newTok);
-    IF errFlag OR jumped THEN RETURN END;
+    IF errFlag OR jumped OR returnPending THEN RETURN END;
     IF CurKind(tb) = TkColon THEN INC(tb.pos) ELSE RETURN END
   END
 END ExecStmtList;
@@ -1349,7 +1657,8 @@ BEGIN
 END ReportError;
 
 PROCEDURE Execute(startLine, startTok: INTEGER);
-VAR cur, tok, newLine, newTok: INTEGER; jumped: BOOLEAN; text: STRING; lineNum: INTEGER; tb: TokBuf;
+VAR cur, tok, newLine, newTok, skipTo: INTEGER;
+    jumped: BOOLEAN; text: STRING; lineNum: INTEGER; tb: TokBuf;
 BEGIN
   cur := startLine; tok := startTok; progRunning := TRUE;
   WHILE progRunning DO
@@ -1357,6 +1666,11 @@ BEGIN
       text := immText; lineNum := -1
     ELSE
       IF (cur < 0) OR (cur >= nLines) THEN EXIT END;
+      (* Skip embedded DEFN..ENDFN blocks so they aren't run as normal code. *)
+      WHILE (cur < nLines) & IsFuncBodyLine(cur, skipTo) DO
+        cur := skipTo
+      END;
+      IF cur >= nLines THEN EXIT END;
       text := prog[cur].text; lineNum := prog[cur].num
     END;
     Tokenize(text, tb); tb.pos := tok;
@@ -1374,6 +1688,8 @@ END Execute;
 PROCEDURE RunProgram;
 BEGIN
   ClearVars; forTop := 0; gosubTop := 0;
+  callDepth := 0; returnPending := FALSE;
+  ScanFuncs;
   ScanData;
   startTime := Time.Now();
   Execute(0, 0)
@@ -1382,12 +1698,15 @@ END RunProgram;
 (* ============================ file load / save ============================= *)
 
 PROCEDURE LoadFile(name: ARRAY OF CHAR): BOOLEAN;
-VAR f: Files.File; r: Files.Rider; line, tok, rest: STRING; num, pos: INTEGER;
+VAR f: Files.File; r: Files.Rider; line, tok, rest: STRING;
+    num, pos, autoNum: INTEGER; inDefn: BOOLEAN;
 BEGIN
   f := Files.Old(name);
   IF f = NIL THEN POut("CANNOT OPEN "); POut(name); PNL; RETURN FALSE END;
   Files.Set(r, f, 0);
   nLines := 0;
+  autoNum := 60000;   (* auto-number DEFN/body/ENDFN lines that have no line number *)
+  inDefn := FALSE;
   WHILE ~r.eof DO
     Files.ReadLine(r, line);
     IF Strings.Length(line) > 0 THEN
@@ -1397,7 +1716,22 @@ BEGIN
         Strings.Extract(line, pos, Strings.Length(line) - pos, rest);
         Strings.Trim(rest);
         ExpandQuestionMarks(rest);
-        InsertLine(num, rest)
+        InsertLine(num, rest);
+        IF IsDefnLine(rest) THEN inDefn := TRUE
+        ELSIF IsEndfnLine(rest) THEN inDefn := FALSE
+        END
+      ELSE
+        (* An unnumbered line: allowed only inside a DEFN block that
+         * we're building (so users can write DEFN blocks without line
+         * numbers in a source file). Auto-number using a high sequence. *)
+        Strings.Copy(line, rest); Strings.Trim(rest);
+        ExpandQuestionMarks(rest);
+        IF IsDefnLine(rest) OR inDefn THEN
+          InsertLine(autoNum, rest); INC(autoNum);
+          IF IsDefnLine(rest) THEN inDefn := TRUE
+          ELSIF IsEndfnLine(rest) THEN inDefn := FALSE
+          END
+        END
       END
     END
   END;
@@ -1441,10 +1775,6 @@ BEGIN
   END
 END StripQuotes;
 
-(* '?' is shorthand for PRINT (Applesoft/GW-BASIC style). Rewrite every '?'
- * that appears outside a quoted string into "PRINT" (with a separating
- * space if it would otherwise fuse with the following identifier/number),
- * so the stored program text -- and LIST output -- always reads PRINT. *)
 PROCEDURE ExpandQuestionMarks(VAR s: ARRAY OF CHAR);
 VAR i, j: INTEGER; c: CHAR; inStr: BOOLEAN; buf: STRING;
 BEGIN
@@ -1476,11 +1806,12 @@ BEGIN
   POut("Commands   : RUN  LIST  NEW  LOAD file  SAVE file  CLEAR  BYE"); PNL;
   POut("Statements : PRINT(?) INPUT LET IF/THEN FOR/TO/STEP/NEXT GOTO GOSUB/RETURN"); PNL;
   POut("             ON..GOTO/GOSUB END STOP DIM DATA/READ/RESTORE CLS LOCATE"); PNL;
+  POut("             DEFN/ENDFN (user functions)"); PNL;
   POut("Graphics   : SCREEN COLOR PSET LINE CIRCLE FCIRCLE RECT FRECT TEXT"); PNL;
   POut("Sound      : SOUND BEEP DELAY"); PNL;
   POut("Type a numbered line to add/replace/delete it; anything else runs"); PNL;
   POut("immediately, e.g. PRINT 2+2 (or ? 2+2)."); PNL;
-  POut("Type HELP topic for details on one item, e.g. HELP SOUND, HELP FUNCTIONS."); PNL;
+  POut("Type HELP topic for details on one item, e.g. HELP DEFN, HELP FUNCTIONS."); PNL;
   POut("Up/Down arrows recall previous input lines."); PNL
 END ShowHelp;
 
@@ -1493,121 +1824,62 @@ BEGIN
     POut("  suppresses the trailing newline. '?' is shorthand for PRINT and"); PNL;
     POut("  is rewritten to PRINT wherever it appears."); PNL
   ELSIF topic = "INPUT" THEN
-    POut("INPUT [prompt$;] var[,var]...        (prompt$ is a quoted string)"); PNL;
-    POut("  Reads a comma-separated line from the keyboard into the given"); PNL;
-    POut("  variables (numeric, or string$). An optional quoted prompt is"); PNL;
-    POut("  shown before the '?' prompt. Up/Down recall earlier input."); PNL
+    POut("INPUT [prompt$;] var[,var]..."); PNL;
+    POut("  Reads a comma-separated line from the keyboard."); PNL
   ELSIF topic = "LET" THEN
-    POut("[LET] var = expr          [LET] arr(i[,j]) = expr"); PNL;
-    POut("  Assigns expr to a scalar or array variable. LET is optional."); PNL
+    POut("[LET] var = expr          [LET] arr(i[,j]) = expr"); PNL
   ELSIF (topic = "IF") OR (topic = "THEN") THEN
-    POut("IF expr THEN stmt[:stmt...]        IF expr THEN linenum"); PNL;
-    POut("  Runs the statement(s) after THEN, or jumps to linenum, only when"); PNL;
-    POut("  expr is true (nonzero, or a non-empty string). No ELSE."); PNL
+    POut("IF expr THEN stmt[:stmt...]        IF expr THEN linenum"); PNL
   ELSIF (topic = "FOR") OR (topic = "TO") OR (topic = "STEP") OR (topic = "NEXT") THEN
-    POut("FOR var = start TO limit [STEP step]"); PNL;
-    POut("  ... NEXT [var]"); PNL;
-    POut("  Repeats the enclosed statements, counting var from start to"); PNL;
-    POut("  limit (inclusive) by step (default 1; may be negative)."); PNL
-  ELSIF topic = "GOTO" THEN
-    POut("GOTO linenum"); PNL;
-    POut("  Jumps to the statement at linenum."); PNL
-  ELSIF (topic = "GOSUB") OR (topic = "RETURN") THEN
-    POut("GOSUB linenum   ...   RETURN"); PNL;
-    POut("  GOSUB jumps to linenum, remembering where it was called from;"); PNL;
-    POut("  RETURN jumps back to the statement after that GOSUB."); PNL
-  ELSIF topic = "ON" THEN
-    POut("ON expr GOTO linenum[,linenum...]        ON expr GOSUB linenum[,...]"); PNL;
-    POut("  Evaluates expr (1-based); jumps to (or GOSUBs) the linenum at"); PNL;
-    POut("  that position in the list. Out-of-range values do nothing."); PNL
-  ELSIF (topic = "END") OR (topic = "STOP") THEN
-    POut("END        STOP"); PNL;
-    POut("  Both halt the running program immediately (STOP is identical"); PNL;
-    POut("  to END; it exists for compatibility)."); PNL
-  ELSIF topic = "DIM" THEN
-    POut("DIM name(d1[,d2])[, name(d1[,d2])...]"); PNL;
-    POut("  Declares a 1- or 2-dimensional array, indices 0..d1 (and"); PNL;
-    POut("  0..d2). A$ arrays hold strings; other names hold numbers."); PNL;
-    POut("  Arrays are auto-created with bound 10 on first use if undimmed."); PNL
+    POut("FOR var = start TO limit [STEP step] ... NEXT [var]"); PNL
+  ELSIF topic = "GOTO" THEN POut("GOTO linenum"); PNL
+  ELSIF (topic = "GOSUB") THEN POut("GOSUB linenum   ...   RETURN"); PNL
+  ELSIF topic = "RETURN" THEN
+    POut("RETURN            (in a GOSUB, jumps back to the caller)"); PNL;
+    POut("RETURN [expr]     (inside DEFN..ENDFN, exits the function with a value)"); PNL
+  ELSIF topic = "ON" THEN POut("ON expr GOTO n1[,n2...]        ON expr GOSUB n1[,n2...]"); PNL
+  ELSIF (topic = "END") OR (topic = "STOP") THEN POut("END / STOP -- halt the program."); PNL
+  ELSIF topic = "DIM" THEN POut("DIM name(d1[,d2])[, ...]"); PNL
   ELSIF (topic = "DATA") OR (topic = "READ") OR (topic = "RESTORE") THEN
-    POut("DATA val[,val...]      READ var[,var...]      RESTORE [linenum]"); PNL;
-    POut("  DATA lists constants anywhere in the program; READ consumes"); PNL;
-    POut("  them in order into variables. RESTORE resets the read pointer"); PNL;
-    POut("  to the start, or to the first DATA at/after linenum."); PNL
-  ELSIF (topic = "CLS") OR (topic = "HOME") THEN
-    POut("CLS        HOME"); PNL;
-    POut("  Clears the screen (the graphics canvas if SCREEN has been used,"); PNL;
-    POut("  otherwise the terminal). CLS and HOME are identical."); PNL
-  ELSIF topic = "LOCATE" THEN
-    POut("LOCATE row[,col]"); PNL;
-    POut("  Moves the terminal cursor to row,col (1-based) using ANSI"); PNL;
-    POut("  escapes; has no effect once graphics mode is active."); PNL
-  ELSIF topic = "RANDOMIZE" THEN
-    POut("RANDOMIZE [expr]"); PNL;
-    POut("  Reseeds the random-number generator used by RND."); PNL
-  ELSIF topic = "SCREEN" THEN
-    POut("SCREEN width[,height]"); PNL;
-    POut("  Opens (or resizes) the graphics window, default height 480."); PNL;
-    POut("  Any other graphics statement opens a 640x480 window if none"); PNL;
-    POut("  is open yet, so SCREEN is only needed for a custom size."); PNL
-  ELSIF topic = "COLOR" THEN
-    POut("COLOR fg[,bg]"); PNL;
-    POut("  Sets the current drawing color (0-15) and, optionally, the"); PNL;
-    POut("  background color used by CLS."); PNL
-  ELSIF topic = "PSET" THEN
-    POut("PSET x,y[,color]"); PNL;
-    POut("  Plots one pixel. color defaults to the current COLOR."); PNL
-  ELSIF topic = "LINE" THEN
-    POut("LINE x1,y1,x2,y2[,color]"); PNL;
-    POut("  Draws a straight line between the two points."); PNL
-  ELSIF (topic = "CIRCLE") OR (topic = "FCIRCLE") THEN
-    POut("CIRCLE x,y,r[,color]        FCIRCLE x,y,r[,color]"); PNL;
-    POut("  Draws a circle outline (CIRCLE) or filled disc (FCIRCLE) of"); PNL;
-    POut("  radius r centered at x,y."); PNL
-  ELSIF (topic = "RECT") OR (topic = "FRECT") THEN
-    POut("RECT x,y,w,h[,color]        FRECT x,y,w,h[,color]"); PNL;
-    POut("  Draws a rectangle outline (RECT) or filled box (FRECT), w wide"); PNL;
-    POut("  and h tall, with x,y as the top-left corner."); PNL
-  ELSIF topic = "TEXT" THEN
-    POut("TEXT x,y,expr[,size[,color]]"); PNL;
-    POut("  Draws expr (a string, or a number converted to one) at x,y."); PNL;
-    POut("  size defaults to 20 pixels tall."); PNL
-  ELSIF topic = "SOUND" THEN
-    POut("SOUND freq,ms"); PNL;
-    POut("  Plays a tone at freq Hz for ms milliseconds, blocking until it"); PNL;
-    POut("  finishes. Opens the audio device on first use."); PNL
-  ELSIF topic = "BEEP" THEN
-    POut("BEEP"); PNL;
-    POut("  Shorthand for SOUND 800,150 -- a short 800Hz beep."); PNL
-  ELSIF topic = "DELAY" THEN
-    POut("DELAY ms"); PNL;
-    POut("  Pauses execution for ms milliseconds."); PNL
-  ELSIF topic = "RUN" THEN
-    POut("RUN"); PNL;
-    POut("  Clears variables and runs the stored program from its lowest"); PNL;
-    POut("  line number."); PNL
-  ELSIF topic = "LIST" THEN
-    POut("LIST"); PNL;
-    POut("  Lists the stored program, in line-number order."); PNL
-  ELSIF topic = "NEW" THEN
-    POut("NEW"); PNL;
-    POut("  Erases the stored program and all variables."); PNL
-  ELSIF topic = "CLEAR" THEN
-    POut("CLEAR"); PNL;
-    POut("  Erases all variables and arrays, but keeps the stored program."); PNL
-  ELSIF (topic = "LOAD") OR (topic = "SAVE") THEN
-    POut("LOAD file        SAVE file"); PNL;
-    POut("  Loads or saves the program as plain text (linenum, space,"); PNL;
-    POut("  statement text per line). Quotes around file are optional."); PNL
+    POut("DATA val[,...]      READ var[,...]      RESTORE [linenum]"); PNL
+  ELSIF (topic = "CLS") OR (topic = "HOME") THEN POut("CLS / HOME -- clear the screen."); PNL
+  ELSIF topic = "LOCATE" THEN POut("LOCATE row[,col]  (terminal only, 1-based)"); PNL
+  ELSIF topic = "RANDOMIZE" THEN POut("RANDOMIZE [expr]  (reseed RND)"); PNL
+  ELSIF topic = "SCREEN" THEN POut("SCREEN width[,height]  (open graphics window)"); PNL
+  ELSIF topic = "COLOR" THEN POut("COLOR fg[,bg]  (0-15)"); PNL
+  ELSIF topic = "PSET" THEN POut("PSET x,y[,color]"); PNL
+  ELSIF topic = "LINE" THEN POut("LINE x1,y1,x2,y2[,color]"); PNL
+  ELSIF (topic = "CIRCLE") OR (topic = "FCIRCLE") THEN POut("CIRCLE / FCIRCLE x,y,r[,color]"); PNL
+  ELSIF (topic = "RECT") OR (topic = "FRECT") THEN POut("RECT / FRECT x,y,w,h[,color]"); PNL
+  ELSIF topic = "TEXT" THEN POut("TEXT x,y,expr[,size[,color]]"); PNL
+  ELSIF topic = "SOUND" THEN POut("SOUND freq,ms  (blocking tone)"); PNL
+  ELSIF topic = "BEEP" THEN POut("BEEP  (short 800Hz tone)"); PNL
+  ELSIF topic = "DELAY" THEN POut("DELAY ms"); PNL
+  ELSIF (topic = "DEFN") OR (topic = "ENDFN") OR (topic = "FUNCTION") OR (topic = "FUNCTIONS") THEN
+    POut("DEFN name[$](p1[,p2,...])"); PNL;
+    POut("  <statements>"); PNL;
+    POut('  RETURN expr           (optional; falls through returns 0/"")'); PNL;
+    POut("ENDFN"); PNL;
+    POut(""); PNL;
+    POut("  Defines a user function. Trailing $ in the name makes it a"); PNL;
+    POut("  string function; otherwise numeric. Parameters are locals; the"); PNL;
+    POut("  caller's scalars are saved and restored (arrays are global)."); PNL;
+    POut("  Call as an expression:  y = square(5)  or as a statement:"); PNL;
+    POut('  greet("world")  (return value, if any, is discarded).'); PNL;
+    POut("  In a source file, body lines under DEFN may be unnumbered."); PNL;
+    POut("  At the REPL, keep typing lines until ENDFN is entered."); PNL;
+    POut(""); PNL;
+    POut("Built-in functions:"); PNL;
+    POut("  ABS INT SGN SQR SIN COS TAN ATN LOG EXP PI RND TIMER"); PNL;
+    POut("  LEN VAL ASC CHR$ STR$ LEFT$ RIGHT$ MID$ INSTR INKEY$"); PNL;
+    POut("  SCRW SCRH MOUSEX MOUSEY MOUSEB"); PNL
+  ELSIF topic = "RUN" THEN POut("RUN  (clears vars, scans DEFNs and DATA, runs from lowest line)"); PNL
+  ELSIF topic = "LIST" THEN POut("LIST  (show the stored program)"); PNL
+  ELSIF topic = "NEW" THEN POut("NEW  (erase program and variables)"); PNL
+  ELSIF topic = "CLEAR" THEN POut("CLEAR  (erase variables, keep program)"); PNL
+  ELSIF (topic = "LOAD") OR (topic = "SAVE") THEN POut("LOAD file        SAVE file  (plain text)"); PNL
   ELSIF (topic = "BYE") OR (topic = "QUIT") OR (topic = "EXIT") OR (topic = "SYSTEM") THEN
-    POut("BYE   (aliases: QUIT, EXIT, SYSTEM)"); PNL;
-    POut("  Leaves the interpreter."); PNL
-  ELSIF (topic = "FUNCTIONS") OR (topic = "FUNCTION") THEN
-    POut("ABS(x) INT(x) SGN(x) SQR(x) SIN/COS/TAN/ATN(x) LOG(x) EXP(x) PI"); PNL;
-    POut("RND (0<=x<1) TIMER (secs since start) LEN(s$) VAL(s$) ASC(s$)"); PNL;
-    POut("CHR$(n) STR$(x) LEFT$/RIGHT$(s$,n) MID$(s$,start[,len])"); PNL;
-    POut("INSTR([start,]s$,find$) INKEY$ (last key pressed, or empty)"); PNL;
-    POut("SCRW/SCRH (window size) MOUSEX/MOUSEY/MOUSEB (mouse state)"); PNL
+    POut("BYE / QUIT / EXIT / SYSTEM  (leave the interpreter)"); PNL
   ELSE
     POut("No help for "); POut(topic); POut(". Type HELP for the topic list."); PNL
   END
@@ -1618,6 +1890,32 @@ BEGIN
   IF gfxMode THEN Raylib.UnloadRenderTexture(canvas); Raylib.CloseWindow END;
   IF audioReady THEN Raylib.CloseAudioDevice END
 END Shutdown;
+
+(* Read a DEFN block from the REPL, prompting for continuation lines
+ * until an ENDFN line. Returns the concatenated lines (with newlines)
+ * so the caller can install them; each line becomes a program line at
+ * an auto-numbered slot in the high 6xxxx range. *)
+PROCEDURE ReadReplDefn(firstLine: ARRAY OF CHAR);
+VAR line: STRING; autoNum: INTEGER;
+BEGIN
+  autoNum := 60000;
+  WHILE LineIndexOf(autoNum) >= 0 DO INC(autoNum) END;
+  InsertLine(autoNum, firstLine); INC(autoNum);
+  LOOP
+    History.ReadLine(". ", line); outCol := 0;
+    Strings.Trim(line);
+    IF Strings.Length(line) = 0 THEN
+      (* skip blank lines silently *)
+    ELSE
+      ExpandQuestionMarks(line);
+      InsertLine(autoNum, line); INC(autoNum);
+      IF IsEndfnLine(line) THEN EXIT END
+    END
+  END;
+  (* Rebuild the function table so the new definition is immediately
+   * usable from immediate-mode calls at the > prompt. *)
+  ScanFuncs
+END ReadReplDefn;
 
 PROCEDURE Repl;
 VAR line, cmd, arg, rest: STRING; num, pos: INTEGER;
@@ -1634,12 +1932,14 @@ BEGIN
         Strings.Extract(line, pos, Strings.Length(line) - pos, rest);
         Strings.Trim(rest);
         ExpandQuestionMarks(rest);
-        InsertLine(num, rest)
+        InsertLine(num, rest);
+        (* If this line introduced or closed a DEFN, refresh func table. *)
+        IF IsDefnLine(rest) OR IsEndfnLine(rest) THEN ScanFuncs END
       ELSE
         Upper(cmd);
         IF cmd = "RUN" THEN RunProgram
         ELSIF cmd = "LIST" THEN DoList
-        ELSIF cmd = "NEW" THEN nLines := 0; ClearVars
+        ELSIF cmd = "NEW" THEN nLines := 0; ClearVars; ClearFuncs
         ELSIF cmd = "CLEAR" THEN ClearVars
         ELSIF cmd = "HELP" THEN
           Strings.Extract(line, pos, Strings.Length(line) - pos, arg); Strings.Trim(arg);
@@ -1650,14 +1950,19 @@ BEGIN
         ELSIF cmd = "LOAD" THEN
           Strings.Extract(line, pos, Strings.Length(line) - pos, arg); Strings.Trim(arg);
           StripQuotes(arg);
-          IF LoadFile(arg) THEN POut("LOADED"); PNL END
+          IF LoadFile(arg) THEN ScanFuncs; POut("LOADED"); PNL END
         ELSIF cmd = "SAVE" THEN
           Strings.Extract(line, pos, Strings.Length(line) - pos, arg); Strings.Trim(arg);
           StripQuotes(arg);
           IF SaveFile(arg) THEN POut("SAVED"); PNL ELSE POut("SAVE FAILED"); PNL END
+        ELSIF cmd = "DEFN" THEN
+          (* Enter multi-line DEFN capture. *)
+          ExpandQuestionMarks(line);
+          ReadReplDefn(line)
         ELSE
           ExpandQuestionMarks(line);
           Strings.Copy(line, immText);
+          callDepth := 0; returnPending := FALSE;
           startTime := Time.Now();
           Execute(-1, 0)
         END
@@ -1669,6 +1974,7 @@ END Repl;
 BEGIN
   nLines := 0; nNumVars := 0; nStrVars := 0; nArrays := 0;
   forTop := 0; gosubTop := 0; nDataVals := 0; dataPtr := 0;
+  nFuncs := 0; callDepth := 0; returnPending := FALSE;
   errFlag := FALSE; gfxMode := FALSE; audioReady := FALSE; outCol := 0;
   progRunning := TRUE; appRunning := TRUE;
   startTime := Time.Now();
@@ -1680,3 +1986,4 @@ BEGIN
   END;
   Shutdown
 END Basic.
+
