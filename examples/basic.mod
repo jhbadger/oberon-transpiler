@@ -101,7 +101,7 @@ CONST
   bfLog=8; bfExp=9; bfPi=10; bfRnd=11; bfTimer=12; bfLen=13; bfVal=14;
   bfAsc=15; bfChr=16; bfStr=17; bfLeft=18; bfRight=19; bfMid=20;
   bfInstr=21; bfInkey=22; bfScrw=23; bfScrh=24; bfMousex=25; bfMousey=26;
-  bfMouseb=27; bfEof=28;
+  bfMouseb=27; bfEof=28; bfStringDollar=29; bfSpaceDollar=30;
 
 TYPE
   Token = RECORD
@@ -689,7 +689,7 @@ BEGIN
        OR (name = "CHR$") OR (name = "STR$") OR (name = "LEFT$") OR (name = "RIGHT$")
        OR (name = "MID$") OR (name = "INSTR") OR (name = "INKEY$") OR (name = "SCRW")
        OR (name = "SCRH") OR (name = "MOUSEX") OR (name = "MOUSEY") OR (name = "MOUSEB")
-       OR (name = "EOF")
+       OR (name = "EOF") OR (name = "STRING$") OR (name = "SPACE$")
 END IsFuncName;
 
 PROCEDURE NameToBuiltinId(name: ARRAY OF CHAR): INTEGER;
@@ -723,6 +723,8 @@ BEGIN
   ELSIF name = "MOUSEY" THEN RETURN bfMousey
   ELSIF name = "MOUSEB" THEN RETURN bfMouseb
   ELSIF name = "EOF" THEN RETURN bfEof
+  ELSIF name = "STRING$" THEN RETURN bfStringDollar
+  ELSIF name = "SPACE$" THEN RETURN bfSpaceDollar
   ELSE RETURN -1
   END
 END NameToBuiltinId;
@@ -821,7 +823,7 @@ END InsertLine;
 (* =============================== builtins ================================ *)
 
 PROCEDURE RunBuiltinFunc(bf, argc: INTEGER);
-VAR a1, a2, a3, v: Value; n: INTEGER; buf: STRING; hasA3: BOOLEAN;
+VAR a1, a2, a3, v: Value; n, i: INTEGER; buf: STRING; hasA3: BOOLEAN; ch: CHAR;
 BEGIN
   a1 := MkNum(0.0); a2 := MkNum(0.0); a3 := MkNum(0.0); hasA3 := FALSE;
   IF argc >= 3 THEN Pop(a3); hasA3 := TRUE END;
@@ -892,6 +894,17 @@ BEGIN
       IF Files.Pos(fileSlots[n].r) >= Files.Length(fileSlots[n].f) THEN v := MkNum(-1.0)
       ELSE v := MkNum(0.0) END
     ELSE v := MkNum(-1.0) END
+  ELSIF bf = bfStringDollar THEN
+    n := FLOOR(a1.num); IF n < 0 THEN n := 0 END; IF n > 255 THEN n := 255 END;
+    IF a2.isStr THEN
+      IF Strings.Length(a2.s) > 0 THEN ch := a2.s[0] ELSE ch := ' ' END
+    ELSE ch := CHR(FLOOR(a2.num)) END;
+    FOR i := 0 TO n - 1 DO buf[i] := ch END;
+    buf[n] := 0X; v := MkStr(buf)
+  ELSIF bf = bfSpaceDollar THEN
+    n := FLOOR(a1.num); IF n < 0 THEN n := 0 END; IF n > 255 THEN n := 255 END;
+    FOR i := 0 TO n - 1 DO buf[i] := ' ' END;
+    buf[n] := 0X; v := MkStr(buf)
   ELSE
     RtErr("UNKNOWN FUNCTION"); v := MkNum(0.0)
   END;
@@ -2605,8 +2618,45 @@ BEGIN
     POut(""); PNL;
     POut("Built-in functions:"); PNL;
     POut("  ABS INT SGN SQR SIN COS TAN ATN LOG EXP PI RND TIMER"); PNL;
-    POut("  LEN VAL ASC CHR$ STR$ LEFT$ RIGHT$ MID$ INSTR INKEY$"); PNL;
-    POut("  SCRW SCRH MOUSEX MOUSEY MOUSEB EOF"); PNL
+    POut("  LEN VAL ASC CHR$ STR$ LEFT$ RIGHT$ MID$ INSTR INKEY$ STRING$ SPACE$"); PNL;
+    POut("  SCRW SCRH MOUSEX MOUSEY MOUSEB EOF"); PNL;
+    POut("  Type HELP name for details on any one of these, e.g. HELP RND."); PNL
+  ELSIF topic = "ABS" THEN POut("ABS(x)  -- absolute value"); PNL
+  ELSIF topic = "INT" THEN POut("INT(x)  -- largest integer <= x (floor, not truncation)"); PNL
+  ELSIF topic = "SGN" THEN POut("SGN(x)  -- -1, 0, or 1 for the sign of x"); PNL
+  ELSIF topic = "SQR" THEN POut("SQR(x)  -- square root"); PNL
+  ELSIF (topic = "SIN") OR (topic = "COS") OR (topic = "TAN") THEN
+    POut("SIN(x) / COS(x) / TAN(x)  -- trig functions, x in radians"); PNL
+  ELSIF topic = "ATN" THEN POut("ATN(x)  -- arctangent of x, result in radians"); PNL
+  ELSIF topic = "LOG" THEN POut("LOG(x)  -- natural logarithm"); PNL
+  ELSIF topic = "EXP" THEN POut("EXP(x)  -- e raised to the power x"); PNL
+  ELSIF topic = "PI" THEN POut("PI  -- 3.14159265...  (no arguments, no parens)"); PNL
+  ELSIF topic = "RND" THEN
+    POut("RND  -- random number in [0,1)  (no arguments, no parens)"); PNL;
+    POut("  See also HELP RANDOMIZE to reseed the sequence."); PNL
+  ELSIF topic = "TIMER" THEN POut("TIMER  -- seconds elapsed since the program started"); PNL
+  ELSIF topic = "LEN" THEN POut("LEN(s$)  -- number of characters in s$"); PNL
+  ELSIF topic = "VAL" THEN POut('VAL(s$)  -- numeric value of s$, e.g. VAL("3.5") = 3.5'); PNL
+  ELSIF topic = "ASC" THEN POut('ASC(s$)  -- ASCII code of the first character of s$'); PNL
+  ELSIF topic = "CHR$" THEN POut("CHR$(n)  -- one-character string for ASCII code n"); PNL
+  ELSIF topic = "STR$" THEN POut("STR$(x)  -- string representation of the number x"); PNL
+  ELSIF topic = "LEFT$" THEN POut("LEFT$(s$,n)  -- leftmost n characters of s$"); PNL
+  ELSIF topic = "RIGHT$" THEN POut("RIGHT$(s$,n)  -- rightmost n characters of s$"); PNL
+  ELSIF topic = "MID$" THEN POut("MID$(s$,start[,len])  -- substring starting at start (1-based)"); PNL
+  ELSIF topic = "INSTR" THEN
+    POut("INSTR([start,]s$,sub$)  -- 1-based position of sub$ in s$, 0 if not found"); PNL
+  ELSIF topic = "INKEY$" THEN
+    POut('INKEY$  -- one pending keypress as a 1-char string, or "" if none'); PNL;
+    POut("  (graphics window only; needs SCREEN to have been called)"); PNL
+  ELSIF topic = "STRING$" THEN
+    POut("STRING$(n,x)  -- n copies of a character: x is an ASCII code or a"); PNL;
+    POut("  string (its first character is repeated)"); PNL
+  ELSIF topic = "SPACE$" THEN POut("SPACE$(n)  -- a string of n space characters"); PNL
+  ELSIF (topic = "SCRW") OR (topic = "SCRH") THEN
+    POut("SCRW / SCRH  -- graphics window width/height in pixels (no arguments)"); PNL
+  ELSIF (topic = "MOUSEX") OR (topic = "MOUSEY") THEN
+    POut("MOUSEX / MOUSEY  -- mouse position within the graphics window"); PNL
+  ELSIF topic = "MOUSEB" THEN POut("MOUSEB  -- TRUE while the left mouse button is held down"); PNL
   ELSIF topic = "RUN" THEN POut("RUN  (clears vars, scans DEFNs and DATA, runs from lowest line)"); PNL
   ELSIF topic = "LIST" THEN POut("LIST  (show the stored program)"); PNL
   ELSIF topic = "NEW" THEN POut("NEW  (erase program and variables)"); PNL
