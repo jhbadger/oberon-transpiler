@@ -2097,9 +2097,21 @@ VAR pc, target, li, idx, ai, i1, i2, c2, n, x, y, x2, y2, w, h, sz, c, d1, d2: I
     v, rhs, idxv, idxv2: Value;
     buf, name, part, prompt: STRING;
     instr: Instr;
+    intCheck: INTEGER;
 BEGIN
-  pc := startPc; progRunning := TRUE;
+  pc := startPc; progRunning := TRUE; intCheck := 0;
   WHILE progRunning & ~errFlag DO
+    INC(intCheck);
+    IF intCheck >= 2000 THEN
+      intCheck := 0;
+      IF History.Interrupted() THEN
+        PNL; POut("BREAK");
+        IF currentLineNum >= 0 THEN POut(" IN "); NumToStr(FLT(currentLineNum), buf); POut(buf) END;
+        PNL;
+        progRunning := FALSE
+      END
+    END;
+    IF progRunning THEN
     instr := code[pc]; INC(pc);
 
     IF instr.op = opPushNum THEN Push(MkNum(numPool[instr.a]))
@@ -2242,7 +2254,13 @@ BEGIN
       IF instr.a >= 0 THEN Strings.Copy(strPool[instr.a], prompt); Strings.Append("? ", prompt)
       ELSE Strings.Copy("? ", prompt) END;
       History.ReadLine(prompt, inputLine); outCol := 0;
-      inputFieldN := 0
+      inputFieldN := 0;
+      IF History.Interrupted() THEN
+        POut("BREAK");
+        IF currentLineNum >= 0 THEN POut(" IN "); NumToStr(FLT(currentLineNum), buf); POut(buf) END;
+        PNL;
+        progRunning := FALSE
+      END
     ELSIF instr.op = opInputFileBegin THEN
       Pop(v); n := FLOOR(v.num);
       IF (n >= 1) & (n <= MaxOpenFiles) & fileSlots[n].inUse THEN
@@ -2378,6 +2396,7 @@ BEGIN
     ELSIF instr.op = opFiles THEN
       IF instr.a = 1 THEN Pop(v); Strings.Copy(v.s, buf) ELSE buf := "" END;
       DoFiles(buf)
+    END
     END
   END;
   IF errFlag THEN ReportError(currentLineNum) END

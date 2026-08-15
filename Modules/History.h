@@ -30,6 +30,14 @@ int  History_Save(char *filename);
 /* Clear all history entries. */
 void History_Clear(void);
 
+/* Returns 1 (and clears the flag) if a Ctrl+C interrupt has occurred since
+   the last check -- either during ReadLine (the raw-mode Ctrl+C case) or
+   via a real SIGINT delivered while the terminal was in normal/cooked mode
+   (i.e. not inside ReadLine). Installs the SIGINT handler on first use, so
+   callers can poll this in a long-running loop to support breaking back to
+   a REPL instead of the process dying to the default SIGINT disposition. */
+int History_Interrupted(void);
+
 /* Completion callback: fills result with space-separated symbol names that
    start with prefix.  result_len is the size of the result buffer. */
 typedef void (*History_CompletionFn)(const char *prefix, char *result, int result_len);

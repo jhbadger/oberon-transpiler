@@ -28,6 +28,26 @@
 #include <termios.h>
 #include <unistd.h>
 #include <ctype.h>
+#include <signal.h>
+
+/* ── Ctrl+C interrupt flag ────────────────────────────────────────────────
+ * Set either by the SIGINT handler below (normal/cooked terminal mode --
+ * i.e. a program is running but not blocked in ReadLine) or directly by
+ * ReadLine's raw-mode Ctrl+C case (raw mode disables ISIG, so the OS never
+ * generates a real SIGINT while a keystroke read is in progress). Either
+ * way, callers just poll History_Interrupted(). */
+
+static volatile sig_atomic_t g_interrupted = 0;
+
+static void on_sigint(int sig) { (void)sig; g_interrupted = 1; }
+
+__attribute__((constructor))
+static void History_init(void) { signal(SIGINT, on_sigint); }
+
+int History_Interrupted(void) {
+    if (g_interrupted) { g_interrupted = 0; return 1; }
+    return 0;
+}
 
 #define HIST_MAX  500
 #define HIST_LEN  256
@@ -404,6 +424,7 @@ void History_ReadLine(char *prompt, char *result) {
             out("\r\n");
             fflush(stdout);
             disable_raw();
+            g_interrupted = 1;
             result[0] = '\0';
             return;
 
