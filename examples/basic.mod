@@ -2297,7 +2297,7 @@ BEGIN
       Pop(v); x := FLOOR(v.num);
       VmLocate(x, y)
     ELSIF instr.op = opRandomize THEN
-      IF instr.a = 1 THEN Pop(v) END
+      IF instr.a = 1 THEN Pop(v); Random.Seed(FLOOR(v.num)) ELSE Random.Randomize END
     ELSIF instr.op = opScreen THEN
       IF instr.a = 2 THEN Pop(v); h := FLOOR(v.num) ELSE h := 480 END;
       Pop(v); w := FLOOR(v.num);

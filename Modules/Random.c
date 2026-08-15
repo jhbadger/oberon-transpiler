@@ -14,3 +14,14 @@ int Random_Int(int n) {
 double Random_Real(void) {
     return (double)rand() / ((double)RAND_MAX + 1.0);
 }
+
+void Random_Randomize(void) {
+    /* time(NULL) alone only has 1-second resolution, so two processes
+     * started within the same second would reseed identically; mix in
+     * clock() (CPU time since process start) for finer-grained entropy. */
+    srand((unsigned)time(NULL) ^ (unsigned)clock());
+}
+
+void Random_Seed(int n) {
+    srand((unsigned)n);
+}
