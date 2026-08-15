@@ -3,7 +3,16 @@ MODULE Basic;
  * A line-numbered BASIC interpreter (GW-BASIC / Applesoft flavor) with
  * Raylib-backed graphics and sound statements bolted on.
  *
- * ... (header comment unchanged) ...
+ * Internal design: a small bytecode VM. Each program line is tokenized
+ * and compiled to bytecode exactly once (whenever the program is edited),
+ * instead of being re-tokenized and re-parsed by a recursive-descent
+ * evaluator on every single execution. GOTO/GOSUB/FOR-NEXT/IF are all
+ * compiled to direct jumps within one flat instruction stream (main
+ * program lines, DEFN function bodies, and the current immediate-mode
+ * line all share one instruction array, in different regions), so loops
+ * run as tight PC-based jumps with no re-lexing and no re-parsing of
+ * expressions. Variable/array storage is unchanged from the original
+ * design (linear-scan symbol tables) since that was not the bottleneck.
  *
  * User-defined functions:
  *   DEFN name[$](p1[,p2...])
@@ -14,10 +23,10 @@ MODULE Basic;
  * Call as an expression:   y = square(5)
  * Or as a statement:       greet("world")   (result, if any, discarded)
  *
- * DEFN blocks may be placed anywhere in the program (they are collected
- * at RUN time and skipped by the interpreter) or entered directly at the
- * REPL (define across several prompt lines; you'll be re-prompted until
- * ENDFN closes the definition).
+ * DEFN blocks may be placed anywhere in the program (they are compiled
+ * separately from the main-line code and skipped over by it) or entered
+ * directly at the REPL (define across several prompt lines; you'll be
+ * re-prompted until ENDFN closes the definition).
  *)
 
 IMPORT Out, Strings, Random, Math, Time, Files, Args, Raylib, History;
@@ -37,12 +46,55 @@ CONST
 
   MaxFuncs      = 128;
   MaxFuncParams = 8;
-  MaxFuncBody   = 200;    (* max statement-lines in a function body *)
   MaxCallDepth  = 32;
 
   (* token kinds *)
   TkEOL = 0; TkNum = 1; TkStr = 2; TkIdent = 3; TkOp = 4;
   TkLP = 5; TkRP = 6; TkComma = 7; TkColon = 8; TkSemi = 9;
+
+  (* bytecode: one flat instruction stream. [0,MainCodeCap) holds the
+   * compiled main program (and DEFN function bodies, appended after the
+   * main lines); [MainCodeCap,MaxCode) is scratch space recompiled fresh
+   * for each immediate-mode ("direct") command, so GOTO/GOSUB from an
+   * immediate-mode line can still jump into real program lines by PC. *)
+  ScratchCap  = 4000;
+  MaxCode     = 240000;
+  MainCodeCap = MaxCode - ScratchCap;
+
+  MaxNames         = 3000;
+  MaxNumPool       = 20000;
+  MaxStrPool       = 4000;
+  MaxOnTargets     = 2000;
+  MaxGotoBackpatch = 8000;
+  MaxLineFixups    = 64;
+  MaxValStack      = 512;
+
+  (* opcodes *)
+  opPushNum = 0; opPushStr = 1; opLoadVar = 2; opLoadArr = 3;
+  opStoreVar = 4; opStoreArr = 5; opPop = 6;
+  opNeg = 7; opNot = 8; opAdd = 9; opSub = 10; opMul = 11; opDiv = 12;
+  opMod = 13; opPow = 14;
+  opEq = 15; opNe = 16; opLt = 17; opLe = 18; opGt = 19; opGe = 20;
+  opAndOp = 21; opOrOp = 22;
+  opCallBuiltinFunc = 23; opCallUserFuncExpr = 24; opCallUserFuncStmt = 25;
+  opJump = 26; opJumpIfFalse = 27;
+  opGoto = 28; opGotoDyn = 29; opGosub = 30; opGosubDyn = 31;
+  opGosubReturn = 32; opFuncReturn = 33;
+  opForInit = 34; opForNext = 35; opOnGoto = 36; opOnGosub = 37;
+  opEnd = 38; opLine = 39;
+  opPrintVal = 40; opPrintTab = 41; opPrintComma = 42; opPrintNL = 43;
+  opInputBegin = 44; opInputVar = 45; opInputArr = 46;
+  opDim = 47; opReadVar = 48; opReadArr = 49; opRestore = 50;
+  opCls = 51; opLocate = 52; opRandomize = 53; opScreen = 54; opColor = 55;
+  opPset = 56; opDrawLine = 57; opCircle = 58; opRect = 59; opText = 60;
+  opSound = 61; opBeep = 62; opDelay = 63;
+
+  (* builtin function ids *)
+  bfAbs=0; bfInt=1; bfSgn=2; bfSqr=3; bfSin=4; bfCos=5; bfTan=6; bfAtn=7;
+  bfLog=8; bfExp=9; bfPi=10; bfRnd=11; bfTimer=12; bfLen=13; bfVal=14;
+  bfAsc=15; bfChr=16; bfStr=17; bfLeft=18; bfRight=19; bfMid=20;
+  bfInstr=21; bfInkey=22; bfScrw=23; bfScrh=24; bfMousex=25; bfMousey=26;
+  bfMouseb=27;
 
 TYPE
   Token = RECORD
@@ -88,20 +140,13 @@ TYPE
     varName  : STRING;
     limit    : REAL;
     step     : REAL;
-    lineIdx  : INTEGER;
-    tokPos   : INTEGER
+    loopTopPc: INTEGER
   END;
 
   GosubEntry = RECORD
-    lineIdx : INTEGER;
-    tokPos  : INTEGER
+    returnPc : INTEGER
   END;
 
-  (* A function body is stored as raw source lines (pre-DEFN/post-ENDFN
-   * stripped). Executing the body reuses Tokenize/ExecStmtList by
-   * building a temporary "program" of these lines in-place, but simpler
-   * still: we just keep the source lines and interpret them with a
-   * dedicated mini-loop that knows about RETURN-with-value. *)
   FuncDef = POINTER TO FuncDefRec;
   FuncDefRec = RECORD
     name      : STRING;             (* uppercased, includes trailing $ if str *)
@@ -109,15 +154,31 @@ TYPE
     nParams   : INTEGER;
     params    : ARRAY MaxFuncParams OF STRING;
     paramIsStr: ARRAY MaxFuncParams OF BOOLEAN;
-    nBody     : INTEGER;
-    body      : ARRAY MaxFuncBody OF STRING
+    entryPc   : INTEGER;
+    bodyStart : INTEGER;             (* prog[] index range of the body *)
+    bodyEnd   : INTEGER
   END;
+
+  NumSnap = POINTER TO NumSnapRec;
+  NumSnapRec = RECORD n: INTEGER; e: ARRAY MaxScalarNum OF ScalarNum END;
+  StrSnap = POINTER TO StrSnapRec;
+  StrSnapRec = RECORD n: INTEGER; e: ARRAY MaxScalarStr OF ScalarStr END;
+
+  CallFrame = RECORD
+    returnPc      : INTEGER;
+    savedForTop   : INTEGER;
+    savedGosubTop : INTEGER;
+    funcIdx       : INTEGER;
+    ns            : NumSnap;
+    ss            : StrSnap;
+    wantValue     : BOOLEAN
+  END;
+
+  Instr = RECORD op, a, b: INTEGER END;
 
 VAR
   prog     : ARRAY MaxLines OF ProgLine;
   nLines   : INTEGER;
-
-  immText  : STRING;
 
   numVars  : ARRAY MaxScalarNum OF ScalarNum;
   nNumVars : INTEGER;
@@ -140,12 +201,8 @@ VAR
   funcs   : ARRAY MaxFuncs OF FuncDef;
   nFuncs  : INTEGER;
 
-  (* Function call state. When a function is executing, callDepth>0
-   * and the outer statement loop uses returnPending / returnVal to
-   * unwind out to the calling EvalPrimary / ExecStmt. *)
-  callDepth     : INTEGER;
-  returnPending : BOOLEAN;
-  returnVal     : Value;
+  callStack : ARRAY MaxCallDepth OF CallFrame;
+  callTop   : INTEGER;
 
   errFlag : BOOLEAN;
   errMsg  : STRING;
@@ -164,6 +221,32 @@ VAR
   curColorIx : INTEGER;
   bgColorIx  : INTEGER;
   startTime  : LONGINT;
+
+  (* ---- compiler + VM state ---- *)
+  code       : ARRAY MaxCode OF Instr;
+  codeLen    : INTEGER;
+  codeLimit  : INTEGER;
+  lineStartPc: ARRAY MaxLines OF INTEGER;
+
+  namePool  : ARRAY MaxNames OF STRING; nNames  : INTEGER;
+  numPool   : ARRAY MaxNumPool OF REAL; nNumPool: INTEGER;
+  strPool   : ARRAY MaxStrPool OF STRING; nStrPool: INTEGER;
+
+  onTargets      : ARRAY MaxOnTargets OF INTEGER; nOnTargets: INTEGER;
+  gotoBackpatch  : ARRAY MaxGotoBackpatch OF INTEGER; nGotoBackpatch: INTEGER;
+  lineFixups     : ARRAY MaxLineFixups OF INTEGER; nLineFixups: INTEGER;
+
+  compInFunc : BOOLEAN;
+  firstCompileErrMsg  : STRING;
+  firstCompileErrLine : INTEGER;
+
+  valStack : ARRAY MaxValStack OF Value;
+  sp       : INTEGER;
+
+  currentLineNum : INTEGER;
+
+  inputLine    : STRING;
+  inputFieldN  : INTEGER;
 
 (* ============================= utility ================================ *)
 
@@ -298,6 +381,12 @@ BEGIN
   RETURN (CurKind(tb) = TkOp) & (tb.t[tb.pos].s = op)
 END IsOp;
 
+PROCEDURE PeekIsBareLineNumber(VAR tb: TokBuf): BOOLEAN;
+BEGIN
+  RETURN (CurKind(tb) = TkNum) &
+         ((tb.t[tb.pos+1].kind = TkColon) OR (tb.t[tb.pos+1].kind = TkEOL))
+END PeekIsBareLineNumber;
+
 (* =========================== symbol table =============================== *)
 
 PROCEDURE IsStrName(name: ARRAY OF CHAR): BOOLEAN;
@@ -429,6 +518,32 @@ BEGIN
   nNumVars := 0; nStrVars := 0; nArrays := 0
 END ClearVars;
 
+PROCEDURE AssignScalar(name: ARRAY OF CHAR; VAR v: Value);
+BEGIN
+  IF IsStrName(name) THEN
+    IF ~v.isStr THEN RtErr("TYPE MISMATCH"); RETURN END;
+    SetStr(name, v.s)
+  ELSE
+    IF v.isStr THEN RtErr("TYPE MISMATCH"); RETURN END;
+    SetNum(name, v.num)
+  END
+END AssignScalar;
+
+PROCEDURE AssignArrayElem(name: ARRAY OF CHAR; i1, i2: INTEGER; VAR v: Value);
+VAR ai, idx: INTEGER;
+BEGIN
+  ai := EnsureArray(name);
+  IF ai < 0 THEN RETURN END;
+  IF ~ArrIndex(arrays[ai], i1, i2, idx) THEN RETURN END;
+  IF arrays[ai].isStr THEN
+    IF ~v.isStr THEN RtErr("TYPE MISMATCH"); RETURN END;
+    Strings.Copy(v.s, arrays[ai].strData.elems[idx])
+  ELSE
+    IF v.isStr THEN RtErr("TYPE MISMATCH"); RETURN END;
+    arrays[ai].numData[idx] := v.num
+  END
+END AssignArrayElem;
+
 (* ========================== user function table ========================= *)
 
 PROCEDURE FindFunc(name: ARRAY OF CHAR): INTEGER;
@@ -449,9 +564,6 @@ BEGIN
   nFuncs := 0
 END ClearFuncs;
 
-(* Parse a DEFN header line ("DEFN name(a,b$)") already-tokenized.
- * Returns TRUE on success and fills *fd with header info (name, params,
- * types), body starts empty. *)
 PROCEDURE ParseDefnHeader(header: ARRAY OF CHAR; fd: FuncDef): BOOLEAN;
 VAR tb: TokBuf; pname: STRING;
 BEGIN
@@ -478,13 +590,10 @@ BEGIN
     END;
     IF CurKind(tb) = TkRP THEN INC(tb.pos) ELSE RtErr("DEFN: MISSING )"); RETURN FALSE END
   END;
-  fd.nBody := 0;
+  fd.entryPc := -1;
   RETURN TRUE
 END ParseDefnHeader;
 
-(* Detect DEFN / ENDFN as the first token of a stripped source line.
- * We use light textual scanning (not Tokenize) to avoid tokenizer state
- * clashes when we're partway through building a function. *)
 PROCEDURE FirstWord(s: ARRAY OF CHAR; VAR w: ARRAY OF CHAR);
 VAR i, j: INTEGER;
 BEGIN
@@ -503,45 +612,9 @@ PROCEDURE IsEndfnLine(s: ARRAY OF CHAR): BOOLEAN;
 VAR w: STRING;
 BEGIN FirstWord(s, w); RETURN w = "ENDFN" END IsEndfnLine;
 
-(* Collect all DEFN...ENDFN blocks from the program into the funcs table.
- * Called at RUN time. Any parse error is reported but doesn't abort the
- * collection of other functions. *)
-PROCEDURE ScanFuncs;
-VAR i, j: INTEGER; fd: FuncDef; ok: BOOLEAN;
-BEGIN
-  ClearFuncs;
-  i := 0;
-  WHILE i < nLines DO
-    IF IsDefnLine(prog[i].text) THEN
-      IF nFuncs >= MaxFuncs THEN RtErr("TOO MANY FUNCTIONS"); RETURN END;
-      NEW(fd);
-      ok := ParseDefnHeader(prog[i].text, fd);
-      INC(i);
-      WHILE (i < nLines) & ~IsEndfnLine(prog[i].text) DO
-        IF ok & (fd.nBody < MaxFuncBody) THEN
-          Strings.Copy(prog[i].text, fd.body[fd.nBody]); INC(fd.nBody)
-        END;
-        INC(i)
-      END;
-      IF i >= nLines THEN
-        RtErr("DEFN WITHOUT ENDFN"); ok := FALSE
-      ELSE
-        INC(i)  (* skip ENDFN *)
-      END;
-      IF ok THEN
-        j := FindFunc(fd.name);
-        IF j >= 0 THEN funcs[j] := fd ELSE funcs[nFuncs] := fd; INC(nFuncs) END
-      END
-    ELSE
-      INC(i)
-    END
-  END
-END ScanFuncs;
-
 (* Return TRUE if line i in the program is inside (or is) a DEFN/ENDFN
- * pair, and set skipTo to the index just past ENDFN. Used by the main
- * Execute loop to jump over embedded function bodies during normal
- * program flow. *)
+ * pair, and set skipTo to the index just past ENDFN. Used to skip over
+ * embedded function bodies during main-line compilation / DATA scanning. *)
 PROCEDURE IsFuncBodyLine(i: INTEGER; VAR skipTo: INTEGER): BOOLEAN;
 VAR k: INTEGER;
 BEGIN
@@ -555,7 +628,7 @@ BEGIN
   RETURN FALSE
 END IsFuncBodyLine;
 
-(* ============================ expressions =============================== *)
+(* ============================ value helpers ============================== *)
 
 PROCEDURE MkNum(x: REAL): Value;
 VAR v: Value;
@@ -590,6 +663,40 @@ BEGIN
        OR (name = "SCRH") OR (name = "MOUSEX") OR (name = "MOUSEY") OR (name = "MOUSEB")
 END IsFuncName;
 
+PROCEDURE NameToBuiltinId(name: ARRAY OF CHAR): INTEGER;
+BEGIN
+  IF name = "ABS" THEN RETURN bfAbs
+  ELSIF name = "INT" THEN RETURN bfInt
+  ELSIF name = "SGN" THEN RETURN bfSgn
+  ELSIF name = "SQR" THEN RETURN bfSqr
+  ELSIF name = "SIN" THEN RETURN bfSin
+  ELSIF name = "COS" THEN RETURN bfCos
+  ELSIF name = "TAN" THEN RETURN bfTan
+  ELSIF name = "ATN" THEN RETURN bfAtn
+  ELSIF name = "LOG" THEN RETURN bfLog
+  ELSIF name = "EXP" THEN RETURN bfExp
+  ELSIF name = "PI" THEN RETURN bfPi
+  ELSIF name = "RND" THEN RETURN bfRnd
+  ELSIF name = "TIMER" THEN RETURN bfTimer
+  ELSIF name = "LEN" THEN RETURN bfLen
+  ELSIF name = "VAL" THEN RETURN bfVal
+  ELSIF name = "ASC" THEN RETURN bfAsc
+  ELSIF name = "CHR$" THEN RETURN bfChr
+  ELSIF name = "STR$" THEN RETURN bfStr
+  ELSIF name = "LEFT$" THEN RETURN bfLeft
+  ELSIF name = "RIGHT$" THEN RETURN bfRight
+  ELSIF name = "MID$" THEN RETURN bfMid
+  ELSIF name = "INSTR" THEN RETURN bfInstr
+  ELSIF name = "INKEY$" THEN RETURN bfInkey
+  ELSIF name = "SCRW" THEN RETURN bfScrw
+  ELSIF name = "SCRH" THEN RETURN bfScrh
+  ELSIF name = "MOUSEX" THEN RETURN bfMousex
+  ELSIF name = "MOUSEY" THEN RETURN bfMousey
+  ELSIF name = "MOUSEB" THEN RETURN bfMouseb
+  ELSE RETURN -1
+  END
+END NameToBuiltinId;
+
 PROCEDURE ReadInkey(VAR out: ARRAY OF CHAR);
 VAR k: INTEGER;
 BEGIN
@@ -611,94 +718,19 @@ BEGIN
   END
 END ReadInkey;
 
-PROCEDURE CallFunction(name: ARRAY OF CHAR; VAR tb: TokBuf; VAR v: Value);
-VAR a1, a2, a3: Value; n: INTEGER; buf: STRING; hasA2, hasA3: BOOLEAN;
+(* ============================ value stack ================================ *)
+
+PROCEDURE Push(v: Value);
 BEGIN
-  hasA2 := FALSE; hasA3 := FALSE;
-  a1 := MkNum(0.0); a2 := MkNum(0.0); a3 := MkNum(0.0);
-  IF CurKind(tb) = TkLP THEN
-    INC(tb.pos);
-    IF CurKind(tb) # TkRP THEN
-      EvalExpr(tb, a1);
-      IF CurKind(tb) = TkComma THEN
-        INC(tb.pos); EvalExpr(tb, a2); hasA2 := TRUE;
-        IF CurKind(tb) = TkComma THEN
-          INC(tb.pos); EvalExpr(tb, a3); hasA3 := TRUE
-        END
-      END
-    END;
-    IF CurKind(tb) = TkRP THEN INC(tb.pos) ELSE RtErr("MISSING )") END
-  END;
+  IF sp < MaxValStack THEN valStack[sp] := v; INC(sp) ELSE RtErr("EXPRESSION TOO COMPLEX") END
+END Push;
 
-  IF name = "ABS" THEN v := MkNum(ABS(a1.num))
-  ELSIF name = "INT" THEN v := MkNum(FLT(FLOOR(a1.num)))
-  ELSIF name = "SGN" THEN
-    IF a1.num > 0.0 THEN v := MkNum(1.0)
-    ELSIF a1.num < 0.0 THEN v := MkNum(-1.0)
-    ELSE v := MkNum(0.0) END
-  ELSIF name = "SQR" THEN v := MkNum(Math.sqrt(a1.num))
-  ELSIF name = "SIN" THEN v := MkNum(Math.sin(a1.num))
-  ELSIF name = "COS" THEN v := MkNum(Math.cos(a1.num))
-  ELSIF name = "TAN" THEN v := MkNum(Math.tan(a1.num))
-  ELSIF name = "ATN" THEN v := MkNum(Math.arctan(a1.num))
-  ELSIF name = "LOG" THEN v := MkNum(Math.ln(a1.num))
-  ELSIF name = "EXP" THEN v := MkNum(Math.exp(a1.num))
-  ELSIF name = "PI" THEN v := MkNum(Math.pi)
-  ELSIF name = "RND" THEN v := MkNum(Random.Real())
-  ELSIF name = "TIMER" THEN v := MkNum(ElapsedSecs())
-  ELSIF name = "LEN" THEN v := MkNum(FLT(Strings.Length(a1.s)))
-  ELSIF name = "VAL" THEN
-    IF ~Strings.StrToReal(a1.s, v.num) THEN v.num := 0.0 END;
-    v.isStr := FALSE; v.s := ""
-  ELSIF name = "ASC" THEN
-    IF Strings.Length(a1.s) > 0 THEN v := MkNum(FLT(ORD(a1.s[0]))) ELSE v := MkNum(0.0) END
-  ELSIF name = "CHR$" THEN
-    buf[0] := CHR(FLOOR(a1.num)); buf[1] := 0X; v := MkStr(buf)
-  ELSIF name = "STR$" THEN
-    NumToStr(a1.num, buf); v := MkStr(buf)
-  ELSIF name = "LEFT$" THEN
-    n := FLOOR(a2.num); IF n < 0 THEN n := 0 END;
-    IF n > Strings.Length(a1.s) THEN n := Strings.Length(a1.s) END;
-    Strings.Extract(a1.s, 0, n, buf); v := MkStr(buf)
-  ELSIF name = "RIGHT$" THEN
-    n := FLOOR(a2.num); IF n < 0 THEN n := 0 END;
-    IF n > Strings.Length(a1.s) THEN n := Strings.Length(a1.s) END;
-    Strings.Extract(a1.s, Strings.Length(a1.s) - n, n, buf); v := MkStr(buf)
-  ELSIF name = "MID$" THEN
-    n := FLOOR(a2.num) - 1; IF n < 0 THEN n := 0 END;
-    IF ~hasA3 THEN a3.num := FLT(Strings.Length(a1.s)) END;
-    IF n > Strings.Length(a1.s) THEN n := Strings.Length(a1.s) END;
-    IF n + FLOOR(a3.num) > Strings.Length(a1.s) THEN a3.num := FLT(Strings.Length(a1.s) - n) END;
-    IF a3.num < 0.0 THEN a3.num := 0.0 END;
-    Strings.Extract(a1.s, n, FLOOR(a3.num), buf); v := MkStr(buf)
-  ELSIF name = "INSTR" THEN
-    IF hasA3 THEN v := MkNum(FLT(Strings.Pos(a3.s, a1.s, FLOOR(a2.num) - 1) + 1))
-    ELSE v := MkNum(FLT(Strings.Pos(a2.s, a1.s) + 1)) END
-  ELSIF name = "INKEY$" THEN
-    ReadInkey(buf); v := MkStr(buf)
-  ELSIF name = "SCRW" THEN v := MkNum(FLT(winW))
-  ELSIF name = "SCRH" THEN v := MkNum(FLT(winH))
-  ELSIF name = "MOUSEX" THEN
-    IF gfxMode THEN v := MkNum(FLT(Raylib.GetMouseX())) ELSE v := MkNum(0.0) END
-  ELSIF name = "MOUSEY" THEN
-    IF gfxMode THEN v := MkNum(FLT(Raylib.GetMouseY())) ELSE v := MkNum(0.0) END
-  ELSIF name = "MOUSEB" THEN
-    IF gfxMode & (Raylib.IsMouseButtonDown(Raylib.BtnLeft) = 1) THEN v := MkNum(-1.0) ELSE v := MkNum(0.0) END
-  ELSE
-    RtErr("UNKNOWN FUNCTION"); v := MkNum(0.0)
-  END
-END CallFunction;
+PROCEDURE Pop(VAR v: Value);
+BEGIN
+  IF sp > 0 THEN DEC(sp); v := valStack[sp] ELSE RtErr("STACK UNDERFLOW"); v := MkNum(0.0) END
+END Pop;
 
-(* ================== user function call machinery ======================== *)
-
-(* Snapshot / restore of scalar variable tables so parameters and locals
- * inside a function don't leak into the caller. We snapshot only the
- * scalar tables (arrays are shared globally, matching classic BASIC). *)
-TYPE
-  NumSnap = POINTER TO NumSnapRec;
-  NumSnapRec = RECORD n: INTEGER; e: ARRAY MaxScalarNum OF ScalarNum END;
-  StrSnap = POINTER TO StrSnapRec;
-  StrSnapRec = RECORD n: INTEGER; e: ARRAY MaxScalarStr OF ScalarStr END;
+(* ====================== snapshot / restore of scalars ==================== *)
 
 PROCEDURE SnapshotScalars(VAR ns: NumSnap; VAR ss: StrSnap);
 VAR i: INTEGER;
@@ -716,272 +748,6 @@ BEGIN
   FOR i := 0 TO nNumVars - 1 DO numVars[i] := ns.e[i] END;
   FOR i := 0 TO nStrVars - 1 DO strVars[i] := ss.e[i] END
 END RestoreScalars;
-
-(* Execute the body of function fd. Returns via returnPending/returnVal;
- * an ordinary fall-off-end returns 0 (or "") of the right type. *)
-PROCEDURE ExecFuncBody(fd: FuncDef);
-VAR i, savedForTop, savedGosubTop: INTEGER;
-    tb: TokBuf; jumped: BOOLEAN; newLine, newTok: INTEGER;
-BEGIN
-  savedForTop := forTop; savedGosubTop := gosubTop;
-  returnPending := FALSE;
-  IF fd.isStr THEN returnVal := MkStr("") ELSE returnVal := MkNum(0.0) END;
-  i := 0;
-  WHILE (i < fd.nBody) & ~errFlag & ~returnPending DO
-    Tokenize(fd.body[i], tb); tb.pos := 0;
-    ExecStmtList(tb, -2, -1, jumped, newLine, newTok);
-    (* No GOTO/GOSUB targeting line numbers inside function bodies: we
-     * simply advance line by line. jumped is ignored (there is no
-     * numbered-line table for the body). If a user writes GOTO 100
-     * inside a function, we'll fall through to next body line -- best
-     * we can do without a per-function line table. *)
-    INC(i)
-  END;
-  (* Discard any FOR/GOSUB frames the function itself left dangling. *)
-  forTop := savedForTop; gosubTop := savedGosubTop
-END ExecFuncBody;
-
-PROCEDURE CallUserFunc(fi: INTEGER; VAR tb: TokBuf; wantValue: BOOLEAN; VAR out: Value);
-VAR fd: FuncDef; args: ARRAY MaxFuncParams OF Value; n, i: INTEGER;
-    ns: NumSnap; ss: StrSnap;
-    savedReturnPending: BOOLEAN; savedReturnVal: Value;
-BEGIN
-  fd := funcs[fi];
-  n := 0;
-  IF CurKind(tb) = TkLP THEN
-    INC(tb.pos);
-    IF CurKind(tb) # TkRP THEN
-      LOOP
-        IF n >= fd.nParams THEN RtErr("TOO MANY ARGS"); RETURN END;
-        EvalExpr(tb, args[n]); INC(n);
-        IF CurKind(tb) = TkComma THEN INC(tb.pos) ELSE EXIT END
-      END
-    END;
-    IF CurKind(tb) = TkRP THEN INC(tb.pos) ELSE RtErr("MISSING )"); RETURN END
-  END;
-  IF n # fd.nParams THEN RtErr("WRONG ARG COUNT"); RETURN END;
-
-  IF callDepth >= MaxCallDepth THEN RtErr("CALL DEPTH EXCEEDED"); RETURN END;
-
-  (* Save caller state and set up fresh scalar frame. Arrays remain
-   * global, which matches classic BASIC. *)
-  savedReturnPending := returnPending; savedReturnVal := returnVal;
-  SnapshotScalars(ns, ss);
-  ClearVars;
-  FOR i := 0 TO n - 1 DO
-    IF fd.paramIsStr[i] THEN
-      IF ~args[i].isStr THEN NumToStr(args[i].num, args[i].s); args[i].isStr := TRUE END;
-      SetStr(fd.params[i], args[i].s)
-    ELSE
-      IF args[i].isStr THEN
-        IF ~Strings.StrToReal(args[i].s, args[i].num) THEN args[i].num := 0.0 END;
-        args[i].isStr := FALSE
-      END;
-      SetNum(fd.params[i], args[i].num)
-    END
-  END;
-
-  INC(callDepth);
-  ExecFuncBody(fd);
-  DEC(callDepth);
-
-  IF fd.isStr THEN
-    IF returnPending & returnVal.isStr THEN out := returnVal
-    ELSIF returnPending THEN NumToStr(returnVal.num, out.s); out.isStr := TRUE; out.num := 0.0
-    ELSE out := MkStr("") END
-  ELSE
-    IF returnPending & ~returnVal.isStr THEN out := returnVal
-    ELSIF returnPending THEN
-      IF ~Strings.StrToReal(returnVal.s, out.num) THEN out.num := 0.0 END;
-      out.isStr := FALSE; out.s := ""
-    ELSE out := MkNum(0.0) END
-  END;
-
-  RestoreScalars(ns, ss);
-  returnPending := savedReturnPending; returnVal := savedReturnVal;
-
-  IF ~wantValue THEN
-    (* caller didn't want the value; nothing else to do *)
-  END
-END CallUserFunc;
-
-(* ============================ expressions cont. ========================= *)
-
-PROCEDURE EvalPrimary(VAR tb: TokBuf; VAR v: Value);
-VAR name: STRING; ai, fi: INTEGER; i1, i2: INTEGER; idx: INTEGER; a2: Value;
-BEGIN
-  IF errFlag THEN v := MkNum(0.0); RETURN END;
-  IF CurKind(tb) = TkNum THEN
-    v := MkNum(tb.t[tb.pos].num); INC(tb.pos)
-  ELSIF CurKind(tb) = TkStr THEN
-    v := MkStr(tb.t[tb.pos].s); INC(tb.pos)
-  ELSIF CurKind(tb) = TkLP THEN
-    INC(tb.pos); EvalExpr(tb, v);
-    IF CurKind(tb) = TkRP THEN INC(tb.pos) ELSE RtErr("MISSING )") END
-  ELSIF CurKind(tb) = TkIdent THEN
-    Strings.Copy(tb.t[tb.pos].s, name); INC(tb.pos);
-    IF IsFuncName(name) THEN
-      CallFunction(name, tb, v)
-    ELSE
-      fi := FindFunc(name);
-      IF (fi >= 0) & (CurKind(tb) = TkLP) THEN
-        CallUserFunc(fi, tb, TRUE, v)
-      ELSIF CurKind(tb) = TkLP THEN
-        (* array reference *)
-        INC(tb.pos);
-        EvalExpr(tb, a2); i1 := FLOOR(a2.num); i2 := -1;
-        IF CurKind(tb) = TkComma THEN
-          INC(tb.pos); EvalExpr(tb, a2); i2 := FLOOR(a2.num)
-        END;
-        IF CurKind(tb) = TkRP THEN INC(tb.pos) ELSE RtErr("MISSING )") END;
-        ai := EnsureArray(name);
-        IF ai >= 0 THEN
-          IF ArrIndex(arrays[ai], i1, i2, idx) THEN
-            IF arrays[ai].isStr THEN v := MkStr(arrays[ai].strData.elems[idx])
-            ELSE v := MkNum(arrays[ai].numData[idx]) END
-          ELSE v := MkNum(0.0) END
-        ELSE v := MkNum(0.0) END
-      ELSE
-        IF IsStrName(name) THEN
-          v.isStr := TRUE; v.num := 0.0; GetStr(name, v.s)
-        ELSE
-          v := MkNum(GetNum(name))
-        END
-      END
-    END
-  ELSE
-    RtErr("SYNTAX ERROR"); v := MkNum(0.0)
-  END
-END EvalPrimary;
-
-PROCEDURE EvalPow(VAR tb: TokBuf; VAR v: Value);
-VAR rhs: Value;
-BEGIN
-  EvalPrimary(tb, v);
-  IF IsOp(tb, "^") THEN
-    INC(tb.pos); EvalUnary(tb, rhs);
-    v := MkNum(Math.power(v.num, rhs.num))
-  END
-END EvalPow;
-
-PROCEDURE EvalUnary(VAR tb: TokBuf; VAR v: Value);
-BEGIN
-  IF IsOp(tb, "-") THEN
-    INC(tb.pos); EvalUnary(tb, v); v := MkNum(-v.num)
-  ELSIF IsOp(tb, "+") THEN
-    INC(tb.pos); EvalUnary(tb, v)
-  ELSE
-    EvalPow(tb, v)
-  END
-END EvalUnary;
-
-PROCEDURE EvalMul(VAR tb: TokBuf; VAR v: Value);
-VAR rhs: Value; opc: INTEGER;
-BEGIN
-  EvalUnary(tb, v);
-  LOOP
-    IF IsOp(tb, "*") THEN opc := 1
-    ELSIF IsOp(tb, "/") THEN opc := 2
-    ELSIF IsIdent(tb, "MOD") THEN opc := 3
-    ELSE EXIT END;
-    INC(tb.pos); EvalUnary(tb, rhs);
-    IF opc = 1 THEN v := MkNum(v.num * rhs.num)
-    ELSIF opc = 2 THEN
-      IF rhs.num = 0.0 THEN RtErr("DIVISION BY ZERO"); v := MkNum(0.0)
-      ELSE v := MkNum(v.num / rhs.num) END
-    ELSE
-      IF FLOOR(rhs.num) = 0 THEN RtErr("DIVISION BY ZERO"); v := MkNum(0.0)
-      ELSE v := MkNum(FLT(FLOOR(v.num) MOD FLOOR(rhs.num))) END
-    END
-  END
-END EvalMul;
-
-PROCEDURE EvalAdd(VAR tb: TokBuf; VAR v: Value);
-VAR rhs: Value; opc: INTEGER; res: STRING;
-BEGIN
-  EvalMul(tb, v);
-  LOOP
-    IF IsOp(tb, "+") THEN opc := 1
-    ELSIF IsOp(tb, "-") THEN opc := 2
-    ELSE EXIT END;
-    INC(tb.pos); EvalMul(tb, rhs);
-    IF opc = 1 THEN
-      IF v.isStr OR rhs.isStr THEN
-        Strings.Copy(v.s, res); Strings.Append(rhs.s, res); v := MkStr(res)
-      ELSE
-        v := MkNum(v.num + rhs.num)
-      END
-    ELSE
-      v := MkNum(v.num - rhs.num)
-    END
-  END
-END EvalAdd;
-
-PROCEDURE EvalRel(VAR tb: TokBuf; VAR v: Value);
-VAR rhs: Value; opc: INTEGER; c: INTEGER; res: BOOLEAN;
-BEGIN
-  EvalAdd(tb, v);
-  IF IsOp(tb, "=") THEN opc := 1
-  ELSIF IsOp(tb, "<>") THEN opc := 2
-  ELSIF IsOp(tb, "<=") THEN opc := 5
-  ELSIF IsOp(tb, ">=") THEN opc := 6
-  ELSIF IsOp(tb, "<") THEN opc := 3
-  ELSIF IsOp(tb, ">") THEN opc := 4
-  ELSE RETURN END;
-  INC(tb.pos); EvalAdd(tb, rhs);
-  IF v.isStr OR rhs.isStr THEN
-    c := Strings.Compare(v.s, rhs.s)
-  ELSE
-    IF v.num < rhs.num THEN c := -1 ELSIF v.num > rhs.num THEN c := 1 ELSE c := 0 END
-  END;
-  IF opc = 1 THEN res := c = 0
-  ELSIF opc = 2 THEN res := c # 0
-  ELSIF opc = 3 THEN res := c < 0
-  ELSIF opc = 4 THEN res := c > 0
-  ELSIF opc = 5 THEN res := c <= 0
-  ELSE res := c >= 0 END;
-  v := MkBool(res)
-END EvalRel;
-
-PROCEDURE EvalNot(VAR tb: TokBuf; VAR v: Value);
-BEGIN
-  IF IsIdent(tb, "NOT") THEN
-    INC(tb.pos); EvalNot(tb, v); v := MkBool(~Truthy(v))
-  ELSE
-    EvalRel(tb, v)
-  END
-END EvalNot;
-
-PROCEDURE EvalAnd(VAR tb: TokBuf; VAR v: Value);
-VAR rhs: Value; r: BOOLEAN;
-BEGIN
-  EvalNot(tb, v);
-  IF IsIdent(tb, "AND") THEN
-    r := Truthy(v);
-    WHILE IsIdent(tb, "AND") DO
-      INC(tb.pos); EvalNot(tb, rhs); r := r & Truthy(rhs)
-    END;
-    v := MkBool(r)
-  END
-END EvalAnd;
-
-PROCEDURE EvalOr(VAR tb: TokBuf; VAR v: Value);
-VAR rhs: Value; r: BOOLEAN;
-BEGIN
-  EvalAnd(tb, v);
-  IF IsIdent(tb, "OR") THEN
-    r := Truthy(v);
-    WHILE IsIdent(tb, "OR") DO
-      INC(tb.pos); EvalAnd(tb, rhs); r := r OR Truthy(rhs)
-    END;
-    v := MkBool(r)
-  END
-END EvalOr;
-
-PROCEDURE EvalExpr(VAR tb: TokBuf; VAR v: Value);
-BEGIN
-  EvalOr(tb, v)
-END EvalExpr;
 
 (* ========================== program line table =========================== *)
 
@@ -1022,305 +788,77 @@ BEGIN
   END
 END InsertLine;
 
-(* ============================= assignment ================================ *)
+(* =============================== builtins ================================ *)
 
-PROCEDURE AssignScalar(name: ARRAY OF CHAR; VAR v: Value);
+PROCEDURE RunBuiltinFunc(bf, argc: INTEGER);
+VAR a1, a2, a3, v: Value; n: INTEGER; buf: STRING; hasA3: BOOLEAN;
 BEGIN
-  IF IsStrName(name) THEN
-    IF ~v.isStr THEN RtErr("TYPE MISMATCH"); RETURN END;
-    SetStr(name, v.s)
+  a1 := MkNum(0.0); a2 := MkNum(0.0); a3 := MkNum(0.0); hasA3 := FALSE;
+  IF argc >= 3 THEN Pop(a3); hasA3 := TRUE END;
+  IF argc >= 2 THEN Pop(a2) END;
+  IF argc >= 1 THEN Pop(a1) END;
+
+  IF bf = bfAbs THEN v := MkNum(ABS(a1.num))
+  ELSIF bf = bfInt THEN v := MkNum(FLT(FLOOR(a1.num)))
+  ELSIF bf = bfSgn THEN
+    IF a1.num > 0.0 THEN v := MkNum(1.0)
+    ELSIF a1.num < 0.0 THEN v := MkNum(-1.0)
+    ELSE v := MkNum(0.0) END
+  ELSIF bf = bfSqr THEN v := MkNum(Math.sqrt(a1.num))
+  ELSIF bf = bfSin THEN v := MkNum(Math.sin(a1.num))
+  ELSIF bf = bfCos THEN v := MkNum(Math.cos(a1.num))
+  ELSIF bf = bfTan THEN v := MkNum(Math.tan(a1.num))
+  ELSIF bf = bfAtn THEN v := MkNum(Math.arctan(a1.num))
+  ELSIF bf = bfLog THEN v := MkNum(Math.ln(a1.num))
+  ELSIF bf = bfExp THEN v := MkNum(Math.exp(a1.num))
+  ELSIF bf = bfPi THEN v := MkNum(Math.pi)
+  ELSIF bf = bfRnd THEN v := MkNum(Random.Real())
+  ELSIF bf = bfTimer THEN v := MkNum(ElapsedSecs())
+  ELSIF bf = bfLen THEN v := MkNum(FLT(Strings.Length(a1.s)))
+  ELSIF bf = bfVal THEN
+    IF ~Strings.StrToReal(a1.s, v.num) THEN v.num := 0.0 END;
+    v.isStr := FALSE; v.s := ""
+  ELSIF bf = bfAsc THEN
+    IF Strings.Length(a1.s) > 0 THEN v := MkNum(FLT(ORD(a1.s[0]))) ELSE v := MkNum(0.0) END
+  ELSIF bf = bfChr THEN
+    buf[0] := CHR(FLOOR(a1.num)); buf[1] := 0X; v := MkStr(buf)
+  ELSIF bf = bfStr THEN
+    NumToStr(a1.num, buf); v := MkStr(buf)
+  ELSIF bf = bfLeft THEN
+    n := FLOOR(a2.num); IF n < 0 THEN n := 0 END;
+    IF n > Strings.Length(a1.s) THEN n := Strings.Length(a1.s) END;
+    Strings.Extract(a1.s, 0, n, buf); v := MkStr(buf)
+  ELSIF bf = bfRight THEN
+    n := FLOOR(a2.num); IF n < 0 THEN n := 0 END;
+    IF n > Strings.Length(a1.s) THEN n := Strings.Length(a1.s) END;
+    Strings.Extract(a1.s, Strings.Length(a1.s) - n, n, buf); v := MkStr(buf)
+  ELSIF bf = bfMid THEN
+    n := FLOOR(a2.num) - 1; IF n < 0 THEN n := 0 END;
+    IF ~hasA3 THEN a3.num := FLT(Strings.Length(a1.s)) END;
+    IF n > Strings.Length(a1.s) THEN n := Strings.Length(a1.s) END;
+    IF n + FLOOR(a3.num) > Strings.Length(a1.s) THEN a3.num := FLT(Strings.Length(a1.s) - n) END;
+    IF a3.num < 0.0 THEN a3.num := 0.0 END;
+    Strings.Extract(a1.s, n, FLOOR(a3.num), buf); v := MkStr(buf)
+  ELSIF bf = bfInstr THEN
+    IF hasA3 THEN v := MkNum(FLT(Strings.Pos(a3.s, a1.s, FLOOR(a2.num) - 1) + 1))
+    ELSE v := MkNum(FLT(Strings.Pos(a2.s, a1.s) + 1)) END
+  ELSIF bf = bfInkey THEN
+    ReadInkey(buf); v := MkStr(buf)
+  ELSIF bf = bfScrw THEN v := MkNum(FLT(winW))
+  ELSIF bf = bfScrh THEN v := MkNum(FLT(winH))
+  ELSIF bf = bfMousex THEN
+    IF gfxMode THEN v := MkNum(FLT(Raylib.GetMouseX())) ELSE v := MkNum(0.0) END
+  ELSIF bf = bfMousey THEN
+    IF gfxMode THEN v := MkNum(FLT(Raylib.GetMouseY())) ELSE v := MkNum(0.0) END
+  ELSIF bf = bfMouseb THEN
+    IF gfxMode & (Raylib.IsMouseButtonDown(Raylib.BtnLeft) = 1) THEN v := MkNum(-1.0) ELSE v := MkNum(0.0) END
   ELSE
-    IF v.isStr THEN RtErr("TYPE MISMATCH"); RETURN END;
-    SetNum(name, v.num)
-  END
-END AssignScalar;
-
-PROCEDURE AssignArrayElem(name: ARRAY OF CHAR; i1, i2: INTEGER; VAR v: Value);
-VAR ai, idx: INTEGER;
-BEGIN
-  ai := EnsureArray(name);
-  IF ai < 0 THEN RETURN END;
-  IF ~ArrIndex(arrays[ai], i1, i2, idx) THEN RETURN END;
-  IF arrays[ai].isStr THEN
-    IF ~v.isStr THEN RtErr("TYPE MISMATCH"); RETURN END;
-    Strings.Copy(v.s, arrays[ai].strData.elems[idx])
-  ELSE
-    IF v.isStr THEN RtErr("TYPE MISMATCH"); RETURN END;
-    arrays[ai].numData[idx] := v.num
-  END
-END AssignArrayElem;
-
-PROCEDURE DoAssign(VAR tb: TokBuf);
-VAR name: STRING; v, idxv: Value; i1, i2: INTEGER;
-BEGIN
-  IF CurKind(tb) # TkIdent THEN RtErr("SYNTAX ERROR"); RETURN END;
-  Strings.Copy(tb.t[tb.pos].s, name); INC(tb.pos);
-  IF CurKind(tb) = TkLP THEN
-    INC(tb.pos); EvalExpr(tb, idxv); i1 := FLOOR(idxv.num); i2 := -1;
-    IF CurKind(tb) = TkComma THEN INC(tb.pos); EvalExpr(tb, idxv); i2 := FLOOR(idxv.num) END;
-    IF CurKind(tb) = TkRP THEN INC(tb.pos) ELSE RtErr("MISSING )"); RETURN END;
-    IF IsOp(tb, "=") THEN INC(tb.pos) ELSE RtErr("MISSING ="); RETURN END;
-    EvalExpr(tb, v);
-    IF errFlag THEN RETURN END;
-    AssignArrayElem(name, i1, i2, v)
-  ELSE
-    IF IsOp(tb, "=") THEN INC(tb.pos) ELSE RtErr("SYNTAX ERROR"); RETURN END;
-    EvalExpr(tb, v);
-    IF errFlag THEN RETURN END;
-    AssignScalar(name, v)
-  END
-END DoAssign;
-
-(* ================================ PRINT =================================== *)
-
-PROCEDURE DoPrint(VAR tb: TokBuf);
-VAR v: Value; buf: STRING; suppressNL: BOOLEAN; n, col: INTEGER;
-BEGIN
-  suppressNL := FALSE;
-  LOOP
-    IF (CurKind(tb) = TkEOL) OR (CurKind(tb) = TkColon) THEN EXIT END;
-    IF IsIdent(tb, "TAB") THEN
-      INC(tb.pos);
-      IF CurKind(tb) = TkLP THEN INC(tb.pos) END;
-      EvalExpr(tb, v); n := FLOOR(v.num);
-      IF CurKind(tb) = TkRP THEN INC(tb.pos) END;
-      WHILE outCol < n DO POut(" ") END
-    ELSE
-      EvalExpr(tb, v);
-      IF errFlag THEN RETURN END;
-      IF v.isStr THEN POut(v.s) ELSE NumToStr(v.num, buf); POut(buf) END
-    END;
-    IF CurKind(tb) = TkComma THEN
-      INC(tb.pos);
-      col := (outCol DIV 14 + 1) * 14;
-      WHILE outCol < col DO POut(" ") END;
-      suppressNL := TRUE
-    ELSIF CurKind(tb) = TkSemi THEN
-      INC(tb.pos); suppressNL := TRUE
-    ELSE
-      suppressNL := FALSE; EXIT
-    END
+    RtErr("UNKNOWN FUNCTION"); v := MkNum(0.0)
   END;
-  IF ~suppressNL THEN PNL END
-END DoPrint;
+  Push(v)
+END RunBuiltinFunc;
 
-(* ================================ INPUT ==================================== *)
-
-PROCEDURE DoInput(VAR tb: TokBuf);
-VAR prompt, line, name, part: STRING; fieldN: INTEGER; num: REAL; i1, i2: INTEGER; v: Value;
-BEGIN
-  prompt := "? ";
-  IF CurKind(tb) = TkStr THEN
-    Strings.Copy(tb.t[tb.pos].s, prompt); INC(tb.pos);
-    Strings.Append("? ", prompt);
-    IF (CurKind(tb) = TkSemi) OR (CurKind(tb) = TkComma) THEN INC(tb.pos) END
-  END;
-  History.ReadLine(prompt, line); outCol := 0;
-  fieldN := 0;
-  LOOP
-    IF CurKind(tb) # TkIdent THEN EXIT END;
-    Strings.Copy(tb.t[tb.pos].s, name); INC(tb.pos);
-    IF ~Strings.Split(line, ',', fieldN, part) THEN part := "" END;
-    Strings.Trim(part);
-    INC(fieldN);
-    IF CurKind(tb) = TkLP THEN
-      INC(tb.pos); EvalExpr(tb, v); i1 := FLOOR(v.num); i2 := -1;
-      IF CurKind(tb) = TkComma THEN INC(tb.pos); EvalExpr(tb, v); i2 := FLOOR(v.num) END;
-      IF CurKind(tb) = TkRP THEN INC(tb.pos) END;
-      IF IsStrName(name) THEN v := MkStr(part)
-      ELSE
-        IF ~Strings.StrToReal(part, num) THEN num := 0.0 END;
-        v := MkNum(num)
-      END;
-      AssignArrayElem(name, i1, i2, v)
-    ELSE
-      IF IsStrName(name) THEN
-        SetStr(name, part)
-      ELSE
-        IF ~Strings.StrToReal(part, num) THEN num := 0.0 END;
-        SetNum(name, num)
-      END
-    END;
-    IF CurKind(tb) = TkComma THEN INC(tb.pos) ELSE EXIT END
-  END
-END DoInput;
-
-(* ============================== DIM / DATA ================================ *)
-
-PROCEDURE DoDim(VAR tb: TokBuf);
-VAR name: STRING; v: Value; d1, d2: INTEGER;
-BEGIN
-  LOOP
-    IF CurKind(tb) # TkIdent THEN RtErr("SYNTAX ERROR"); RETURN END;
-    Strings.Copy(tb.t[tb.pos].s, name); INC(tb.pos);
-    d1 := 10; d2 := -1;
-    IF CurKind(tb) = TkLP THEN
-      INC(tb.pos); EvalExpr(tb, v); d1 := FLOOR(v.num);
-      IF CurKind(tb) = TkComma THEN INC(tb.pos); EvalExpr(tb, v); d2 := FLOOR(v.num) END;
-      IF CurKind(tb) = TkRP THEN INC(tb.pos) ELSE RtErr("MISSING )") END
-    END;
-    IF errFlag THEN RETURN END;
-    IF DimArray(name, d1, d2) < 0 THEN RETURN END;
-    IF CurKind(tb) = TkComma THEN INC(tb.pos) ELSE EXIT END
-  END
-END DoDim;
-
-PROCEDURE ScanData;
-VAR i: INTEGER; tb: TokBuf; v: Value; neg: BOOLEAN; skipTo: INTEGER;
-BEGIN
-  nDataVals := 0; dataPtr := 0;
-  i := 0;
-  WHILE i < nLines DO
-    IF IsFuncBodyLine(i, skipTo) THEN i := skipTo
-    ELSE
-      Tokenize(prog[i].text, tb);
-      WHILE tb.pos < tb.n DO
-        IF IsIdent(tb, "DATA") THEN
-          INC(tb.pos);
-          LOOP
-            IF CurKind(tb) = TkStr THEN
-              v := MkStr(tb.t[tb.pos].s); INC(tb.pos)
-            ELSE
-              neg := FALSE;
-              IF IsOp(tb, "-") THEN neg := TRUE; INC(tb.pos) END;
-              IF CurKind(tb) = TkNum THEN
-                IF neg THEN v := MkNum(-tb.t[tb.pos].num) ELSE v := MkNum(tb.t[tb.pos].num) END;
-                INC(tb.pos)
-              ELSIF CurKind(tb) = TkIdent THEN
-                v := MkStr(tb.t[tb.pos].s); INC(tb.pos)
-              ELSE
-                EXIT
-              END
-            END;
-            IF nDataVals < MaxDataVals THEN
-              dataVals[nDataVals] := v; dataLineOf[nDataVals] := prog[i].num; INC(nDataVals)
-            END;
-            IF CurKind(tb) = TkComma THEN INC(tb.pos) ELSE EXIT END
-          END
-        ELSE
-          INC(tb.pos)
-        END
-      END;
-      INC(i)
-    END
-  END
-END ScanData;
-
-PROCEDURE DoRead(VAR tb: TokBuf);
-VAR name: STRING; dv, idxv: Value; i1, i2: INTEGER;
-BEGIN
-  LOOP
-    IF CurKind(tb) # TkIdent THEN EXIT END;
-    Strings.Copy(tb.t[tb.pos].s, name); INC(tb.pos);
-    IF dataPtr >= nDataVals THEN RtErr("OUT OF DATA"); RETURN END;
-    dv := dataVals[dataPtr]; INC(dataPtr);
-    IF IsStrName(name) & ~dv.isStr THEN NumToStr(dv.num, dv.s); dv.isStr := TRUE
-    ELSIF ~IsStrName(name) & dv.isStr THEN
-      IF ~Strings.StrToReal(dv.s, dv.num) THEN dv.num := 0.0 END; dv.isStr := FALSE
-    END;
-    IF CurKind(tb) = TkLP THEN
-      INC(tb.pos); EvalExpr(tb, idxv); i1 := FLOOR(idxv.num); i2 := -1;
-      IF CurKind(tb) = TkComma THEN INC(tb.pos); EvalExpr(tb, idxv); i2 := FLOOR(idxv.num) END;
-      IF CurKind(tb) = TkRP THEN INC(tb.pos) ELSE RtErr("MISSING )") END;
-      AssignArrayElem(name, i1, i2, dv)
-    ELSE
-      AssignScalar(name, dv)
-    END;
-    IF CurKind(tb) = TkComma THEN INC(tb.pos) ELSE EXIT END
-  END
-END DoRead;
-
-PROCEDURE DoRestore(VAR tb: TokBuf);
-VAR v: Value; target, i: INTEGER;
-BEGIN
-  IF CurKind(tb) = TkNum THEN
-    EvalExpr(tb, v); target := FLOOR(v.num);
-    i := 0;
-    WHILE (i < nDataVals) & (dataLineOf[i] < target) DO INC(i) END;
-    dataPtr := i
-  ELSE
-    dataPtr := 0
-  END
-END DoRestore;
-
-(* ============================ FOR / NEXT / GOSUB ============================ *)
-
-PROCEDURE DoFor(VAR tb: TokBuf; curLineIdx: INTEGER);
-VAR name: STRING; v: Value; startv, limitv, stepv: REAL;
-BEGIN
-  IF CurKind(tb) # TkIdent THEN RtErr("SYNTAX ERROR"); RETURN END;
-  Strings.Copy(tb.t[tb.pos].s, name); INC(tb.pos);
-  IF IsOp(tb, "=") THEN INC(tb.pos) ELSE RtErr("MISSING ="); RETURN END;
-  EvalExpr(tb, v); startv := v.num;
-  IF IsIdent(tb, "TO") THEN INC(tb.pos) ELSE RtErr("MISSING TO"); RETURN END;
-  EvalExpr(tb, v); limitv := v.num;
-  stepv := 1.0;
-  IF IsIdent(tb, "STEP") THEN INC(tb.pos); EvalExpr(tb, v); stepv := v.num END;
-  IF errFlag THEN RETURN END;
-  SetNum(name, startv);
-  IF forTop >= MaxForStack THEN RtErr("FOR TOO DEEP"); RETURN END;
-  Strings.Copy(name, forStack[forTop].varName);
-  forStack[forTop].limit := limitv;
-  forStack[forTop].step := stepv;
-  forStack[forTop].lineIdx := curLineIdx;
-  forStack[forTop].tokPos := tb.pos;
-  INC(forTop)
-END DoFor;
-
-PROCEDURE PushGosub(lineIdx, tokPos: INTEGER);
-BEGIN
-  IF gosubTop >= MaxGosubStack THEN RtErr("GOSUB TOO DEEP"); RETURN END;
-  gosubStack[gosubTop].lineIdx := lineIdx;
-  gosubStack[gosubTop].tokPos := tokPos;
-  INC(gosubTop)
-END PushGosub;
-
-PROCEDURE DoOn(VAR tb: TokBuf; curLineIdx: INTEGER; VAR jumped: BOOLEAN; VAR newLine, newTok: INTEGER);
-VAR v: Value; idx, count, target, li: INTEGER; isGosub: BOOLEAN;
-BEGIN
-  EvalExpr(tb, v); idx := FLOOR(v.num);
-  IF IsIdent(tb, "GOTO") THEN isGosub := FALSE; INC(tb.pos)
-  ELSIF IsIdent(tb, "GOSUB") THEN isGosub := TRUE; INC(tb.pos)
-  ELSE RtErr("SYNTAX ERROR"); RETURN END;
-  count := 0; target := -1;
-  LOOP
-    IF CurKind(tb) # TkNum THEN EXIT END;
-    count := count + 1;
-    IF count = idx THEN target := FLOOR(tb.t[tb.pos].num) END;
-    INC(tb.pos);
-    IF CurKind(tb) = TkComma THEN INC(tb.pos) ELSE EXIT END
-  END;
-  IF target >= 0 THEN
-    li := LineIndexOf(target);
-    IF li < 0 THEN RtErr("UNDEFINED LINE"); RETURN END;
-    IF isGosub THEN PushGosub(curLineIdx, tb.pos) END;
-    jumped := TRUE; newLine := li; newTok := 0
-  END
-END DoOn;
-
-(* ============================= CLS / LOCATE ================================ *)
-
-PROCEDURE DoCls;
-BEGIN
-  IF gfxMode THEN
-    Raylib.BeginTextureMode(canvas); Raylib.ClearBackground(palette[bgColorIx]); Raylib.EndTextureMode
-  ELSE
-    Out.Char(CHR(27)); Out.String("[2J"); Out.Char(CHR(27)); Out.String("[H"); outCol := 0
-  END
-END DoCls;
-
-PROCEDURE DoLocate(VAR tb: TokBuf);
-VAR v: Value; row, col: INTEGER; buf: STRING;
-BEGIN
-  EvalExpr(tb, v); row := FLOOR(v.num); col := 1;
-  IF CurKind(tb) = TkComma THEN INC(tb.pos); EvalExpr(tb, v); col := FLOOR(v.num) END;
-  IF errFlag THEN RETURN END;
-  Out.Char(CHR(27)); Out.String("[");
-  NumToStr(FLT(row), buf); Out.String(buf); Out.String(";");
-  NumToStr(FLT(col), buf); Out.String(buf); Out.String("H")
-END DoLocate;
-
-(* ========================== graphics / sound state ========================= *)
+(* ======================= graphics / sound state + ops ==================== *)
 
 PROCEDURE InitPalette;
 BEGIN
@@ -1374,112 +912,74 @@ BEGIN
   END
 END Present;
 
-PROCEDURE NumArg(VAR tb: TokBuf): REAL;
-VAR v: Value;
-BEGIN EvalExpr(tb, v); RETURN v.num END NumArg;
-
-PROCEDURE ExpectComma(VAR tb: TokBuf);
+PROCEDURE MaybePresent;
 BEGIN
-  IF CurKind(tb) = TkComma THEN INC(tb.pos) ELSE RtErr("MISSING ,") END
-END ExpectComma;
+  IF gfxMode THEN Present END
+END MaybePresent;
 
-PROCEDURE OptColorIx(VAR tb: TokBuf): INTEGER;
-VAR v: Value;
+PROCEDURE DoCls;
 BEGIN
-  IF CurKind(tb) = TkComma THEN INC(tb.pos); EvalExpr(tb, v); RETURN FLOOR(v.num) END;
-  RETURN curColorIx
-END OptColorIx;
+  IF gfxMode THEN
+    Raylib.BeginTextureMode(canvas); Raylib.ClearBackground(palette[bgColorIx]); Raylib.EndTextureMode
+  ELSE
+    Out.Char(CHR(27)); Out.String("[2J"); Out.Char(CHR(27)); Out.String("[H"); outCol := 0
+  END
+END DoCls;
 
-PROCEDURE DoScreen(VAR tb: TokBuf);
-VAR w, h: INTEGER;
+PROCEDURE VmLocate(row, col: INTEGER);
+VAR buf: STRING;
 BEGIN
-  w := FLOOR(NumArg(tb)); h := 480;
-  IF CurKind(tb) = TkComma THEN INC(tb.pos); h := FLOOR(NumArg(tb)) END;
-  IF errFlag THEN RETURN END;
-  EnsureGfx(w, h)
-END DoScreen;
+  Out.Char(CHR(27)); Out.String("[");
+  NumToStr(FLT(row), buf); Out.String(buf); Out.String(";");
+  NumToStr(FLT(col), buf); Out.String(buf); Out.String("H")
+END VmLocate;
 
-PROCEDURE DoColor(VAR tb: TokBuf);
-BEGIN
-  curColorIx := FLOOR(NumArg(tb));
-  IF CurKind(tb) = TkComma THEN INC(tb.pos); bgColorIx := FLOOR(NumArg(tb)) END
-END DoColor;
-
-PROCEDURE DoPset(VAR tb: TokBuf);
-VAR x, y, c: INTEGER;
+PROCEDURE VmPset(x, y, c: INTEGER);
 BEGIN
   EnsureGfx(640, 480);
-  x := FLOOR(NumArg(tb)); ExpectComma(tb); y := FLOOR(NumArg(tb));
-  c := OptColorIx(tb);
-  IF errFlag THEN RETURN END;
   Raylib.BeginTextureMode(canvas); Raylib.DrawPixel(x, y, ColorOf(c)); Raylib.EndTextureMode
-END DoPset;
+END VmPset;
 
-PROCEDURE DoLine(VAR tb: TokBuf);
-VAR x1, y1, x2, y2, c: INTEGER;
+PROCEDURE VmLine(x1, y1, x2, y2, c: INTEGER);
 BEGIN
   EnsureGfx(640, 480);
-  x1 := FLOOR(NumArg(tb)); ExpectComma(tb); y1 := FLOOR(NumArg(tb)); ExpectComma(tb);
-  x2 := FLOOR(NumArg(tb)); ExpectComma(tb); y2 := FLOOR(NumArg(tb));
-  c := OptColorIx(tb);
-  IF errFlag THEN RETURN END;
   Raylib.BeginTextureMode(canvas); Raylib.DrawLine(x1, y1, x2, y2, ColorOf(c)); Raylib.EndTextureMode
-END DoLine;
+END VmLine;
 
-PROCEDURE DoCircle(VAR tb: TokBuf; filled: BOOLEAN);
-VAR x, y, c: INTEGER; r: REAL;
+PROCEDURE VmCircle(x, y, c: INTEGER; r: REAL; filled: BOOLEAN);
 BEGIN
   EnsureGfx(640, 480);
-  x := FLOOR(NumArg(tb)); ExpectComma(tb); y := FLOOR(NumArg(tb)); ExpectComma(tb);
-  r := NumArg(tb);
-  c := OptColorIx(tb);
-  IF errFlag THEN RETURN END;
   Raylib.BeginTextureMode(canvas);
   IF filled THEN Raylib.DrawCircle(x, y, r, ColorOf(c)) ELSE Raylib.DrawCircleLines(x, y, r, ColorOf(c)) END;
   Raylib.EndTextureMode
-END DoCircle;
+END VmCircle;
 
-PROCEDURE DoRect(VAR tb: TokBuf; filled: BOOLEAN);
-VAR x, y, w, h, c: INTEGER;
+PROCEDURE VmRect(x, y, w, h, c: INTEGER; filled: BOOLEAN);
 BEGIN
   EnsureGfx(640, 480);
-  x := FLOOR(NumArg(tb)); ExpectComma(tb); y := FLOOR(NumArg(tb)); ExpectComma(tb);
-  w := FLOOR(NumArg(tb)); ExpectComma(tb); h := FLOOR(NumArg(tb));
-  c := OptColorIx(tb);
-  IF errFlag THEN RETURN END;
   Raylib.BeginTextureMode(canvas);
   IF filled THEN Raylib.DrawRectangle(x, y, w, h, ColorOf(c)) ELSE Raylib.DrawRectangleLines(x, y, w, h, ColorOf(c)) END;
   Raylib.EndTextureMode
-END DoRect;
+END VmRect;
 
-PROCEDURE DoText(VAR tb: TokBuf);
-VAR x, y, sz, c: INTEGER; v: Value;
+PROCEDURE VmText(x, y, sz, c: INTEGER; s: ARRAY OF CHAR);
 BEGIN
   EnsureGfx(640, 480);
-  x := FLOOR(NumArg(tb)); ExpectComma(tb); y := FLOOR(NumArg(tb)); ExpectComma(tb);
-  EvalExpr(tb, v);
-  IF ~v.isStr THEN NumToStr(v.num, v.s) END;
-  sz := 20; c := curColorIx;
-  IF CurKind(tb) = TkComma THEN INC(tb.pos); sz := FLOOR(NumArg(tb)) END;
-  IF CurKind(tb) = TkComma THEN INC(tb.pos); c := FLOOR(NumArg(tb)) END;
-  IF errFlag THEN RETURN END;
-  Raylib.BeginTextureMode(canvas); Raylib.DrawText(v.s, x, y, sz, ColorOf(c)); Raylib.EndTextureMode
-END DoText;
+  Raylib.BeginTextureMode(canvas); Raylib.DrawText(s, x, y, sz, ColorOf(c)); Raylib.EndTextureMode
+END VmText;
 
-PROCEDURE DoSound(VAR tb: TokBuf);
-VAR freq: REAL; ms: INTEGER; snd: Raylib.Sound;
+PROCEDURE VmSound(freq: REAL; ms: INTEGER);
+VAR snd: Raylib.Sound;
 BEGIN
   EnsureAudio;
-  freq := NumArg(tb); ExpectComma(tb); ms := FLOOR(NumArg(tb));
-  IF errFlag THEN RETURN END;
   IF ms < 0 THEN ms := 0 END;
   snd := Raylib.GenToneSound(freq, ms);
   Raylib.PlaySound(snd);
   Time.Sleep(ms);
   Raylib.UnloadSound(snd)
-END DoSound;
+END VmSound;
 
-PROCEDURE DoBeep;
+PROCEDURE VmBeep;
 VAR snd: Raylib.Sound;
 BEGIN
   EnsureAudio;
@@ -1487,162 +987,744 @@ BEGIN
   Raylib.PlaySound(snd);
   Time.Sleep(150);
   Raylib.UnloadSound(snd)
-END DoBeep;
+END VmBeep;
 
-PROCEDURE DoDelay(VAR tb: TokBuf);
-VAR ms: INTEGER;
+PROCEDURE VmDelay(ms: INTEGER);
 BEGIN
-  ms := FLOOR(NumArg(tb));
-  IF errFlag THEN RETURN END;
   IF ms > 0 THEN Time.Sleep(ms) END
-END DoDelay;
+END VmDelay;
 
-(* ============================ statement dispatch ============================ *)
+(* =========================== compiler: pools ============================= *)
 
-(* Statement-level user-function call: name(args), value discarded. *)
-PROCEDURE DoFuncCallStmt(fi: INTEGER; VAR tb: TokBuf);
-VAR out: Value;
+PROCEDURE InternName(s: ARRAY OF CHAR): INTEGER;
+VAR i: INTEGER;
 BEGIN
-  CallUserFunc(fi, tb, FALSE, out)
-END DoFuncCallStmt;
+  FOR i := 0 TO nNames - 1 DO
+    IF namePool[i] = s THEN RETURN i END
+  END;
+  IF nNames >= MaxNames THEN RtErr("TOO MANY NAMES"); RETURN 0 END;
+  Strings.Copy(s, namePool[nNames]);
+  i := nNames; INC(nNames); RETURN i
+END InternName;
 
-(* RETURN as a statement: in a function body it stores a value and sets
- * returnPending; outside a function it means GOSUB return. *)
-PROCEDURE DoReturn(VAR tb: TokBuf; VAR jumped: BOOLEAN; VAR newLine, newTok: INTEGER);
-VAR v: Value; ge: GosubEntry;
+PROCEDURE AddNumConst(x: REAL): INTEGER;
+VAR i: INTEGER;
 BEGIN
-  IF callDepth > 0 THEN
-    IF (CurKind(tb) = TkEOL) OR (CurKind(tb) = TkColon) THEN
-      returnPending := TRUE  (* returnVal was pre-initialized in ExecFuncBody *)
-    ELSE
-      EvalExpr(tb, v);
-      IF errFlag THEN RETURN END;
-      returnVal := v; returnPending := TRUE
-    END
+  IF nNumPool >= MaxNumPool THEN RtErr("PROGRAM TOO LARGE"); RETURN 0 END;
+  numPool[nNumPool] := x; i := nNumPool; INC(nNumPool); RETURN i
+END AddNumConst;
+
+PROCEDURE AddStrConst(s: ARRAY OF CHAR): INTEGER;
+VAR i: INTEGER;
+BEGIN
+  IF nStrPool >= MaxStrPool THEN RtErr("PROGRAM TOO LARGE"); RETURN 0 END;
+  Strings.Copy(s, strPool[nStrPool]); i := nStrPool; INC(nStrPool); RETURN i
+END AddStrConst;
+
+PROCEDURE Emit(op, a, b: INTEGER);
+BEGIN
+  IF codeLen < codeLimit THEN
+    code[codeLen].op := op; code[codeLen].a := a; code[codeLen].b := b;
+    INC(codeLen)
   ELSE
-    IF gosubTop <= 0 THEN RtErr("RETURN WITHOUT GOSUB")
+    RtErr("PROGRAM TOO LARGE")
+  END
+END Emit;
+
+PROCEDURE AddLineFixup(pcIdx: INTEGER);
+BEGIN
+  IF nLineFixups < MaxLineFixups THEN
+    lineFixups[nLineFixups] := pcIdx; INC(nLineFixups)
+  ELSE
+    RtErr("STATEMENT TOO COMPLEX")
+  END
+END AddLineFixup;
+
+PROCEDURE ResolveLineFixups(target: INTEGER);
+VAR i: INTEGER;
+BEGIN
+  FOR i := 0 TO nLineFixups - 1 DO code[lineFixups[i]].a := target END;
+  nLineFixups := 0
+END ResolveLineFixups;
+
+PROCEDURE AddGotoBackpatch(pcIdx: INTEGER);
+BEGIN
+  IF nGotoBackpatch < MaxGotoBackpatch THEN
+    gotoBackpatch[nGotoBackpatch] := pcIdx; INC(nGotoBackpatch)
+  ELSE
+    RtErr("PROGRAM TOO LARGE")
+  END
+END AddGotoBackpatch;
+
+PROCEDURE BackpatchGotosFrom(start: INTEGER);
+VAR i, pos: INTEGER;
+BEGIN
+  FOR i := start TO nGotoBackpatch - 1 DO
+    IF FindLinePos(code[gotoBackpatch[i]].a, pos) THEN
+      code[gotoBackpatch[i]].a := lineStartPc[pos]
     ELSE
-      DEC(gosubTop); ge := gosubStack[gosubTop];
-      jumped := TRUE; newLine := ge.lineIdx; newTok := ge.tokPos
+      code[gotoBackpatch[i]].a := -1
     END
   END
-END DoReturn;
+END BackpatchGotosFrom;
 
-PROCEDURE ExecStmt(VAR tb: TokBuf; curLineIdx, curLineNum: INTEGER;
-                    VAR jumped: BOOLEAN; VAR newLine, newTok: INTEGER);
-VAR name: STRING; v: Value; li, target, fi, savePos: INTEGER; fe: ForEntry; ge: GosubEntry; contd: BOOLEAN;
+PROCEDURE BackpatchOnTargetsFrom(start: INTEGER);
+VAR i, pos: INTEGER;
 BEGIN
-  jumped := FALSE;
+  FOR i := start TO nOnTargets - 1 DO
+    IF FindLinePos(onTargets[i], pos) THEN onTargets[i] := lineStartPc[pos] ELSE onTargets[i] := -1 END
+  END
+END BackpatchOnTargetsFrom;
+
+(* ======================= compiler: expressions ============================ *)
+
+PROCEDURE CompileExpr(VAR tb: TokBuf);
+BEGIN CompileOr(tb) END CompileExpr;
+
+PROCEDURE CompileOr(VAR tb: TokBuf);
+BEGIN
+  CompileAnd(tb);
+  WHILE IsIdent(tb, "OR") DO INC(tb.pos); CompileAnd(tb); Emit(opOrOp, 0, 0) END
+END CompileOr;
+
+PROCEDURE CompileAnd(VAR tb: TokBuf);
+BEGIN
+  CompileNot(tb);
+  WHILE IsIdent(tb, "AND") DO INC(tb.pos); CompileNot(tb); Emit(opAndOp, 0, 0) END
+END CompileAnd;
+
+PROCEDURE CompileNot(VAR tb: TokBuf);
+BEGIN
+  IF IsIdent(tb, "NOT") THEN INC(tb.pos); CompileNot(tb); Emit(opNot, 0, 0)
+  ELSE CompileRel(tb) END
+END CompileNot;
+
+PROCEDURE CompileRel(VAR tb: TokBuf);
+VAR opc: INTEGER; matched: BOOLEAN;
+BEGIN
+  CompileAdd(tb);
+  matched := TRUE; opc := opEq;
+  IF IsOp(tb, "=") THEN opc := opEq
+  ELSIF IsOp(tb, "<>") THEN opc := opNe
+  ELSIF IsOp(tb, "<=") THEN opc := opLe
+  ELSIF IsOp(tb, ">=") THEN opc := opGe
+  ELSIF IsOp(tb, "<") THEN opc := opLt
+  ELSIF IsOp(tb, ">") THEN opc := opGt
+  ELSE matched := FALSE
+  END;
+  IF matched THEN INC(tb.pos); CompileAdd(tb); Emit(opc, 0, 0) END
+END CompileRel;
+
+PROCEDURE CompileAdd(VAR tb: TokBuf);
+BEGIN
+  CompileMul(tb);
+  LOOP
+    IF IsOp(tb, "+") THEN INC(tb.pos); CompileMul(tb); Emit(opAdd, 0, 0)
+    ELSIF IsOp(tb, "-") THEN INC(tb.pos); CompileMul(tb); Emit(opSub, 0, 0)
+    ELSE EXIT END
+  END
+END CompileAdd;
+
+PROCEDURE CompileMul(VAR tb: TokBuf);
+BEGIN
+  CompileUnary(tb);
+  LOOP
+    IF IsOp(tb, "*") THEN INC(tb.pos); CompileUnary(tb); Emit(opMul, 0, 0)
+    ELSIF IsOp(tb, "/") THEN INC(tb.pos); CompileUnary(tb); Emit(opDiv, 0, 0)
+    ELSIF IsIdent(tb, "MOD") THEN INC(tb.pos); CompileUnary(tb); Emit(opMod, 0, 0)
+    ELSE EXIT END
+  END
+END CompileMul;
+
+PROCEDURE CompileUnary(VAR tb: TokBuf);
+BEGIN
+  IF IsOp(tb, "-") THEN INC(tb.pos); CompileUnary(tb); Emit(opNeg, 0, 0)
+  ELSIF IsOp(tb, "+") THEN INC(tb.pos); CompileUnary(tb)
+  ELSE CompilePow(tb) END
+END CompileUnary;
+
+PROCEDURE CompilePow(VAR tb: TokBuf);
+BEGIN
+  CompilePrimary(tb);
+  IF IsOp(tb, "^") THEN INC(tb.pos); CompileUnary(tb); Emit(opPow, 0, 0) END
+END CompilePow;
+
+PROCEDURE CompileBuiltinCall(name: ARRAY OF CHAR; VAR tb: TokBuf);
+VAR bf, argc: INTEGER;
+BEGIN
+  bf := NameToBuiltinId(name); argc := 0;
+  IF CurKind(tb) = TkLP THEN
+    INC(tb.pos);
+    IF CurKind(tb) # TkRP THEN
+      CompileExpr(tb); argc := 1;
+      IF CurKind(tb) = TkComma THEN
+        INC(tb.pos); CompileExpr(tb); argc := 2;
+        IF CurKind(tb) = TkComma THEN INC(tb.pos); CompileExpr(tb); argc := 3 END
+      END
+    END;
+    IF CurKind(tb) = TkRP THEN INC(tb.pos) ELSE RtErr("MISSING )") END
+  END;
+  Emit(opCallBuiltinFunc, bf, argc)
+END CompileBuiltinCall;
+
+PROCEDURE CompileUserFuncCall(fi: INTEGER; wantValue: BOOLEAN; VAR tb: TokBuf);
+VAR n: INTEGER; fd: FuncDef;
+BEGIN
+  fd := funcs[fi]; n := 0;
+  IF CurKind(tb) = TkLP THEN
+    INC(tb.pos);
+    IF CurKind(tb) # TkRP THEN
+      LOOP
+        IF n >= fd.nParams THEN RtErr("TOO MANY ARGS"); RETURN END;
+        CompileExpr(tb); INC(n);
+        IF CurKind(tb) = TkComma THEN INC(tb.pos) ELSE EXIT END
+      END
+    END;
+    IF CurKind(tb) = TkRP THEN INC(tb.pos) ELSE RtErr("MISSING )"); RETURN END
+  END;
+  IF n # fd.nParams THEN RtErr("WRONG ARG COUNT"); RETURN END;
+  IF wantValue THEN Emit(opCallUserFuncExpr, fi, n) ELSE Emit(opCallUserFuncStmt, fi, n) END
+END CompileUserFuncCall;
+
+PROCEDURE CompilePrimary(VAR tb: TokBuf);
+VAR name: STRING; fi, dims: INTEGER;
+BEGIN
+  IF CurKind(tb) = TkNum THEN
+    Emit(opPushNum, AddNumConst(tb.t[tb.pos].num), 0); INC(tb.pos)
+  ELSIF CurKind(tb) = TkStr THEN
+    Emit(opPushStr, AddStrConst(tb.t[tb.pos].s), 0); INC(tb.pos)
+  ELSIF CurKind(tb) = TkLP THEN
+    INC(tb.pos); CompileExpr(tb);
+    IF CurKind(tb) = TkRP THEN INC(tb.pos) ELSE RtErr("MISSING )") END
+  ELSIF CurKind(tb) = TkIdent THEN
+    Strings.Copy(tb.t[tb.pos].s, name); INC(tb.pos);
+    IF IsFuncName(name) THEN
+      CompileBuiltinCall(name, tb)
+    ELSE
+      fi := FindFunc(name);
+      IF (fi >= 0) & (CurKind(tb) = TkLP) THEN
+        CompileUserFuncCall(fi, TRUE, tb)
+      ELSIF CurKind(tb) = TkLP THEN
+        INC(tb.pos); CompileExpr(tb); dims := 1;
+        IF CurKind(tb) = TkComma THEN INC(tb.pos); CompileExpr(tb); dims := 2 END;
+        IF CurKind(tb) = TkRP THEN INC(tb.pos) ELSE RtErr("MISSING )") END;
+        Emit(opLoadArr, InternName(name), dims)
+      ELSE
+        Emit(opLoadVar, InternName(name), 0)
+      END
+    END
+  ELSE
+    RtErr("SYNTAX ERROR")
+  END
+END CompilePrimary;
+
+(* ========================= compiler: statements ============================ *)
+
+PROCEDURE CompileAssign(VAR tb: TokBuf);
+VAR name: STRING; dims: INTEGER;
+BEGIN
+  IF CurKind(tb) # TkIdent THEN RtErr("SYNTAX ERROR"); RETURN END;
+  Strings.Copy(tb.t[tb.pos].s, name); INC(tb.pos);
+  IF CurKind(tb) = TkLP THEN
+    INC(tb.pos); CompileExpr(tb); dims := 1;
+    IF CurKind(tb) = TkComma THEN INC(tb.pos); CompileExpr(tb); dims := 2 END;
+    IF CurKind(tb) = TkRP THEN INC(tb.pos) ELSE RtErr("MISSING )"); RETURN END;
+    IF IsOp(tb, "=") THEN INC(tb.pos) ELSE RtErr("MISSING ="); RETURN END;
+    CompileExpr(tb);
+    Emit(opStoreArr, InternName(name), dims)
+  ELSE
+    IF IsOp(tb, "=") THEN INC(tb.pos) ELSE RtErr("SYNTAX ERROR"); RETURN END;
+    CompileExpr(tb);
+    Emit(opStoreVar, InternName(name), 0)
+  END
+END CompileAssign;
+
+PROCEDURE CompilePrint(VAR tb: TokBuf);
+VAR trailing: BOOLEAN;
+BEGIN
+  trailing := FALSE;
+  LOOP
+    IF (CurKind(tb) = TkEOL) OR (CurKind(tb) = TkColon) THEN EXIT END;
+    IF IsIdent(tb, "TAB") THEN
+      INC(tb.pos);
+      IF CurKind(tb) = TkLP THEN INC(tb.pos) END;
+      CompileExpr(tb);
+      IF CurKind(tb) = TkRP THEN INC(tb.pos) END;
+      Emit(opPrintTab, 0, 0)
+    ELSE
+      CompileExpr(tb);
+      Emit(opPrintVal, 0, 0)
+    END;
+    IF CurKind(tb) = TkComma THEN
+      INC(tb.pos); Emit(opPrintComma, 0, 0); trailing := TRUE
+    ELSIF CurKind(tb) = TkSemi THEN
+      INC(tb.pos); trailing := TRUE
+    ELSE
+      trailing := FALSE; EXIT
+    END
+  END;
+  IF ~trailing THEN Emit(opPrintNL, 0, 0) END
+END CompilePrint;
+
+PROCEDURE CompileInput(VAR tb: TokBuf);
+VAR name: STRING; promptIdx, dims: INTEGER;
+BEGIN
+  IF CurKind(tb) = TkStr THEN
+    promptIdx := AddStrConst(tb.t[tb.pos].s); INC(tb.pos);
+    IF (CurKind(tb) = TkSemi) OR (CurKind(tb) = TkComma) THEN INC(tb.pos) END
+  ELSE
+    promptIdx := -1
+  END;
+  Emit(opInputBegin, promptIdx, 0);
+  LOOP
+    IF CurKind(tb) # TkIdent THEN EXIT END;
+    Strings.Copy(tb.t[tb.pos].s, name); INC(tb.pos);
+    IF CurKind(tb) = TkLP THEN
+      INC(tb.pos); CompileExpr(tb); dims := 1;
+      IF CurKind(tb) = TkComma THEN INC(tb.pos); CompileExpr(tb); dims := 2 END;
+      IF CurKind(tb) = TkRP THEN INC(tb.pos) ELSE RtErr("MISSING )") END;
+      Emit(opInputArr, InternName(name), dims)
+    ELSE
+      Emit(opInputVar, InternName(name), 0)
+    END;
+    IF CurKind(tb) = TkComma THEN INC(tb.pos) ELSE EXIT END
+  END
+END CompileInput;
+
+PROCEDURE CompileDim(VAR tb: TokBuf);
+VAR name: STRING; dims: INTEGER;
+BEGIN
+  LOOP
+    IF CurKind(tb) # TkIdent THEN RtErr("SYNTAX ERROR"); RETURN END;
+    Strings.Copy(tb.t[tb.pos].s, name); INC(tb.pos);
+    dims := 0;
+    IF CurKind(tb) = TkLP THEN
+      INC(tb.pos); CompileExpr(tb); dims := 1;
+      IF CurKind(tb) = TkComma THEN INC(tb.pos); CompileExpr(tb); dims := 2 END;
+      IF CurKind(tb) = TkRP THEN INC(tb.pos) ELSE RtErr("MISSING )") END
+    END;
+    Emit(opDim, InternName(name), dims);
+    IF CurKind(tb) = TkComma THEN INC(tb.pos) ELSE EXIT END
+  END
+END CompileDim;
+
+PROCEDURE CompileRead(VAR tb: TokBuf);
+VAR name: STRING; dims: INTEGER;
+BEGIN
+  LOOP
+    IF CurKind(tb) # TkIdent THEN EXIT END;
+    Strings.Copy(tb.t[tb.pos].s, name); INC(tb.pos);
+    IF CurKind(tb) = TkLP THEN
+      INC(tb.pos); CompileExpr(tb); dims := 1;
+      IF CurKind(tb) = TkComma THEN INC(tb.pos); CompileExpr(tb); dims := 2 END;
+      IF CurKind(tb) = TkRP THEN INC(tb.pos) ELSE RtErr("MISSING )") END;
+      Emit(opReadArr, InternName(name), dims)
+    ELSE
+      Emit(opReadVar, InternName(name), 0)
+    END;
+    IF CurKind(tb) = TkComma THEN INC(tb.pos) ELSE EXIT END
+  END
+END CompileRead;
+
+PROCEDURE CompileRestore(VAR tb: TokBuf);
+BEGIN
+  IF CurKind(tb) = TkNum THEN
+    CompileExpr(tb); Emit(opRestore, 1, 0)
+  ELSE
+    Emit(opRestore, 0, 0)
+  END
+END CompileRestore;
+
+PROCEDURE CompileGoto(VAR tb: TokBuf);
+VAR lineNum, pcIdx: INTEGER;
+BEGIN
+  IF PeekIsBareLineNumber(tb) THEN
+    lineNum := FLOOR(tb.t[tb.pos].num); INC(tb.pos);
+    IF ~compInFunc THEN
+      pcIdx := codeLen; Emit(opGoto, lineNum, 0); AddGotoBackpatch(pcIdx)
+    END
+  ELSE
+    CompileExpr(tb);
+    IF compInFunc THEN Emit(opPop, 0, 0) ELSE Emit(opGotoDyn, 0, 0) END
+  END
+END CompileGoto;
+
+PROCEDURE CompileGosub(VAR tb: TokBuf);
+VAR lineNum, pcIdx: INTEGER;
+BEGIN
+  IF PeekIsBareLineNumber(tb) THEN
+    lineNum := FLOOR(tb.t[tb.pos].num); INC(tb.pos);
+    IF ~compInFunc THEN
+      pcIdx := codeLen; Emit(opGosub, lineNum, 0); AddGotoBackpatch(pcIdx)
+    END
+  ELSE
+    CompileExpr(tb);
+    IF compInFunc THEN Emit(opPop, 0, 0) ELSE Emit(opGosubDyn, 0, 0) END
+  END
+END CompileGosub;
+
+PROCEDURE CompileReturn(VAR tb: TokBuf);
+VAR hasExpr: BOOLEAN;
+BEGIN
+  IF compInFunc THEN
+    hasExpr := (CurKind(tb) # TkEOL) & (CurKind(tb) # TkColon);
+    IF hasExpr THEN CompileExpr(tb); Emit(opFuncReturn, 1, 0)
+    ELSE Emit(opFuncReturn, 0, 0) END
+  ELSE
+    Emit(opGosubReturn, 0, 0)
+  END
+END CompileReturn;
+
+PROCEDURE CompileOn(VAR tb: TokBuf);
+VAR isGosub: BOOLEAN; startIdx, count, lineNum: INTEGER;
+BEGIN
+  CompileExpr(tb);
+  IF IsIdent(tb, "GOTO") THEN isGosub := FALSE; INC(tb.pos)
+  ELSIF IsIdent(tb, "GOSUB") THEN isGosub := TRUE; INC(tb.pos)
+  ELSE RtErr("SYNTAX ERROR"); RETURN END;
+  IF compInFunc THEN
+    Emit(opPop, 0, 0);
+    LOOP
+      IF CurKind(tb) # TkNum THEN EXIT END;
+      INC(tb.pos);
+      IF CurKind(tb) = TkComma THEN INC(tb.pos) ELSE EXIT END
+    END
+  ELSE
+    startIdx := nOnTargets; count := 0;
+    LOOP
+      IF CurKind(tb) # TkNum THEN EXIT END;
+      lineNum := FLOOR(tb.t[tb.pos].num); INC(tb.pos);
+      IF nOnTargets < MaxOnTargets THEN
+        onTargets[nOnTargets] := lineNum; INC(nOnTargets); INC(count)
+      ELSE RtErr("PROGRAM TOO LARGE") END;
+      IF CurKind(tb) = TkComma THEN INC(tb.pos) ELSE EXIT END
+    END;
+    IF isGosub THEN Emit(opOnGosub, startIdx, count) ELSE Emit(opOnGoto, startIdx, count) END
+  END
+END CompileOn;
+
+PROCEDURE CompileFor(VAR tb: TokBuf);
+VAR name: STRING;
+BEGIN
+  IF CurKind(tb) # TkIdent THEN RtErr("SYNTAX ERROR"); RETURN END;
+  Strings.Copy(tb.t[tb.pos].s, name); INC(tb.pos);
+  IF IsOp(tb, "=") THEN INC(tb.pos) ELSE RtErr("MISSING ="); RETURN END;
+  CompileExpr(tb);
+  IF IsIdent(tb, "TO") THEN INC(tb.pos) ELSE RtErr("MISSING TO"); RETURN END;
+  CompileExpr(tb);
+  IF IsIdent(tb, "STEP") THEN INC(tb.pos); CompileExpr(tb)
+  ELSE Emit(opPushNum, AddNumConst(1.0), 0) END;
+  Emit(opForInit, InternName(name), 0)
+END CompileFor;
+
+PROCEDURE CompileIf(VAR tb: TokBuf);
+VAR lineNum, fixIdx, gotoIdx: INTEGER;
+BEGIN
+  INC(tb.pos);
+  CompileExpr(tb);
+  IF IsIdent(tb, "THEN") THEN INC(tb.pos) END;
+  IF CurKind(tb) = TkNum THEN
+    lineNum := FLOOR(tb.t[tb.pos].num); INC(tb.pos);
+    IF compInFunc THEN
+      Emit(opPop, 0, 0)
+    ELSE
+      fixIdx := codeLen; Emit(opJumpIfFalse, 0, 0); AddLineFixup(fixIdx);
+      gotoIdx := codeLen; Emit(opGoto, lineNum, 0); AddGotoBackpatch(gotoIdx)
+    END
+  ELSE
+    fixIdx := codeLen; Emit(opJumpIfFalse, 0, 0); AddLineFixup(fixIdx);
+    CompileStmtSeq(tb)
+  END
+END CompileIf;
+
+PROCEDURE CompileExpectComma(VAR tb: TokBuf);
+BEGIN
+  IF CurKind(tb) = TkComma THEN INC(tb.pos) ELSE RtErr("MISSING ,") END
+END CompileExpectComma;
+
+PROCEDURE CompileOptColor(VAR tb: TokBuf; VAR argc: INTEGER);
+BEGIN
+  IF CurKind(tb) = TkComma THEN INC(tb.pos); CompileExpr(tb); INC(argc) END
+END CompileOptColor;
+
+PROCEDURE CompileLocate(VAR tb: TokBuf);
+VAR argc: INTEGER;
+BEGIN
+  CompileExpr(tb); argc := 1;
+  IF CurKind(tb) = TkComma THEN INC(tb.pos); CompileExpr(tb); argc := 2 END;
+  Emit(opLocate, argc, 0)
+END CompileLocate;
+
+PROCEDURE CompileRandomize(VAR tb: TokBuf);
+BEGIN
+  IF (CurKind(tb) # TkEOL) & (CurKind(tb) # TkColon) THEN
+    CompileExpr(tb); Emit(opRandomize, 1, 0)
+  ELSE
+    Emit(opRandomize, 0, 0)
+  END
+END CompileRandomize;
+
+PROCEDURE CompileScreen(VAR tb: TokBuf);
+VAR argc: INTEGER;
+BEGIN
+  CompileExpr(tb); argc := 1;
+  IF CurKind(tb) = TkComma THEN INC(tb.pos); CompileExpr(tb); argc := 2 END;
+  Emit(opScreen, argc, 0)
+END CompileScreen;
+
+PROCEDURE CompileColor(VAR tb: TokBuf);
+VAR argc: INTEGER;
+BEGIN
+  CompileExpr(tb); argc := 1;
+  IF CurKind(tb) = TkComma THEN INC(tb.pos); CompileExpr(tb); argc := 2 END;
+  Emit(opColor, argc, 0)
+END CompileColor;
+
+PROCEDURE CompilePset(VAR tb: TokBuf);
+VAR argc: INTEGER;
+BEGIN
+  CompileExpr(tb); CompileExpectComma(tb); CompileExpr(tb); argc := 2;
+  CompileOptColor(tb, argc);
+  Emit(opPset, argc, 0)
+END CompilePset;
+
+PROCEDURE CompileDrawLine(VAR tb: TokBuf);
+VAR argc: INTEGER;
+BEGIN
+  CompileExpr(tb); CompileExpectComma(tb); CompileExpr(tb); CompileExpectComma(tb);
+  CompileExpr(tb); CompileExpectComma(tb); CompileExpr(tb); argc := 4;
+  CompileOptColor(tb, argc);
+  Emit(opDrawLine, argc, 0)
+END CompileDrawLine;
+
+PROCEDURE CompileCircle(VAR tb: TokBuf; filled: BOOLEAN);
+VAR argc, f: INTEGER;
+BEGIN
+  CompileExpr(tb); CompileExpectComma(tb); CompileExpr(tb); CompileExpectComma(tb);
+  CompileExpr(tb); argc := 3;
+  CompileOptColor(tb, argc);
+  IF filled THEN f := 1 ELSE f := 0 END;
+  Emit(opCircle, f, argc)
+END CompileCircle;
+
+PROCEDURE CompileRect(VAR tb: TokBuf; filled: BOOLEAN);
+VAR argc, f: INTEGER;
+BEGIN
+  CompileExpr(tb); CompileExpectComma(tb); CompileExpr(tb); CompileExpectComma(tb);
+  CompileExpr(tb); CompileExpectComma(tb); CompileExpr(tb); argc := 4;
+  CompileOptColor(tb, argc);
+  IF filled THEN f := 1 ELSE f := 0 END;
+  Emit(opRect, f, argc)
+END CompileRect;
+
+PROCEDURE CompileText(VAR tb: TokBuf);
+VAR argc: INTEGER;
+BEGIN
+  CompileExpr(tb); CompileExpectComma(tb); CompileExpr(tb); CompileExpectComma(tb);
+  CompileExpr(tb); argc := 3;
+  IF CurKind(tb) = TkComma THEN
+    INC(tb.pos); CompileExpr(tb); INC(argc);
+    IF CurKind(tb) = TkComma THEN INC(tb.pos); CompileExpr(tb); INC(argc) END
+  END;
+  Emit(opText, argc, 0)
+END CompileText;
+
+PROCEDURE CompileSound(VAR tb: TokBuf);
+BEGIN
+  CompileExpr(tb); CompileExpectComma(tb); CompileExpr(tb);
+  Emit(opSound, 0, 0)
+END CompileSound;
+
+PROCEDURE CompileDelay(VAR tb: TokBuf);
+BEGIN
+  CompileExpr(tb); Emit(opDelay, 0, 0)
+END CompileDelay;
+
+PROCEDURE CompileStmt(VAR tb: TokBuf);
+VAR name: STRING; fi: INTEGER;
+BEGIN
   IF CurKind(tb) # TkIdent THEN RtErr("SYNTAX ERROR"); RETURN END;
   Strings.Copy(tb.t[tb.pos].s, name);
 
-  IF name = "PRINT" THEN INC(tb.pos); DoPrint(tb)
-  ELSIF name = "INPUT" THEN INC(tb.pos); DoInput(tb)
-  ELSIF name = "LET" THEN INC(tb.pos); DoAssign(tb)
-  ELSIF name = "DIM" THEN INC(tb.pos); DoDim(tb)
+  IF name = "PRINT" THEN INC(tb.pos); CompilePrint(tb)
+  ELSIF name = "INPUT" THEN INC(tb.pos); CompileInput(tb)
+  ELSIF name = "LET" THEN INC(tb.pos); CompileAssign(tb)
+  ELSIF name = "DIM" THEN INC(tb.pos); CompileDim(tb)
   ELSIF name = "DATA" THEN tb.pos := tb.n
-  ELSIF name = "READ" THEN INC(tb.pos); DoRead(tb)
-  ELSIF name = "RESTORE" THEN INC(tb.pos); DoRestore(tb)
-  ELSIF name = "GOTO" THEN
-    INC(tb.pos); EvalExpr(tb, v); target := FLOOR(v.num);
-    IF ~errFlag THEN
-      li := LineIndexOf(target);
-      IF li < 0 THEN RtErr("UNDEFINED LINE") ELSE jumped := TRUE; newLine := li; newTok := 0 END
-    END
-  ELSIF name = "GOSUB" THEN
-    INC(tb.pos); EvalExpr(tb, v); target := FLOOR(v.num);
-    IF ~errFlag THEN
-      li := LineIndexOf(target);
-      IF li < 0 THEN RtErr("UNDEFINED LINE")
-      ELSE PushGosub(curLineIdx, tb.pos); jumped := TRUE; newLine := li; newTok := 0 END
-    END
-  ELSIF name = "RETURN" THEN
-    INC(tb.pos); DoReturn(tb, jumped, newLine, newTok)
-  ELSIF name = "ON" THEN INC(tb.pos); DoOn(tb, curLineIdx, jumped, newLine, newTok)
-  ELSIF name = "FOR" THEN INC(tb.pos); DoFor(tb, curLineIdx)
+  ELSIF name = "READ" THEN INC(tb.pos); CompileRead(tb)
+  ELSIF name = "RESTORE" THEN INC(tb.pos); CompileRestore(tb)
+  ELSIF name = "GOTO" THEN INC(tb.pos); CompileGoto(tb)
+  ELSIF name = "GOSUB" THEN INC(tb.pos); CompileGosub(tb)
+  ELSIF name = "RETURN" THEN INC(tb.pos); CompileReturn(tb)
+  ELSIF name = "ON" THEN INC(tb.pos); CompileOn(tb)
+  ELSIF name = "FOR" THEN INC(tb.pos); CompileFor(tb)
   ELSIF name = "NEXT" THEN
     INC(tb.pos);
     IF CurKind(tb) = TkIdent THEN INC(tb.pos) END;
-    IF forTop <= 0 THEN RtErr("NEXT WITHOUT FOR")
-    ELSE
-      fe := forStack[forTop-1];
-      SetNum(fe.varName, GetNum(fe.varName) + fe.step);
-      IF fe.step >= 0.0 THEN contd := GetNum(fe.varName) <= fe.limit + 1.0E-9
-      ELSE contd := GetNum(fe.varName) >= fe.limit - 1.0E-9 END;
-      IF contd THEN
-        jumped := TRUE; newLine := fe.lineIdx; newTok := fe.tokPos
-      ELSE
-        DEC(forTop)
-      END
-    END
-  ELSIF name = "IF" THEN
-    INC(tb.pos); EvalExpr(tb, v);
-    IF errFlag THEN RETURN END;
-    IF IsIdent(tb, "THEN") THEN INC(tb.pos) END;
-    IF Truthy(v) THEN
-      IF CurKind(tb) = TkNum THEN
-        target := FLOOR(tb.t[tb.pos].num);
-        li := LineIndexOf(target);
-        IF li < 0 THEN RtErr("UNDEFINED LINE") ELSE jumped := TRUE; newLine := li; newTok := 0 END
-      ELSE
-        ExecStmtList(tb, curLineIdx, curLineNum, jumped, newLine, newTok)
-      END
-    ELSE
-      tb.pos := tb.n
-    END
-  ELSIF name = "END" THEN tb.pos := tb.n; progRunning := FALSE
-  ELSIF name = "STOP" THEN tb.pos := tb.n; progRunning := FALSE
-  ELSIF name = "CLS" THEN INC(tb.pos); DoCls
-  ELSIF name = "HOME" THEN INC(tb.pos); DoCls
-  ELSIF name = "LOCATE" THEN INC(tb.pos); DoLocate(tb)
-  ELSIF name = "RANDOMIZE" THEN
-    INC(tb.pos); IF CurKind(tb) # TkEOL THEN EvalExpr(tb, v) END
-  ELSIF name = "SCREEN" THEN INC(tb.pos); DoScreen(tb)
-  ELSIF name = "COLOR" THEN INC(tb.pos); DoColor(tb)
-  ELSIF name = "PSET" THEN INC(tb.pos); DoPset(tb)
-  ELSIF name = "LINE" THEN INC(tb.pos); DoLine(tb)
-  ELSIF name = "CIRCLE" THEN INC(tb.pos); DoCircle(tb, FALSE)
-  ELSIF name = "FCIRCLE" THEN INC(tb.pos); DoCircle(tb, TRUE)
-  ELSIF name = "RECT" THEN INC(tb.pos); DoRect(tb, FALSE)
-  ELSIF name = "FRECT" THEN INC(tb.pos); DoRect(tb, TRUE)
-  ELSIF name = "TEXT" THEN INC(tb.pos); DoText(tb)
-  ELSIF name = "SOUND" THEN INC(tb.pos); DoSound(tb)
-  ELSIF name = "BEEP" THEN INC(tb.pos); DoBeep
-  ELSIF name = "DELAY" THEN INC(tb.pos); DoDelay(tb)
+    Emit(opForNext, 0, 0)
+  ELSIF name = "IF" THEN CompileIf(tb)
+  ELSIF name = "END" THEN tb.pos := tb.n; Emit(opEnd, 0, 0)
+  ELSIF name = "STOP" THEN tb.pos := tb.n; Emit(opEnd, 0, 0)
+  ELSIF name = "CLS" THEN INC(tb.pos); Emit(opCls, 0, 0)
+  ELSIF name = "HOME" THEN INC(tb.pos); Emit(opCls, 0, 0)
+  ELSIF name = "LOCATE" THEN INC(tb.pos); CompileLocate(tb)
+  ELSIF name = "RANDOMIZE" THEN INC(tb.pos); CompileRandomize(tb)
+  ELSIF name = "SCREEN" THEN INC(tb.pos); CompileScreen(tb)
+  ELSIF name = "COLOR" THEN INC(tb.pos); CompileColor(tb)
+  ELSIF name = "PSET" THEN INC(tb.pos); CompilePset(tb)
+  ELSIF name = "LINE" THEN INC(tb.pos); CompileDrawLine(tb)
+  ELSIF name = "CIRCLE" THEN INC(tb.pos); CompileCircle(tb, FALSE)
+  ELSIF name = "FCIRCLE" THEN INC(tb.pos); CompileCircle(tb, TRUE)
+  ELSIF name = "RECT" THEN INC(tb.pos); CompileRect(tb, FALSE)
+  ELSIF name = "FRECT" THEN INC(tb.pos); CompileRect(tb, TRUE)
+  ELSIF name = "TEXT" THEN INC(tb.pos); CompileText(tb)
+  ELSIF name = "SOUND" THEN INC(tb.pos); CompileSound(tb)
+  ELSIF name = "BEEP" THEN INC(tb.pos); Emit(opBeep, 0, 0)
+  ELSIF name = "DELAY" THEN INC(tb.pos); CompileDelay(tb)
   ELSIF (name = "DEFN") OR (name = "ENDFN") THEN
-    (* Shouldn't happen: Execute() skips DEFN/ENDFN blocks. But in
-     * immediate mode a stray one is a no-op. *)
     tb.pos := tb.n
   ELSE
-    (* Might be:  fname(args)  -- statement-level user-function call.
-     * Otherwise it's an assignment. Distinguish by looking ahead. *)
     fi := FindFunc(name);
     IF (fi >= 0) & (tb.pos + 1 < tb.n) & (tb.t[tb.pos + 1].kind = TkLP) THEN
-      savePos := tb.pos;
-      (* Also check it's NOT actually an array-element assignment like
-       * name(i) = expr. If a matching function name exists we treat it
-       * as a call; the user should DIM before defining a same-named
-       * function to disambiguate. *)
-      INC(tb.pos);  (* consume name *)
-      DoFuncCallStmt(fi, tb)
+      INC(tb.pos); CompileUserFuncCall(fi, FALSE, tb)
     ELSE
-      DoAssign(tb)
+      CompileAssign(tb)
     END
   END
-END ExecStmt;
+END CompileStmt;
 
-PROCEDURE ExecStmtList(VAR tb: TokBuf; curLineIdx, curLineNum: INTEGER;
-                        VAR jumped: BOOLEAN; VAR newLine, newTok: INTEGER);
+(* ===================== compiler: lines / program / functions ============== *)
+
+(* Compiles a colon-separated run of statements up to EOL. Used both for a
+ * whole program line and for the "then" part of "IF cond THEN stmt[:stmt]",
+ * which is not itself preceded by a colon. *)
+PROCEDURE CompileStmtSeq(VAR tb: TokBuf);
 BEGIN
-  jumped := FALSE;
-  LOOP
-    IF errFlag OR returnPending THEN RETURN END;
-    IF CurKind(tb) = TkEOL THEN RETURN END;
-    ExecStmt(tb, curLineIdx, curLineNum, jumped, newLine, newTok);
-    IF errFlag OR jumped OR returnPending THEN RETURN END;
-    IF CurKind(tb) = TkColon THEN INC(tb.pos) ELSE RETURN END
+  WHILE (CurKind(tb) # TkEOL) & ~errFlag DO
+    CompileStmt(tb);
+    IF errFlag THEN EXIT END;
+    IF CurKind(tb) = TkColon THEN INC(tb.pos) ELSE EXIT END
   END
-END ExecStmtList;
+END CompileStmtSeq;
+
+PROCEDURE CompileLineBody(text: ARRAY OF CHAR; lineNum: INTEGER);
+VAR tb: TokBuf; savedCodeLen, savedGBP, savedOT: INTEGER;
+BEGIN
+  savedCodeLen := codeLen; savedGBP := nGotoBackpatch; savedOT := nOnTargets;
+  nLineFixups := 0;
+  Emit(opLine, lineNum, 0);
+  Tokenize(text, tb); tb.pos := 0;
+  CompileStmtSeq(tb);
+  IF errFlag THEN
+    IF Strings.Length(firstCompileErrMsg) = 0 THEN
+      Strings.Copy(errMsg, firstCompileErrMsg); firstCompileErrLine := lineNum
+    END;
+    errFlag := FALSE;
+    codeLen := savedCodeLen; nGotoBackpatch := savedGBP; nOnTargets := savedOT;
+    nLineFixups := 0
+  ELSE
+    ResolveLineFixups(codeLen)
+  END
+END CompileLineBody;
+
+PROCEDURE CompileFunctionBody(fd: FuncDef);
+VAR i: INTEGER;
+BEGIN
+  compInFunc := TRUE;
+  fd.entryPc := codeLen;
+  FOR i := fd.bodyStart TO fd.bodyEnd - 1 DO
+    CompileLineBody(prog[i].text, prog[i].num)
+  END;
+  Emit(opFuncReturn, 0, 0);
+  compInFunc := FALSE
+END CompileFunctionBody;
+
+PROCEDURE CompileProgram;
+VAR i, k, j, skipTo: INTEGER; fd: FuncDef; ok: BOOLEAN;
+BEGIN
+  codeLen := 0; codeLimit := MainCodeCap;
+  nNames := 0; nNumPool := 0; nStrPool := 0; nOnTargets := 0; nGotoBackpatch := 0;
+  errFlag := FALSE; errMsg := "";
+  firstCompileErrMsg := ""; firstCompileErrLine := -1;
+  compInFunc := FALSE;
+  ClearFuncs;
+
+  (* phase 1: register function headers (so forward references resolve) *)
+  i := 0;
+  WHILE i < nLines DO
+    IF IsDefnLine(prog[i].text) THEN
+      NEW(fd);
+      ok := ParseDefnHeader(prog[i].text, fd);
+      fd.bodyStart := i + 1;
+      k := i + 1;
+      WHILE (k < nLines) & ~IsEndfnLine(prog[k].text) DO INC(k) END;
+      fd.bodyEnd := k;
+      IF k >= nLines THEN RtErr("DEFN WITHOUT ENDFN"); ok := FALSE END;
+      errFlag := FALSE;
+      IF ok THEN
+        j := FindFunc(fd.name);
+        IF j >= 0 THEN funcs[j] := fd
+        ELSIF nFuncs < MaxFuncs THEN funcs[nFuncs] := fd; INC(nFuncs)
+        ELSE RtErr("TOO MANY FUNCTIONS"); errFlag := FALSE
+        END
+      END;
+      IF k < nLines THEN i := k + 1 ELSE i := nLines END
+    ELSE
+      INC(i)
+    END
+  END;
+
+  (* phase 2: compile main-line code, skipping DEFN..ENDFN spans *)
+  i := 0;
+  WHILE i < nLines DO
+    IF IsFuncBodyLine(i, skipTo) THEN
+      i := skipTo
+    ELSE
+      lineStartPc[i] := codeLen;
+      CompileLineBody(prog[i].text, prog[i].num);
+      INC(i)
+    END
+  END;
+  Emit(opEnd, 0, 0);
+
+  (* phase 3: compile each function body *)
+  FOR i := 0 TO nFuncs - 1 DO CompileFunctionBody(funcs[i]) END;
+
+  (* phase 4: resolve literal line-number jump targets to PCs *)
+  BackpatchGotosFrom(0);
+  BackpatchOnTargetsFrom(0);
+
+  IF Strings.Length(firstCompileErrMsg) > 0 THEN
+    errFlag := TRUE;
+    Strings.Copy(firstCompileErrMsg, errMsg);
+    currentLineNum := firstCompileErrLine
+  ELSE
+    errFlag := FALSE
+  END
+END CompileProgram;
+
+PROCEDURE CompileImmediate(text: ARRAY OF CHAR; VAR startPc: INTEGER; VAR ok: BOOLEAN);
+VAR tb: TokBuf; savedGBP, savedOT: INTEGER;
+BEGIN
+  codeLen := MainCodeCap; codeLimit := MaxCode;
+  compInFunc := FALSE;
+  errFlag := FALSE; errMsg := "";
+  savedGBP := nGotoBackpatch; savedOT := nOnTargets;
+  nLineFixups := 0;
+  startPc := codeLen;
+  Tokenize(text, tb); tb.pos := 0;
+  CompileStmtSeq(tb);
+  IF errFlag THEN
+    ok := FALSE;
+    nGotoBackpatch := savedGBP; nOnTargets := savedOT
+  ELSE
+    ok := TRUE;
+    ResolveLineFixups(codeLen);
+    Emit(opEnd, 0, 0);
+    BackpatchGotosFrom(savedGBP);
+    BackpatchOnTargetsFrom(savedOT)
+  END
+END CompileImmediate;
 
 (* =============================== run engine ================================ *)
 
@@ -1656,46 +1738,395 @@ BEGIN
   errFlag := FALSE
 END ReportError;
 
-PROCEDURE Execute(startLine, startTok: INTEGER);
-VAR cur, tok, newLine, newTok, skipTo: INTEGER;
-    jumped: BOOLEAN; text: STRING; lineNum: INTEGER; tb: TokBuf;
+PROCEDURE VMNextDataValue(name: ARRAY OF CHAR; VAR v: Value): BOOLEAN;
 BEGIN
-  cur := startLine; tok := startTok; progRunning := TRUE;
-  WHILE progRunning DO
-    IF cur = -1 THEN
-      text := immText; lineNum := -1
+  IF dataPtr >= nDataVals THEN RtErr("OUT OF DATA"); RETURN FALSE END;
+  v := dataVals[dataPtr]; INC(dataPtr);
+  IF IsStrName(name) & ~v.isStr THEN NumToStr(v.num, v.s); v.isStr := TRUE
+  ELSIF ~IsStrName(name) & v.isStr THEN
+    IF ~Strings.StrToReal(v.s, v.num) THEN v.num := 0.0 END; v.isStr := FALSE
+  END;
+  RETURN TRUE
+END VMNextDataValue;
+
+PROCEDURE DoVmCall(funcIdx, argc: INTEGER; wantValue: BOOLEAN; VAR pc: INTEGER);
+VAR fd: FuncDef; ns: NumSnap; ss: StrSnap; k: INTEGER;
+    args: ARRAY MaxFuncParams OF Value; dummy: Value;
+BEGIN
+  IF callTop >= MaxCallDepth THEN
+    RtErr("CALL DEPTH EXCEEDED");
+    FOR k := 1 TO argc DO Pop(dummy) END;
+    RETURN
+  END;
+  fd := funcs[funcIdx];
+  FOR k := argc - 1 TO 0 BY -1 DO Pop(args[k]) END;
+  SnapshotScalars(ns, ss); ClearVars;
+  FOR k := 0 TO argc - 1 DO
+    IF fd.paramIsStr[k] THEN
+      IF ~args[k].isStr THEN NumToStr(args[k].num, args[k].s); args[k].isStr := TRUE END;
+      SetStr(fd.params[k], args[k].s)
     ELSE
-      IF (cur < 0) OR (cur >= nLines) THEN EXIT END;
-      (* Skip embedded DEFN..ENDFN blocks so they aren't run as normal code. *)
-      WHILE (cur < nLines) & IsFuncBodyLine(cur, skipTo) DO
-        cur := skipTo
+      IF args[k].isStr THEN
+        IF ~Strings.StrToReal(args[k].s, args[k].num) THEN args[k].num := 0.0 END;
+        args[k].isStr := FALSE
       END;
-      IF cur >= nLines THEN EXIT END;
-      text := prog[cur].text; lineNum := prog[cur].num
-    END;
-    Tokenize(text, tb); tb.pos := tok;
-    ExecStmtList(tb, cur, lineNum, jumped, newLine, newTok);
-    IF errFlag THEN ReportError(lineNum); progRunning := FALSE; EXIT END;
-    IF gfxMode THEN Present END;
-    IF ~progRunning THEN EXIT END;
-    IF jumped THEN cur := newLine; tok := newTok
-    ELSIF cur = -1 THEN EXIT
-    ELSE INC(cur); tok := 0
+      SetNum(fd.params[k], args[k].num)
+    END
+  END;
+  callStack[callTop].returnPc := pc;
+  callStack[callTop].savedForTop := forTop;
+  callStack[callTop].savedGosubTop := gosubTop;
+  callStack[callTop].funcIdx := funcIdx;
+  callStack[callTop].ns := ns; callStack[callTop].ss := ss;
+  callStack[callTop].wantValue := wantValue;
+  INC(callTop);
+  pc := fd.entryPc
+END DoVmCall;
+
+PROCEDURE DoVmReturn(hasExpr: INTEGER; VAR pc: INTEGER);
+VAR v, result: Value; frame: CallFrame; fd: FuncDef; tmp: STRING;
+BEGIN
+  IF callTop <= 0 THEN RETURN END;
+  frame := callStack[callTop-1];
+  fd := funcs[frame.funcIdx];
+  IF hasExpr = 1 THEN
+    Pop(v);
+    IF fd.isStr THEN
+      IF v.isStr THEN result := v ELSE NumToStr(v.num, tmp); result := MkStr(tmp) END
+    ELSE
+      IF v.isStr THEN
+        IF ~Strings.StrToReal(v.s, v.num) THEN v.num := 0.0 END; result := MkNum(v.num)
+      ELSE result := v END
+    END
+  ELSE
+    IF fd.isStr THEN result := MkStr("") ELSE result := MkNum(0.0) END
+  END;
+  DEC(callTop);
+  RestoreScalars(frame.ns, frame.ss);
+  forTop := frame.savedForTop; gosubTop := frame.savedGosubTop;
+  pc := frame.returnPc;
+  IF frame.wantValue THEN Push(result) END
+END DoVmReturn;
+
+PROCEDURE RunVM(startPc: INTEGER);
+VAR pc, target, li, idx, ai, i1, i2, c2, n, x, y, x2, y2, w, h, sz, c, d1, d2: INTEGER;
+    r, num: REAL;
+    res, contd: BOOLEAN;
+    v, rhs, idxv, idxv2: Value;
+    buf, name, part, prompt: STRING;
+    instr: Instr;
+BEGIN
+  pc := startPc; progRunning := TRUE;
+  WHILE progRunning & ~errFlag DO
+    instr := code[pc]; INC(pc);
+
+    IF instr.op = opPushNum THEN Push(MkNum(numPool[instr.a]))
+    ELSIF instr.op = opLoadVar THEN
+      Strings.Copy(namePool[instr.a], name);
+      IF IsStrName(name) THEN v.isStr := TRUE; v.num := 0.0; GetStr(name, v.s)
+      ELSE v := MkNum(GetNum(name)) END;
+      Push(v)
+    ELSIF instr.op = opAdd THEN
+      Pop(rhs); Pop(v);
+      IF v.isStr OR rhs.isStr THEN
+        Strings.Copy(v.s, buf); Strings.Append(rhs.s, buf); Push(MkStr(buf))
+      ELSE Push(MkNum(v.num + rhs.num)) END
+    ELSIF instr.op = opSub THEN Pop(rhs); Pop(v); Push(MkNum(v.num - rhs.num))
+    ELSIF instr.op = opMul THEN Pop(rhs); Pop(v); Push(MkNum(v.num * rhs.num))
+    ELSIF instr.op = opStoreVar THEN
+      Pop(v); AssignScalar(namePool[instr.a], v)
+    ELSIF (instr.op >= opEq) & (instr.op <= opGe) THEN
+      Pop(rhs); Pop(v);
+      IF v.isStr OR rhs.isStr THEN c2 := Strings.Compare(v.s, rhs.s)
+      ELSE
+        IF v.num < rhs.num THEN c2 := -1 ELSIF v.num > rhs.num THEN c2 := 1 ELSE c2 := 0 END
+      END;
+      IF instr.op = opEq THEN res := c2 = 0
+      ELSIF instr.op = opNe THEN res := c2 # 0
+      ELSIF instr.op = opLt THEN res := c2 < 0
+      ELSIF instr.op = opGt THEN res := c2 > 0
+      ELSIF instr.op = opLe THEN res := c2 <= 0
+      ELSE res := c2 >= 0 END;
+      Push(MkBool(res))
+    ELSIF instr.op = opJumpIfFalse THEN
+      Pop(v); IF ~Truthy(v) THEN pc := instr.a END
+    ELSIF instr.op = opForNext THEN
+      IF forTop <= 0 THEN RtErr("NEXT WITHOUT FOR")
+      ELSE
+        SetNum(forStack[forTop-1].varName, GetNum(forStack[forTop-1].varName) + forStack[forTop-1].step);
+        IF forStack[forTop-1].step >= 0.0 THEN
+          contd := GetNum(forStack[forTop-1].varName) <= forStack[forTop-1].limit + 1.0E-9
+        ELSE
+          contd := GetNum(forStack[forTop-1].varName) >= forStack[forTop-1].limit - 1.0E-9
+        END;
+        IF contd THEN pc := forStack[forTop-1].loopTopPc ELSE DEC(forTop) END
+      END
+    ELSIF instr.op = opLine THEN
+      MaybePresent; currentLineNum := instr.a
+    ELSIF instr.op = opPushStr THEN Push(MkStr(strPool[instr.a]))
+    ELSIF instr.op = opLoadArr THEN
+      IF instr.b = 2 THEN Pop(idxv2); i2 := FLOOR(idxv2.num) ELSE i2 := -1 END;
+      Pop(idxv); i1 := FLOOR(idxv.num);
+      ai := EnsureArray(namePool[instr.a]);
+      IF (ai >= 0) & ArrIndex(arrays[ai], i1, i2, idx) THEN
+        IF arrays[ai].isStr THEN Push(MkStr(arrays[ai].strData.elems[idx]))
+        ELSE Push(MkNum(arrays[ai].numData[idx])) END
+      ELSE Push(MkNum(0.0)) END
+    ELSIF instr.op = opStoreArr THEN
+      Pop(v);
+      IF instr.b = 2 THEN Pop(idxv2); i2 := FLOOR(idxv2.num) ELSE i2 := -1 END;
+      Pop(idxv); i1 := FLOOR(idxv.num);
+      AssignArrayElem(namePool[instr.a], i1, i2, v)
+    ELSIF instr.op = opPop THEN Pop(v)
+    ELSIF instr.op = opNeg THEN Pop(v); Push(MkNum(-v.num))
+    ELSIF instr.op = opNot THEN Pop(v); Push(MkBool(~Truthy(v)))
+    ELSIF instr.op = opDiv THEN
+      Pop(rhs); Pop(v);
+      IF rhs.num = 0.0 THEN RtErr("DIVISION BY ZERO"); Push(MkNum(0.0))
+      ELSE Push(MkNum(v.num / rhs.num)) END
+    ELSIF instr.op = opMod THEN
+      Pop(rhs); Pop(v);
+      IF FLOOR(rhs.num) = 0 THEN RtErr("DIVISION BY ZERO"); Push(MkNum(0.0))
+      ELSE Push(MkNum(FLT(FLOOR(v.num) MOD FLOOR(rhs.num)))) END
+    ELSIF instr.op = opPow THEN Pop(rhs); Pop(v); Push(MkNum(Math.power(v.num, rhs.num)))
+    ELSIF instr.op = opAndOp THEN Pop(rhs); Pop(v); Push(MkBool(Truthy(v) & Truthy(rhs)))
+    ELSIF instr.op = opOrOp THEN Pop(rhs); Pop(v); Push(MkBool(Truthy(v) OR Truthy(rhs)))
+    ELSIF instr.op = opCallBuiltinFunc THEN RunBuiltinFunc(instr.a, instr.b)
+    ELSIF instr.op = opCallUserFuncExpr THEN DoVmCall(instr.a, instr.b, TRUE, pc)
+    ELSIF instr.op = opCallUserFuncStmt THEN DoVmCall(instr.a, instr.b, FALSE, pc)
+    ELSIF instr.op = opFuncReturn THEN DoVmReturn(instr.a, pc)
+    ELSIF instr.op = opJump THEN pc := instr.a
+    ELSIF instr.op = opGoto THEN
+      IF instr.a < 0 THEN RtErr("UNDEFINED LINE") ELSE pc := instr.a END
+    ELSIF instr.op = opGotoDyn THEN
+      Pop(v); target := FLOOR(v.num);
+      IF FindLinePos(target, li) THEN pc := lineStartPc[li] ELSE RtErr("UNDEFINED LINE") END
+    ELSIF instr.op = opGosub THEN
+      IF instr.a < 0 THEN RtErr("UNDEFINED LINE")
+      ELSIF gosubTop >= MaxGosubStack THEN RtErr("GOSUB TOO DEEP")
+      ELSE gosubStack[gosubTop].returnPc := pc; INC(gosubTop); pc := instr.a END
+    ELSIF instr.op = opGosubDyn THEN
+      Pop(v); target := FLOOR(v.num);
+      IF ~FindLinePos(target, li) THEN RtErr("UNDEFINED LINE")
+      ELSIF gosubTop >= MaxGosubStack THEN RtErr("GOSUB TOO DEEP")
+      ELSE gosubStack[gosubTop].returnPc := pc; INC(gosubTop); pc := lineStartPc[li] END
+    ELSIF instr.op = opGosubReturn THEN
+      IF gosubTop <= 0 THEN RtErr("RETURN WITHOUT GOSUB")
+      ELSE DEC(gosubTop); pc := gosubStack[gosubTop].returnPc END
+    ELSIF instr.op = opOnGoto THEN
+      Pop(v); idx := FLOOR(v.num);
+      IF (idx >= 1) & (idx <= instr.b) THEN
+        target := onTargets[instr.a + idx - 1];
+        IF target < 0 THEN RtErr("UNDEFINED LINE") ELSE pc := target END
+      END
+    ELSIF instr.op = opOnGosub THEN
+      Pop(v); idx := FLOOR(v.num);
+      IF (idx >= 1) & (idx <= instr.b) THEN
+        target := onTargets[instr.a + idx - 1];
+        IF target < 0 THEN RtErr("UNDEFINED LINE")
+        ELSIF gosubTop >= MaxGosubStack THEN RtErr("GOSUB TOO DEEP")
+        ELSE gosubStack[gosubTop].returnPc := pc; INC(gosubTop); pc := target END
+      END
+    ELSIF instr.op = opForInit THEN
+      IF forTop >= MaxForStack THEN RtErr("FOR TOO DEEP")
+      ELSE
+        Pop(v); forStack[forTop].step := v.num;
+        Pop(v); forStack[forTop].limit := v.num;
+        Pop(v);
+        Strings.Copy(namePool[instr.a], forStack[forTop].varName);
+        SetNum(namePool[instr.a], v.num);
+        forStack[forTop].loopTopPc := pc;
+        INC(forTop)
+      END
+    ELSIF instr.op = opEnd THEN
+      MaybePresent; progRunning := FALSE
+    ELSIF instr.op = opPrintVal THEN
+      Pop(v); IF v.isStr THEN POut(v.s) ELSE NumToStr(v.num, buf); POut(buf) END
+    ELSIF instr.op = opPrintTab THEN
+      Pop(v); n := FLOOR(v.num); WHILE outCol < n DO POut(" ") END
+    ELSIF instr.op = opPrintComma THEN
+      n := (outCol DIV 14 + 1) * 14; WHILE outCol < n DO POut(" ") END
+    ELSIF instr.op = opPrintNL THEN PNL
+    ELSIF instr.op = opInputBegin THEN
+      IF instr.a >= 0 THEN Strings.Copy(strPool[instr.a], prompt); Strings.Append("? ", prompt)
+      ELSE Strings.Copy("? ", prompt) END;
+      History.ReadLine(prompt, inputLine); outCol := 0;
+      inputFieldN := 0
+    ELSIF instr.op = opInputVar THEN
+      IF ~Strings.Split(inputLine, ',', inputFieldN, part) THEN part := "" END;
+      Strings.Trim(part); INC(inputFieldN);
+      IF IsStrName(namePool[instr.a]) THEN v := MkStr(part)
+      ELSE
+        IF ~Strings.StrToReal(part, num) THEN num := 0.0 END; v := MkNum(num)
+      END;
+      AssignScalar(namePool[instr.a], v)
+    ELSIF instr.op = opInputArr THEN
+      IF instr.b = 2 THEN Pop(idxv2); i2 := FLOOR(idxv2.num) ELSE i2 := -1 END;
+      Pop(idxv); i1 := FLOOR(idxv.num);
+      IF ~Strings.Split(inputLine, ',', inputFieldN, part) THEN part := "" END;
+      Strings.Trim(part); INC(inputFieldN);
+      IF IsStrName(namePool[instr.a]) THEN v := MkStr(part)
+      ELSE
+        IF ~Strings.StrToReal(part, num) THEN num := 0.0 END; v := MkNum(num)
+      END;
+      AssignArrayElem(namePool[instr.a], i1, i2, v)
+    ELSIF instr.op = opDim THEN
+      IF instr.b = 0 THEN d1 := 10; d2 := -1
+      ELSIF instr.b = 1 THEN Pop(v); d1 := FLOOR(v.num); d2 := -1
+      ELSE Pop(v); d2 := FLOOR(v.num); Pop(idxv); d1 := FLOOR(idxv.num)
+      END;
+      ai := DimArray(namePool[instr.a], d1, d2)
+    ELSIF instr.op = opReadVar THEN
+      IF VMNextDataValue(namePool[instr.a], v) THEN AssignScalar(namePool[instr.a], v) END
+    ELSIF instr.op = opReadArr THEN
+      IF instr.b = 2 THEN Pop(idxv2); i2 := FLOOR(idxv2.num) ELSE i2 := -1 END;
+      Pop(idxv); i1 := FLOOR(idxv.num);
+      IF VMNextDataValue(namePool[instr.a], v) THEN AssignArrayElem(namePool[instr.a], i1, i2, v) END
+    ELSIF instr.op = opRestore THEN
+      IF instr.a = 1 THEN
+        Pop(v); target := FLOOR(v.num);
+        i1 := 0; WHILE (i1 < nDataVals) & (dataLineOf[i1] < target) DO INC(i1) END;
+        dataPtr := i1
+      ELSE dataPtr := 0 END
+    ELSIF instr.op = opCls THEN DoCls
+    ELSIF instr.op = opLocate THEN
+      IF instr.a = 2 THEN Pop(v); y := FLOOR(v.num) ELSE y := 1 END;
+      Pop(v); x := FLOOR(v.num);
+      VmLocate(x, y)
+    ELSIF instr.op = opRandomize THEN
+      IF instr.a = 1 THEN Pop(v) END
+    ELSIF instr.op = opScreen THEN
+      IF instr.a = 2 THEN Pop(v); h := FLOOR(v.num) ELSE h := 480 END;
+      Pop(v); w := FLOOR(v.num);
+      EnsureGfx(w, h)
+    ELSIF instr.op = opColor THEN
+      IF instr.a = 2 THEN Pop(v); bgColorIx := FLOOR(v.num) END;
+      Pop(v); curColorIx := FLOOR(v.num)
+    ELSIF instr.op = opPset THEN
+      IF instr.a = 3 THEN Pop(v); c := FLOOR(v.num) ELSE c := curColorIx END;
+      Pop(v); y := FLOOR(v.num);
+      Pop(v); x := FLOOR(v.num);
+      VmPset(x, y, c)
+    ELSIF instr.op = opDrawLine THEN
+      IF instr.a = 5 THEN Pop(v); c := FLOOR(v.num) ELSE c := curColorIx END;
+      Pop(v); y2 := FLOOR(v.num);
+      Pop(v); x2 := FLOOR(v.num);
+      Pop(v); y := FLOOR(v.num);
+      Pop(v); x := FLOOR(v.num);
+      VmLine(x, y, x2, y2, c)
+    ELSIF instr.op = opCircle THEN
+      IF instr.b = 4 THEN Pop(v); c := FLOOR(v.num) ELSE c := curColorIx END;
+      Pop(v); r := v.num;
+      Pop(v); y := FLOOR(v.num);
+      Pop(v); x := FLOOR(v.num);
+      VmCircle(x, y, c, r, instr.a = 1)
+    ELSIF instr.op = opRect THEN
+      IF instr.b = 5 THEN Pop(v); c := FLOOR(v.num) ELSE c := curColorIx END;
+      Pop(v); h := FLOOR(v.num);
+      Pop(v); w := FLOOR(v.num);
+      Pop(v); y := FLOOR(v.num);
+      Pop(v); x := FLOOR(v.num);
+      VmRect(x, y, w, h, c, instr.a = 1)
+    ELSIF instr.op = opText THEN
+      IF instr.a = 5 THEN Pop(v); c := FLOOR(v.num) ELSE c := curColorIx END;
+      IF instr.a >= 4 THEN Pop(v); sz := FLOOR(v.num) ELSE sz := 20 END;
+      Pop(v); IF ~v.isStr THEN NumToStr(v.num, v.s) END; Strings.Copy(v.s, buf);
+      Pop(v); y := FLOOR(v.num);
+      Pop(v); x := FLOOR(v.num);
+      VmText(x, y, sz, c, buf)
+    ELSIF instr.op = opSound THEN
+      Pop(v); n := FLOOR(v.num);
+      Pop(v); r := v.num;
+      VmSound(r, n)
+    ELSIF instr.op = opBeep THEN VmBeep
+    ELSIF instr.op = opDelay THEN
+      Pop(v); VmDelay(FLOOR(v.num))
+    END
+  END;
+  IF errFlag THEN ReportError(currentLineNum) END
+END RunVM;
+
+PROCEDURE ScanData;
+VAR i: INTEGER; tb: TokBuf; v: Value; neg: BOOLEAN; skipTo: INTEGER;
+BEGIN
+  nDataVals := 0; dataPtr := 0;
+  i := 0;
+  WHILE i < nLines DO
+    IF IsFuncBodyLine(i, skipTo) THEN i := skipTo
+    ELSE
+      Tokenize(prog[i].text, tb);
+      WHILE tb.pos < tb.n DO
+        IF IsIdent(tb, "DATA") THEN
+          INC(tb.pos);
+          LOOP
+            IF CurKind(tb) = TkStr THEN
+              v := MkStr(tb.t[tb.pos].s); INC(tb.pos)
+            ELSE
+              neg := FALSE;
+              IF IsOp(tb, "-") THEN neg := TRUE; INC(tb.pos) END;
+              IF CurKind(tb) = TkNum THEN
+                IF neg THEN v := MkNum(-tb.t[tb.pos].num) ELSE v := MkNum(tb.t[tb.pos].num) END;
+                INC(tb.pos)
+              ELSIF CurKind(tb) = TkIdent THEN
+                v := MkStr(tb.t[tb.pos].s); INC(tb.pos)
+              ELSE
+                EXIT
+              END
+            END;
+            IF nDataVals < MaxDataVals THEN
+              dataVals[nDataVals] := v; dataLineOf[nDataVals] := prog[i].num; INC(nDataVals)
+            END;
+            IF CurKind(tb) = TkComma THEN INC(tb.pos) ELSE EXIT END
+          END
+        ELSE
+          INC(tb.pos)
+        END
+      END;
+      INC(i)
     END
   END
-END Execute;
+END ScanData;
 
 PROCEDURE RunProgram;
 BEGIN
-  ClearVars; forTop := 0; gosubTop := 0;
-  callDepth := 0; returnPending := FALSE;
-  ScanFuncs;
+  ClearVars; forTop := 0; gosubTop := 0; callTop := 0; sp := 0;
+  CompileProgram;
+  IF errFlag THEN ReportError(currentLineNum); RETURN END;
   ScanData;
   startTime := Time.Now();
-  Execute(0, 0)
+  IF nLines > 0 THEN RunVM(lineStartPc[0]) END
 END RunProgram;
 
 (* ============================ file load / save ============================= *)
+
+PROCEDURE StripQuotes(VAR s: ARRAY OF CHAR);
+VAR n: INTEGER; tmp: STRING;
+BEGIN
+  n := Strings.Length(s);
+  IF (n >= 2) & (s[0] = '"') & (s[n-1] = '"') THEN
+    Strings.Extract(s, 1, n - 2, tmp); Strings.Copy(tmp, s)
+  END
+END StripQuotes;
+
+PROCEDURE ExpandQuestionMarks(VAR s: ARRAY OF CHAR);
+VAR i, j: INTEGER; c: CHAR; inStr: BOOLEAN; buf: STRING;
+BEGIN
+  i := 0; j := 0; inStr := FALSE;
+  WHILE (s[i] # 0X) & (j < MaxLineLen - 6) DO
+    c := s[i];
+    IF c = '"' THEN inStr := ~inStr END;
+    IF (c = '?') & ~inStr THEN
+      buf[j] := 'P'; INC(j); buf[j] := 'R'; INC(j); buf[j] := 'I'; INC(j);
+      buf[j] := 'N'; INC(j); buf[j] := 'T'; INC(j);
+      IF IsAlnum(s[i+1]) THEN buf[j] := ' '; INC(j) END
+    ELSE
+      buf[j] := c; INC(j)
+    END;
+    INC(i)
+  END;
+  buf[j] := 0X;
+  Strings.Copy(buf, s)
+END ExpandQuestionMarks;
 
 PROCEDURE LoadFile(name: ARRAY OF CHAR): BOOLEAN;
 VAR f: Files.File; r: Files.Rider; line, tok, rest: STRING;
@@ -1765,35 +2196,6 @@ BEGIN
 END DoList;
 
 (* ================================== REPL ==================================== *)
-
-PROCEDURE StripQuotes(VAR s: ARRAY OF CHAR);
-VAR n: INTEGER; tmp: STRING;
-BEGIN
-  n := Strings.Length(s);
-  IF (n >= 2) & (s[0] = '"') & (s[n-1] = '"') THEN
-    Strings.Extract(s, 1, n - 2, tmp); Strings.Copy(tmp, s)
-  END
-END StripQuotes;
-
-PROCEDURE ExpandQuestionMarks(VAR s: ARRAY OF CHAR);
-VAR i, j: INTEGER; c: CHAR; inStr: BOOLEAN; buf: STRING;
-BEGIN
-  i := 0; j := 0; inStr := FALSE;
-  WHILE (s[i] # 0X) & (j < MaxLineLen - 6) DO
-    c := s[i];
-    IF c = '"' THEN inStr := ~inStr END;
-    IF (c = '?') & ~inStr THEN
-      buf[j] := 'P'; INC(j); buf[j] := 'R'; INC(j); buf[j] := 'I'; INC(j);
-      buf[j] := 'N'; INC(j); buf[j] := 'T'; INC(j);
-      IF IsAlnum(s[i+1]) THEN buf[j] := ' '; INC(j) END
-    ELSE
-      buf[j] := c; INC(j)
-    END;
-    INC(i)
-  END;
-  buf[j] := 0X;
-  Strings.Copy(buf, s)
-END ExpandQuestionMarks;
 
 PROCEDURE ShowBanner;
 BEGIN
@@ -1892,9 +2294,8 @@ BEGIN
 END Shutdown;
 
 (* Read a DEFN block from the REPL, prompting for continuation lines
- * until an ENDFN line. Returns the concatenated lines (with newlines)
- * so the caller can install them; each line becomes a program line at
- * an auto-numbered slot in the high 6xxxx range. *)
+ * until an ENDFN line. Each line becomes a program line at an
+ * auto-numbered slot in the high 6xxxx range. *)
 PROCEDURE ReadReplDefn(firstLine: ARRAY OF CHAR);
 VAR line: STRING; autoNum: INTEGER;
 BEGIN
@@ -1911,14 +2312,11 @@ BEGIN
       InsertLine(autoNum, line); INC(autoNum);
       IF IsEndfnLine(line) THEN EXIT END
     END
-  END;
-  (* Rebuild the function table so the new definition is immediately
-   * usable from immediate-mode calls at the > prompt. *)
-  ScanFuncs
+  END
 END ReadReplDefn;
 
 PROCEDURE Repl;
-VAR line, cmd, arg, rest: STRING; num, pos: INTEGER;
+VAR line, cmd, arg, rest: STRING; num, pos, startPc: INTEGER; ok: BOOLEAN;
 BEGIN
   ShowBanner;
   appRunning := TRUE;
@@ -1932,9 +2330,7 @@ BEGIN
         Strings.Extract(line, pos, Strings.Length(line) - pos, rest);
         Strings.Trim(rest);
         ExpandQuestionMarks(rest);
-        InsertLine(num, rest);
-        (* If this line introduced or closed a DEFN, refresh func table. *)
-        IF IsDefnLine(rest) OR IsEndfnLine(rest) THEN ScanFuncs END
+        InsertLine(num, rest)
       ELSE
         Upper(cmd);
         IF cmd = "RUN" THEN RunProgram
@@ -1950,7 +2346,7 @@ BEGIN
         ELSIF cmd = "LOAD" THEN
           Strings.Extract(line, pos, Strings.Length(line) - pos, arg); Strings.Trim(arg);
           StripQuotes(arg);
-          IF LoadFile(arg) THEN ScanFuncs; POut("LOADED"); PNL END
+          IF LoadFile(arg) THEN POut("LOADED"); PNL END
         ELSIF cmd = "SAVE" THEN
           Strings.Extract(line, pos, Strings.Length(line) - pos, arg); Strings.Trim(arg);
           StripQuotes(arg);
@@ -1961,10 +2357,20 @@ BEGIN
           ReadReplDefn(line)
         ELSE
           ExpandQuestionMarks(line);
-          Strings.Copy(line, immText);
-          callDepth := 0; returnPending := FALSE;
-          startTime := Time.Now();
-          Execute(-1, 0)
+          CompileProgram;
+          IF errFlag THEN
+            ReportError(currentLineNum)
+          ELSE
+            CompileImmediate(line, startPc, ok);
+            IF ok THEN
+              callTop := 0;
+              currentLineNum := -1;
+              startTime := Time.Now();
+              RunVM(startPc)
+            ELSE
+              ReportError(-1)
+            END
+          END
         END
       END
     END
@@ -1974,7 +2380,8 @@ END Repl;
 BEGIN
   nLines := 0; nNumVars := 0; nStrVars := 0; nArrays := 0;
   forTop := 0; gosubTop := 0; nDataVals := 0; dataPtr := 0;
-  nFuncs := 0; callDepth := 0; returnPending := FALSE;
+  nFuncs := 0; callTop := 0; sp := 0; codeLen := 0; codeLimit := MainCodeCap;
+  nNames := 0; nNumPool := 0; nStrPool := 0; nOnTargets := 0; nGotoBackpatch := 0;
   errFlag := FALSE; gfxMode := FALSE; audioReady := FALSE; outCol := 0;
   progRunning := TRUE; appRunning := TRUE;
   startTime := Time.Now();
@@ -1986,4 +2393,3 @@ BEGIN
   END;
   Shutdown
 END Basic.
-
