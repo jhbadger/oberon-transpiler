@@ -29,7 +29,7 @@ MODULE Basic;
  * re-prompted until ENDFN closes the definition).
  *)
 
-IMPORT Out, Strings, Random, Math, Time, Files, Args, Raylib, History;
+IMPORT Out, Strings, Random, Math, Time, Files, Args, Raylib, History, OS;
 
 CONST
   MaxLines      = 4000;
@@ -48,9 +48,14 @@ CONST
   MaxFuncParams = 8;
   MaxCallDepth  = 32;
 
+  MaxWhileStack   = 40;
+  MaxOpenFiles    = 16;
+  MaxAppendLines  = 4000;
+
   (* token kinds *)
   TkEOL = 0; TkNum = 1; TkStr = 2; TkIdent = 3; TkOp = 4;
   TkLP = 5; TkRP = 6; TkComma = 7; TkColon = 8; TkSemi = 9;
+  TkHash = 10;
 
   (* bytecode: one flat instruction stream. [0,MainCodeCap) holds the
    * compiled main program (and DEFN function bodies, appended after the
@@ -88,13 +93,15 @@ CONST
   opCls = 51; opLocate = 52; opRandomize = 53; opScreen = 54; opColor = 55;
   opPset = 56; opDrawLine = 57; opCircle = 58; opRect = 59; opText = 60;
   opSound = 61; opBeep = 62; opDelay = 63;
+  opOpen = 64; opCloseFile = 65; opPrintFileBegin = 66; opInputFileBegin = 67;
+  opLineInputFile = 68; opFiles = 69;
 
   (* builtin function ids *)
   bfAbs=0; bfInt=1; bfSgn=2; bfSqr=3; bfSin=4; bfCos=5; bfTan=6; bfAtn=7;
   bfLog=8; bfExp=9; bfPi=10; bfRnd=11; bfTimer=12; bfLen=13; bfVal=14;
   bfAsc=15; bfChr=16; bfStr=17; bfLeft=18; bfRight=19; bfMid=20;
   bfInstr=21; bfInkey=22; bfScrw=23; bfScrh=24; bfMousex=25; bfMousey=26;
-  bfMouseb=27;
+  bfMouseb=27; bfEof=28;
 
 TYPE
   Token = RECORD
@@ -147,6 +154,18 @@ TYPE
     returnPc : INTEGER
   END;
 
+  WhileEntry = RECORD
+    condPc : INTEGER;
+    jfPc   : INTEGER
+  END;
+
+  FileSlot = RECORD
+    inUse   : BOOLEAN;
+    isInput : BOOLEAN;
+    f       : Files.File;
+    r       : Files.Rider
+  END;
+
   FuncDef = POINTER TO FuncDefRec;
   FuncDefRec = RECORD
     name      : STRING;             (* uppercased, includes trailing $ if str *)
@@ -192,6 +211,14 @@ VAR
   forTop     : INTEGER;
   gosubStack : ARRAY MaxGosubStack OF GosubEntry;
   gosubTop   : INTEGER;
+
+  whileStack : ARRAY MaxWhileStack OF WhileEntry;
+  whileTop   : INTEGER;
+
+  fileSlots       : ARRAY MaxOpenFiles + 1 OF FileSlot;
+  filePrintTarget : INTEGER;
+  filePrintBuf    : STRING;
+  appendBuf       : ARRAY MaxAppendLines OF STRING;
 
   dataVals    : ARRAY MaxDataVals OF Value;
   dataLineOf  : ARRAY MaxDataVals OF INTEGER;
@@ -360,6 +387,7 @@ BEGIN
     ELSIF c = ',' THEN AddTok(tb, TkComma); INC(i)
     ELSIF c = ':' THEN AddTok(tb, TkColon); INC(i)
     ELSIF c = ';' THEN AddTok(tb, TkSemi); INC(i)
+    ELSIF c = '#' THEN AddTok(tb, TkHash); INC(i)
     ELSE INC(i)
     END
   END;
@@ -661,6 +689,7 @@ BEGIN
        OR (name = "CHR$") OR (name = "STR$") OR (name = "LEFT$") OR (name = "RIGHT$")
        OR (name = "MID$") OR (name = "INSTR") OR (name = "INKEY$") OR (name = "SCRW")
        OR (name = "SCRH") OR (name = "MOUSEX") OR (name = "MOUSEY") OR (name = "MOUSEB")
+       OR (name = "EOF")
 END IsFuncName;
 
 PROCEDURE NameToBuiltinId(name: ARRAY OF CHAR): INTEGER;
@@ -693,6 +722,7 @@ BEGIN
   ELSIF name = "MOUSEX" THEN RETURN bfMousex
   ELSIF name = "MOUSEY" THEN RETURN bfMousey
   ELSIF name = "MOUSEB" THEN RETURN bfMouseb
+  ELSIF name = "EOF" THEN RETURN bfEof
   ELSE RETURN -1
   END
 END NameToBuiltinId;
@@ -852,6 +882,16 @@ BEGIN
     IF gfxMode THEN v := MkNum(FLT(Raylib.GetMouseY())) ELSE v := MkNum(0.0) END
   ELSIF bf = bfMouseb THEN
     IF gfxMode & (Raylib.IsMouseButtonDown(Raylib.BtnLeft) = 1) THEN v := MkNum(-1.0) ELSE v := MkNum(0.0) END
+  ELSIF bf = bfEof THEN
+    n := FLOOR(a1.num);
+    IF (n >= 1) & (n <= MaxOpenFiles) & fileSlots[n].inUse THEN
+      (* Prospective check (pos vs length) rather than the rider's own .eof
+       * flag, which only turns true after a read has already come back
+       * empty -- using it here would make WHILE NOT EOF(n) ... WEND loops
+       * process one spurious empty record at the end of every file. *)
+      IF Files.Pos(fileSlots[n].r) >= Files.Length(fileSlots[n].f) THEN v := MkNum(-1.0)
+      ELSE v := MkNum(0.0) END
+    ELSE v := MkNum(-1.0) END
   ELSE
     RtErr("UNKNOWN FUNCTION"); v := MkNum(0.0)
   END;
@@ -1243,6 +1283,10 @@ PROCEDURE CompilePrint(VAR tb: TokBuf);
 VAR trailing: BOOLEAN;
 BEGIN
   trailing := FALSE;
+  IF CurKind(tb) = TkHash THEN
+    INC(tb.pos); CompileExpr(tb); Emit(opPrintFileBegin, 0, 0);
+    IF CurKind(tb) = TkComma THEN INC(tb.pos) END
+  END;
   LOOP
     IF (CurKind(tb) = TkEOL) OR (CurKind(tb) = TkColon) THEN EXIT END;
     IF IsIdent(tb, "TAB") THEN
@@ -1269,13 +1313,18 @@ END CompilePrint;
 PROCEDURE CompileInput(VAR tb: TokBuf);
 VAR name: STRING; promptIdx, dims: INTEGER;
 BEGIN
-  IF CurKind(tb) = TkStr THEN
-    promptIdx := AddStrConst(tb.t[tb.pos].s); INC(tb.pos);
-    IF (CurKind(tb) = TkSemi) OR (CurKind(tb) = TkComma) THEN INC(tb.pos) END
+  IF CurKind(tb) = TkHash THEN
+    INC(tb.pos); CompileExpr(tb); Emit(opInputFileBegin, 0, 0);
+    IF CurKind(tb) = TkComma THEN INC(tb.pos) END
   ELSE
-    promptIdx := -1
+    IF CurKind(tb) = TkStr THEN
+      promptIdx := AddStrConst(tb.t[tb.pos].s); INC(tb.pos);
+      IF (CurKind(tb) = TkSemi) OR (CurKind(tb) = TkComma) THEN INC(tb.pos) END
+    ELSE
+      promptIdx := -1
+    END;
+    Emit(opInputBegin, promptIdx, 0)
   END;
-  Emit(opInputBegin, promptIdx, 0);
   LOOP
     IF CurKind(tb) # TkIdent THEN EXIT END;
     Strings.Copy(tb.t[tb.pos].s, name); INC(tb.pos);
@@ -1417,23 +1466,63 @@ BEGIN
   Emit(opForInit, InternName(name), 0)
 END CompileFor;
 
+(* WHILE/WEND compile to a compile-time-matched pair of jumps (no runtime
+ * stack needed, unlike FOR/NEXT): WHILE tests the condition and remembers
+ * both the top-of-loop PC (for WEND's backward jump) and the PC of the
+ * JumpIfFalse to backpatch once WEND's location is known. Matching is by
+ * simple LIFO nesting order in source, since lines compile strictly in
+ * program order. *)
+PROCEDURE CompileWhile(VAR tb: TokBuf);
+BEGIN
+  IF whileTop >= MaxWhileStack THEN RtErr("WHILE TOO DEEP"); RETURN END;
+  whileStack[whileTop].condPc := codeLen;
+  CompileExpr(tb);
+  whileStack[whileTop].jfPc := codeLen;
+  Emit(opJumpIfFalse, 0, 0);
+  INC(whileTop)
+END CompileWhile;
+
+PROCEDURE CompileWend(VAR tb: TokBuf);
+BEGIN
+  IF whileTop <= 0 THEN RtErr("WEND WITHOUT WHILE"); RETURN END;
+  DEC(whileTop);
+  Emit(opJump, whileStack[whileTop].condPc, 0);
+  code[whileStack[whileTop].jfPc].a := codeLen
+END CompileWend;
+
+(* Compiles one branch (THEN or ELSE) of an IF: either a bare line number
+ * (compiled to a GOTO, a no-op inside a function body since line-number
+ * targets aren't meaningful there) or a colon-separated statement list
+ * running to EOL or a following ELSE. *)
+PROCEDURE CompileIfBranch(VAR tb: TokBuf);
+VAR lineNum, gotoIdx: INTEGER;
+BEGIN
+  IF CurKind(tb) = TkNum THEN
+    lineNum := FLOOR(tb.t[tb.pos].num); INC(tb.pos);
+    IF ~compInFunc THEN
+      gotoIdx := codeLen; Emit(opGoto, lineNum, 0); AddGotoBackpatch(gotoIdx)
+    END
+  ELSE
+    CompileStmtSeq(tb)
+  END
+END CompileIfBranch;
+
 PROCEDURE CompileIf(VAR tb: TokBuf);
-VAR lineNum, fixIdx, gotoIdx: INTEGER;
+VAR fixIdx, elseJumpIdx: INTEGER;
 BEGIN
   INC(tb.pos);
   CompileExpr(tb);
   IF IsIdent(tb, "THEN") THEN INC(tb.pos) END;
-  IF CurKind(tb) = TkNum THEN
-    lineNum := FLOOR(tb.t[tb.pos].num); INC(tb.pos);
-    IF compInFunc THEN
-      Emit(opPop, 0, 0)
-    ELSE
-      fixIdx := codeLen; Emit(opJumpIfFalse, 0, 0); AddLineFixup(fixIdx);
-      gotoIdx := codeLen; Emit(opGoto, lineNum, 0); AddGotoBackpatch(gotoIdx)
-    END
+  fixIdx := codeLen; Emit(opJumpIfFalse, 0, 0);
+  CompileIfBranch(tb);
+  IF IsIdent(tb, "ELSE") THEN
+    INC(tb.pos);
+    elseJumpIdx := codeLen; Emit(opJump, 0, 0);
+    code[fixIdx].a := codeLen;
+    CompileIfBranch(tb);
+    code[elseJumpIdx].a := codeLen
   ELSE
-    fixIdx := codeLen; Emit(opJumpIfFalse, 0, 0); AddLineFixup(fixIdx);
-    CompileStmtSeq(tb)
+    AddLineFixup(fixIdx)
   END
 END CompileIf;
 
@@ -1540,6 +1629,61 @@ BEGIN
   CompileExpr(tb); Emit(opDelay, 0, 0)
 END CompileDelay;
 
+(* OPEN name$ FOR INPUT|OUTPUT|APPEND AS #n *)
+PROCEDURE CompileOpen(VAR tb: TokBuf);
+VAR mode: INTEGER;
+BEGIN
+  CompileExpr(tb);
+  IF IsIdent(tb, "FOR") THEN INC(tb.pos) ELSE RtErr("MISSING FOR"); RETURN END;
+  IF IsIdent(tb, "INPUT") THEN mode := 0; INC(tb.pos)
+  ELSIF IsIdent(tb, "OUTPUT") THEN mode := 1; INC(tb.pos)
+  ELSIF IsIdent(tb, "APPEND") THEN mode := 2; INC(tb.pos)
+  ELSE RtErr("BAD OPEN MODE"); RETURN END;
+  IF IsIdent(tb, "AS") THEN INC(tb.pos) ELSE RtErr("MISSING AS"); RETURN END;
+  IF CurKind(tb) = TkHash THEN INC(tb.pos) END;
+  CompileExpr(tb);
+  Emit(opOpen, mode, 0)
+END CompileOpen;
+
+(* CLOSE [#]n[,[#]n...]   CLOSE (no args) closes every open file *)
+PROCEDURE CompileClose(VAR tb: TokBuf);
+VAR hasArg: BOOLEAN;
+BEGIN
+  hasArg := FALSE;
+  IF CurKind(tb) = TkHash THEN INC(tb.pos) END;
+  IF (CurKind(tb) # TkEOL) & (CurKind(tb) # TkColon) THEN
+    CompileExpr(tb); hasArg := TRUE;
+    WHILE CurKind(tb) = TkComma DO
+      Emit(opCloseFile, 1, 0);
+      INC(tb.pos);
+      IF CurKind(tb) = TkHash THEN INC(tb.pos) END;
+      CompileExpr(tb)
+    END
+  END;
+  IF hasArg THEN Emit(opCloseFile, 1, 0) ELSE Emit(opCloseFile, 0, 0) END
+END CompileClose;
+
+(* LINE INPUT #n, var$  -- reads one whole line, no comma-splitting *)
+PROCEDURE CompileLineInput(VAR tb: TokBuf);
+VAR name: STRING;
+BEGIN
+  IF CurKind(tb) = TkHash THEN INC(tb.pos) ELSE RtErr("MISSING #"); RETURN END;
+  CompileExpr(tb);
+  IF CurKind(tb) = TkComma THEN INC(tb.pos) END;
+  IF CurKind(tb) # TkIdent THEN RtErr("SYNTAX ERROR"); RETURN END;
+  Strings.Copy(tb.t[tb.pos].s, name); INC(tb.pos);
+  Emit(opLineInputFile, InternName(name), 0)
+END CompileLineInput;
+
+PROCEDURE CompileFiles(VAR tb: TokBuf);
+BEGIN
+  IF (CurKind(tb) # TkEOL) & (CurKind(tb) # TkColon) THEN
+    CompileExpr(tb); Emit(opFiles, 1, 0)
+  ELSE
+    Emit(opFiles, 0, 0)
+  END
+END CompileFiles;
+
 PROCEDURE CompileStmt(VAR tb: TokBuf);
 VAR name: STRING; fi: INTEGER;
 BEGIN
@@ -1563,6 +1707,8 @@ BEGIN
     IF CurKind(tb) = TkIdent THEN INC(tb.pos) END;
     Emit(opForNext, 0, 0)
   ELSIF name = "IF" THEN CompileIf(tb)
+  ELSIF name = "WHILE" THEN INC(tb.pos); CompileWhile(tb)
+  ELSIF name = "WEND" THEN INC(tb.pos); CompileWend(tb)
   ELSIF name = "END" THEN tb.pos := tb.n; Emit(opEnd, 0, 0)
   ELSIF name = "STOP" THEN tb.pos := tb.n; Emit(opEnd, 0, 0)
   ELSIF name = "CLS" THEN INC(tb.pos); Emit(opCls, 0, 0)
@@ -1572,7 +1718,10 @@ BEGIN
   ELSIF name = "SCREEN" THEN INC(tb.pos); CompileScreen(tb)
   ELSIF name = "COLOR" THEN INC(tb.pos); CompileColor(tb)
   ELSIF name = "PSET" THEN INC(tb.pos); CompilePset(tb)
-  ELSIF name = "LINE" THEN INC(tb.pos); CompileDrawLine(tb)
+  ELSIF name = "LINE" THEN
+    INC(tb.pos);
+    IF IsIdent(tb, "INPUT") THEN INC(tb.pos); CompileLineInput(tb)
+    ELSE CompileDrawLine(tb) END
   ELSIF name = "CIRCLE" THEN INC(tb.pos); CompileCircle(tb, FALSE)
   ELSIF name = "FCIRCLE" THEN INC(tb.pos); CompileCircle(tb, TRUE)
   ELSIF name = "RECT" THEN INC(tb.pos); CompileRect(tb, FALSE)
@@ -1581,6 +1730,9 @@ BEGIN
   ELSIF name = "SOUND" THEN INC(tb.pos); CompileSound(tb)
   ELSIF name = "BEEP" THEN INC(tb.pos); Emit(opBeep, 0, 0)
   ELSIF name = "DELAY" THEN INC(tb.pos); CompileDelay(tb)
+  ELSIF name = "OPEN" THEN INC(tb.pos); CompileOpen(tb)
+  ELSIF name = "CLOSE" THEN INC(tb.pos); CompileClose(tb)
+  ELSIF name = "FILES" THEN INC(tb.pos); CompileFiles(tb)
   ELSIF (name = "DEFN") OR (name = "ENDFN") THEN
     tb.pos := tb.n
   ELSE
@@ -1608,9 +1760,10 @@ BEGIN
 END CompileStmtSeq;
 
 PROCEDURE CompileLineBody(text: ARRAY OF CHAR; lineNum: INTEGER);
-VAR tb: TokBuf; savedCodeLen, savedGBP, savedOT: INTEGER;
+VAR tb: TokBuf; savedCodeLen, savedGBP, savedOT, savedWT: INTEGER;
 BEGIN
   savedCodeLen := codeLen; savedGBP := nGotoBackpatch; savedOT := nOnTargets;
+  savedWT := whileTop;
   nLineFixups := 0;
   Emit(opLine, lineNum, 0);
   Tokenize(text, tb); tb.pos := 0;
@@ -1621,6 +1774,7 @@ BEGIN
     END;
     errFlag := FALSE;
     codeLen := savedCodeLen; nGotoBackpatch := savedGBP; nOnTargets := savedOT;
+    whileTop := savedWT;
     nLineFixups := 0
   ELSE
     ResolveLineFixups(codeLen)
@@ -1631,6 +1785,7 @@ PROCEDURE CompileFunctionBody(fd: FuncDef);
 VAR i: INTEGER;
 BEGIN
   compInFunc := TRUE;
+  whileTop := 0;
   fd.entryPc := codeLen;
   FOR i := fd.bodyStart TO fd.bodyEnd - 1 DO
     CompileLineBody(prog[i].text, prog[i].num)
@@ -1647,6 +1802,7 @@ BEGIN
   errFlag := FALSE; errMsg := "";
   firstCompileErrMsg := ""; firstCompileErrLine := -1;
   compInFunc := FALSE;
+  whileTop := 0;
   ClearFuncs;
 
   (* phase 1: register function headers (so forward references resolve) *)
@@ -1704,19 +1860,20 @@ BEGIN
 END CompileProgram;
 
 PROCEDURE CompileImmediate(text: ARRAY OF CHAR; VAR startPc: INTEGER; VAR ok: BOOLEAN);
-VAR tb: TokBuf; savedGBP, savedOT: INTEGER;
+VAR tb: TokBuf; savedGBP, savedOT, savedWT: INTEGER;
 BEGIN
   codeLen := MainCodeCap; codeLimit := MaxCode;
   compInFunc := FALSE;
+  whileTop := 0;
   errFlag := FALSE; errMsg := "";
-  savedGBP := nGotoBackpatch; savedOT := nOnTargets;
+  savedGBP := nGotoBackpatch; savedOT := nOnTargets; savedWT := whileTop;
   nLineFixups := 0;
   startPc := codeLen;
   Tokenize(text, tb); tb.pos := 0;
   CompileStmtSeq(tb);
   IF errFlag THEN
     ok := FALSE;
-    nGotoBackpatch := savedGBP; nOnTargets := savedOT
+    nGotoBackpatch := savedGBP; nOnTargets := savedOT; whileTop := savedWT
   ELSE
     ok := TRUE;
     ResolveLineFixups(codeLen);
@@ -1808,6 +1965,109 @@ BEGIN
   IF frame.wantValue THEN Push(result) END
 END DoVmReturn;
 
+(* ============================ file I/O runtime ============================ *)
+
+PROCEDURE CloseFileSlot(n: INTEGER);
+BEGIN
+  IF fileSlots[n].inUse THEN
+    IF ~fileSlots[n].isInput THEN Files.Register(fileSlots[n].f) END;
+    Files.Close(fileSlots[n].f);
+    fileSlots[n].inUse := FALSE
+  END
+END CloseFileSlot;
+
+PROCEDURE CloseAllFiles;
+VAR i: INTEGER;
+BEGIN
+  FOR i := 1 TO MaxOpenFiles DO CloseFileSlot(i) END
+END CloseAllFiles;
+
+PROCEDURE InitFileSlots;
+VAR i: INTEGER;
+BEGIN
+  FOR i := 0 TO MaxOpenFiles DO fileSlots[i].inUse := FALSE END
+END InitFileSlots;
+
+(* APPEND mode: the runtime's Files.New always creates/truncates, and there's
+ * no update-in-place open mode, so we drain any existing file into memory,
+ * close it, then recreate it via Files.New and write the old content back
+ * before handing the rider to the caller for further writes. Files are
+ * capped at MaxAppendLines lines of pre-existing content. *)
+PROCEDURE OpenAppend(n: INTEGER; name: ARRAY OF CHAR);
+VAR oldf, newf: Files.File; r: Files.Rider; line: STRING; cnt, i: INTEGER;
+BEGIN
+  oldf := Files.Old(name);
+  IF oldf = NIL THEN
+    newf := Files.New(name);
+    IF newf = NIL THEN RtErr("CANNOT OPEN FILE"); RETURN END;
+    Files.Set(fileSlots[n].r, newf, 0);
+    fileSlots[n].f := newf; fileSlots[n].inUse := TRUE; fileSlots[n].isInput := FALSE;
+    RETURN
+  END;
+  Files.Set(r, oldf, 0);
+  cnt := 0;
+  WHILE ~r.eof & (cnt < MaxAppendLines) DO
+    Files.ReadLine(r, line);
+    IF ~r.eof THEN Strings.Copy(line, appendBuf[cnt]); INC(cnt) END
+  END;
+  Files.Close(oldf);
+  newf := Files.New(name);
+  IF newf = NIL THEN RtErr("CANNOT OPEN FILE"); RETURN END;
+  Files.Set(fileSlots[n].r, newf, 0);
+  FOR i := 0 TO cnt - 1 DO Files.WriteLine(fileSlots[n].r, appendBuf[i]) END;
+  fileSlots[n].f := newf; fileSlots[n].inUse := TRUE; fileSlots[n].isInput := FALSE
+END OpenAppend;
+
+(* PRINT/PRINT# share one compiled opcode sequence; these two helpers
+ * redirect character output and column tracking to a per-file line buffer
+ * (flushed as one record on opPrintNL) instead of the terminal when a
+ * PRINT# statement is active. *)
+PROCEDURE PrintOut(s: ARRAY OF CHAR);
+BEGIN
+  IF filePrintTarget # 0 THEN Strings.Append(s, filePrintBuf) ELSE POut(s) END
+END PrintOut;
+
+PROCEDURE PrintCol(): INTEGER;
+BEGIN
+  IF filePrintTarget # 0 THEN RETURN Strings.Length(filePrintBuf) ELSE RETURN outCol END
+END PrintCol;
+
+(* Splits a FILES argument like "sub/*.bas" into a directory path and a
+ * suffix filter (OS.DirOpen matches by filename suffix, not a glob). *)
+PROCEDURE SplitFilesArg(arg: ARRAY OF CHAR; VAR path, filter: ARRAY OF CHAR);
+VAR i, n, slash, star: INTEGER; rest: STRING;
+BEGIN
+  n := Strings.Length(arg);
+  slash := -1;
+  FOR i := 0 TO n - 1 DO IF arg[i] = '/' THEN slash := i END END;
+  IF slash >= 0 THEN
+    Strings.Extract(arg, 0, slash, path);
+    Strings.Extract(arg, slash + 1, n - slash - 1, rest)
+  ELSE
+    path := ""; Strings.Copy(arg, rest)
+  END;
+  star := Strings.Pos("*", rest);
+  IF star >= 0 THEN
+    Strings.Extract(rest, star + 1, Strings.Length(rest) - star - 1, filter)
+  ELSE
+    Strings.Copy(rest, filter)
+  END
+END SplitFilesArg;
+
+PROCEDURE DoFiles(arg: ARRAY OF CHAR);
+VAR path, filter, name, buf: STRING; i, n, isdir: INTEGER;
+BEGIN
+  SplitFilesArg(arg, path, filter);
+  OS.DirOpen(path, filter);
+  n := OS.DirCount();
+  FOR i := 0 TO n - 1 DO
+    OS.DirName(i, name);
+    isdir := OS.DirIsDir(i);
+    POut(name); IF isdir = 1 THEN POut("/") END; PNL
+  END;
+  NumToStr(FLT(n), buf); POut(buf); POut(" File(s)"); PNL
+END DoFiles;
+
 PROCEDURE RunVM(startPc: INTEGER);
 VAR pc, target, li, idx, ai, i1, i2, c2, n, x, y, x2, y2, w, h, sz, c, d1, d2: INTEGER;
     r, num: REAL;
@@ -1862,7 +2122,8 @@ BEGIN
         IF contd THEN pc := forStack[forTop-1].loopTopPc ELSE DEC(forTop) END
       END
     ELSIF instr.op = opLine THEN
-      MaybePresent; currentLineNum := instr.a
+      MaybePresent; currentLineNum := instr.a;
+      IF filePrintTarget # 0 THEN filePrintTarget := 0; filePrintBuf := "" END
     ELSIF instr.op = opPushStr THEN Push(MkStr(strPool[instr.a]))
     ELSIF instr.op = opLoadArr THEN
       IF instr.b = 2 THEN Pop(idxv2); i2 := FLOOR(idxv2.num) ELSE i2 := -1 END;
@@ -1941,17 +2202,37 @@ BEGIN
     ELSIF instr.op = opEnd THEN
       MaybePresent; progRunning := FALSE
     ELSIF instr.op = opPrintVal THEN
-      Pop(v); IF v.isStr THEN POut(v.s) ELSE NumToStr(v.num, buf); POut(buf) END
+      Pop(v); IF v.isStr THEN PrintOut(v.s) ELSE NumToStr(v.num, buf); PrintOut(buf) END
     ELSIF instr.op = opPrintTab THEN
-      Pop(v); n := FLOOR(v.num); WHILE outCol < n DO POut(" ") END
+      Pop(v); n := FLOOR(v.num); WHILE PrintCol() < n DO PrintOut(" ") END
     ELSIF instr.op = opPrintComma THEN
-      n := (outCol DIV 14 + 1) * 14; WHILE outCol < n DO POut(" ") END
-    ELSIF instr.op = opPrintNL THEN PNL
+      n := (PrintCol() DIV 14 + 1) * 14; WHILE PrintCol() < n DO PrintOut(" ") END
+    ELSIF instr.op = opPrintNL THEN
+      IF filePrintTarget # 0 THEN
+        IF (filePrintTarget >= 1) & (filePrintTarget <= MaxOpenFiles) & fileSlots[filePrintTarget].inUse THEN
+          Files.WriteLine(fileSlots[filePrintTarget].r, filePrintBuf)
+        ELSE RtErr("FILE NOT OPEN") END;
+        filePrintTarget := 0; filePrintBuf := ""
+      ELSE PNL END
+    ELSIF instr.op = opPrintFileBegin THEN
+      Pop(v); filePrintTarget := FLOOR(v.num); filePrintBuf := ""
     ELSIF instr.op = opInputBegin THEN
       IF instr.a >= 0 THEN Strings.Copy(strPool[instr.a], prompt); Strings.Append("? ", prompt)
       ELSE Strings.Copy("? ", prompt) END;
       History.ReadLine(prompt, inputLine); outCol := 0;
       inputFieldN := 0
+    ELSIF instr.op = opInputFileBegin THEN
+      Pop(v); n := FLOOR(v.num);
+      IF (n >= 1) & (n <= MaxOpenFiles) & fileSlots[n].inUse THEN
+        Files.ReadLine(fileSlots[n].r, inputLine)
+      ELSE RtErr("FILE NOT OPEN"); inputLine := "" END;
+      inputFieldN := 0
+    ELSIF instr.op = opLineInputFile THEN
+      Pop(v); n := FLOOR(v.num);
+      IF (n >= 1) & (n <= MaxOpenFiles) & fileSlots[n].inUse THEN
+        Files.ReadLine(fileSlots[n].r, buf)
+      ELSE RtErr("FILE NOT OPEN"); buf := "" END;
+      v := MkStr(buf); AssignScalar(namePool[instr.a], v)
     ELSIF instr.op = opInputVar THEN
       IF ~Strings.Split(inputLine, ',', inputFieldN, part) THEN part := "" END;
       Strings.Trim(part); INC(inputFieldN);
@@ -2041,6 +2322,40 @@ BEGIN
     ELSIF instr.op = opBeep THEN VmBeep
     ELSIF instr.op = opDelay THEN
       Pop(v); VmDelay(FLOOR(v.num))
+    ELSIF instr.op = opOpen THEN
+      Pop(v); n := FLOOR(v.num);
+      Pop(rhs); Strings.Copy(rhs.s, buf);
+      IF (n < 1) OR (n > MaxOpenFiles) THEN RtErr("BAD FILE NUMBER")
+      ELSE
+        IF fileSlots[n].inUse THEN CloseFileSlot(n) END;
+        IF instr.a = 0 THEN
+          fileSlots[n].f := Files.Old(buf);
+          IF fileSlots[n].f = NIL THEN RtErr("FILE NOT FOUND")
+          ELSE
+            Files.Set(fileSlots[n].r, fileSlots[n].f, 0);
+            fileSlots[n].inUse := TRUE; fileSlots[n].isInput := TRUE
+          END
+        ELSIF instr.a = 1 THEN
+          fileSlots[n].f := Files.New(buf);
+          IF fileSlots[n].f = NIL THEN RtErr("CANNOT OPEN FILE")
+          ELSE
+            Files.Set(fileSlots[n].r, fileSlots[n].f, 0);
+            fileSlots[n].inUse := TRUE; fileSlots[n].isInput := FALSE
+          END
+        ELSE
+          OpenAppend(n, buf)
+        END
+      END
+    ELSIF instr.op = opCloseFile THEN
+      IF instr.a = 1 THEN
+        Pop(v); n := FLOOR(v.num);
+        IF (n >= 1) & (n <= MaxOpenFiles) THEN CloseFileSlot(n) END
+      ELSE
+        CloseAllFiles
+      END
+    ELSIF instr.op = opFiles THEN
+      IF instr.a = 1 THEN Pop(v); Strings.Copy(v.s, buf) ELSE buf := "" END;
+      DoFiles(buf)
     END
   END;
   IF errFlag THEN ReportError(currentLineNum) END
@@ -2206,9 +2521,10 @@ END ShowBanner;
 PROCEDURE ShowHelp;
 BEGIN
   POut("Commands   : RUN  LIST  NEW  LOAD file  SAVE file  CLEAR  BYE"); PNL;
-  POut("Statements : PRINT(?) INPUT LET IF/THEN FOR/TO/STEP/NEXT GOTO GOSUB/RETURN"); PNL;
-  POut("             ON..GOTO/GOSUB END STOP DIM DATA/READ/RESTORE CLS LOCATE"); PNL;
-  POut("             DEFN/ENDFN (user functions)"); PNL;
+  POut("Statements : PRINT(?) INPUT LET IF/THEN/ELSE WHILE/WEND FOR/TO/STEP/NEXT"); PNL;
+  POut("             GOTO GOSUB/RETURN ON..GOTO/GOSUB END STOP DIM DATA/READ/RESTORE"); PNL;
+  POut("             CLS LOCATE DEFN/ENDFN (user functions)"); PNL;
+  POut("Files      : OPEN/CLOSE PRINT# INPUT# LINE INPUT# EOF() FILES"); PNL;
   POut("Graphics   : SCREEN COLOR PSET LINE CIRCLE FCIRCLE RECT FRECT TEXT"); PNL;
   POut("Sound      : SOUND BEEP DELAY"); PNL;
   POut("Type a numbered line to add/replace/delete it; anything else runs"); PNL;
@@ -2218,20 +2534,28 @@ BEGIN
 END ShowHelp;
 
 PROCEDURE ShowHelpTopic(topic: ARRAY OF CHAR);
+VAR tmp: STRING;
 BEGIN
   IF (topic = "PRINT") OR ((Strings.Length(topic) = 1) & (topic[0] = '?')) THEN
     POut("PRINT expr[,expr|;expr]...        (also spelled: ? expr...)"); PNL;
+    POut("PRINT #n, expr[,expr|;expr]...    (writes one record to file #n)"); PNL;
     POut("  Prints values. ';' joins with no space; ',' pads to the next"); PNL;
     POut("  14-column zone. TAB(n) moves to column n. Ending in ',' or ';'"); PNL;
     POut("  suppresses the trailing newline. '?' is shorthand for PRINT and"); PNL;
     POut("  is rewritten to PRINT wherever it appears."); PNL
   ELSIF topic = "INPUT" THEN
-    POut("INPUT [prompt$;] var[,var]..."); PNL;
-    POut("  Reads a comma-separated line from the keyboard."); PNL
+    POut("INPUT [prompt$;] var[,var]...      INPUT #n, var[,var]..."); PNL;
+    POut("  Reads a comma-separated line from the keyboard, or from open"); PNL;
+    POut("  file #n. See also HELP LINE for LINE INPUT #n."); PNL
   ELSIF topic = "LET" THEN
     POut("[LET] var = expr          [LET] arr(i[,j]) = expr"); PNL
-  ELSIF (topic = "IF") OR (topic = "THEN") THEN
-    POut("IF expr THEN stmt[:stmt...]        IF expr THEN linenum"); PNL
+  ELSIF (topic = "IF") OR (topic = "THEN") OR (topic = "ELSE") THEN
+    POut("IF expr THEN stmt[:stmt...] [ELSE stmt[:stmt...]]"); PNL;
+    POut("IF expr THEN linenum [ELSE linenum]"); PNL;
+    POut("  THEN/ELSE branches may each independently be a line number or a"); PNL;
+    POut("  colon-separated statement list; the branch runs to EOL or ELSE."); PNL
+  ELSIF (topic = "WHILE") OR (topic = "WEND") THEN
+    POut("WHILE expr ... WEND  (loops while expr is true; may span lines)"); PNL
   ELSIF (topic = "FOR") OR (topic = "TO") OR (topic = "STEP") OR (topic = "NEXT") THEN
     POut("FOR var = start TO limit [STEP step] ... NEXT [var]"); PNL
   ELSIF topic = "GOTO" THEN POut("GOTO linenum"); PNL
@@ -2250,13 +2574,21 @@ BEGIN
   ELSIF topic = "SCREEN" THEN POut("SCREEN width[,height]  (open graphics window)"); PNL
   ELSIF topic = "COLOR" THEN POut("COLOR fg[,bg]  (0-15)"); PNL
   ELSIF topic = "PSET" THEN POut("PSET x,y[,color]"); PNL
-  ELSIF topic = "LINE" THEN POut("LINE x1,y1,x2,y2[,color]"); PNL
+  ELSIF topic = "LINE" THEN
+    POut("LINE x1,y1,x2,y2[,color]"); PNL;
+    POut("LINE INPUT #n, var$    (reads one whole line, no comma-splitting)"); PNL
   ELSIF (topic = "CIRCLE") OR (topic = "FCIRCLE") THEN POut("CIRCLE / FCIRCLE x,y,r[,color]"); PNL
   ELSIF (topic = "RECT") OR (topic = "FRECT") THEN POut("RECT / FRECT x,y,w,h[,color]"); PNL
   ELSIF topic = "TEXT" THEN POut("TEXT x,y,expr[,size[,color]]"); PNL
   ELSIF topic = "SOUND" THEN POut("SOUND freq,ms  (blocking tone)"); PNL
   ELSIF topic = "BEEP" THEN POut("BEEP  (short 800Hz tone)"); PNL
   ELSIF topic = "DELAY" THEN POut("DELAY ms"); PNL
+  ELSIF topic = "OPEN" THEN
+    NumToStr(FLT(MaxOpenFiles), tmp);
+    POut('OPEN name$ FOR INPUT|OUTPUT|APPEND AS #n   (n = 1..'); POut(tmp); POut(")"); PNL
+  ELSIF topic = "CLOSE" THEN POut("CLOSE [#n[,#n...]]   (no args closes every open file)"); PNL
+  ELSIF topic = "EOF" THEN POut("EOF(n)  -- TRUE once file #n has no more lines to read"); PNL
+  ELSIF topic = "FILES" THEN POut('FILES ["path"] ["*.ext"] ["path/*.ext"]  -- list a directory'); PNL
   ELSIF (topic = "DEFN") OR (topic = "ENDFN") OR (topic = "FUNCTION") OR (topic = "FUNCTIONS") THEN
     POut("DEFN name[$](p1[,p2,...])"); PNL;
     POut("  <statements>"); PNL;
@@ -2274,7 +2606,7 @@ BEGIN
     POut("Built-in functions:"); PNL;
     POut("  ABS INT SGN SQR SIN COS TAN ATN LOG EXP PI RND TIMER"); PNL;
     POut("  LEN VAL ASC CHR$ STR$ LEFT$ RIGHT$ MID$ INSTR INKEY$"); PNL;
-    POut("  SCRW SCRH MOUSEX MOUSEY MOUSEB"); PNL
+    POut("  SCRW SCRH MOUSEX MOUSEY MOUSEB EOF"); PNL
   ELSIF topic = "RUN" THEN POut("RUN  (clears vars, scans DEFNs and DATA, runs from lowest line)"); PNL
   ELSIF topic = "LIST" THEN POut("LIST  (show the stored program)"); PNL
   ELSIF topic = "NEW" THEN POut("NEW  (erase program and variables)"); PNL
@@ -2289,6 +2621,7 @@ END ShowHelpTopic;
 
 PROCEDURE Shutdown;
 BEGIN
+  CloseAllFiles;
   IF gfxMode THEN Raylib.UnloadRenderTexture(canvas); Raylib.CloseWindow END;
   IF audioReady THEN Raylib.CloseAudioDevice END
 END Shutdown;
@@ -2335,7 +2668,7 @@ BEGIN
         Upper(cmd);
         IF cmd = "RUN" THEN RunProgram
         ELSIF cmd = "LIST" THEN DoList
-        ELSIF cmd = "NEW" THEN nLines := 0; ClearVars; ClearFuncs
+        ELSIF cmd = "NEW" THEN nLines := 0; ClearVars; ClearFuncs; CloseAllFiles
         ELSIF cmd = "CLEAR" THEN ClearVars
         ELSIF cmd = "HELP" THEN
           Strings.Extract(line, pos, Strings.Length(line) - pos, arg); Strings.Trim(arg);
@@ -2384,6 +2717,8 @@ BEGIN
   nNames := 0; nNumPool := 0; nStrPool := 0; nOnTargets := 0; nGotoBackpatch := 0;
   errFlag := FALSE; gfxMode := FALSE; audioReady := FALSE; outCol := 0;
   progRunning := TRUE; appRunning := TRUE;
+  whileTop := 0; filePrintTarget := 0; filePrintBuf := "";
+  InitFileSlots;
   startTime := Time.Now();
   IF Args.Count() >= 1 THEN
     Args.Get(1, fname);
