@@ -946,17 +946,18 @@ static void emit_builtin(CG *g, const char *name, Node *args) {
              * for POINTER TO ARRAY OF CHAR collapses to char*, making both
              * sizeof(*p) and sizeof(**p) unreliable. */
             const char *elem_ctype = "char"; /* sensible default */
-            if (a0->kind == ND_IDENT) {
-                Node *pt = sym_type(a0->str);
+            {
+                Node *pt = (a0->kind == ND_IDENT) ? sym_type(a0->str) : expr_type(a0);
+                /* pt may be a type-alias name (e.g. a record field declared
+                 * with a named POINTER TO ARRAY OF T type, like NumArrPtr)
+                 * rather than the pointer type itself -- follow a bounded
+                 * chain of aliases before checking its shape, otherwise the
+                 * ND_TPOINTER check below never matches and we silently
+                 * fall back to sizeof(char), badly under-allocating. */
+                for (int hops = 0; pt && pt->kind == ND_TNAME && hops < 8; hops++)
+                    pt = resolve_named_type(pt->str);
                 if (pt && pt->kind == ND_TPOINTER && pt->c0 && pt->c0->kind == ND_TARRAY) {
                     Node *elem = pt->c0->c1; /* element type of the array */
-                    if (elem && elem->kind == ND_TNAME) elem_ctype = ctype(elem->str);
-                }
-            } else {
-                /* Field access or index: try expr_type */
-                Node *pt = expr_type(a0);
-                if (pt && pt->kind == ND_TPOINTER && pt->c0 && pt->c0->kind == ND_TARRAY) {
-                    Node *elem = pt->c0->c1;
                     if (elem && elem->kind == ND_TNAME) elem_ctype = ctype(elem->str);
                 }
             }
