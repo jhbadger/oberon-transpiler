@@ -546,6 +546,15 @@ BEGIN
   nNumVars := 0; nStrVars := 0; nArrays := 0
 END ClearVars;
 
+(* Used when entering a DEFN call: only scalars are function-local (and get
+ * snapshotted/restored around the call by the caller); arrays are global
+ * and must stay visible inside the function body, so nArrays is untouched
+ * here unlike ClearVars. *)
+PROCEDURE ClearScalars;
+BEGIN
+  nNumVars := 0; nStrVars := 0
+END ClearScalars;
+
 PROCEDURE AssignScalar(name: ARRAY OF CHAR; VAR v: Value);
 BEGIN
   IF IsStrName(name) THEN
@@ -1930,7 +1939,7 @@ BEGIN
   END;
   fd := funcs[funcIdx];
   FOR k := argc - 1 TO 0 BY -1 DO Pop(args[k]) END;
-  SnapshotScalars(ns, ss); ClearVars;
+  SnapshotScalars(ns, ss); ClearScalars;
   FOR k := 0 TO argc - 1 DO
     IF fd.paramIsStr[k] THEN
       IF ~args[k].isStr THEN NumToStr(args[k].num, args[k].s); args[k].isStr := TRUE END;
