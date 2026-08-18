@@ -1,154 +1,214 @@
 10 REM
-20 REM  VOYAGE TO NEPTUNE -- AN INTERPLANETARY CROSSING
-30 REM  Adapted for basic.mod, inspired by David H. Ahl's game in
-40 REM  Small Basic Computer Adventures (25th Anniversary Edition)
-50 REM
-60 DIM LEG$(7)
-70 DIM DISTANCE(7)
-80 LEG$(1)="Earth orbit to Mars flyby" : DISTANCE(1)=140
-90 LEG$(2)="Mars to the Asteroid Belt" : DISTANCE(2)=180
-100 LEG$(3)="Asteroid Belt to Jupiter flyby" : DISTANCE(3)=300
-110 LEG$(4)="Jupiter to Saturn flyby" : DISTANCE(4)=400
-120 LEG$(5)="Saturn to Uranus flyby" : DISTANCE(5)=900
-130 LEG$(6)="Uranus to the approach to Neptune" : DISTANCE(6)=1000
-140 LEG$(7)="Final approach and orbit insertion at Neptune" : DISTANCE(7)=50
+20 REM  VOYAGE TO NEPTUNE, 2100 -- A SEVEN-LEG INTERPLANETARY CROSSING
+30 REM  Adapted for basic.mod from the (c) 1986 David H. Ahl original
+40 REM
+50 DIM PLAND$(7)
+60 DIM DIS(6)
+70 PLAND$(1)="Earth" : PLAND$(2)="Callisto" : PLAND$(3)="Titan"
+80 PLAND$(4)="Alpha 1" : PLAND$(5)="Ariel" : PLAND$(6)="Theta 2"
+90 PLAND$(7)="Neptune"
+100 DIS(1)=391 : DIS(2)=403 : DIS(3)=446
+110 DIS(4)=447 : DIS(5)=507 : DIS(6)=507
 
-150 FUEL=2000 : CELLS=0 : SOLAR=50 : SEG=0 : TOTALDAYS=0
-
+195 REM ============================ opening scenario =============================
 200 CLS
-210 PRINT "          VOYAGE TO NEPTUNE -- AN INTERPLANETARY CROSSING"
-220 PRINT "                   adapted from David H. Ahl"
-230 PRINT
-240 INPUT "Press ENTER to begin the voyage!"; ANY$
-250 CLS
-260 PRINT "Your ship departs Earth orbit for Neptune, nearly three billion"
-270 PRINT "miles away. Solar collectors supply about half your power at"
-280 PRINT "the start, fading fast the farther you get from the sun -- the"
-290 PRINT "rest must come from nuclear fuel and a small breeder reactor"
-300 PRINT "that can manufacture more fuel from what the main engines burn."
-310 PRINT
-320 INPUT "Press ENTER to continue"; ANY$
+205 PRINT "                    VOYAGE TO NEPTUNE, 2100"
+210 PRINT "                 (c) by David H. Ahl, 1986"
+215 PRINT
+220 PRINT " It is the Year 2100 and you are in command of the first manned"
+225 PRINT "spaceship to Neptune. Manned space stations have been established"
+230 PRINT "which orbit Callisto, Titan, and Ariel, as well as at two inter-"
+235 PRINT "mediate points between Saturn and Uranus, and Uranus and Neptune."
+240 PRINT "You must travel about 2700 million miles. At an average speed of"
+245 PRINT "over 50,000 miles per hour, the entire trip should take about"
+250 PRINT "six years."
+255 PRINT " Your spaceship is a marvel of 21st century engineering. Since"
+260 PRINT "you may have to stop at space stations along the way, you will not"
+265 PRINT "be able to use the gravitational 'slingshot' effect of the planets."
+270 PRINT "However, your engines are highly efficient using both energy from"
+275 PRINT "the sun captured by giant parabolic arrays and nuclear fuel carried"
+280 PRINT "on board. You will not be able to carry enough fuel for the whole"
+285 PRINT "trip, so you also have a multi-celled nuclear breeder reactor"
+290 PRINT "(which takes spent fuel from your engines along with a small amount"
+295 PRINT "of primary fuel and turns it into a much greater amount of primary"
+300 PRINT "fuel)."
+305 PRINT " The space stations along the way usually have a small stock of"
+310 PRINT "engine repair parts, breeder-reactor cells, and nuclear fuel which"
+315 PRINT "are available to you on a barter basis."
+320 PRINT
+325 INPUT "Press ENTER to begin your voyage!"; ANY$
 330 CLS
 
-995 REM ============================ main loop ================================
-1000 SEG=SEG+1
-1010 PRINT
-1015 PRINT "Leg "; SEG; ": "; LEG$(SEG); " ("; DISTANCE(SEG); " million miles)"
-1020 GOSUB 2000
-1030 GOSUB 2500
-1040 GOSUB 3000
-1050 GOSUB 3500
-1060 GOSUB 4000
-1070 GOSUB 8500
-1080 SOLAR=SOLAR-7
-1085 IF SOLAR<5 THEN SOLAR=5
-1090 IF SEG>=7 THEN GOTO 11000
-1100 GOTO 1000
+395 REM ============================ initial values ================================
+400 CELLS=120 : FUEL=3000 : SEG=0 : DIST=0 : TOTDAYS=0
 
-1995 REM ================================ trading =================================
-2000 PRINT
-2005 PRINT "You have "; FUEL; " lbs of fuel and "; CELLS; " breeder cells online."
-2010 PRINT "  (1) Build a new cell (costs 30 lbs of fuel)"
-2015 PRINT "  (2) Decommission a cell (recovers 15 lbs of fuel)"
-2020 PRINT "  (3) Skip trading this leg"
-2025 A1=1 : A2=3
-2030 INPUT "Your choice? "; A
-2035 GOSUB 10000
-2040 IF A=3 THEN RETURN
-2045 IF A=1 THEN GOTO 2100
-2050 IF CELLS<1 THEN PRINT "You don't have any cells to decommission.": RETURN
-2055 CELLS=CELLS-1 : FUEL=FUEL+15
-2060 PRINT "You decommission a cell and recover 15 lbs of fuel."
-2065 RETURN
-2100 IF FUEL<30 THEN PRINT "You don't have enough fuel to build a new cell.": RETURN
-2105 FUEL=FUEL-30 : CELLS=CELLS+1
-2110 PRINT "A new breeder cell comes online."
-2115 RETURN
+495 REM ============================ main loop =====================================
+500 SEG=SEG+1
+505 IF SEG=7 THEN GOTO 9000
 
-2495 REM ============================ set engine burn =============================
-2500 PRINT
-2505 PRINT "How many pounds of nuclear fuel do you want to burn this leg (0 to "; FUEL; ")?"
-2510 A1=0 : A2=FUEL
-2515 INPUT "Your answer? "; A
-2520 GOSUB 10000
-2525 BURNFUEL=A
-2530 RETURN
+510 PRINT
+515 PRINT "Current conditions are as follows:"
+520 PRINT "  Location: "; PLAND$(SEG)
+525 PRINT "  Distance to Neptune: "; 2701-DIST; " million miles."
+530 IF SEG=1 THEN GOTO 700
 
-2995 REM ========================== operate breeder cells ==========================
-3000 IF CELLS<1 THEN OPERATING=0: RETURN
-3005 PRINT
-3010 PRINT "You have "; CELLS; " breeder cells. Each running cell needs 5 lbs of"
-3015 PRINT "primary fuel and 20 lbs of spent fuel from the engines to operate."
-3020 MAXOP=CELLS
-3025 IF INT((FUEL-BURNFUEL)/5)<MAXOP THEN MAXOP=INT((FUEL-BURNFUEL)/5)
-3030 IF INT(BURNFUEL/20)<MAXOP THEN MAXOP=INT(BURNFUEL/20)
-3035 IF MAXOP<0 THEN MAXOP=0
-3040 A1=0 : A2=MAXOP
-3045 INPUT "How many cells do you want to operate this leg? "; A
-3050 GOSUB 10000
-3055 OPERATING=A
-3060 FUEL=FUEL-BURNFUEL-OPERATING*5
-3065 RETURN
+535 PRINT "  Distance from Earth: "; DIST; " million miles."
+540 PRINT "Over the last leg, your average speed was "; INT(RATE); " mph,"
+545 PRINT "  and you covered "; DIS(SEG-1); " million miles in "; LEGTIME; " days."
+550 TM=.81*DIST
+555 PRINT "Time estimate for this total distance";
+560 GOSUB 8000
+565 TM=TOTDAYS
+570 PRINT "Your actual cumulative time was ";
+575 GOSUB 8000
+580 PRINT "You used "; UBREED; " cells which produced "; FUBR; " lbs of fuel each."
+585 IF DECAY>0 THEN PRINT DECAY; " lbs of fuel in storage decayed into an unusable state."
 
-3495 REM ============================ engines and transit ==========================
-3500 EFF=SOLAR+INT(BURNFUEL/20)
-3505 IF EFF>104 THEN EFF=104
-3510 IF INT(RND*100)+1<=10 THEN GOSUB 3600
-3515 IF EFF<10 THEN EFF=10
-3520 RATE=INT(40000*EFF/100)
-3525 DST=DISTANCE(SEG)
-3530 LEGTIME=INT(DST*1000000/RATE/24)
-3535 PRINT
-3540 PRINT "Engine efficiency: "; EFF; "%.  Cruising speed: "; RATE; " mph."
-3545 PRINT "This leg takes "; LEGTIME; " days."
-3550 TOTALDAYS=TOTALDAYS+LEGTIME
-3555 RETURN
+695 REM -------------------------- fuel and cell status -----------------------------
+700 PRINT "  Pounds of nuclear fuel ready for use: "; FUEL
+705 PRINT "  Operational breeder-reactor cells: "; CELLS
+710 PRINT
 
-3595 REM ============================ engine malfunction ===========================
-3600 PRINT "A malfunction ripples through the main engines!"
-3605 EFF=INT(EFF*(5+RND*3)/10)
-3610 PRINT "Efficiency drops to "; EFF; "% while the crew scrambles to compensate."
-3615 RETURN
+795 REM -------------------------- trade fuel for cells ------------------------------
+800 TRADE=INT(150+80*RND)
+805 IF SEG>1 THEN GOTO 830
+810 PRINT "Before leaving, you can trade fuel for breeder-reactor cells at"
+815 GOTO 840
+830 PRINT "Here at "; PLAND$(SEG); ", breeder cells and nuclear fuel trade at"
+840 PRINT "the rate of "; TRADE; " pounds of fuel per cell."
+845 PRINT
+850 IF FUEL-TRADE<1501 THEN PRINT "You have too little fuel to trade." : GOTO 1000
+855 INPUT "Would you like to procure more breeder cells (Y or N)? "; AD$
+860 GOSUB 8500
+865 IF YES=0 THEN GOTO 1000
+870 INPUT "How many cells do you want? "; A
+875 F=FUEL-A*TRADE
+880 IF F>1500 THEN FUEL=F : CELLS=CELLS+A : GOTO 1100
+885 PRINT "That doesn't leave enough fuel to run the engines."
+890 GOTO 870
 
-3995 REM ========================= breeder output and decay ========================
-4000 IF OPERATING<1 THEN RETURN
-4005 PRODUCED=0
-4010 FOR K=1 TO OPERATING
-4015   PRODUCED=PRODUCED+INT(16+RND*18)
-4020 NEXT K
-4025 FUEL=FUEL+PRODUCED
-4030 PRINT "Your breeder cells produce "; PRODUCED; " lbs of new fuel."
-4035 IF INT(RND*100)+1<=20 THEN GOSUB 4100
-4040 RETURN
-4100 DECAY=INT(FUEL/20+RND*FUEL/10)
-4105 FUEL=FUEL-DECAY
-4110 IF FUEL<0 THEN FUEL=0
-4115 PRINT "Some stored fuel decays and becomes unusable: -"; DECAY; " lbs."
-4120 RETURN
+995 REM -------------------------- trade cells for fuel -------------------------------
+1000 INPUT "Would you like to trade some breeder cells for fuel? "; AD$
+1005 GOSUB 8500
+1010 IF YES=0 THEN GOTO 1100
+1015 INPUT "How many cells would you like to trade? "; A
+1020 F=CELLS-A
+1025 IF F>49 THEN CELLS=F : FUEL=FUEL+A*TRADE : GOTO 1100
+1030 PRINT "That would leave only "; F; " cells. The reactor requires a minimum"
+1035 PRINT "of 50 cells to remain operational."
+1040 GOTO 1015
 
-8495 REM ============================ print status ================================
-8500 PRINT
-8505 PRINT "Fuel: "; FUEL; " lbs   Cells online: "; CELLS; "   Solar power: "; SOLAR; "%"
-8510 RETURN
+1095 REM ============================ engine fuel this leg =============================
+1100 SOLARPCT=56-SEG*8
+1105 PRINT "At this distance from the sun, your solar collectors can fulfill"
+1110 PRINT SOLARPCT; "% of the fuel requirements of the engines. How many pounds"
+1115 INPUT "of nuclear fuel do you want to use on this leg? "; FUSEG
+1120 IF FUSEG<=FUEL THEN FUEL=FUEL-FUSEG : GOTO 1200
+1125 PRINT "That's more fuel than you have. Now then, how many pounds"
+1130 GOTO 1115
 
-9995 REM ======================= range-checked numeric input ====================
-10000 IF (A>=A1) AND (A<=A2) THEN RETURN
-10005 IF A<A1 THEN PRINT "That's too few. Try again." ELSE PRINT "That's too many. Try again."
-10010 INPUT A
-10015 GOTO 10000
+1195 REM ============================ breeder-reactor usage =============================
+1200 INPUT "How many breeder-reactor cells do you want to operate? "; UBREED
+1205 IF UBREED>CELLS THEN PRINT "You don't have that many cells." : GOTO 1200
+1210 IF INT(FUSEG/20)>=UBREED THEN GOTO 1230
+1215 PRINT "The spent fuel from your engines is only enough to operate "; INT(FUSEG/20)
+1220 PRINT "  breeder-reactor cells. Again please..."
+1225 GOTO 1200
+1230 IF UBREED*5<=FUEL THEN GOTO 1250
+1235 PRINT "You have only enough fuel to seed "; INT(FUEL/5); " breeder cells."
+1240 PRINT "Please adjust your number accordingly."
+1245 GOTO 1200
+1250 FUEL=FUEL-5*UBREED
 
-10995 REM ============================== arrival! ===================================
-11000 CLS
-11005 PRINT "YOU ARRIVE AT NEPTUNE!"
-11010 PRINT
-11015 YR=INT(TOTALDAYS/365)
-11020 DY=TOTALDAYS-YR*365
-11025 PRINT "Total voyage time: "; YR; " years, "; DY; " days."
-11030 PRINT "You arrive with "; FUEL; " lbs of fuel and "; CELLS; " breeder cells"
-11035 PRINT "still online."
-11040 IF YR<=8 THEN PRINT "A remarkably fast crossing of the outer solar system."
-11045 IF (YR>8) AND (YR<=12) THEN PRINT "A long but steady voyage, true to the scale of the real thing."
-11050 IF YR>12 THEN PRINT "A grueling, drawn-out journey -- but you made it."
-11055 PRINT
-11060 INPUT "Press ENTER to end"; ANY$
-11065 END
+1295 REM ============================ resolve the leg =============================
+1300 EFF=56-SEG*8+FUSEG/40
+1305 IF EFF>104 THEN EFF=104
+1310 EF=RND
+1315 IF EF<.1 THEN GOSUB 2000
+1320 RATE=EFF*513.89
+1325 DIST=DIST+DIS(SEG)
+1330 LEGTIME=INT(DIS(SEG)*41667/RATE)
+1335 TOTDAYS=TOTDAYS+LEGTIME
+1340 FUBR=INT(16+18*RND)
+1345 FUEL=FUEL+FUBR*UBREED
+1350 FD=RND
+1355 IF FD<.2 THEN DECAY=INT(FD*FUEL) ELSE DECAY=0
+1360 FUEL=FUEL-DECAY
+1365 GOTO 500
+
+1995 REM ============================ engine malfunction =============================
+2000 CLS
+2005 PRINT "*** ENGINE MALFUNCTION! ***"
+2010 PRINT
+2015 PRINT "You will have to operate your engines at a "; INT(300*EF); "% reduction"
+2020 PRINT "in speed until you reach "; PLAND$(SEG+1); "."
+2025 PRINT
+2030 EFF=EFF*(1-3*EF)
+2035 RETURN
+
+7995 REM ============================ elapsed-time printer =============================
+8000 YRS=INT(TM/365)
+8005 IF YRS<1 THEN GOTO 8025
+8010 IF YRS=1 THEN PRINT " 1 year";
+8015 IF YRS<>1 THEN PRINT " "; YRS; " years";
+8025 MOS=INT((TM/365-YRS)*12)
+8030 IF MOS<1 THEN GOTO 8050
+8035 IF MOS=1 THEN PRINT ", 1 month";
+8040 IF MOS<>1 THEN PRINT ", "; MOS; " months";
+8050 DYS=INT(TM-YRS*365-MOS*30.5)
+8055 IF DYS<1 THEN PRINT "." : RETURN
+8060 IF DYS=1 THEN PRINT ", 1 day." ELSE PRINT ", "; DYS; " days."
+8065 RETURN
+
+8495 REM ============================ yes/no helper =====================================
+8500 IF (LEFT$(AD$,1)="Y") OR (LEFT$(AD$,1)="y") THEN YES=1 : RETURN
+8505 IF (LEFT$(AD$,1)="N") OR (LEFT$(AD$,1)="n") THEN YES=0 : RETURN
+8510 PRINT "Don't understand your answer. Enter 'Y' or 'N' please."
+8515 INPUT AD$
+8520 GOTO 8500
+
+8995 REM ============================ arrival at Neptune! ===============================
+9000 CLS
+9005 PRINT "You finally reached Neptune in ";
+9010 TM=TOTDAYS
+9015 GOSUB 8000
+9020 PRINT "Had your engines run at 100% efficiency the entire way, you would"
+9025 PRINT "have averaged 51,389 mph and completed the trip in exactly 6 years."
+9030 IF TOTDAYS>2220 THEN GOTO 9100
+
+9035 PRINT
+9040 PRINT "                 Congratulations! Outstanding job!"
+9045 PRINT
+9050 GOTO 9200
+
+9095 REM -------------------------- ran long: rate the performance --------------------
+9100 TM=TOTDAYS-2190
+9105 PRINT
+9110 PRINT "Your trip took longer than this by";
+9115 GOSUB 8000
+9120 PRINT "Your performance was ";
+9125 GRADE=YRS+1
+9130 IF GRADE>4 THEN GRADE=4
+9135 IF GRADE=1 THEN PRINT "excellent (room for slight improvement)."
+9140 IF GRADE=2 THEN PRINT "quite good (but could be better)."
+9145 IF GRADE=3 THEN PRINT "marginal (could do much better)."
+9150 IF GRADE=4 THEN PRINT "abysmal (need lots more practice)."
+
+9195 REM -------------------------- return-trip readiness --------------------------
+9200 PRINT
+9205 IF CELLS<105 THEN GOTO 9230
+9210 PRINT "Fortunately you have "; CELLS; " operational breeder-reactor cells"
+9215 PRINT "for your return trip. Very good."
+9220 GOTO 9250
+9230 PRINT "I guess you realize that the return trip will be extremely"
+9235 PRINT "chancy with only "; CELLS; " breeder-reactor cells operational."
+
+9245 REM -------------------------- return-trip time estimate --------------------------
+9250 PRINT "With your remaining "; FUEL; " pounds of fuel and "; CELLS; " breeder"
+9255 TM=42250/(8+FUEL/40)
+9260 IF TM<405 THEN TM=405
+9265 PRINT "cells, to get back to Theta 2 will take";
+9270 GOSUB 8000
+9275 PRINT
+9280 INPUT "Press ENTER to end"; ANY$
+9285 END
