@@ -15,6 +15,7 @@ CONST
   FMTPDF  = 0;
   FMTHTML = 1;
   FMTDOCX = 2;
+  FMTEPUB = 3;
   PG_W    = 612;
   PG_H    = 792;
   PG_MAR  = 72;
@@ -57,15 +58,77 @@ VAR
   inTableHead : BOOLEAN;
   tableHdr  : ARRAY LLEN OF CHAR;
   tableCols : INTEGER;
+  crcOnly   : BOOLEAN;
+  trackCrc  : BOOLEAN;
+  eCrc      : INTEGER;
+  eSz       : INTEGER;
+  crcTab    : ARRAY 256 OF INTEGER;
+  zipOff    : ARRAY 8 OF INTEGER;
+  zipCrc    : ARRAY 8 OF INTEGER;
+  zipSz     : ARRAY 8 OF INTEGER;
+  zipNm     : ARRAY 8 OF ARRAY 64 OF CHAR;
+  zipCnt    : INTEGER;
+  docTitle  : ARRAY 256 OF CHAR;
+  MININT    : INTEGER; (* -2147483648, set at startup via LSL(1,31) *)
+
+(* ── CRC-32 ───────────────────────────────────────────── *)
+
+PROCEDURE Lsr1(x: INTEGER): INTEGER;
+BEGIN
+  IF x < 0 THEN RETURN ASR(x, 1) - MININT
+  ELSE RETURN ASR(x, 1)
+  END
+END Lsr1;
+
+PROCEDURE Xor32(a, b: INTEGER): INTEGER;
+VAR r, bit, ba, bb: INTEGER;
+BEGIN
+  r := 0; bit := 1;
+  (* bits 0..29: loop safe since bit+bit stays <= 2^30 *)
+  WHILE bit < 1073741824 DO
+    ba := a MOD (bit + bit) DIV bit;
+    bb := b MOD (bit + bit) DIV bit;
+    IF ba # bb THEN r := r + bit END;
+    bit := bit + bit
+  END;
+  (* bit 30 = 1073741824: extract without overflow *)
+  IF ((a >= 0) & (a < 1073741824)) OR (a < -1073741824) THEN ba := 0 ELSE ba := 1 END;
+  IF ((b >= 0) & (b < 1073741824)) OR (b < -1073741824) THEN bb := 0 ELSE bb := 1 END;
+  IF ba # bb THEN r := r + 1073741824 END;
+  (* bit 31 = sign bit *)
+  IF (a < 0) # (b < 0) THEN r := r + MININT END;
+  RETURN r
+END Xor32;
+
+PROCEDURE Lsr8(x: INTEGER): INTEGER;
+VAR i: INTEGER;
+BEGIN
+  i := 8; WHILE i > 0 DO x := Lsr1(x); DEC(i) END;
+  RETURN x
+END Lsr8;
+
+PROCEDURE CrcByte(crc: INTEGER; c: CHAR): INTEGER;
+VAR idx: INTEGER;
+BEGIN
+  idx := Xor32(crc MOD 256, ORD(c));
+  RETURN Xor32(crcTab[idx], Lsr8(crc))
+END CrcByte;
 
 (* ── Output primitives ────────────────────────────────── *)
 
 PROCEDURE Wch(c: CHAR);
-BEGIN Files.Write(outR, c) END Wch;
+BEGIN
+  IF crcOnly THEN
+    eCrc := CrcByte(eCrc, c); INC(eSz)
+  ELSE
+    Files.Write(outR, c);
+    IF trackCrc THEN eCrc := CrcByte(eCrc, c); INC(eSz) END
+  END
+END Wch;
 
 PROCEDURE Wstr(s: ARRAY OF CHAR);
 VAR i: INTEGER;
-BEGIN i := 0; WHILE s[i] # 0X DO Files.Write(outR, s[i]); INC(i) END END Wstr;
+BEGIN i := 0; WHILE s[i] # 0X DO Wch(s[i]); INC(i) END END Wstr;
 
 PROCEDURE Wln;
 BEGIN Wch(0AX) END Wln;
@@ -1228,13 +1291,256 @@ END WriteTexHeader;
 PROCEDURE WriteTexFooter;
 BEGIN EndBlockTex; Wstr("\end{document}"); Wln END WriteTexFooter;
 
+(* ── ZIP / EPUB ───────────────────────────────────────── *)
+
+PROCEDURE InitCrcTable;
+VAR n, k, c: INTEGER;
+BEGIN
+  n := 0;
+  WHILE n < 256 DO
+    c := n; k := 8;
+    WHILE k > 0 DO
+      IF c MOD 2 = 1 THEN c := Xor32(-306674912, Lsr1(c))
+      ELSE c := Lsr1(c)
+      END;
+      DEC(k)
+    END;
+    crcTab[n] := c; INC(n)
+  END
+END InitCrcTable;
+
+PROCEDURE WleU16(n: INTEGER);
+BEGIN
+  Files.Write(outR, CHR(n MOD 256));
+  Files.Write(outR, CHR(n DIV 256 MOD 256))
+END WleU16;
+
+PROCEDURE WleU32(n: INTEGER);
+VAR b: INTEGER;
+BEGIN
+  b := n MOD 256;                    Files.Write(outR, CHR(b)); n := (n - b) DIV 256;
+  b := n MOD 256;                    Files.Write(outR, CHR(b)); n := (n - b) DIV 256;
+  b := n MOD 256;                    Files.Write(outR, CHR(b)); n := (n - b) DIV 256;
+  Files.Write(outR, CHR(n MOD 256))
+END WleU32;
+
+PROCEDURE ZipLocalHdr(name: ARRAY OF CHAR; crc, sz: INTEGER);
+VAR nl: INTEGER;
+BEGIN
+  nl := Strings.Length(name);
+  WleU32(67324752);  WleU16(20); WleU16(0); WleU16(0);
+  WleU16(0); WleU16(0);
+  WleU32(crc); WleU32(sz); WleU32(sz);
+  WleU16(nl); WleU16(0);
+  Wstr(name)
+END ZipLocalHdr;
+
+PROCEDURE ZipCDEntry(name: ARRAY OF CHAR; crc, sz, off: INTEGER);
+VAR nl: INTEGER;
+BEGIN
+  nl := Strings.Length(name);
+  WleU32(33639248); WleU16(20); WleU16(20); WleU16(0); WleU16(0);
+  WleU16(0); WleU16(0);
+  WleU32(crc); WleU32(sz); WleU32(sz);
+  WleU16(nl); WleU16(0); WleU16(0);
+  WleU16(0); WleU16(0); WleU32(0); WleU32(off);
+  Wstr(name)
+END ZipCDEntry;
+
+PROCEDURE ZipAddAux(name: ARRAY OF CHAR; crc, sz: INTEGER);
+(* Add auxFile content to ZIP using pre-computed crc/sz *)
+VAR f: Files.File; r: Files.Rider; b: INTEGER; off: INTEGER;
+BEGIN
+  off := Files.Pos(outR);
+  ZipLocalHdr(name, crc, sz);
+  f := Files.Old(auxFile);
+  IF f # NIL THEN
+    Files.Set(r, f, 0);
+    Files.Read(r, b);
+    WHILE ~r.eof DO Files.Write(outR, CHR(b)); Files.Read(r, b) END;
+    Files.Close(f)
+  END;
+  zipOff[zipCnt] := off; zipCrc[zipCnt] := crc; zipSz[zipCnt] := sz;
+  COPY(name, zipNm[zipCnt]); INC(zipCnt)
+END ZipAddAux;
+
+PROCEDURE ZipStatic(name: ARRAY OF CHAR);
+(* Helper: record a static entry whose header was already written *)
+BEGIN
+  (* called after ZipLocalHdr + Wstr content *)
+END ZipStatic;
+
+(* Low-level ZIP static-file helper: dry-run to get CRC/size, then write *)
+(* Caller pattern:
+     crcOnly:=TRUE; eCrc:=-1; eSz:=0; <write content>; crcOnly:=FALSE;
+     eCrc:=Xor32(eCrc,-1);
+     off:=Files.Pos(outR); ZipLocalHdr(name,eCrc,eSz); <write content again>;
+     zipOff[zipCnt]:=off; zipCrc[zipCnt]:=eCrc; zipSz[zipCnt]:=eSz;
+     COPY(name,zipNm[zipCnt]); INC(zipCnt)
+*)
+
+PROCEDURE WriteContainerXml;
+BEGIN
+  Wstr('<?xml version="1.0"?>'); Wln;
+  Wstr('<container version="1.0"'); Wln;
+  Wstr(' xmlns="urn:oasis:names:tc:opendocument:xmlns:container">'); Wln;
+  Wstr('  <rootfiles>'); Wln;
+  Wstr('    <rootfile full-path="OEBPS/content.opf"'); Wln;
+  Wstr('     media-type="application/oebps-package+xml"/>'); Wln;
+  Wstr('  </rootfiles>'); Wln;
+  Wstr('</container>'); Wln
+END WriteContainerXml;
+
+PROCEDURE WriteContentOpf;
+BEGIN
+  Wstr('<?xml version="1.0" encoding="utf-8"?>'); Wln;
+  Wstr('<package xmlns="http://www.idpf.org/2007/opf"'); Wln;
+  Wstr(' version="2.0" unique-identifier="bookid">'); Wln;
+  Wstr('  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">'); Wln;
+  Wstr('    <dc:title>'); Wstr(docTitle); Wstr('</dc:title>'); Wln;
+  Wstr('    <dc:language>en</dc:language>'); Wln;
+  Wstr('    <dc:identifier id="bookid">urn:plume:1</dc:identifier>'); Wln;
+  Wstr('  </metadata>'); Wln;
+  Wstr('  <manifest>'); Wln;
+  Wstr('    <item id="ncx" href="toc.ncx"'); Wln;
+  Wstr('     media-type="application/x-dtbncx+xml"/>'); Wln;
+  Wstr('    <item id="css" href="style.css" media-type="text/css"/>'); Wln;
+  Wstr('    <item id="c" href="content.html"'); Wln;
+  Wstr('     media-type="application/xhtml+xml"/>'); Wln;
+  Wstr('  </manifest>'); Wln;
+  Wstr('  <spine toc="ncx">'); Wln;
+  Wstr('    <itemref idref="c"/>'); Wln;
+  Wstr('  </spine>'); Wln;
+  Wstr('</package>'); Wln
+END WriteContentOpf;
+
+PROCEDURE WriteTocNcx;
+BEGIN
+  Wstr('<?xml version="1.0" encoding="utf-8"?>'); Wln;
+  Wstr('<!DOCTYPE ncx PUBLIC "-//NISO//DTD ncx 2005-1//EN"'); Wln;
+  Wstr(' "http://www.daisy.org/z3986/2005/ncx-2005-1.dtd">'); Wln;
+  Wstr('<ncx xmlns="http://www.daisy.org/z3986/2005/ncx/"'); Wln;
+  Wstr(' version="2005-1">'); Wln;
+  Wstr('  <head>'); Wln;
+  Wstr('    <meta name="dtb:uid" content="urn:plume:1"/>'); Wln;
+  Wstr('    <meta name="dtb:depth" content="1"/>'); Wln;
+  Wstr('    <meta name="dtb:totalPageCount" content="0"/>'); Wln;
+  Wstr('    <meta name="dtb:maxPageNumber" content="0"/>'); Wln;
+  Wstr('  </head>'); Wln;
+  Wstr('  <docTitle><text>'); Wstr(docTitle); Wstr('</text></docTitle>'); Wln;
+  Wstr('  <navMap>'); Wln;
+  Wstr('    <navPoint id="p1" playOrder="1">'); Wln;
+  Wstr('      <navLabel><text>Start</text></navLabel>'); Wln;
+  Wstr('      <content src="content.html"/>'); Wln;
+  Wstr('    </navPoint>'); Wln;
+  Wstr('  </navMap>'); Wln;
+  Wstr('</ncx>'); Wln
+END WriteTocNcx;
+
+PROCEDURE WriteEpubCss;
+BEGIN
+  Wstr("body{font-family:Georgia,serif;max-width:36em;margin:2em auto;"); Wln;
+  Wstr("     line-height:1.6;color:#222;padding:0 1em}"); Wln;
+  Wstr("h1,h2,h3{line-height:1.2;margin-top:1.4em}"); Wln;
+  Wstr("pre,code{background:#f4f4f4;font-family:monospace}"); Wln;
+  Wstr("pre{padding:.8em;overflow:auto}"); Wln;
+  Wstr("blockquote{border-left:4px solid #ccc;margin-left:0;"); Wln;
+  Wstr("           padding-left:1em;color:#555}"); Wln;
+  Wstr("table{border-collapse:collapse;margin:1em 0}"); Wln;
+  Wstr("th,td{border:1px solid #ccc;padding:4px 8px;text-align:left}"); Wln;
+  Wstr("thead th{background:#f0f0f0}"); Wln
+END WriteEpubCss;
+
+PROCEDURE WriteEpubContentHeader;
+BEGIN
+  Wstr('<?xml version="1.0" encoding="utf-8"?>'); Wln;
+  Wstr('<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.1//EN"'); Wln;
+  Wstr(' "http://www.w3.org/TR/xhtml11/DTD/xhtml11.dtd">'); Wln;
+  Wstr('<html xmlns="http://www.w3.org/1999/xhtml">'); Wln;
+  Wstr('<head>'); Wln;
+  Wstr('<meta http-equiv="Content-Type"'); Wln;
+  Wstr(' content="application/xhtml+xml; charset=utf-8"/>'); Wln;
+  Wstr('<title>'); Wstr(docTitle); Wstr('</title>'); Wln;
+  Wstr('<link rel="stylesheet" type="text/css" href="style.css"/>'); Wln;
+  Wstr('</head><body>'); Wln
+END WriteEpubContentHeader;
+
+PROCEDURE WriteEpubZip;
+(* Build the EPUB ZIP into outF/outR; auxFile holds the XHTML content *)
+VAR off, cdOff, cdSz, i, savedCrc, savedSz: INTEGER;
+BEGIN
+  zipCnt := 0;
+  savedCrc := eCrc; savedSz := eSz; (* XHTML content CRC/size from phase 1 *)
+
+  (* 1. mimetype – must be first and stored *)
+  crcOnly := TRUE; eCrc := -1; eSz := 0;
+  Wstr("application/epub+zip");
+  crcOnly := FALSE; eCrc := Xor32(eCrc, -1);
+  off := Files.Pos(outR);
+  ZipLocalHdr("mimetype", eCrc, eSz);
+  Wstr("application/epub+zip");
+  zipOff[zipCnt]:=off; zipCrc[zipCnt]:=eCrc; zipSz[zipCnt]:=eSz;
+  COPY("mimetype", zipNm[zipCnt]); INC(zipCnt);
+
+  (* 2. META-INF/container.xml *)
+  crcOnly := TRUE; eCrc := -1; eSz := 0; WriteContainerXml;
+  crcOnly := FALSE; eCrc := Xor32(eCrc, -1);
+  off := Files.Pos(outR);
+  ZipLocalHdr("META-INF/container.xml", eCrc, eSz); WriteContainerXml;
+  zipOff[zipCnt]:=off; zipCrc[zipCnt]:=eCrc; zipSz[zipCnt]:=eSz;
+  COPY("META-INF/container.xml", zipNm[zipCnt]); INC(zipCnt);
+
+  (* 3. OEBPS/content.opf *)
+  crcOnly := TRUE; eCrc := -1; eSz := 0; WriteContentOpf;
+  crcOnly := FALSE; eCrc := Xor32(eCrc, -1);
+  off := Files.Pos(outR);
+  ZipLocalHdr("OEBPS/content.opf", eCrc, eSz); WriteContentOpf;
+  zipOff[zipCnt]:=off; zipCrc[zipCnt]:=eCrc; zipSz[zipCnt]:=eSz;
+  COPY("OEBPS/content.opf", zipNm[zipCnt]); INC(zipCnt);
+
+  (* 4. OEBPS/toc.ncx *)
+  crcOnly := TRUE; eCrc := -1; eSz := 0; WriteTocNcx;
+  crcOnly := FALSE; eCrc := Xor32(eCrc, -1);
+  off := Files.Pos(outR);
+  ZipLocalHdr("OEBPS/toc.ncx", eCrc, eSz); WriteTocNcx;
+  zipOff[zipCnt]:=off; zipCrc[zipCnt]:=eCrc; zipSz[zipCnt]:=eSz;
+  COPY("OEBPS/toc.ncx", zipNm[zipCnt]); INC(zipCnt);
+
+  (* 5. OEBPS/style.css *)
+  crcOnly := TRUE; eCrc := -1; eSz := 0; WriteEpubCss;
+  crcOnly := FALSE; eCrc := Xor32(eCrc, -1);
+  off := Files.Pos(outR);
+  ZipLocalHdr("OEBPS/style.css", eCrc, eSz); WriteEpubCss;
+  zipOff[zipCnt]:=off; zipCrc[zipCnt]:=eCrc; zipSz[zipCnt]:=eSz;
+  COPY("OEBPS/style.css", zipNm[zipCnt]); INC(zipCnt);
+
+  (* 6. OEBPS/content.html – from auxFile *)
+  ZipAddAux("OEBPS/content.html", savedCrc, savedSz);
+
+  (* Central directory *)
+  cdOff := Files.Pos(outR);
+  i := 0;
+  WHILE i < zipCnt DO
+    ZipCDEntry(zipNm[i], zipCrc[i], zipSz[i], zipOff[i]); INC(i)
+  END;
+  cdSz := Files.Pos(outR) - cdOff;
+
+  (* End of central directory record *)
+  WleU32(101010256); (* 0x06054b50 *)
+  WleU16(0); WleU16(0);
+  WleU16(zipCnt); WleU16(zipCnt);
+  WleU32(cdSz); WleU32(cdOff);
+  WleU16(0)
+END WriteEpubZip;
+
 (* ── Main ─────────────────────────────────────────────── *)
 
 PROCEDURE Usage;
 BEGIN
-  Out.String("Usage: plume [-o outfile] [--html|--pdf|--docx] <input.md>"); Out.Ln;
+  Out.String("Usage: plume [-o outfile] [--html|--pdf|--epub|--rtf] <input.md>"); Out.Ln;
   Out.String("  --html   HTML output (native)"); Out.Ln;
   Out.String("  --pdf    PDF output (native, no external tools)"); Out.Ln;
+  Out.String("  --epub   EPUB 2 ebook (native, no external tools)"); Out.Ln;
   Out.String("  --rtf    RTF document (opens in Word/LibreOffice)"); Out.Ln;
   Out.String("  --docx   alias for --rtf"); Out.Ln
 END Usage;
@@ -1251,6 +1557,7 @@ BEGIN
     Args.Get(i, arg);
     IF    Strings.Compare(arg, "--html") = 0 THEN fmt := FMTHTML
     ELSIF Strings.Compare(arg, "--pdf")  = 0 THEN fmt := FMTPDF
+    ELSIF Strings.Compare(arg, "--epub") = 0 THEN fmt := FMTEPUB
     ELSIF Strings.Compare(arg, "--rtf")  = 0 THEN fmt := FMTDOCX
     ELSIF Strings.Compare(arg, "--docx") = 0 THEN fmt := FMTDOCX
     ELSIF Strings.Compare(arg, "-o") = 0 THEN
@@ -1266,9 +1573,13 @@ BEGIN
   IF outFile[0] = 0X THEN
     IF    fmt = FMTHTML THEN SetExt(inFile, ".html", outFile)
     ELSIF fmt = FMTDOCX THEN SetExt(inFile, ".rtf",  outFile)
+    ELSIF fmt = FMTEPUB THEN SetExt(inFile, ".epub", outFile)
     ELSE                     SetExt(inFile, ".pdf",  outFile)
     END
   END;
+
+  (* auxFile = temp XHTML for EPUB *)
+  COPY(outFile, auxFile); Strings.Append(".tmp", auxFile);
 
   inF := Files.Old(inFile);
   IF inF = NIL THEN
@@ -1277,19 +1588,20 @@ BEGIN
   END;
   Files.Set(inR, inF, 0);
 
-  outF := Files.New(outFile);
+  MININT := LSL(1, 31);
+  crcOnly := FALSE; trackCrc := FALSE;
+  docTitle[0] := 0X;
 
-  IF outF = NIL THEN
-    Out.String("plume: cannot create output"); Out.Ln; HALT(1)
-  END;
-  Files.Set(outR, outF, 0);
-
-  IF fmt = FMTHTML THEN WriteHtmlHeader
-  ELSIF fmt = FMTDOCX THEN WriteRtfHeader
-  ELSIF fmt = FMTPDF THEN
-    nPages := 0; i := 0; WHILE i < 200 DO xref[i] := 0; INC(i) END;
-    WritePdfHeader; BeginPdfPage
-  ELSE WriteTexHeader
+  IF fmt = FMTEPUB THEN
+    (* Phase 1: render XHTML content to auxFile with CRC tracking *)
+    InitCrcTable;
+    outF := Files.New(auxFile);
+    IF outF = NIL THEN Out.String("plume: cannot create temp"); Out.Ln; HALT(1) END;
+    Files.Set(outR, outF, 0)
+  ELSE
+    outF := Files.New(outFile);
+    IF outF = NIL THEN Out.String("plume: cannot create output"); Out.Ln; HALT(1) END;
+    Files.Set(outR, outF, 0)
   END;
 
   inPara := FALSE; inList := FALSE; listOrd := FALSE; listN := 1;
@@ -1297,12 +1609,38 @@ BEGIN
   bold   := FALSE; ital   := FALSE;
   inTable := FALSE; inTableHead := FALSE; tableCols := 0;
 
+  IF fmt = FMTHTML THEN WriteHtmlHeader
+  ELSIF fmt = FMTDOCX THEN WriteRtfHeader
+  ELSIF fmt = FMTPDF THEN
+    nPages := 0; i := 0; WHILE i < 200 DO xref[i] := 0; INC(i) END;
+    WritePdfHeader; BeginPdfPage
+  ELSIF fmt = FMTEPUB THEN
+    (* title extracted on first pass; emit placeholder header after first line *)
+  ELSE WriteTexHeader
+  END;
+
   Files.ReadLine(inR, line);
   WHILE ~inR.eof DO
     StripCR(line);
-    IF fmt = FMTHTML THEN ProcessLineHtml(line)
+    IF fmt = FMTEPUB THEN
+      (* capture first H1 as document title *)
+      IF (docTitle[0] = 0X) & (line[0] = '#') & (line[1] = ' ') THEN
+        Strings.Extract(line, 2, Strings.Length(line) - 2, docTitle);
+        (* now we know the title: emit XHTML header then this heading *)
+        eCrc := -1; eSz := 0; trackCrc := TRUE;
+        WriteEpubContentHeader
+      ELSIF (docTitle[0] = 0X) & ~inR.eof THEN
+        (* no H1 yet: emit header with blank title on first non-blank line *)
+        IF Strings.Length(line) > 0 THEN
+          COPY("Document", docTitle);
+          eCrc := -1; eSz := 0; trackCrc := TRUE;
+          WriteEpubContentHeader
+        END
+      END;
+      IF trackCrc THEN ProcessLineHtml(line) END
+    ELSIF fmt = FMTHTML THEN ProcessLineHtml(line)
     ELSIF fmt = FMTDOCX THEN ProcessLineRtf(line)
-    ELSIF fmt = FMTPDF THEN ProcessLinePdf(line)
+    ELSIF fmt = FMTPDF  THEN ProcessLinePdf(line)
     ELSE ProcessLineTex(line)
     END;
     Files.ReadLine(inR, line)
@@ -1311,13 +1649,27 @@ BEGIN
   IF fmt = FMTHTML THEN WriteHtmlFooter
   ELSIF fmt = FMTDOCX THEN WriteRtfFooter
   ELSIF fmt = FMTPDF THEN EndPdfPage; WritePdfStructure
+  ELSIF fmt = FMTEPUB THEN
+    EndBlock; Wstr("</body></html>"); Wln;
+    trackCrc := FALSE;
+    eCrc := Xor32(eCrc, -1);   (* finalise content.html CRC *)
+    Files.Register(outF); Files.Close(outF);
+    (* Phase 2: build EPUB ZIP *)
+    outF := Files.New(outFile);
+    IF outF = NIL THEN Out.String("plume: cannot create output"); Out.Ln; HALT(1) END;
+    Files.Set(outR, outF, 0);
+    WriteEpubZip;
+    Files.Register(outF); Files.Close(outF);
+    Files.Delete(auxFile);
+    Files.Close(inF);
+    Out.String("plume: wrote "); Out.String(outFile); Out.Ln;
+    HALT(0)
   ELSE WriteTexFooter
   END;
 
   Files.Register(outF);
   Files.Close(outF);
   Files.Close(inF);
-
 
   Out.String("plume: wrote "); Out.String(outFile); Out.Ln
 END Plume.
