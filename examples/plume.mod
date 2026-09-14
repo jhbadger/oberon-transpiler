@@ -51,8 +51,12 @@ VAR
   listN   : INTEGER;
   inCode  : BOOLEAN;
   inBQ    : BOOLEAN;
-  bold    : BOOLEAN;
-  ital    : BOOLEAN;
+  bold      : BOOLEAN;
+  ital      : BOOLEAN;
+  inTable   : BOOLEAN;
+  inTableHead : BOOLEAN;
+  tableHdr  : ARRAY LLEN OF CHAR;
+  tableCols : INTEGER;
 
 (* ── Output primitives ────────────────────────────────── *)
 
@@ -163,8 +167,34 @@ END EndList;
 PROCEDURE EndBQ;
 BEGIN IF inBQ THEN Wstr("</blockquote>"); Wln; inBQ := FALSE END END EndBQ;
 
+PROCEDURE EmitTableRowHtml(s: ARRAY OF CHAR; isHeader: BOOLEAN);
+VAR pos: INTEGER; cell: ARRAY 512 OF CHAR;
+BEGIN
+  Wstr("<tr>"); pos := 0;
+  WHILE GetCell(s, pos, cell) DO
+    IF isHeader THEN Wstr("<th>") ELSE Wstr("<td>") END;
+    WriteInlineHtml(cell);
+    IF isHeader THEN Wstr("</th>") ELSE Wstr("</td>") END
+  END;
+  Wstr("</tr>"); Wln
+END EmitTableRowHtml;
+
+PROCEDURE EndTableHtml;
+BEGIN
+  IF inTable THEN
+    IF inTableHead THEN
+      Wstr("<thead>"); Wln;
+      EmitTableRowHtml(tableHdr, TRUE);
+      Wstr("</thead>"); Wln;
+      inTableHead := FALSE
+    END;
+    Wstr("</tbody></table>"); Wln;
+    inTable := FALSE
+  END
+END EndTableHtml;
+
 PROCEDURE EndBlock;
-BEGIN EndPara; EndList; EndBQ END EndBlock;
+BEGIN EndPara; EndList; EndBQ; EndTableHtml END EndBlock;
 
 PROCEDURE IsHRule(s: ARRAY OF CHAR): BOOLEAN;
 VAR i: INTEGER; c: CHAR;
@@ -175,6 +205,45 @@ BEGIN
   WHILE (s[i] = c) OR (s[i] = ' ') DO INC(i) END;
   RETURN (s[i] = 0X) & (i >= 3)
 END IsHRule;
+
+PROCEDURE IsTableSep(s: ARRAY OF CHAR): BOOLEAN;
+VAR i, n: INTEGER; hasD: BOOLEAN;
+BEGIN
+  IF s[0] # '|' THEN RETURN FALSE END;
+  n := Strings.Length(s); hasD := FALSE; i := 0;
+  WHILE i < n DO
+    IF s[i] = '-' THEN hasD := TRUE
+    ELSIF (s[i] # '|') & (s[i] # ' ') & (s[i] # ':') THEN RETURN FALSE
+    END;
+    INC(i)
+  END;
+  RETURN hasD
+END IsTableSep;
+
+PROCEDURE GetCell(s: ARRAY OF CHAR; VAR pos: INTEGER; VAR cell: ARRAY OF CHAR): BOOLEAN;
+VAR i, start, fin, n: INTEGER;
+BEGIN
+  n := Strings.Length(s);
+  IF (pos < n) & (s[pos] = '|') THEN INC(pos) END;
+  IF pos >= n THEN RETURN FALSE END;
+  start := pos;
+  WHILE (pos < n) & (s[pos] # '|') DO INC(pos) END;
+  IF pos = start THEN RETURN FALSE END;
+  i := start;
+  WHILE (i < pos) & (s[i] = ' ') DO INC(i) END;
+  fin := pos;
+  WHILE (fin > i) & (s[fin-1] = ' ') DO DEC(fin) END;
+  Strings.Extract(s, i, fin - i, cell);
+  RETURN TRUE
+END GetCell;
+
+PROCEDURE CountCols(s: ARRAY OF CHAR): INTEGER;
+VAR pos, n: INTEGER; cell: ARRAY 512 OF CHAR;
+BEGIN
+  pos := 0; n := 0;
+  WHILE GetCell(s, pos, cell) DO INC(n) END;
+  RETURN n
+END CountCols;
 
 PROCEDURE ProcessLineHtml(s: ARRAY OF CHAR);
 VAR lvl, i, n: INTEGER;
@@ -207,6 +276,36 @@ BEGIN
   END;
 
   IF IsHRule(s) THEN EndBlock; Wstr("<hr>"); Wln; RETURN END;
+
+  IF IsTableSep(s) THEN
+    IF inTable & inTableHead THEN
+      Wstr("<thead>"); Wln;
+      EmitTableRowHtml(tableHdr, TRUE);
+      Wstr("</thead><tbody>"); Wln;
+      inTableHead := FALSE
+    END;
+    RETURN
+  END;
+
+  IF s[0] = '|' THEN
+    IF ~inTable THEN
+      EndBlock;
+      Wstr("<table>"); Wln;
+      inTable := TRUE; inTableHead := TRUE;
+      COPY(s, tableHdr)
+    ELSIF inTableHead THEN
+      Wstr("<thead>"); Wln;
+      EmitTableRowHtml(tableHdr, TRUE);
+      Wstr("</thead><tbody>"); Wln;
+      inTableHead := FALSE;
+      EmitTableRowHtml(s, FALSE)
+    ELSE
+      EmitTableRowHtml(s, FALSE)
+    END;
+    RETURN
+  END;
+
+  IF inTable THEN EndTableHtml END;
 
   IF s[0] = '>' THEN
     EndPara; EndList;
@@ -254,6 +353,9 @@ BEGIN
   Wstr("code{padding:.1em .3em;border-radius:3px}"); Wln;
   Wstr("blockquote{border-left:4px solid #ccc;margin-left:0;padding-left:1em;color:#555}"); Wln;
   Wstr("a{color:#0066cc}hr{border:none;border-top:1px solid #ccc}"); Wln;
+  Wstr("table{border-collapse:collapse;margin:1em 0}"); Wln;
+  Wstr("th,td{border:1px solid #ccc;padding:5px 10px;text-align:left}"); Wln;
+  Wstr("thead th{background:#f0f0f0;font-weight:bold}"); Wln;
   Wstr("</style></head><body>"); Wln
 END WriteHtmlHeader;
 
@@ -335,8 +437,43 @@ BEGIN inList := FALSE END EndListRtf;
 PROCEDURE EndBQRtf;
 BEGIN inBQ := FALSE END EndBQRtf;
 
+PROCEDURE EmitTableRowRtf(s: ARRAY OF CHAR; isHeader: BOOLEAN);
+VAR pos, i, cw: INTEGER; cell: ARRAY 512 OF CHAR; ns: ARRAY 16 OF CHAR;
+BEGIN
+  IF tableCols < 1 THEN tableCols := 1 END;
+  cw := 9360 DIV tableCols;
+  Wstr("\trowd\trgaph108\trleft0"); Wln;
+  i := 1;
+  WHILE i <= tableCols DO
+    Wstr("\clbrdrt\brdrw10\brdrs\clbrdrl\brdrw10\brdrs\clbrdrb\brdrw10\brdrs\clbrdrr\brdrw10\brdrs\cellx");
+    Strings.IntToStr(cw * i, ns); Wstr(ns); Wln;
+    INC(i)
+  END;
+  pos := 0;
+  WHILE GetCell(s, pos, cell) DO
+    Wstr("\pard\intbl\f0\fs24 ");
+    IF isHeader THEN Wstr("\b ") END;
+    WriteInlineRtf(cell);
+    IF isHeader THEN Wstr("\b0 ") END;
+    Wstr("\cell"); Wln
+  END;
+  Wstr("\row"); Wln
+END EmitTableRowRtf;
+
+PROCEDURE EndTableRtf;
+BEGIN
+  IF inTable THEN
+    IF inTableHead THEN
+      tableCols := CountCols(tableHdr);
+      EmitTableRowRtf(tableHdr, TRUE);
+      inTableHead := FALSE
+    END;
+    inTable := FALSE
+  END
+END EndTableRtf;
+
 PROCEDURE EndBlockRtf;
-BEGIN EndParaRtf; EndListRtf; EndBQRtf END EndBlockRtf;
+BEGIN EndParaRtf; EndListRtf; EndBQRtf; EndTableRtf END EndBlockRtf;
 
 PROCEDURE ProcessLineRtf(s: ARRAY OF CHAR);
 VAR lvl, i, n: INTEGER; ns: ARRAY 8 OF CHAR;
@@ -376,6 +513,33 @@ BEGIN
     EndBlockRtf;
     Wstr("\pard\brdrb\brdrs\brdrw10\brsp40\sb60\sa60 \par"); Wln; RETURN
   END;
+
+  IF IsTableSep(s) THEN
+    IF inTable & inTableHead THEN
+      tableCols := CountCols(tableHdr);
+      EmitTableRowRtf(tableHdr, TRUE);
+      inTableHead := FALSE
+    END;
+    RETURN
+  END;
+
+  IF s[0] = '|' THEN
+    IF ~inTable THEN
+      EndBlockRtf;
+      inTable := TRUE; inTableHead := TRUE;
+      COPY(s, tableHdr)
+    ELSIF inTableHead THEN
+      tableCols := CountCols(tableHdr);
+      EmitTableRowRtf(tableHdr, TRUE);
+      inTableHead := FALSE;
+      EmitTableRowRtf(s, FALSE)
+    ELSE
+      EmitTableRowRtf(s, FALSE)
+    END;
+    RETURN
+  END;
+
+  IF inTable THEN EndTableRtf END;
 
   IF s[0] = '>' THEN
     EndParaRtf; EndListRtf;
@@ -596,6 +760,51 @@ END RenderPdfRaw;
 PROCEDURE EndParaPdf;
 BEGIN inPara := FALSE; inList := FALSE; inBQ := FALSE END EndParaPdf;
 
+PROCEDURE EmitTableRowPdf(s: ARRAY OF CHAR; isHeader: BOOLEAN);
+VAR pos, i, x, cw, k, fnt: INTEGER; cell: ARRAY 512 OF CHAR;
+BEGIN
+  IF tableCols < 1 THEN tableCols := 1 END;
+  cw := TX_W DIV tableCols;
+  CheckPdfRoom(16);
+  Wstr("ET"); Wln;
+  Wstr("0.5 w"); Wln;
+  WpdfInt(PG_MAR); Wch(' '); WpdfInt(curY + 2); Wstr(" m ");
+  WpdfInt(PG_MAR + TX_W); Wch(' '); WpdfInt(curY + 2); Wstr(" l S"); Wln;
+  WpdfInt(PG_MAR); Wch(' '); WpdfInt(curY - 14); Wstr(" m ");
+  WpdfInt(PG_MAR + TX_W); Wch(' '); WpdfInt(curY - 14); Wstr(" l S"); Wln;
+  i := 0;
+  WHILE i <= tableCols DO
+    x := PG_MAR + i * cw;
+    WpdfInt(x); Wch(' '); WpdfInt(curY + 2); Wstr(" m ");
+    WpdfInt(x); Wch(' '); WpdfInt(curY - 14); Wstr(" l S"); Wln;
+    INC(i)
+  END;
+  Wstr("BT"); Wln;
+  IF isHeader THEN fnt := FN_B ELSE fnt := FN_R END;
+  pos := 0; i := 0;
+  WHILE GetCell(s, pos, cell) DO
+    x := PG_MAR + i * cw + 3;
+    PdfTm(x, curY - 11); PdfSetFont(fnt, 10);
+    Wch('('); k := 0;
+    WHILE cell[k] # 0X DO PdfEscCh(cell[k]); INC(k) END;
+    Wstr(") Tj"); Wln;
+    INC(i)
+  END;
+  DEC(curY, 16)
+END EmitTableRowPdf;
+
+PROCEDURE EndTablePdf;
+BEGIN
+  IF inTable THEN
+    IF inTableHead THEN
+      tableCols := CountCols(tableHdr);
+      EmitTableRowPdf(tableHdr, TRUE);
+      inTableHead := FALSE
+    END;
+    inTable := FALSE
+  END
+END EndTablePdf;
+
 PROCEDURE ProcessLinePdf(s: ARRAY OF CHAR);
 VAR lvl, i, n: INTEGER; ns: ARRAY 8 OF CHAR;
 BEGIN
@@ -612,6 +821,34 @@ BEGIN
   END;
 
   n := Strings.Length(s);
+
+  IF IsTableSep(s) THEN
+    IF inTable & inTableHead THEN
+      tableCols := CountCols(tableHdr);
+      EmitTableRowPdf(tableHdr, TRUE);
+      inTableHead := FALSE
+    END;
+    RETURN
+  END;
+
+  IF s[0] = '|' THEN
+    IF ~inTable THEN
+      EndParaPdf;
+      inTable := TRUE; inTableHead := TRUE; tableCols := 0;
+      COPY(s, tableHdr)
+    ELSIF inTableHead THEN
+      tableCols := CountCols(tableHdr);
+      EmitTableRowPdf(tableHdr, TRUE);
+      inTableHead := FALSE;
+      EmitTableRowPdf(s, FALSE)
+    ELSE
+      EmitTableRowPdf(s, FALSE)
+    END;
+    RETURN
+  END;
+
+  IF inTable THEN EndTablePdf END;
+
   IF n = 0 THEN EndParaPdf; RETURN END;
 
   lvl := 0;
@@ -828,8 +1065,46 @@ END EndListTex;
 PROCEDURE EndBQTex;
 BEGIN IF inBQ THEN Wstr("\end{quote}"); Wln; inBQ := FALSE END END EndBQTex;
 
+PROCEDURE WriteTabularSpec(n: INTEGER);
+VAR i: INTEGER;
+BEGIN
+  Wstr("\begin{tabular}{|");
+  i := 0; WHILE i < n DO Wstr("l|"); INC(i) END;
+  Wch('}'); Wln;
+  Wstr("\hline"); Wln
+END WriteTabularSpec;
+
+PROCEDURE EmitTableRowTex(s: ARRAY OF CHAR; isHeader: BOOLEAN);
+VAR pos: INTEGER; first: BOOLEAN; cell: ARRAY 512 OF CHAR;
+BEGIN
+  pos := 0; first := TRUE;
+  WHILE GetCell(s, pos, cell) DO
+    IF ~first THEN Wstr(" & ") END;
+    first := FALSE;
+    IF isHeader THEN Wstr("\textbf{") END;
+    WriteInlineTex(cell);
+    IF isHeader THEN Wch('}') END
+  END;
+  Wstr(" \\"); Wln;
+  Wstr("\hline"); Wln
+END EmitTableRowTex;
+
+PROCEDURE EndTableTex;
+BEGIN
+  IF inTable THEN
+    IF inTableHead THEN
+      tableCols := CountCols(tableHdr);
+      WriteTabularSpec(tableCols);
+      EmitTableRowTex(tableHdr, FALSE);
+      inTableHead := FALSE
+    END;
+    Wstr("\end{tabular}"); Wln; Wln;
+    inTable := FALSE
+  END
+END EndTableTex;
+
 PROCEDURE EndBlockTex;
-BEGIN EndParaTex; EndListTex; EndBQTex END EndBlockTex;
+BEGIN EndParaTex; EndListTex; EndBQTex; EndTableTex END EndBlockTex;
 
 PROCEDURE ProcessLineTex(s: ARRAY OF CHAR);
 VAR lvl, i, n: INTEGER;
@@ -864,6 +1139,35 @@ BEGIN
   END;
 
   IF IsHRule(s) THEN EndBlockTex; Wstr("\hrule"); Wln; Wln; RETURN END;
+
+  IF IsTableSep(s) THEN
+    IF inTable & inTableHead THEN
+      tableCols := CountCols(tableHdr);
+      WriteTabularSpec(tableCols);
+      EmitTableRowTex(tableHdr, TRUE);
+      inTableHead := FALSE
+    END;
+    RETURN
+  END;
+
+  IF s[0] = '|' THEN
+    IF ~inTable THEN
+      EndBlockTex;
+      inTable := TRUE; inTableHead := TRUE;
+      COPY(s, tableHdr)
+    ELSIF inTableHead THEN
+      tableCols := CountCols(tableHdr);
+      WriteTabularSpec(tableCols);
+      EmitTableRowTex(tableHdr, TRUE);
+      inTableHead := FALSE;
+      EmitTableRowTex(s, FALSE)
+    ELSE
+      EmitTableRowTex(s, FALSE)
+    END;
+    RETURN
+  END;
+
+  IF inTable THEN EndTableTex END;
 
   IF s[0] = '>' THEN
     EndParaTex; EndListTex;
@@ -984,6 +1288,7 @@ BEGIN
   inPara := FALSE; inList := FALSE; listOrd := FALSE; listN := 1;
   inCode := FALSE; inBQ   := FALSE;
   bold   := FALSE; ital   := FALSE;
+  inTable := FALSE; inTableHead := FALSE; tableCols := 0;
 
   Files.ReadLine(inR, line);
   WHILE ~inR.eof DO
