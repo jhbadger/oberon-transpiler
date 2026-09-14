@@ -632,9 +632,16 @@ BEGIN
 END BeginPdfPage;
 
 PROCEDURE EndPdfPage;
-VAR len: INTEGER;
+VAR len, pgNum, pw, x: INTEGER; ns: ARRAY 16 OF CHAR;
 BEGIN
   IF ~inBT OR (nPages >= MAXPG) THEN RETURN END;
+  pgNum := nPages + 1;
+  Strings.IntToStr(pgNum, ns);
+  pw := (Strings.Length(ns) + 4) * 10 * 55 DIV 100;
+  x := PG_W DIV 2 - pw DIV 2;
+  Wstr("1 0 0 1 "); WpdfInt(x); Wch(' '); WpdfInt(36); Wstr(" Tm"); Wln;
+  Wstr("/F1 10 Tf"); Wln;
+  Wstr("(- "); Wstr(ns); Wstr(" -) Tj"); Wln;
   Wstr("ET"); Wln; inBT := FALSE;
   len := Files.Pos(outR) - pgBase;
   Wstr("endstream"); Wln; WobjEnd;
