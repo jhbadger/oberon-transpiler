@@ -487,7 +487,7 @@ PROCEDURE PdfSetFont(fontN, sz: INTEGER);
 BEGIN Wstr("/F"); WpdfInt(fontN - 2); Wch(' '); WpdfInt(sz); Wstr(" Tf"); Wln END PdfSetFont;
 
 PROCEDURE PdfTm(x, y: INTEGER);
-BEGIN WpdfInt(x); Wch(' '); WpdfInt(y); Wstr(" Tm"); Wln END PdfTm;
+BEGIN Wstr("1 0 0 1 "); WpdfInt(x); Wch(' '); WpdfInt(y); Wstr(" Tm"); Wln END PdfTm;
 
 PROCEDURE PdfApproxW(len, sz, fontN: INTEGER): INTEGER;
 BEGIN
