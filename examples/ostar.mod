@@ -186,7 +186,7 @@ VAR
   styleCurKind : INTEGER;   (* kind at cursor position, set during DrawTextLine/DrawSegment *)
 
   (* Project *)
-  projPath     : ARRAY 512 OF CHAR;               (* path of open .pstarproj file, or empty *)
+  projPath     : ARRAY 512 OF CHAR;               (* path of open .ostarproj file, or empty *)
   projDocs     : ARRAY MaxProjDocs OF ARRAY 512 OF CHAR;
   projDocCount : INTEGER;
   projCurDoc   : INTEGER;   (* index of currently open doc in projDocs, or -1 *)
@@ -2895,7 +2895,7 @@ BEGIN
 END SaveProjFile;
 
 PROCEDURE LoadProjFile(path: ARRAY OF CHAR): BOOLEAN;
-(* Read a .pstarproj manifest into projDocs. Returns TRUE on success. *)
+(* Read a .ostarproj manifest into projDocs. Returns TRUE on success. *)
 VAR f: Files.File; r: Files.Rider; buf: ARRAY 512 OF CHAR;
 BEGIN
   f := Files.Old(path);
@@ -2945,11 +2945,11 @@ BEGIN
 END OpenProjDoc;
 
 PROCEDURE ProjNew(name: ARRAY OF CHAR);
-(* Create a new project named <name>, manifest at <name>.pstarproj *)
+(* Create a new project named <name>, manifest at <name>.ostarproj *)
 VAR tmp: ARRAY 32 OF CHAR;
 BEGIN
   COPY(name, projPath);
-  Strings.Append(".pstarproj", projPath);
+  Strings.Append(".ostarproj", projPath);
   projDocCount := 0;
   projCurDoc := -1;
   (* Add current file if we have one *)
@@ -3043,7 +3043,7 @@ BEGIN
   prefix := PrefNone;
   CASE k OF
     'n', 'N': StartInput("New project name", ActProjNew)
-  | 'p', 'P': StartInput("Open project (.pstarproj)", ActProjOpen)
+  | 'p', 'P': StartInput("Open project (.ostarproj)", ActProjOpen)
   | 'a', 'A': ProjAdd
   | 'r', 'R': ProjRemove
   | 'e', 'E': ProjPrev
