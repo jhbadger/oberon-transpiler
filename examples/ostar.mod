@@ -21,8 +21,8 @@ IMPORT TUI, Files, Strings, Args, Dict, OS, Env;
 
 (* ── Constants ───────────────────────────────────────────────────── *)
 CONST
-  MaxLines   = 4096;
-  MaxLineLen = 255;
+  MaxLines   = 65536;
+  MaxLineLen = 4095;
 
   KRSlots    = 8;    (* kill ring capacity        *)
   KRLines    = 128;  (* max lines per kill entry  *)
@@ -63,14 +63,16 @@ CONST
 
 (* ── Types ───────────────────────────────────────────────────────── *)
 TYPE
-  Line = ARRAY (MaxLineLen + 1) OF CHAR;
+  LineRec = RECORD s: ARRAY (MaxLineLen + 1) OF CHAR END;
+  Line    = POINTER TO LineRec;
+  LineBuf = ARRAY (MaxLineLen + 1) OF CHAR;
 
   UndoEntry = RECORD
     kind              : INTEGER;
     row, col          : INTEGER;   (* edit position *)
     curRow, curCol    : INTEGER;   (* cursor before op *)
-    line1             : Line;      (* primary saved content *)
-    line2             : Line;      (* secondary (unused for most ops) *)
+    line1             : Line;      (* heap-allocated; NIL = unused *)
+    line2             : Line;
   END;
 
   KillBlock = RECORD
@@ -231,8 +233,8 @@ END Clamp;
 
 PROCEDURE LineLen(row: INTEGER): INTEGER;
 BEGIN
-  IF (row >= 0) & (row < numLines) THEN
-    RETURN Strings.Length(lines[row])
+  IF (row >= 0) & (row < numLines) & (lines[row] # NIL) THEN
+    RETURN Strings.Length(lines[row].s)
   ELSE RETURN 0
   END
 END LineLen;
@@ -282,10 +284,11 @@ BEGIN
   IF numLines >= MaxLines THEN RETURN END;
   i := numLines;
   WHILE i > from DO
-    COPY(lines[i - 1], lines[i]);
+    lines[i] := lines[i - 1];
     DEC(i)
   END;
-  lines[from][0] := 0X;
+  NEW(lines[from]);
+  lines[from].s[0] := 0X;
   INC(numLines)
 END ShiftLinesDown;
 
@@ -293,13 +296,14 @@ PROCEDURE ShiftLinesUp(from: INTEGER);
 (* Delete line at `from'; lines above shift down. *)
 VAR i: INTEGER;
 BEGIN
-  IF numLines <= 1 THEN lines[0][0] := 0X; RETURN END;
+  IF numLines <= 1 THEN lines[0].s[0] := 0X; RETURN END;
+  FREE(lines[from]);
   i := from;
   WHILE i < numLines - 1 DO
-    COPY(lines[i + 1], lines[i]);
+    lines[i] := lines[i + 1];
     INC(i)
   END;
-  lines[numLines - 1][0] := 0X;
+  lines[numLines - 1] := NIL;
   DEC(numLines)
 END ShiftLinesUp;
 
@@ -309,13 +313,18 @@ PROCEDURE UndoSaveLine;
 (* Call before any single-line char-level edit. *)
 VAR e: UndoEntry;
 BEGIN
-  IF undoTop >= MaxUndo THEN DEC(undoTop) END;
+  IF undoTop >= MaxUndo THEN
+    DEC(undoTop);
+    IF undoStack[undoTop].line1 # NIL THEN FREE(undoStack[undoTop].line1) END;
+    IF undoStack[undoTop].line2 # NIL THEN FREE(undoStack[undoTop].line2) END
+  END;
   e.kind   := UKLine;
   e.row    := curRow;
   e.col    := curCol;
   e.curRow := curRow;
   e.curCol := curCol;
-  COPY(lines[curRow], e.line1);
+  NEW(e.line1); COPY(lines[curRow].s, e.line1.s);
+  e.line2  := NIL;
   undoStack[undoTop] := e;
   INC(undoTop)
 END UndoSaveLine;
@@ -324,13 +333,18 @@ PROCEDURE UndoSaveBreak;
 (* Call before splitting a line (Enter). Saves original combined line. *)
 VAR e: UndoEntry;
 BEGIN
-  IF undoTop >= MaxUndo THEN DEC(undoTop) END;
+  IF undoTop >= MaxUndo THEN
+    DEC(undoTop);
+    IF undoStack[undoTop].line1 # NIL THEN FREE(undoStack[undoTop].line1) END;
+    IF undoStack[undoTop].line2 # NIL THEN FREE(undoStack[undoTop].line2) END
+  END;
   e.kind   := UKBreak;
   e.row    := curRow;
   e.col    := curCol;
   e.curRow := curRow;
   e.curCol := curCol;
-  COPY(lines[curRow], e.line1);
+  NEW(e.line1); COPY(lines[curRow].s, e.line1.s);
+  e.line2  := NIL;
   undoStack[undoTop] := e;
   INC(undoTop)
 END UndoSaveBreak;
@@ -339,18 +353,24 @@ PROCEDURE UndoSaveJoin(upperRow, splitCol: INTEGER);
 (* Call before joining `upperRow` with `upperRow+1'. Saves the removed line. *)
 VAR e: UndoEntry;
 BEGIN
-  IF undoTop >= MaxUndo THEN DEC(undoTop) END;
+  IF undoTop >= MaxUndo THEN
+    DEC(undoTop);
+    IF undoStack[undoTop].line1 # NIL THEN FREE(undoStack[undoTop].line1) END;
+    IF undoStack[undoTop].line2 # NIL THEN FREE(undoStack[undoTop].line2) END
+  END;
   e.kind   := UKJoin;
   e.row    := upperRow;
   e.col    := splitCol;    (* length of upper line = where the split was *)
   e.curRow := curRow;
   e.curCol := curCol;
   (* Save the line that will be deleted (the lower one) *)
+  NEW(e.line1);
   IF upperRow + 1 < numLines THEN
-    COPY(lines[upperRow + 1], e.line1)
+    COPY(lines[upperRow + 1].s, e.line1.s)
   ELSE
-    e.line1[0] := 0X
+    e.line1.s[0] := 0X
   END;
+  e.line2  := NIL;
   undoStack[undoTop] := e;
   INC(undoTop)
 END UndoSaveJoin;
@@ -359,13 +379,18 @@ PROCEDURE UndoSaveInsLine(row: INTEGER);
 (* Call after inserting blank line at `row' so we record what was inserted. *)
 VAR e: UndoEntry;
 BEGIN
-  IF undoTop >= MaxUndo THEN DEC(undoTop) END;
+  IF undoTop >= MaxUndo THEN
+    DEC(undoTop);
+    IF undoStack[undoTop].line1 # NIL THEN FREE(undoStack[undoTop].line1) END;
+    IF undoStack[undoTop].line2 # NIL THEN FREE(undoStack[undoTop].line2) END
+  END;
   e.kind   := UKIns;
   e.row    := row;
   e.col    := 0;
   e.curRow := curRow;
   e.curCol := curCol;
-  e.line1[0] := 0X;
+  e.line1  := NIL;
+  e.line2  := NIL;
   undoStack[undoTop] := e;
   INC(undoTop)
 END UndoSaveInsLine;
@@ -374,40 +399,47 @@ PROCEDURE UndoSaveDelLine(row: INTEGER);
 (* Call before deleting line `row'. Saves its content. *)
 VAR e: UndoEntry;
 BEGIN
-  IF undoTop >= MaxUndo THEN DEC(undoTop) END;
+  IF undoTop >= MaxUndo THEN
+    DEC(undoTop);
+    IF undoStack[undoTop].line1 # NIL THEN FREE(undoStack[undoTop].line1) END;
+    IF undoStack[undoTop].line2 # NIL THEN FREE(undoStack[undoTop].line2) END
+  END;
   e.kind   := UKDel;
   e.row    := row;
   e.col    := 0;
   e.curRow := curRow;
   e.curCol := curCol;
-  COPY(lines[row], e.line1);
+  NEW(e.line1); COPY(lines[row].s, e.line1.s);
+  e.line2  := NIL;
   undoStack[undoTop] := e;
   INC(undoTop)
 END UndoSaveDelLine;
 
 PROCEDURE DoUndo;
-VAR e: UndoEntry; rest: Line;
+VAR e: UndoEntry; restBuf: LineBuf;
 BEGIN
   IF undoTop = 0 THEN SetStatus("Nothing to undo"); RETURN END;
   DEC(undoTop);
   e := undoStack[undoTop];
+  undoStack[undoTop].line1 := NIL;
+  undoStack[undoTop].line2 := NIL;
   CASE e.kind OF
     UKLine:
-      COPY(e.line1, lines[e.row]);
+      COPY(e.line1.s, lines[e.row].s);
       curRow := e.curRow;
       curCol := e.curCol
   | UKBreak:
       (* Undo Enter: restore original line, remove the split-off line *)
-      COPY(e.line1, lines[e.row]);
+      COPY(e.line1.s, lines[e.row].s);
       ShiftLinesUp(e.row + 1);
       curRow := e.curRow;
       curCol := e.curCol
   | UKJoin:
       (* Undo join: re-split lines[e.row] at e.col, restore removed line *)
-      Strings.Extract(lines[e.row], e.col, MaxLineLen, rest);
-      lines[e.row][e.col] := 0X;
+      Strings.Extract(lines[e.row].s, e.col, MaxLineLen, restBuf);
+      lines[e.row].s[e.col] := 0X;
       ShiftLinesDown(e.row + 1);
-      COPY(rest, lines[e.row + 1]);
+      COPY(restBuf, lines[e.row + 1].s);
       curRow := e.curRow;
       curCol := e.curCol
   | UKIns:
@@ -418,10 +450,12 @@ BEGIN
   | UKDel:
       (* Undo delete-line: re-insert it *)
       ShiftLinesDown(e.row);
-      COPY(e.line1, lines[e.row]);
+      COPY(e.line1.s, lines[e.row].s);
       curRow := e.curRow;
       curCol := e.curCol
   END;
+  IF e.line1 # NIL THEN FREE(e.line1) END;
+  IF e.line2 # NIL THEN FREE(e.line2) END;
   dirty := TRUE;
   needRedraw := TRUE
 END DoUndo;
@@ -429,13 +463,17 @@ END DoUndo;
 (* ── File I/O ────────────────────────────────────────────────────── *)
 
 PROCEDURE LoadFile(path: ARRAY OF CHAR): BOOLEAN;
-VAR f: Files.File; r: Files.Rider; i: INTEGER; tmp: Line;
+VAR f: Files.File; r: Files.Rider; i: INTEGER;
 BEGIN
-  f := Files.Old(path);
+  (* Free existing lines *)
+  FOR i := 0 TO numLines - 1 DO
+    IF lines[i] # NIL THEN FREE(lines[i]) END
+  END;
   numLines := 0;
+  f := Files.Old(path);
   IF f = NIL THEN
     (* New / non-existent file *)
-    lines[0][0] := 0X;
+    NEW(lines[0]); lines[0].s[0] := 0X;
     numLines := 1;
     COPY(path, filePath);
     dirty := FALSE;
@@ -443,14 +481,16 @@ BEGIN
   END;
   Files.Set(r, f, 0);
   WHILE ~r.eof & (numLines < MaxLines) DO
-    Files.ReadLine(r, tmp);
-    IF ~r.eof OR (tmp[0] # 0X) THEN
-      COPY(tmp, lines[numLines]);
+    NEW(lines[numLines]);
+    Files.ReadLine(r, lines[numLines].s);
+    IF ~r.eof OR (lines[numLines].s[0] # 0X) THEN
       INC(numLines)
+    ELSE
+      FREE(lines[numLines])
     END
   END;
   Files.Close(f);
-  IF numLines = 0 THEN lines[0][0] := 0X; numLines := 1 END;
+  IF numLines = 0 THEN NEW(lines[0]); lines[0].s[0] := 0X; numLines := 1 END;
   COPY(path, filePath);
   dirty := FALSE;
   RETURN TRUE
@@ -467,7 +507,7 @@ BEGIN
   IF f = NIL THEN SetStatus("Save failed"); RETURN FALSE END;
   Files.Set(r, f, 0);
   FOR i := 0 TO numLines - 1 DO
-    Files.WriteLine(r, lines[i])
+    Files.WriteLine(r, lines[i].s)
   END;
   Files.Register(f);
   Files.Close(f);
@@ -485,9 +525,9 @@ BEGIN
   UndoSaveLine;
   tmp[0] := c; tmp[1] := 0X;
   IF overtype & (curCol < LineLen(curRow)) THEN
-    lines[curRow][curCol] := c
+    lines[curRow].s[curCol] := c
   ELSE
-    Strings.Insert(tmp, curCol, lines[curRow])
+    Strings.Insert(tmp, curCol, lines[curRow].s)
   END;
   INC(curCol);
   dirty := TRUE;
@@ -509,12 +549,12 @@ BEGIN
   len := LineLen(curRow);
   IF curCol < len THEN
     UndoSaveLine;
-    Strings.Delete(lines[curRow], curCol, 1);
+    Strings.Delete(lines[curRow].s, curCol, 1);
     dirty := TRUE; needRedraw := TRUE
   ELSIF curRow < numLines - 1 THEN
     UndoSaveJoin(curRow, len);
     IF LineLen(curRow) + LineLen(curRow + 1) <= MaxLineLen THEN
-      Strings.Append(lines[curRow + 1], lines[curRow]);
+      Strings.Append(lines[curRow + 1].s, lines[curRow].s);
       ShiftLinesUp(curRow + 1)
     END;
     dirty := TRUE; needRedraw := TRUE
@@ -528,13 +568,13 @@ BEGIN
   IF curCol > 0 THEN
     UndoSaveLine;
     DEC(curCol);
-    Strings.Delete(lines[curRow], curCol, 1);
+    Strings.Delete(lines[curRow].s, curCol, 1);
     dirty := TRUE; needRedraw := TRUE
   ELSIF curRow > 0 THEN
     upperLen := LineLen(curRow - 1);
     UndoSaveJoin(curRow - 1, upperLen);
     IF upperLen + LineLen(curRow) <= MaxLineLen THEN
-      Strings.Append(lines[curRow], lines[curRow - 1]);
+      Strings.Append(lines[curRow].s, lines[curRow - 1].s);
       ShiftLinesUp(curRow);
       DEC(curRow);
       curCol := upperLen
@@ -545,13 +585,13 @@ END BackspaceChar;
 
 PROCEDURE BreakLine;
 (* Insert newline at cursor (Enter) *)
-VAR rest: Line;
+VAR restBuf: LineBuf;
 BEGIN
   UndoSaveBreak;
-  Strings.Extract(lines[curRow], curCol, MaxLineLen, rest);
-  lines[curRow][curCol] := 0X;
+  Strings.Extract(lines[curRow].s, curCol, MaxLineLen, restBuf);
+  lines[curRow].s[curCol] := 0X;
   ShiftLinesDown(curRow + 1);
-  COPY(rest, lines[curRow + 1]);
+  COPY(restBuf, lines[curRow + 1].s);
   INC(curRow); curCol := 0;
   dirty := TRUE; needRedraw := TRUE
 END BreakLine;
@@ -568,22 +608,26 @@ BEGIN
   UndoSaveLine;
   i := curCol;
   (* Skip any non-word chars first, then word chars *)
-  WHILE (i < len) & ~IsWordChar(lines[curRow][i]) DO INC(i) END;
-  WHILE (i < len) & IsWordChar(lines[curRow][i]) DO INC(i) END;
-  Strings.Delete(lines[curRow], curCol, i - curCol);
+  WHILE (i < len) & ~IsWordChar(lines[curRow].s[i]) DO INC(i) END;
+  WHILE (i < len) & IsWordChar(lines[curRow].s[i]) DO INC(i) END;
+  Strings.Delete(lines[curRow].s, curCol, i - curCol);
   dirty := TRUE; needRedraw := TRUE
 END DeleteWordRight;
 
 PROCEDURE DeleteLine;
 (* ^Y — delete current line to kill ring, leave cursor on same row *)
-VAR kb: KillBlock; slot: INTEGER;
+VAR slot, i: INTEGER;
 BEGIN
   UndoSaveDelLine(curRow);
   (* Put the line in the kill ring *)
   slot := killHead MOD KRSlots;
-  kb.n := 1;
-  COPY(lines[curRow], kb.data[0]);
-  killRing[slot] := kb;
+  FOR i := 0 TO killRing[slot].n - 1 DO
+    IF killRing[slot].data[i] # NIL THEN FREE(killRing[slot].data[i]) END
+  END;
+  killRing[slot].n := 1;
+  killRing[slot].data[0] := NIL;
+  NEW(killRing[slot].data[0]);
+  COPY(lines[curRow].s, killRing[slot].data[0].s);
   killHead := (killHead + 1) MOD KRSlots;
   IF killCount < KRSlots THEN INC(killCount) END;
   putIndex := 0;
@@ -600,7 +644,7 @@ BEGIN
   len := LineLen(curRow);
   IF curCol < len THEN
     UndoSaveLine;
-    lines[curRow][curCol] := 0X;
+    lines[curRow].s[curCol] := 0X;
     dirty := TRUE; needRedraw := TRUE
   END
 END DeleteToEOL;
@@ -633,7 +677,7 @@ BEGIN
   len := LineLen(row);
   IF ~wrap OR (len - from <= wrapMargin) THEN RETURN len END;
   bp := from + wrapMargin;
-  WHILE (bp > from) & (lines[row][bp] # ' ') DO DEC(bp) END;
+  WHILE (bp > from) & (lines[row].s[bp] # ' ') DO DEC(bp) END;
   IF bp = from THEN RETURN from + wrapMargin END;
   RETURN bp
 END SegEnd;
@@ -643,7 +687,7 @@ PROCEDURE SegNext(row, from: INTEGER): INTEGER;
 VAR e: INTEGER;
 BEGIN
   e := SegEnd(row, from);
-  IF (e < LineLen(row)) & (lines[row][e] = ' ') THEN RETURN e + 1 END;
+  IF (e < LineLen(row)) & (lines[row].s[e] = ' ') THEN RETURN e + 1 END;
   RETURN e
 END SegNext;
 
@@ -759,8 +803,8 @@ BEGIN
     IF curRow > 0 THEN DEC(curRow); curCol := LineLen(curRow) END
   ELSE
     DEC(curCol);
-    WHILE (curCol > 0) & ~IsWordChar(lines[curRow][curCol]) DO DEC(curCol) END;
-    WHILE (curCol > 0) & IsWordChar(lines[curRow][curCol - 1]) DO DEC(curCol) END
+    WHILE (curCol > 0) & ~IsWordChar(lines[curRow].s[curCol]) DO DEC(curCol) END;
+    WHILE (curCol > 0) & IsWordChar(lines[curRow].s[curCol - 1]) DO DEC(curCol) END
   END;
   needRedraw := TRUE
 END MoveWordLeft;
@@ -774,8 +818,8 @@ BEGIN
   IF curCol >= len THEN
     IF curRow < numLines - 1 THEN INC(curRow); curCol := 0 END
   ELSE
-    WHILE (curCol < len) & ~IsWordChar(lines[curRow][curCol]) DO INC(curCol) END;
-    WHILE (curCol < len) & IsWordChar(lines[curRow][curCol]) DO INC(curCol) END
+    WHILE (curCol < len) & ~IsWordChar(lines[curRow].s[curCol]) DO INC(curCol) END;
+    WHILE (curCol < len) & IsWordChar(lines[curRow].s[curCol]) DO INC(curCol) END
   END;
   needRedraw := TRUE
 END MoveWordRight;
@@ -912,11 +956,11 @@ BEGIN
       DEC(r); c := LineLen(r)
     END;
     IF c > 0 THEN
-      ch := lines[r][c - 1];
+      ch := lines[r].s[c - 1];
       IF (ch = '.') OR (ch = '!') OR (ch = '?') THEN
         (* skip whitespace after the punctuation *)
         INC(c);
-        WHILE (c < LineLen(r)) & (lines[r][c] = ' ') DO INC(c) END;
+        WHILE (c < LineLen(r)) & (lines[r].s[c] = ' ') DO INC(c) END;
         curRow := r; curCol := c; goalCol := -1; needRedraw := TRUE;
         RETURN
       END
@@ -935,10 +979,10 @@ BEGIN
   LOOP
     len := LineLen(r);
     WHILE c < len DO
-      ch := lines[r][c];
+      ch := lines[r].s[c];
       IF (ch = '.') OR (ch = '!') OR (ch = '?') THEN
         INC(c);
-        WHILE (c < len) & (lines[r][c] = ' ') DO INC(c) END;
+        WHILE (c < len) & (lines[r].s[c] = ' ') DO INC(c) END;
         IF c < len THEN
           curRow := r; curCol := c; goalCol := -1; needRedraw := TRUE; RETURN
         END
@@ -990,7 +1034,7 @@ PROCEDURE MoveNextHeading;
 VAR r: INTEGER;
 BEGIN
   r := curRow + 1;
-  WHILE (r < numLines) & (lines[r][0] # '#') DO INC(r) END;
+  WHILE (r < numLines) & (lines[r].s[0] # '#') DO INC(r) END;
   IF r < numLines THEN
     SavePrev;
     curRow := r; curCol := 0; goalCol := -1; needRedraw := TRUE
@@ -1006,9 +1050,9 @@ BEGIN
   IF (curCol = 0) OR (len = 0) THEN SetStatus("Nothing to transpose"); RETURN END;
   IF curCol >= len THEN curCol := len END;
   UndoSaveLine;
-  tmp := lines[curRow][curCol - 1];
-  lines[curRow][curCol - 1] := lines[curRow][curCol];
-  lines[curRow][curCol] := tmp;
+  tmp := lines[curRow].s[curCol - 1];
+  lines[curRow].s[curCol - 1] := lines[curRow].s[curCol];
+  lines[curRow].s[curCol] := tmp;
   IF curCol < len THEN INC(curCol) END;
   dirty := TRUE; needRedraw := TRUE
 END TransposeChars;
@@ -1016,29 +1060,29 @@ END TransposeChars;
 PROCEDURE TransposeWords;
 (* ^QT — swap word at/after cursor with the following word on same line *)
 VAR w1s, w1e, w2s, w2e: INTEGER;
-    prefix, word1, gap, word2, suffix: Line;
+    prefix, word1, gap, word2, suffix: LineBuf;
 BEGIN
   w1s := curCol;
-  WHILE (w1s < LineLen(curRow)) & ~IsWordChar(lines[curRow][w1s]) DO INC(w1s) END;
+  WHILE (w1s < LineLen(curRow)) & ~IsWordChar(lines[curRow].s[w1s]) DO INC(w1s) END;
   IF w1s >= LineLen(curRow) THEN SetStatus("No word to transpose"); RETURN END;
   w1e := w1s;
-  WHILE (w1e < LineLen(curRow)) & IsWordChar(lines[curRow][w1e]) DO INC(w1e) END;
+  WHILE (w1e < LineLen(curRow)) & IsWordChar(lines[curRow].s[w1e]) DO INC(w1e) END;
   w2s := w1e;
-  WHILE (w2s < LineLen(curRow)) & ~IsWordChar(lines[curRow][w2s]) DO INC(w2s) END;
+  WHILE (w2s < LineLen(curRow)) & ~IsWordChar(lines[curRow].s[w2s]) DO INC(w2s) END;
   IF w2s >= LineLen(curRow) THEN SetStatus("No second word to transpose"); RETURN END;
   w2e := w2s;
-  WHILE (w2e < LineLen(curRow)) & IsWordChar(lines[curRow][w2e]) DO INC(w2e) END;
+  WHILE (w2e < LineLen(curRow)) & IsWordChar(lines[curRow].s[w2e]) DO INC(w2e) END;
   UndoSaveLine;
-  Strings.Extract(lines[curRow], 0,   w1s,       prefix);
-  Strings.Extract(lines[curRow], w1s, w1e - w1s, word1);
-  Strings.Extract(lines[curRow], w1e, w2s - w1e, gap);
-  Strings.Extract(lines[curRow], w2s, w2e - w2s, word2);
-  Strings.Extract(lines[curRow], w2e, MaxLineLen, suffix);
-  COPY(prefix, lines[curRow]);
-  Strings.Append(word2, lines[curRow]);
-  Strings.Append(gap,   lines[curRow]);
-  Strings.Append(word1, lines[curRow]);
-  Strings.Append(suffix,lines[curRow]);
+  Strings.Extract(lines[curRow].s, 0,   w1s,       prefix);
+  Strings.Extract(lines[curRow].s, w1s, w1e - w1s, word1);
+  Strings.Extract(lines[curRow].s, w1e, w2s - w1e, gap);
+  Strings.Extract(lines[curRow].s, w2s, w2e - w2s, word2);
+  Strings.Extract(lines[curRow].s, w2e, MaxLineLen, suffix);
+  COPY(prefix, lines[curRow].s);
+  Strings.Append(word2, lines[curRow].s);
+  Strings.Append(gap,   lines[curRow].s);
+  Strings.Append(word1, lines[curRow].s);
+  Strings.Append(suffix,lines[curRow].s);
   curCol := w1s + Strings.Length(word2);
   dirty := TRUE; needRedraw := TRUE
 END TransposeWords;
@@ -1108,27 +1152,34 @@ END BlockHide;
 
 PROCEDURE KillPushBlock(r1, c1, r2, c2: INTEGER);
 (* Copy lines[r1,c1 .. r2,c2) into the kill ring. *)
-VAR slot: INTEGER; kb: KillBlock; i, n: INTEGER; tmp: Line;
+VAR slot, i: INTEGER; kb: KillBlock;
 BEGIN
   slot := killHead MOD KRSlots;
+  FOR i := 0 TO killRing[slot].n - 1 DO
+    IF killRing[slot].data[i] # NIL THEN FREE(killRing[slot].data[i]) END
+  END;
   kb.n := 0;
   IF r1 = r2 THEN
     (* Single partial line *)
-    Strings.Extract(lines[r1], c1, c2 - c1, kb.data[0]);
+    NEW(kb.data[0]);
+    Strings.Extract(lines[r1].s, c1, c2 - c1, kb.data[0].s);
     kb.n := 1
   ELSE
     (* First (partial) line *)
-    Strings.Extract(lines[r1], c1, MaxLineLen, kb.data[0]);
+    NEW(kb.data[kb.n]);
+    Strings.Extract(lines[r1].s, c1, MaxLineLen, kb.data[kb.n].s);
     INC(kb.n);
     (* Middle lines *)
     i := r1 + 1;
     WHILE (i < r2) & (kb.n < KRLines) DO
-      COPY(lines[i], kb.data[kb.n]);
+      NEW(kb.data[kb.n]);
+      COPY(lines[i].s, kb.data[kb.n].s);
       INC(kb.n); INC(i)
     END;
     (* Last partial line *)
     IF kb.n < KRLines THEN
-      Strings.Extract(lines[r2], 0, c2, kb.data[kb.n]);
+      NEW(kb.data[kb.n]);
+      Strings.Extract(lines[r2].s, 0, c2, kb.data[kb.n].s);
       INC(kb.n)
     END
   END;
@@ -1140,7 +1191,7 @@ END KillPushBlock;
 
 PROCEDURE KillPut;
 (* ^KP — paste most-recent kill ring entry at cursor, cycling on repeats *)
-VAR kb: KillBlock; slot, i, insertRow: INTEGER; before, after: Line;
+VAR kb: KillBlock; slot, i, insertRow: INTEGER; afterBuf: LineBuf;
 BEGIN
   IF killCount = 0 THEN SetStatus("Kill ring empty"); RETURN END;
   slot := (killHead - 1 - putIndex + KRSlots * 2) MOD KRSlots;
@@ -1150,26 +1201,26 @@ BEGIN
   (* Insert kb at cursor position *)
   IF kb.n = 1 THEN
     UndoSaveLine;
-    IF LineLen(curRow) + Strings.Length(kb.data[0]) <= MaxLineLen THEN
-      Strings.Insert(kb.data[0], curCol, lines[curRow]);
-      INC(curCol, Strings.Length(kb.data[0]))
+    IF LineLen(curRow) + Strings.Length(kb.data[0].s) <= MaxLineLen THEN
+      Strings.Insert(kb.data[0].s, curCol, lines[curRow].s);
+      INC(curCol, Strings.Length(kb.data[0].s))
     END
   ELSE
     (* Multi-line paste: split current line, insert lines, rejoin last *)
     UndoSaveBreak;
-    Strings.Extract(lines[curRow], curCol, MaxLineLen, after);
-    lines[curRow][curCol] := 0X;
-    Strings.Append(kb.data[0], lines[curRow]);
+    Strings.Extract(lines[curRow].s, curCol, MaxLineLen, afterBuf);
+    lines[curRow].s[curCol] := 0X;
+    Strings.Append(kb.data[0].s, lines[curRow].s);
     insertRow := curRow + 1;
     FOR i := 1 TO kb.n - 1 DO
       ShiftLinesDown(insertRow);
-      COPY(kb.data[i], lines[insertRow]);
+      COPY(kb.data[i].s, lines[insertRow].s);
       INC(insertRow)
     END;
     curRow := insertRow - 1;
-    curCol := Strings.Length(lines[curRow]);
-    IF LineLen(curRow) + Strings.Length(after) <= MaxLineLen THEN
-      Strings.Append(after, lines[curRow])
+    curCol := Strings.Length(lines[curRow].s);
+    IF LineLen(curRow) + Strings.Length(afterBuf) <= MaxLineLen THEN
+      Strings.Append(afterBuf, lines[curRow].s)
     END
   END;
   dirty := TRUE; needRedraw := TRUE
@@ -1190,21 +1241,21 @@ END BlockCopy;
 
 PROCEDURE BlockDelete;
 (* ^KY — delete marked block *)
-VAR r1, c1, r2, c2, i: INTEGER; rest: Line;
+VAR r1, c1, r2, c2, i: INTEGER; restBuf: LineBuf;
 BEGIN
   IF ~hasBlkB OR ~hasBlkE THEN SetStatus("No block marked"); RETURN END;
   NormBlock(r1, c1, r2, c2);
   KillPushBlock(r1, c1, r2, c2);
   IF r1 = r2 THEN
     UndoSaveLine;
-    Strings.Delete(lines[r1], c1, c2 - c1);
+    Strings.Delete(lines[r1].s, c1, c2 - c1);
     curRow := r1; curCol := c1
   ELSE
     (* Keep text before c1 on r1, text after c2 on r2; join them *)
     UndoSaveBreak;  (* approximation *)
-    Strings.Extract(lines[r2], c2, MaxLineLen, rest);
-    lines[r1][c1] := 0X;
-    Strings.Append(rest, lines[r1]);
+    Strings.Extract(lines[r2].s, c2, MaxLineLen, restBuf);
+    lines[r1].s[c1] := 0X;
+    Strings.Append(restBuf, lines[r1].s);
     (* Delete lines r1+1 .. r2 *)
     FOR i := r1 + 1 TO r2 DO ShiftLinesUp(r1 + 1) END;
     curRow := r1; curCol := c1
@@ -1246,7 +1297,7 @@ BEGIN
     WHILE c <= llen - slen DO
       match := TRUE;
       FOR i := 0 TO slen - 1 DO
-        IF CaseChar(lines[r][c + i]) # CaseChar(searchStr[i]) THEN
+        IF CaseChar(lines[r].s[c + i]) # CaseChar(searchStr[i]) THEN
           match := FALSE
         END
       END;
@@ -1282,10 +1333,10 @@ PROCEDURE DoReplace;
 VAR replen, i: INTEGER;
 BEGIN
   UndoSaveLine;
-  Strings.Delete(lines[searchRow], searchCol, searchLen);
+  Strings.Delete(lines[searchRow].s, searchCol, searchLen);
   replen := Strings.Length(replWith);
   IF replen > 0 THEN
-    Strings.Insert(replWith, searchCol, lines[searchRow])
+    Strings.Insert(replWith, searchCol, lines[searchRow].s)
   END;
   curRow := searchRow;
   curCol := searchCol + replen;
@@ -1300,8 +1351,8 @@ BEGIN
   n := 0; inWord := FALSE;
   FOR row := 0 TO numLines - 1 DO
     col := 0;
-    WHILE lines[row][col] # 0X DO
-      c := lines[row][col];
+    WHILE lines[row].s[col] # 0X DO
+      c := lines[row].s[col];
       IF IsWordChar(c) THEN
         IF ~inWord THEN INC(n); inWord := TRUE END
       ELSE
@@ -1465,21 +1516,21 @@ END HasDigit;
 (* Build a boolean mask for one line: mask[col] = TRUE iff that character
    is part of a word that hunspell flagged and is not in personalDict.    *)
 PROCEDURE BuildSpellMask(row: INTEGER; VAR mask: ARRAY OF BOOLEAN);
-VAR col, len, ws, we: INTEGER; word, lword: Line;
+VAR col, len, ws, we: INTEGER; wordBuf, lwordBuf: LineBuf;
 BEGIN
   len := LineLen(row);
   FOR col := 0 TO len DO mask[col] := FALSE END;
   col := 0;
   WHILE col < len DO
-    IF IsWordChar(lines[row][col]) THEN
+    IF IsWordChar(lines[row].s[col]) THEN
       ws := col;
-      WHILE (col < len) & IsWordChar(lines[row][col]) DO INC(col) END;
+      WHILE (col < len) & IsWordChar(lines[row].s[col]) DO INC(col) END;
       we := col;
       IF we - ws > 1 THEN
-        Strings.Extract(lines[row], ws, we - ws, word);
-        IF ~IsAllCaps(word) & ~HasDigit(word) THEN
-          COPY(word, lword); Strings.ToLower(lword);
-          IF Dict.Has(misspelled, lword) & ~Dict.Has(personalDict, lword) THEN
+        Strings.Extract(lines[row].s, ws, we - ws, wordBuf);
+        IF ~IsAllCaps(wordBuf) & ~HasDigit(wordBuf) THEN
+          COPY(wordBuf, lwordBuf); Strings.ToLower(lwordBuf);
+          IF Dict.Has(misspelled, lwordBuf) & ~Dict.Has(personalDict, lwordBuf) THEN
             FOR col := ws TO we - 1 DO mask[col] := TRUE END
           END
         END;
@@ -1496,16 +1547,16 @@ VAR c, len, ws: INTEGER;
 BEGIN
   word[0] := 0X;
   len := LineLen(curRow);
-  IF (curCol >= len) OR ~IsWordChar(lines[curRow][curCol]) THEN RETURN END;
+  IF (curCol >= len) OR ~IsWordChar(lines[curRow].s[curCol]) THEN RETURN END;
   ws := curCol;
-  WHILE (ws > 0) & IsWordChar(lines[curRow][ws - 1]) DO DEC(ws) END;
+  WHILE (ws > 0) & IsWordChar(lines[curRow].s[ws - 1]) DO DEC(ws) END;
   c := ws;
-  WHILE (c < len) & IsWordChar(lines[curRow][c]) DO INC(c) END;
-  Strings.Extract(lines[curRow], ws, c - ws, word)
+  WHILE (c < len) & IsWordChar(lines[curRow].s[c]) DO INC(c) END;
+  Strings.Extract(lines[curRow].s, ws, c - ws, word)
 END WordUnderCursor;
 
 PROCEDURE LoadPersonalDict;
-VAR f: Files.File; r: Files.Rider; word: Line;
+VAR f: Files.File; r: Files.Rider; wordBuf: LineBuf;
 BEGIN
   Dict.Init(personalDict);
   IF personalPath[0] = 0X THEN RETURN END;
@@ -1513,8 +1564,8 @@ BEGIN
   IF f = NIL THEN RETURN END;
   Files.Set(r, f, 0);
   WHILE ~r.eof DO
-    Files.ReadLine(r, word);
-    IF word[0] # 0X THEN Strings.ToLower(word); Dict.Put(personalDict, word, "") END
+    Files.ReadLine(r, wordBuf);
+    IF wordBuf[0] # 0X THEN Strings.ToLower(wordBuf); Dict.Put(personalDict, wordBuf, "") END
   END;
   Files.Close(f)
 END LoadPersonalDict;
@@ -1523,7 +1574,7 @@ END LoadPersonalDict;
    Results land in `misspelled`; highlights appear on the next redraw. *)
 PROCEDURE RunSpellCheck;
 VAR f: Files.File; r: Files.Rider; row, col, len, ws: INTEGER;
-    word, lword: Line; cmd: ARRAY 768 OF CHAR;
+    wordBuf, lwordBuf: LineBuf; cmd: ARRAY 768 OF CHAR;
     tmpDir, wordsFile, badFile: ARRAY 512 OF CHAR;
     seen: Dict.Table; cnt: INTEGER; tmp: ARRAY 32 OF CHAR;
 BEGIN
@@ -1543,16 +1594,16 @@ BEGIN
   FOR row := 0 TO numLines - 1 DO
     col := 0; len := LineLen(row);
     WHILE col < len DO
-      IF IsWordChar(lines[row][col]) THEN
+      IF IsWordChar(lines[row].s[col]) THEN
         ws := col;
-        WHILE (col < len) & IsWordChar(lines[row][col]) DO INC(col) END;
+        WHILE (col < len) & IsWordChar(lines[row].s[col]) DO INC(col) END;
         IF col - ws > 1 THEN
-          Strings.Extract(lines[row], ws, col - ws, word);
-          IF ~IsAllCaps(word) & ~HasDigit(word) THEN
-            COPY(word, lword); Strings.ToLower(lword);
-            IF ~Dict.Has(seen, lword) THEN
-              Files.WriteLine(r, lword);
-              Dict.Put(seen, lword, "");
+          Strings.Extract(lines[row].s, ws, col - ws, wordBuf);
+          IF ~IsAllCaps(wordBuf) & ~HasDigit(wordBuf) THEN
+            COPY(wordBuf, lwordBuf); Strings.ToLower(lwordBuf);
+            IF ~Dict.Has(seen, lwordBuf) THEN
+              Files.WriteLine(r, lwordBuf);
+              Dict.Put(seen, lwordBuf, "");
               INC(cnt)
             END
           END
@@ -1578,11 +1629,11 @@ BEGIN
   IF f # NIL THEN
     Files.Set(r, f, 0);
     WHILE ~r.eof DO
-      Files.ReadLine(r, word);
-      IF word[0] # 0X THEN
-        Strings.ToLower(word);
-        IF ~Dict.Has(personalDict, word) THEN
-          Dict.Put(misspelled, word, "");
+      Files.ReadLine(r, wordBuf);
+      IF wordBuf[0] # 0X THEN
+        Strings.ToLower(wordBuf);
+        IF ~Dict.Has(personalDict, wordBuf) THEN
+          Dict.Put(misspelled, wordBuf, "");
           INC(cnt)
         END
       END
@@ -1600,7 +1651,7 @@ END RunSpellCheck;
 
 (* ^QN — jump cursor to the next misspelled word *)
 PROCEDURE NextMisspelling;
-VAR row, col, len, ws, we: INTEGER; word, lword: Line;
+VAR row, col, len, ws, we: INTEGER; wordBuf, lwordBuf: LineBuf;
 BEGIN
   IF ~spellEnabled THEN SetStatus("Spell off — ^OS to enable"); RETURN END;
   row := curRow; col := curCol + 1;
@@ -1609,17 +1660,17 @@ BEGIN
     IF row >= numLines THEN SetStatus("No more misspellings"); RETURN END;
     len := LineLen(row);
     WHILE col < len DO
-      IF IsWordChar(lines[row][col]) THEN
+      IF IsWordChar(lines[row].s[col]) THEN
         ws := col;
-        WHILE (col < len) & IsWordChar(lines[row][col]) DO INC(col) END;
+        WHILE (col < len) & IsWordChar(lines[row].s[col]) DO INC(col) END;
         we := col;
         IF we - ws > 1 THEN
-          Strings.Extract(lines[row], ws, we - ws, word);
-          IF ~IsAllCaps(word) & ~HasDigit(word) THEN
-            COPY(word, lword); Strings.ToLower(lword);
-            IF Dict.Has(misspelled, lword) & ~Dict.Has(personalDict, lword) THEN
+          Strings.Extract(lines[row].s, ws, we - ws, wordBuf);
+          IF ~IsAllCaps(wordBuf) & ~HasDigit(wordBuf) THEN
+            COPY(wordBuf, lwordBuf); Strings.ToLower(lwordBuf);
+            IF Dict.Has(misspelled, lwordBuf) & ~Dict.Has(personalDict, lwordBuf) THEN
               curRow := row; curCol := ws;
-              COPY("Misspelling: ", statusMsg); Strings.Append(word, statusMsg);
+              COPY("Misspelling: ", statusMsg); Strings.Append(wordBuf, statusMsg);
               needRedraw := TRUE; RETURN
             END
           END
@@ -1635,14 +1686,14 @@ END NextMisspelling;
 PROCEDURE AddToPersonalDict;
 (* Files.Old opens read-only ("rb") so we cannot write through it.
    Files.New truncates.  Shell append is the only safe option here. *)
-VAR word, lword: Line; cmd: ARRAY 700 OF CHAR;
+VAR wordBuf, lwordBuf: LineBuf; cmd: ARRAY 700 OF CHAR;
     dirPath: ARRAY 512 OF CHAR; i: INTEGER;
 BEGIN
-  WordUnderCursor(word);
-  IF word[0] = 0X THEN SetStatus("No word under cursor"); RETURN END;
-  COPY(word, lword); Strings.ToLower(lword);
-  Dict.Put(personalDict, lword, "");
-  Dict.Remove(misspelled, lword);
+  WordUnderCursor(wordBuf);
+  IF wordBuf[0] = 0X THEN SetStatus("No word under cursor"); RETURN END;
+  COPY(wordBuf, lwordBuf); Strings.ToLower(lwordBuf);
+  Dict.Put(personalDict, lwordBuf, "");
+  Dict.Remove(misspelled, lwordBuf);
   IF personalPath[0] # 0X THEN
     (* Ensure parent directory exists *)
     COPY(personalPath, dirPath);
@@ -1657,14 +1708,14 @@ BEGIN
     END;
     (* Append the word as a new line *)
     COPY("printf '%s\n' '", cmd);
-    Strings.Append(lword, cmd);
+    Strings.Append(lwordBuf, cmd);
     Strings.Append("' >> '", cmd);
     Strings.Append(personalPath, cmd);
     Strings.Append("'", cmd);
     OS.Exec(cmd)
   END;
   TUI.InvalidateFront;  (* shell subprocess may have disturbed the terminal *)
-  COPY("Added to dictionary: ", statusMsg); Strings.Append(word, statusMsg);
+  COPY("Added to dictionary: ", statusMsg); Strings.Append(wordBuf, statusMsg);
   needRedraw := TRUE
 END AddToPersonalDict;
 
@@ -1677,7 +1728,7 @@ BEGIN
   x := 1;
   col := leftCol;
   WHILE (x <= TUI.Cols) & (col <= len) DO
-    c := lines[docRow][col];
+    c := lines[docRow].s[col];
     IF c = 0X THEN c := ' ' END;
     IF InBlock(docRow, col) THEN
       fg := ThBlkFg(); bg := ThBlkBg()
@@ -1840,7 +1891,7 @@ BEGIN
   IF spellEnabled THEN BuildSpellMask(docRow, mask) END;
   x := 1; col := segFrom;
   WHILE (x <= TUI.Cols) & (col < segEnd) DO
-    c := lines[docRow][col];
+    c := lines[docRow].s[col];
     IF c = 0X THEN c := ' ' END;
     IF InBlock(docRow, col) THEN
       fg := ThBlkFg(); bg := ThBlkBg()
@@ -1936,8 +1987,8 @@ END StartInput;
 
 PROCEDURE CommitInput;
 VAR tmp: ARRAY 16 OF CHAR; n: INTEGER; ok: BOOLEAN;
-    r1, c1, r2, c2, i: INTEGER; f: Files.File; r: Files.Rider; tmp2: Line;
-    f2: Files.File; rr: Files.Rider; tmp3: Line;
+    r1, c1, r2, c2, i: INTEGER; f: Files.File; r: Files.Rider; tmpBuf: LineBuf;
+    f2: Files.File; rr: Files.Rider;
 BEGIN
   mode := ModeNormal;
   CASE inpAction OF
@@ -1959,14 +2010,14 @@ BEGIN
         IF f # NIL THEN
           Files.Set(r, f, 0);
           IF r1 = r2 THEN
-            Strings.Extract(lines[r1], c1, c2 - c1, tmp2);
-            Files.WriteLine(r, tmp2)
+            Strings.Extract(lines[r1].s, c1, c2 - c1, tmpBuf);
+            Files.WriteLine(r, tmpBuf)
           ELSE
-            Strings.Extract(lines[r1], c1, MaxLineLen, tmp2);
-            Files.WriteLine(r, tmp2);
-            FOR i := r1 + 1 TO r2 - 1 DO Files.WriteLine(r, lines[i]) END;
-            Strings.Extract(lines[r2], 0, c2, tmp2);
-            Files.WriteLine(r, tmp2)
+            Strings.Extract(lines[r1].s, c1, MaxLineLen, tmpBuf);
+            Files.WriteLine(r, tmpBuf);
+            FOR i := r1 + 1 TO r2 - 1 DO Files.WriteLine(r, lines[i].s) END;
+            Strings.Extract(lines[r2].s, 0, c2, tmpBuf);
+            Files.WriteLine(r, tmpBuf)
           END;
           Files.Register(f); Files.Close(f);
           SetStatus("Block written")
@@ -1978,10 +2029,10 @@ BEGIN
       IF f2 # NIL THEN
         Files.Set(rr, f2, 0);
         WHILE ~rr.eof DO
-          Files.ReadLine(rr, tmp3);
-          IF ~rr.eof OR (tmp3[0] # 0X) THEN
+          Files.ReadLine(rr, tmpBuf);
+          IF ~rr.eof OR (tmpBuf[0] # 0X) THEN
             ShiftLinesDown(curRow + 1);
-            COPY(tmp3, lines[curRow + 1]);
+            COPY(tmpBuf, lines[curRow + 1].s);
             INC(curRow)
           END
         END;
@@ -2318,7 +2369,7 @@ END HandleKey;
 
 BEGIN
   (* Initialise state *)
-  numLines := 1; lines[0][0] := 0X;
+  NEW(lines[0]); lines[0].s[0] := 0X; numLines := 1;
   filePath[0] := 0X;
   dirty := FALSE;
   curRow := 0; curCol := 0; goalCol := -1;
