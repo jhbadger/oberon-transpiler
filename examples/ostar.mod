@@ -2326,6 +2326,52 @@ BEGIN
   END
 END HandleNormalKey;
 
+PROCEDURE HandleMouse;
+(* Translate a TUI mouse event into editor actions. *)
+VAR sx, sy, btn: INTEGER;
+    bufRow, segF, e, targetRow, targetCol: INTEGER;
+BEGIN
+  sx  := ev.mx;   (* 1-based screen column *)
+  sy  := ev.my;   (* 1-based screen row    *)
+  btn := ev.mb;
+
+  IF btn = 64 THEN          (* wheel up *)
+    ScrollUp; RETURN
+  ELSIF btn = 65 THEN       (* wheel down *)
+    ScrollDown; RETURN
+  ELSIF btn # 0 THEN RETURN (* ignore middle, right, release, motion *)
+  END;
+
+  (* Left click: find document position from screen position *)
+  IF sy >= TUI.Rows THEN RETURN END;  (* status bar — ignore *)
+
+  IF wrap THEN
+    (* Walk visual rows from topLine until we reach screen row sy *)
+    bufRow := topLine; segF := 0;
+    WHILE sy > 1 DO
+      e := SegEnd(bufRow, segF);
+      IF e >= LineLen(bufRow) THEN INC(bufRow); segF := 0
+      ELSE segF := SegNext(bufRow, segF)
+      END;
+      DEC(sy);
+      IF bufRow >= numLines THEN bufRow := numLines - 1; segF := 0; sy := 0 END
+    END;
+    targetRow := bufRow;
+    targetCol := segF + (sx - 1);
+    IF targetCol > LineLen(targetRow) THEN targetCol := LineLen(targetRow) END
+  ELSE
+    targetRow := topLine + (sy - 1);
+    IF targetRow >= numLines THEN targetRow := numLines - 1 END;
+    targetCol := leftCol + (sx - 1);
+    IF targetCol > LineLen(targetRow) THEN targetCol := LineLen(targetRow) END
+  END;
+
+  SavePrev;
+  curRow := targetRow; curCol := targetCol;
+  goalCol := -1;
+  needRedraw := TRUE
+END HandleMouse;
+
 PROCEDURE HandleKey(k: CHAR);
 BEGIN
   CASE mode OF
@@ -2425,6 +2471,8 @@ BEGIN
       needRedraw := TRUE
     ELSIF ev.kind = TUI.EvKey THEN
       HandleKey(ev.key)
+    ELSIF ev.kind = TUI.EvMouse THEN
+      HandleMouse
     END;
     IF ~running THEN EXIT END
   END;
