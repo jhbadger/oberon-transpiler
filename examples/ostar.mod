@@ -1416,18 +1416,24 @@ BEGIN
   ELSIF prefix = PrefQ THEN COPY("^Q Quick", s)
   ELSIF prefix = PrefO THEN COPY("^O Onscreen", s)
   ELSIF prefix = PrefP THEN COPY("^P Project", s)
-  ELSIF mode = ModeSearch THEN
-    COPY("FIND: ", s); Strings.Append(searchStr, s)
   ELSIF mode = ModeReplace THEN
     COPY("REPLACE? (Y/N/A/Esc)", s)
-  ELSIF mode = ModeInput THEN
-    COPY(inpLabel, s); Strings.Append(": ", s); Strings.Append(inpValue, s)
   ELSIF mode = ModeConfirm THEN
     COPY("Quit without saving? (Y/N)", s)
   ELSIF overtype THEN COPY("OVR", s)
   END;
   IF statusMsg[0] # 0X THEN COPY(statusMsg, s) END;
-  IF s[0] # 0X THEN
+  (* Search and input prompts are left-aligned so the cursor lands right
+     after the typed text (position is computable without measuring the line). *)
+  IF mode = ModeSearch THEN
+    s[0] := 0X;
+    COPY("FIND: ", s); Strings.Append(searchStr, s);
+    TUI.PutStr(1, TUI.Rows, s, fg, bg)
+  ELSIF mode = ModeInput THEN
+    s[0] := 0X;
+    COPY(inpLabel, s); Strings.Append(": ", s); Strings.Append(inpValue, s);
+    TUI.PutStr(1, TUI.Rows, s, fg, bg)
+  ELSIF s[0] # 0X THEN
     col := TUI.Cols - Strings.Length(s);
     IF col < 1 THEN col := 1 END;
     TUI.PutStr(col, TUI.Rows, s, fg, bg)
@@ -1543,8 +1549,14 @@ BEGIN
     DrawPrefixMenu(prefix)
   END;
   IF mode = ModePalette THEN DrawPalette END;
-  (* Hardware cursor *)
-  TUI.SetCursor(curCol - leftCol + 1, curRow - topLine + 1);
+  (* Hardware cursor: in search/input the user is typing into the status bar *)
+  IF mode = ModeSearch THEN
+    TUI.SetCursor(7 + Strings.Length(searchStr), TUI.Rows)
+  ELSIF mode = ModeInput THEN
+    TUI.SetCursor(Strings.Length(inpLabel) + 3 + Strings.Length(inpValue), TUI.Rows)
+  ELSE
+    TUI.SetCursor(curCol - leftCol + 1, curRow - topLine + 1)
+  END;
   TUI.Flush
 END DrawAll;
 
