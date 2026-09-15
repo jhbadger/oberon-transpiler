@@ -11,13 +11,14 @@ MODULE OStar;
  *              ^QF find, ^QA replace, ^Q,/. sentence, ^Q[/] para,
  *              ^QO next heading, ^QG transpose chars, ^QT transpose words.
  * Prefix ^O  — Onscreen: ^OB cycle theme, ^OH cycle help, ^OW wrap,
- *              ^OS spellcheck (stub), ^OT typewriter scroll.
+ *              ^OS spellcheck, ^OT typewriter scroll, ^OC word count,
+ *              ^OF focus mode.
  * Prefix ^P  — Project (future).
  * Other: ^G delete, ^H backspace, ^T del-word, ^Y del-line,
  *        ^N insert line, ^U undo, ^L find next, ^V overtype toggle,
  *        F1 command palette (shows key list).
  *)
-IMPORT TUI, Files, Strings, Args, Dict, OS, Env;
+IMPORT TUI, Files, Strings, Args, Dict, OS, Env, Time;
 
 (* ── Constants ───────────────────────────────────────────────────── *)
 CONST
@@ -156,6 +157,11 @@ VAR
 
   (* Misc *)
   needRedraw  : BOOLEAN;
+
+  (* Focus mode *)
+  focusMode   : BOOLEAN;
+  focusParaS  : INTEGER;
+  focusParaE  : INTEGER;
 
   (* Palette scroll *)
   palScroll   : INTEGER;
@@ -680,6 +686,65 @@ BEGIN
   Strings.Append(rtfPath, statusMsg);
   needRedraw := TRUE
 END ExportRTF;
+
+(* ── Clean Export (^KE) ─────────────────────────────────────────── *)
+
+PROCEDURE ExportClean;
+(* Write all non-note lines to <basename>.txt, stripping .. note lines. *)
+VAR f: Files.File; r: Files.Rider;
+    txtPath: ARRAY 512 OF CHAR;
+    i, j: INTEGER;
+BEGIN
+  IF filePath[0] = 0X THEN SetStatus("Save file first (^KD)"); RETURN END;
+  COPY(filePath, txtPath);
+  j := Strings.Length(txtPath) - 1;
+  WHILE (j > 0) & (txtPath[j] # '.') & (txtPath[j] # '/') DO DEC(j) END;
+  IF (j > 0) & (txtPath[j] = '.') THEN txtPath[j] := 0X END;
+  Strings.Append(".txt", txtPath);
+  f := Files.New(txtPath);
+  IF f = NIL THEN SetStatus("Clean export: cannot create file"); RETURN END;
+  Files.Set(r, f, 0);
+  FOR i := 0 TO numLines - 1 DO
+    IF ~((lines[i].s[0] = '.') & (lines[i].s[1] = '.')) THEN
+      Files.WriteLine(r, lines[i].s)
+    END
+  END;
+  Files.Register(f);
+  Files.Close(f);
+  SetStatus("Exported: ");
+  Strings.Append(txtPath, statusMsg);
+  needRedraw := TRUE
+END ExportClean;
+
+(* ── Snapshot / Backup (^KN) ─────────────────────────────────────── *)
+
+PROCEDURE SaveSnapshot;
+(* Save a dated copy of the file as <basename>.YYYYMMDD-HHMMSS.bak *)
+VAR f: Files.File; r: Files.Rider;
+    bakPath, stamp: ARRAY 512 OF CHAR;
+    i, j: INTEGER;
+BEGIN
+  IF filePath[0] = 0X THEN SetStatus("Save file first (^KD)"); RETURN END;
+  COPY(filePath, bakPath);
+  j := Strings.Length(bakPath) - 1;
+  WHILE (j > 0) & (bakPath[j] # '.') & (bakPath[j] # '/') DO DEC(j) END;
+  IF (j > 0) & (bakPath[j] = '.') THEN bakPath[j] := 0X END;
+  Time.Format(Time.Now(), "%Y%m%d-%H%M%S", stamp);
+  Strings.Append(".", bakPath);
+  Strings.Append(stamp, bakPath);
+  Strings.Append(".bak", bakPath);
+  f := Files.New(bakPath);
+  IF f = NIL THEN SetStatus("Snapshot: cannot create file"); RETURN END;
+  Files.Set(r, f, 0);
+  FOR i := 0 TO numLines - 1 DO
+    Files.WriteLine(r, lines[i].s)
+  END;
+  Files.Register(f);
+  Files.Close(f);
+  SetStatus("Snapshot: ");
+  Strings.Append(bakPath, statusMsg);
+  needRedraw := TRUE
+END SaveSnapshot;
 
 (* ── Text Editing ────────────────────────────────────────────────── *)
 
@@ -1593,12 +1658,16 @@ BEGIN
   | 53: COPY("^QT",  chord); COPY("transpose words",       desc)
   | 54: COPY("F1",   chord); COPY("this key list",         desc)
   | 55: COPY("^KM",  chord); COPY("export RTF manuscript",  desc)
+  | 56: COPY("^KE",  chord); COPY("clean export (strip notes)", desc)
+  | 57: COPY("^KN",  chord); COPY("snapshot/backup",        desc)
+  | 58: COPY("^OC",  chord); COPY("word count",             desc)
+  | 59: COPY("^OF",  chord); COPY("focus mode toggle",      desc)
   ELSE (* end *)
   END
 END PaletteEntry;
 
 PROCEDURE PaletteCount(): INTEGER;
-BEGIN RETURN 56 END PaletteCount;
+BEGIN RETURN 60 END PaletteCount;
 
 (* ── Splash Screen ───────────────────────────────────────────────── *)
 
@@ -1886,17 +1955,20 @@ BEGIN
 END AddToPersonalDict;
 
 PROCEDURE DrawTextLine(screenY, docRow: INTEGER);
-VAR col, len, x, fg, bg: INTEGER; c: CHAR;
+VAR col, len, x, fg, bg: INTEGER; c: CHAR; dimmed: BOOLEAN;
     mask: ARRAY (MaxLineLen + 1) OF BOOLEAN;
 BEGIN
   len := LineLen(docRow);
   IF spellEnabled THEN BuildSpellMask(docRow, mask) END;
+  dimmed := focusMode & ((docRow < focusParaS) OR (docRow > focusParaE));
   x := 1;
   col := leftCol;
   WHILE (x <= TUI.Cols) & (col <= len) DO
     c := lines[docRow].s[col];
     IF c = 0X THEN c := ' ' END;
-    IF InBlock(docRow, col) THEN
+    IF dimmed THEN
+      fg := ThDimFg(); bg := ThBg()
+    ELSIF InBlock(docRow, col) THEN
       fg := ThBlkFg(); bg := ThBlkBg()
     ELSIF (docRow = searchRow) & (col >= searchCol) & (col < searchCol + searchLen)
         & (mode = ModeSearch) THEN
@@ -1911,7 +1983,11 @@ BEGIN
   END;
   (* Fill remainder of line *)
   IF x <= TUI.Cols THEN
-    TUI.FillRect(x, screenY, TUI.Cols - x + 1, 1, ' ', ThFg(), ThBg())
+    IF dimmed THEN
+      TUI.FillRect(x, screenY, TUI.Cols - x + 1, 1, ' ', ThDimFg(), ThBg())
+    ELSE
+      TUI.FillRect(x, screenY, TUI.Cols - x + 1, 1, ' ', ThFg(), ThBg())
+    END
   END
 END DrawTextLine;
 
@@ -2050,16 +2126,19 @@ END DrawPalette;
 
 PROCEDURE DrawSegment(screenY, docRow, segFrom: INTEGER);
 (* Draw one visual wrap segment of docRow on screen row screenY. *)
-VAR col, segEnd, x, fg, bg: INTEGER; c: CHAR;
+VAR col, segEnd, x, fg, bg: INTEGER; c: CHAR; dimmed: BOOLEAN;
     mask: ARRAY (MaxLineLen + 1) OF BOOLEAN;
 BEGIN
   segEnd := SegEnd(docRow, segFrom);
   IF spellEnabled THEN BuildSpellMask(docRow, mask) END;
+  dimmed := focusMode & ((docRow < focusParaS) OR (docRow > focusParaE));
   x := 1; col := segFrom;
   WHILE (x <= TUI.Cols) & (col < segEnd) DO
     c := lines[docRow].s[col];
     IF c = 0X THEN c := ' ' END;
-    IF InBlock(docRow, col) THEN
+    IF dimmed THEN
+      fg := ThDimFg(); bg := ThBg()
+    ELSIF InBlock(docRow, col) THEN
       fg := ThBlkFg(); bg := ThBlkBg()
     ELSIF (docRow = searchRow) & (col >= searchCol) & (col < searchCol + searchLen)
         & (mode = ModeSearch) THEN
@@ -2073,7 +2152,11 @@ BEGIN
     INC(x); INC(col)
   END;
   IF x <= TUI.Cols THEN
-    TUI.FillRect(x, screenY, TUI.Cols - x + 1, 1, ' ', ThFg(), ThBg())
+    IF dimmed THEN
+      TUI.FillRect(x, screenY, TUI.Cols - x + 1, 1, ' ', ThDimFg(), ThBg())
+    ELSE
+      TUI.FillRect(x, screenY, TUI.Cols - x + 1, 1, ' ', ThFg(), ThBg())
+    END
   END
 END DrawSegment;
 
@@ -2085,6 +2168,13 @@ BEGIN
   TUI.InvalidateFront;
   TUI.ClearBack(ThFg(), ThBg());
   EnsureVisible;
+  (* Compute focus paragraph bounds around curRow *)
+  IF focusMode THEN
+    focusParaS := curRow;
+    WHILE (focusParaS > 0) & (LineLen(focusParaS - 1) > 0) DO DEC(focusParaS) END;
+    focusParaE := curRow;
+    WHILE (focusParaE < numLines - 1) & (LineLen(focusParaE + 1) > 0) DO INC(focusParaE) END
+  END;
   (* Draw text lines *)
   IF wrap THEN
     bufRow := topLine; segF := 0;
@@ -2338,6 +2428,8 @@ BEGIN
   | 'w', 'W': StartInput("Write block to file", ActWBlk)
   | 'r', 'R': StartInput("Read file", ActRFile)
   | 'm', 'M': ExportRTF
+  | 'e', 'E': ExportClean
+  | 'n', 'N': SaveSnapshot
   ELSE SetStatus("Unknown ^K command")
   END;
   needRedraw := TRUE
@@ -2380,11 +2472,18 @@ BEGIN
 END HandlePrefixQ;
 
 PROCEDURE HandlePrefixO(k: CHAR);
-VAR tmp: ARRAY 16 OF CHAR;
+VAR tmp: ARRAY 32 OF CHAR; wc: INTEGER;
 BEGIN
   prefix := PrefNone;
   CASE k OF
-    'b', 'B':
+    'c', 'C':
+      wc := WordCount();
+      COPY("Words: ", statusMsg); Strings.IntToStr(wc, tmp); Strings.Append(tmp, statusMsg);
+      Strings.Append("  Lines: ", statusMsg); Strings.IntToStr(numLines, tmp); Strings.Append(tmp, statusMsg)
+  | 'f', 'F':
+      focusMode := ~focusMode;
+      IF focusMode THEN SetStatus("Focus mode ON") ELSE SetStatus("Focus mode OFF") END
+  | 'b', 'B':
       IF theme = ThWP THEN theme := ThWS
       ELSIF theme = ThWS THEN theme := ThDef
       ELSE theme := ThWP
@@ -2602,6 +2701,7 @@ BEGIN
   inReplace := FALSE;
   needRedraw := TRUE;
   palScroll := 0;
+  focusMode := FALSE; focusParaS := 0; focusParaE := 0;
   spellEnabled := FALSE;
   Dict.Init(misspelled);
   Dict.Init(personalDict);
