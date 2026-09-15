@@ -7,7 +7,9 @@ MODULE OStar;
  * Prefix ^K  — Block & File: ^KB/KK marks, ^KC copy, ^KV move, ^KY del,
  *              ^KP put, ^KD/KS save, ^KX save+quit, ^KQ quit.
  * Prefix ^Q  — Quick: ^QS/QD line start/end, ^QR/QC doc start/end,
- *              ^QF find, ^QA replace, ^QE/QX screen top/bot.
+ *              ^QE/QX screen top/bot, ^QB/QK jump block, ^QP prev pos,
+ *              ^QF find, ^QA replace, ^Q,/. sentence, ^Q[/] para,
+ *              ^QO next heading, ^QG transpose chars, ^QT transpose words.
  * Prefix ^O  — Onscreen: ^OB cycle theme, ^OH cycle help, ^OW wrap,
  *              ^OS spellcheck (stub), ^OT typewriter scroll.
  * Prefix ^P  — Project (future).
@@ -145,6 +147,10 @@ VAR
   misspelled   : Dict.Table;   (* words hunspell flagged as wrong  *)
   personalDict : Dict.Table;   (* personal word list (always OK)   *)
   personalPath : ARRAY 512 OF CHAR;
+
+  (* Previous position (^QP) *)
+  prevRow, prevCol : INTEGER;
+  hasPrev          : BOOLEAN;
 
   (* Misc *)
   needRedraw  : BOOLEAN;
@@ -784,12 +790,12 @@ BEGIN goalCol := -1; curCol := LineLen(curRow); needRedraw := TRUE END MoveLineE
 
 PROCEDURE MoveDocStart;
 (* ^QR *)
-BEGIN goalCol := -1; curRow := 0; curCol := 0; needRedraw := TRUE END MoveDocStart;
+BEGIN SavePrev; goalCol := -1; curRow := 0; curCol := 0; needRedraw := TRUE END MoveDocStart;
 
 PROCEDURE MoveDocEnd;
 (* ^QC *)
 BEGIN
-  goalCol := -1;
+  SavePrev; goalCol := -1;
   curRow := numLines - 1;
   curCol := LineLen(curRow);
   needRedraw := TRUE
@@ -861,6 +867,181 @@ BEGIN
   curCol := Min(curCol, LineLen(curRow));
   needRedraw := TRUE
 END ScreenBottom;
+
+PROCEDURE SavePrev;
+BEGIN prevRow := curRow; prevCol := curCol; hasPrev := TRUE END SavePrev;
+
+PROCEDURE JumpPrev;
+(* ^QP — jump to position before last large move *)
+VAR r, c: INTEGER;
+BEGIN
+  IF ~hasPrev THEN SetStatus("No previous position"); RETURN END;
+  r := prevRow; c := prevCol;
+  SavePrev;
+  curRow := r; curCol := c;
+  goalCol := -1; needRedraw := TRUE
+END JumpPrev;
+
+PROCEDURE JumpBlockBegin;
+(* ^QB *)
+BEGIN
+  IF ~hasBlkB THEN SetStatus("No block begin marked"); RETURN END;
+  SavePrev;
+  curRow := blkBRow; curCol := blkBCol;
+  goalCol := -1; needRedraw := TRUE
+END JumpBlockBegin;
+
+PROCEDURE JumpBlockEnd;
+(* ^QK *)
+BEGIN
+  IF ~hasBlkE THEN SetStatus("No block end marked"); RETURN END;
+  SavePrev;
+  curRow := blkERow; curCol := blkECol;
+  goalCol := -1; needRedraw := TRUE
+END JumpBlockEnd;
+
+PROCEDURE MoveSentBack;
+(* ^Q, — move to start of previous sentence (. ! ? followed by space/newline) *)
+VAR r, c: INTEGER; ch: CHAR;
+BEGIN
+  SavePrev;
+  r := curRow; c := curCol - 1;
+  LOOP
+    IF c < 0 THEN
+      IF r = 0 THEN EXIT END;
+      DEC(r); c := LineLen(r)
+    END;
+    IF c > 0 THEN
+      ch := lines[r][c - 1];
+      IF (ch = '.') OR (ch = '!') OR (ch = '?') THEN
+        (* skip whitespace after the punctuation *)
+        INC(c);
+        WHILE (c < LineLen(r)) & (lines[r][c] = ' ') DO INC(c) END;
+        curRow := r; curCol := c; goalCol := -1; needRedraw := TRUE;
+        RETURN
+      END
+    END;
+    DEC(c)
+  END;
+  curRow := 0; curCol := 0; goalCol := -1; needRedraw := TRUE
+END MoveSentBack;
+
+PROCEDURE MoveSentForward;
+(* ^Q. — move to start of next sentence *)
+VAR r, c, len: INTEGER; ch: CHAR;
+BEGIN
+  SavePrev;
+  r := curRow; c := curCol;
+  LOOP
+    len := LineLen(r);
+    WHILE c < len DO
+      ch := lines[r][c];
+      IF (ch = '.') OR (ch = '!') OR (ch = '?') THEN
+        INC(c);
+        WHILE (c < len) & (lines[r][c] = ' ') DO INC(c) END;
+        IF c < len THEN
+          curRow := r; curCol := c; goalCol := -1; needRedraw := TRUE; RETURN
+        END
+      END;
+      INC(c)
+    END;
+    INC(r);
+    IF r >= numLines THEN
+      curRow := numLines - 1; curCol := LineLen(curRow);
+      goalCol := -1; needRedraw := TRUE; RETURN
+    END;
+    c := 0
+  END
+END MoveSentForward;
+
+PROCEDURE MoveParaBack;
+(* ^Q[ — move to start of previous paragraph (blank-line delimited) *)
+VAR r: INTEGER;
+BEGIN
+  SavePrev;
+  r := curRow;
+  (* If already on a blank line, step off it first *)
+  IF LineLen(r) = 0 THEN DEC(r) END;
+  (* Skip back over non-blank lines *)
+  WHILE (r > 0) & (LineLen(r) > 0) DO DEC(r) END;
+  (* Skip back over blank lines *)
+  WHILE (r > 0) & (LineLen(r) = 0) DO DEC(r) END;
+  (* Now find start of this paragraph *)
+  WHILE (r > 0) & (LineLen(r - 1) > 0) DO DEC(r) END;
+  curRow := r; curCol := 0; goalCol := -1; needRedraw := TRUE
+END MoveParaBack;
+
+PROCEDURE MoveParaForward;
+(* ^Q] — move to start of next paragraph *)
+VAR r: INTEGER;
+BEGIN
+  SavePrev;
+  r := curRow;
+  (* Skip over current non-blank lines *)
+  WHILE (r < numLines) & (LineLen(r) > 0) DO INC(r) END;
+  (* Skip blank lines *)
+  WHILE (r < numLines) & (LineLen(r) = 0) DO INC(r) END;
+  IF r >= numLines THEN r := numLines - 1 END;
+  curRow := r; curCol := 0; goalCol := -1; needRedraw := TRUE
+END MoveParaForward;
+
+PROCEDURE MoveNextHeading;
+(* ^QO — jump to next Markdown heading (line starting with #) *)
+VAR r: INTEGER;
+BEGIN
+  r := curRow + 1;
+  WHILE (r < numLines) & (lines[r][0] # '#') DO INC(r) END;
+  IF r < numLines THEN
+    SavePrev;
+    curRow := r; curCol := 0; goalCol := -1; needRedraw := TRUE
+  ELSE SetStatus("No next heading")
+  END
+END MoveNextHeading;
+
+PROCEDURE TransposeChars;
+(* ^QG — swap char at cursor with char to its left *)
+VAR tmp: CHAR; len: INTEGER;
+BEGIN
+  len := LineLen(curRow);
+  IF (curCol = 0) OR (len = 0) THEN SetStatus("Nothing to transpose"); RETURN END;
+  IF curCol >= len THEN curCol := len END;
+  UndoSaveLine;
+  tmp := lines[curRow][curCol - 1];
+  lines[curRow][curCol - 1] := lines[curRow][curCol];
+  lines[curRow][curCol] := tmp;
+  IF curCol < len THEN INC(curCol) END;
+  dirty := TRUE; needRedraw := TRUE
+END TransposeChars;
+
+PROCEDURE TransposeWords;
+(* ^QT — swap word at/after cursor with the following word on same line *)
+VAR w1s, w1e, w2s, w2e: INTEGER;
+    prefix, word1, gap, word2, suffix: Line;
+BEGIN
+  w1s := curCol;
+  WHILE (w1s < LineLen(curRow)) & ~IsWordChar(lines[curRow][w1s]) DO INC(w1s) END;
+  IF w1s >= LineLen(curRow) THEN SetStatus("No word to transpose"); RETURN END;
+  w1e := w1s;
+  WHILE (w1e < LineLen(curRow)) & IsWordChar(lines[curRow][w1e]) DO INC(w1e) END;
+  w2s := w1e;
+  WHILE (w2s < LineLen(curRow)) & ~IsWordChar(lines[curRow][w2s]) DO INC(w2s) END;
+  IF w2s >= LineLen(curRow) THEN SetStatus("No second word to transpose"); RETURN END;
+  w2e := w2s;
+  WHILE (w2e < LineLen(curRow)) & IsWordChar(lines[curRow][w2e]) DO INC(w2e) END;
+  UndoSaveLine;
+  Strings.Extract(lines[curRow], 0,   w1s,       prefix);
+  Strings.Extract(lines[curRow], w1s, w1e - w1s, word1);
+  Strings.Extract(lines[curRow], w1e, w2s - w1e, gap);
+  Strings.Extract(lines[curRow], w2s, w2e - w2s, word2);
+  Strings.Extract(lines[curRow], w2e, MaxLineLen, suffix);
+  COPY(prefix, lines[curRow]);
+  Strings.Append(word2, lines[curRow]);
+  Strings.Append(gap,   lines[curRow]);
+  Strings.Append(word1, lines[curRow]);
+  Strings.Append(suffix,lines[curRow]);
+  curCol := w1s + Strings.Length(word2);
+  dirty := TRUE; needRedraw := TRUE
+END TransposeWords;
 
 PROCEDURE EnsureVisible;
 VAR h, vrow, row, from, e, segF: INTEGER;
@@ -1184,13 +1365,23 @@ BEGIN
   | 41: COPY("^OS",  chord); COPY("spell check on/off",    desc)
   | 42: COPY("^OA",  chord); COPY("add word to dict",      desc)
   | 43: COPY("^QN",  chord); COPY("next misspelling",      desc)
-  | 44: COPY("F1",   chord); COPY("this key list",         desc)
+  | 44: COPY("^QP",  chord); COPY("previous position",     desc)
+  | 45: COPY("^QB",  chord); COPY("jump to block begin",   desc)
+  | 46: COPY("^QK",  chord); COPY("jump to block end",     desc)
+  | 47: COPY("^Q,",  chord); COPY("sentence back",         desc)
+  | 48: COPY("^Q.",  chord); COPY("sentence forward",      desc)
+  | 49: COPY("^Q[",  chord); COPY("paragraph back",        desc)
+  | 50: COPY("^Q]",  chord); COPY("paragraph forward",     desc)
+  | 51: COPY("^QO",  chord); COPY("next heading",          desc)
+  | 52: COPY("^QG",  chord); COPY("transpose chars",       desc)
+  | 53: COPY("^QT",  chord); COPY("transpose words",       desc)
+  | 54: COPY("F1",   chord); COPY("this key list",         desc)
   ELSE (* end *)
   END
 END PaletteEntry;
 
 PROCEDURE PaletteCount(): INTEGER;
-BEGIN RETURN 42 END PaletteCount;
+BEGIN RETURN 55 END PaletteCount;
 
 (* ── Splash Screen ───────────────────────────────────────────────── *)
 
@@ -1954,8 +2145,16 @@ BEGIN
       inReplace := TRUE;
       SetStatus("Find (for replace):")
   | 'y', 'Y': DeleteToEOL
-  | 'p', 'P': (* TODO: previous position *)
-      SetStatus("^QP (previous position) — not yet implemented")
+  | 'p', 'P': JumpPrev
+  | 'b', 'B': JumpBlockBegin
+  | 'k', 'K': JumpBlockEnd
+  | ',':      MoveSentBack
+  | '.':      MoveSentForward
+  | '[':      MoveParaBack
+  | ']':      MoveParaForward
+  | 'o', 'O': MoveNextHeading
+  | 'g', 'G': TransposeChars
+  | 't', 'T': TransposeWords
   | 'n', 'N': NextMisspelling
   ELSE SetStatus("Unknown ^Q command")
   END;
@@ -2125,6 +2324,7 @@ BEGIN
   curRow := 0; curCol := 0; goalCol := -1;
   topLine := 0; leftCol := 0;
   hasBlkB := FALSE; hasBlkE := FALSE;
+  hasPrev := FALSE; prevRow := 0; prevCol := 0;
   killHead := 0; killCount := 0; putIndex := 0;
   undoTop := 0;
   mode := ModeNormal; prefix := PrefNone;
