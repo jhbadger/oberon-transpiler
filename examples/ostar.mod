@@ -446,9 +446,30 @@ BEGIN
   Files.Close(f);
   IF numLines = 0 THEN lines[0][0] := 0X; numLines := 1 END;
   COPY(path, filePath);
+  IF wrap THEN ReflowLines END;
   dirty := FALSE;
   RETURN TRUE
 END LoadFile;
+
+PROCEDURE ReflowLines;
+(* Walk every line; split any that exceed wrapMargin at the last space.
+   Called after LoadFile when wrap is on so existing long lines are broken. *)
+VAR row, sp: INTEGER; rest: Line;
+BEGIN
+  row := 0;
+  WHILE row < numLines DO
+    WHILE (LineLen(row) > wrapMargin) & (numLines < MaxLines) DO
+      sp := wrapMargin;
+      WHILE (sp > 0) & (lines[row][sp] # ' ') DO DEC(sp) END;
+      IF sp = 0 THEN EXIT END;   (* no space to break at — leave line alone *)
+      Strings.Extract(lines[row], sp + 1, MaxLineLen, rest);
+      lines[row][sp] := 0X;
+      ShiftLinesDown(row + 1);
+      COPY(rest, lines[row + 1])
+    END;
+    INC(row)
+  END
+END ReflowLines;
 
 PROCEDURE SaveFile(): BOOLEAN;
 VAR f: Files.File; r: Files.Rider; i: INTEGER;
