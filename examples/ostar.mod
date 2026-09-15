@@ -44,6 +44,8 @@ CONST
   ModeInput   = 3;   (* generic text prompt     *)
   ModeConfirm = 4;   (* yes/no confirmation     *)
   ModePalette = 5;   (* F1 key list             *)
+  ModeBinder  = 6;   (* binder panel navigation *)
+  ModeOutline = 7;   (* outline panel           *)
 
   (* Prefix keys *)
   PrefNone = 0;  PrefK = 1;  PrefQ = 2;  PrefO = 3;  PrefP = 4;
@@ -196,6 +198,10 @@ VAR
 
   (* Palette scroll *)
   palScroll   : INTEGER;
+
+  (* Outline panel *)
+  outlineScroll : INTEGER;
+  outlineSel    : INTEGER;
 
   (* Main loop event *)
   ev          : TUI.Event;
@@ -1321,6 +1327,30 @@ BEGIN
   END
 END MoveNextHeading;
 
+PROCEDURE NextComment;
+(* ^QM — jump to next line starting with .. *)
+VAR r: INTEGER;
+BEGIN
+  r := curRow + 1;
+  WHILE (r < numLines) & ~((lines[r].s[0] = '.') & (lines[r].s[1] = '.')) DO INC(r) END;
+  IF r < numLines THEN
+    SavePrev; curRow := r; curCol := 0; goalCol := -1; needRedraw := TRUE
+  ELSE SetStatus("No next comment")
+  END
+END NextComment;
+
+PROCEDURE PrevComment;
+(* ^QU — jump to previous line starting with .. *)
+VAR r: INTEGER;
+BEGIN
+  r := curRow - 1;
+  WHILE (r >= 0) & ~((lines[r].s[0] = '.') & (lines[r].s[1] = '.')) DO DEC(r) END;
+  IF r >= 0 THEN
+    SavePrev; curRow := r; curCol := 0; goalCol := -1; needRedraw := TRUE
+  ELSE SetStatus("No previous comment")
+  END
+END PrevComment;
+
 PROCEDURE TransposeChars;
 (* ^QG — swap char at cursor with char to its left *)
 VAR tmp: CHAR; len: INTEGER;
@@ -1724,12 +1754,16 @@ BEGIN
   | 70: COPY("^PT",  chord); COPY("project: compile text",   desc)
   | 71: COPY("^PS",  chord); COPY("project: find in all",    desc)
   | 72: COPY("^PB",  chord); COPY("binder panel toggle",     desc)
+  | 73: COPY("^QM", chord); COPY("next comment",            desc)
+  | 74: COPY("^QU", chord); COPY("prev comment",            desc)
+  | 75: COPY("^QH", chord); COPY("outline panel",           desc)
+  | 76: COPY("Tab",  chord); COPY("focus binder (when open)", desc)
   ELSE (* end *)
   END
 END PaletteEntry;
 
 PROCEDURE PaletteCount(): INTEGER;
-BEGIN RETURN 73 END PaletteCount;
+BEGIN RETURN 77 END PaletteCount;
 
 (* ── Splash Screen ───────────────────────────────────────────────── *)
 
@@ -2526,7 +2560,11 @@ BEGIN
   sfg := ThStFg(); sbg := ThStBg();
   (* Header *)
   TUI.FillRect(1, 1, BinderW, 1, ' ', sfg, sbg);
-  TUI.PutStr(2, 1, "PROJECT", sfg, sbg);
+  IF mode = ModeBinder THEN
+    TUI.PutStr(2, 1, "PROJECT (nav)", sfg, sbg)
+  ELSE
+    TUI.PutStr(2, 1, "PROJECT", sfg, sbg)
+  END;
   (* Divider column *)
   FOR y := 1 TO textH DO
     TUI.PutCell(BinderW + 1, y, TUI.BoxV, ThDimFg(), ThBg())
@@ -2556,6 +2594,57 @@ BEGIN
     TUI.FillRect(1, y, BinderW, 1, ' ', ThFg(), ThBg())
   END
 END DrawBinder;
+
+PROCEDURE DrawOutline;
+(* Draw overlay showing all # headings; navigable with Up/Down/Enter *)
+CONST OW = 50; OH = 20;
+VAR i, r, n, px, py, vis, maxScroll, lev: INTEGER;
+    line: ARRAY 54 OF CHAR;
+    fg, bg, hfg, hbg: INTEGER;
+BEGIN
+  fg := ThFg(); bg := ThBg();
+  hfg := ThBg(); hbg := ThFg();
+  px := (TUI.Cols - OW) DIV 2 + 1;
+  py := (TUI.Rows - OH) DIV 2;
+  IF py < 1 THEN py := 1 END;
+  TUI.DrawBox(px - 1, py - 1, OW + 2, OH + 2, ThStFg(), ThStBg());
+  TUI.PutStr(px, py - 1, "Outline  (Enter=jump  Esc=close)", ThStFg(), ThStBg());
+  (* Count headings *)
+  n := 0;
+  FOR r := 0 TO numLines - 1 DO
+    IF lines[r].s[0] = '#' THEN INC(n) END
+  END;
+  maxScroll := n - OH;
+  IF maxScroll < 0 THEN maxScroll := 0 END;
+  IF outlineScroll > maxScroll THEN outlineScroll := maxScroll END;
+  IF outlineScroll < 0 THEN outlineScroll := 0 END;
+  (* Draw OH entries starting at outlineScroll *)
+  i := 0; vis := 0;
+  FOR r := 0 TO numLines - 1 DO
+    IF lines[r].s[0] = '#' THEN
+      IF (i >= outlineScroll) & (vis < OH) THEN
+        lev := 0;
+        WHILE (lev < Strings.Length(lines[r].s)) & (lines[r].s[lev] = '#') DO INC(lev) END;
+        line[0] := 0X;
+        IF lev >= 2 THEN Strings.Append("  ", line) END;
+        Strings.Append(lines[r].s, line);
+        IF Strings.Length(line) > OW THEN line[OW] := 0X END;
+        IF r = outlineSel THEN
+          TUI.FillRect(px, py + vis, OW, 1, ' ', hfg, hbg);
+          TUI.PutStr(px, py + vis, line, hfg, hbg)
+        ELSE
+          TUI.FillRect(px, py + vis, OW, 1, ' ', fg, bg);
+          TUI.PutStr(px, py + vis, line, fg, bg)
+        END;
+        INC(vis)
+      END;
+      INC(i)
+    END
+  END;
+  FOR i := vis TO OH - 1 DO
+    TUI.FillRect(px, py + i, OW, 1, ' ', fg, bg)
+  END
+END DrawOutline;
 
 PROCEDURE DrawAll;
 VAR row, screenY, textH: INTEGER;
@@ -2602,9 +2691,12 @@ BEGIN
   DrawStatus;
   IF (helpLevel >= 1) & (prefix # PrefNone) THEN DrawPrefixMenu(prefix) END;
   IF mode = ModePalette THEN DrawPalette END;
+  IF mode = ModeOutline THEN DrawOutline END;
   TUI.Flush;
   (* Place hardware cursor *)
-  IF mode = ModeSearch THEN
+  IF (mode = ModeBinder) OR (mode = ModeOutline) THEN
+    TUI.SetCursor(1, TUI.Rows)
+  ELSIF mode = ModeSearch THEN
     TUI.SetCursor(7 + Strings.Length(searchStr), TUI.Rows)
   ELSIF mode = ModeInput THEN
     TUI.SetCursor(Strings.Length(inpLabel) + 3 + Strings.Length(inpValue), TUI.Rows)
@@ -2877,6 +2969,13 @@ BEGIN
   | 't', 'T': TransposeWords
   | 'n', 'N': NextMisspelling
   | 'i', 'I': NextStyleIssue
+  | 'm', 'M': NextComment
+  | 'u', 'U': PrevComment
+  | 'h', 'H':
+      outlineSel := curRow;
+      WHILE (outlineSel < numLines) & (lines[outlineSel].s[0] # '#') DO INC(outlineSel) END;
+      IF outlineSel >= numLines THEN outlineSel := 0 END;
+      outlineScroll := 0; mode := ModeOutline
   ELSE SetStatus("Unknown ^Q command")
   END;
   needRedraw := TRUE
@@ -3421,7 +3520,13 @@ BEGIN
     | TUI.KDel:       DelChar
     | TUI.KBackspace: BackspaceChar
     | TUI.KEnter:     BreakLine;  goalCol := -1
-    | TUI.KTab:       InsTab
+    | TUI.KTab:
+        IF binderOpen THEN
+          mode := ModeBinder;
+          IF binderSel < 0 THEN binderSel := 0 END;
+          needRedraw := TRUE
+        ELSE InsTab
+        END
     | TUI.KF1:        mode := ModePalette; palScroll := 0; needRedraw := TRUE
     ELSE
       IF (ORD(k) >= 32) & (ORD(k) < 127) THEN
@@ -3481,6 +3586,53 @@ BEGIN
   needRedraw := TRUE
 END HandleMouse;
 
+PROCEDURE HandleBinderKey(k: CHAR);
+BEGIN
+  IF (k = TUI.KUp) OR (k = CHR(5)) THEN   (* Up or ^E *)
+    IF binderSel > 0 THEN DEC(binderSel) END
+  ELSIF (k = TUI.KDown) OR (k = CHR(24)) THEN  (* Down or ^X *)
+    IF binderSel < projDocCount - 1 THEN INC(binderSel) END
+  ELSIF k = TUI.KEnter THEN
+    IF (binderSel >= 0) & (binderSel < projDocCount) THEN
+      OpenProjDoc(binderSel); mode := ModeNormal
+    END
+  ELSIF (k = TUI.KEsc) OR (k = TUI.KTab) THEN
+    mode := ModeNormal
+  END;
+  needRedraw := TRUE
+END HandleBinderKey;
+
+PROCEDURE HandleOutlineKey(k: CHAR);
+VAR r, i: INTEGER;
+BEGIN
+  IF (k = TUI.KUp) OR (k = CHR(5)) THEN
+    (* move to prev heading *)
+    r := outlineSel - 1;
+    WHILE (r >= 0) & (lines[r].s[0] # '#') DO DEC(r) END;
+    IF r >= 0 THEN outlineSel := r END
+  ELSIF (k = TUI.KDown) OR (k = CHR(24)) THEN
+    (* move to next heading *)
+    r := outlineSel + 1;
+    WHILE (r < numLines) & (lines[r].s[0] # '#') DO INC(r) END;
+    IF r < numLines THEN outlineSel := r END
+  ELSIF k = TUI.KEnter THEN
+    SavePrev; curRow := outlineSel; curCol := 0; goalCol := -1;
+    mode := ModeNormal
+  ELSIF (k = TUI.KEsc) OR (k = TUI.KF1) THEN
+    mode := ModeNormal
+  END;
+  (* Adjust outlineScroll so outlineSel is visible — count heading ordinal *)
+  i := 0; r := 0;
+  WHILE r < outlineSel DO
+    IF lines[r].s[0] = '#' THEN INC(i) END;
+    INC(r)
+  END;
+  (* i is the ordinal of outlineSel; scroll so it's in the window *)
+  IF i < outlineScroll THEN outlineScroll := i END;
+  IF i >= outlineScroll + 20 THEN outlineScroll := i - 19 END;
+  needRedraw := TRUE
+END HandleOutlineKey;
+
 PROCEDURE HandleKey(k: CHAR);
 BEGIN
   CASE mode OF
@@ -3515,6 +3667,8 @@ BEGIN
       END
   | ModeConfirm: HandleConfirmKey(k)
   | ModePalette: HandlePaletteKey(k)
+  | ModeBinder:  HandleBinderKey(k)
+  | ModeOutline: HandleOutlineKey(k)
   ELSE HandleNormalKey(k)
   END;
   needRedraw := TRUE
@@ -3544,6 +3698,7 @@ BEGIN
   inReplace := FALSE;
   needRedraw := TRUE;
   palScroll := 0;
+  outlineScroll := 0; outlineSel := 0;
   focusMode := FALSE; focusParaS := 0; focusParaE := 0;
   styleEnabled := FALSE; styleCurKind := StNone;
   projPath[0] := 0X; projDocCount := 0; projCurDoc := -1;
