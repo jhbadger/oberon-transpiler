@@ -15,7 +15,7 @@ MODULE OStar;
  *        ^N insert line, ^U undo, ^L find next, ^V overtype toggle,
  *        F1 command palette (shows key list).
  *)
-IMPORT TUI, Files, Strings, Args;
+IMPORT TUI, Files, Strings, Args, Dict, OS, Env;
 
 (* ── Constants ───────────────────────────────────────────────────── *)
 CONST
@@ -140,6 +140,12 @@ VAR
   inpAction  : INTEGER;
   inpCursor  : INTEGER;
 
+  (* Spell check *)
+  spellEnabled : BOOLEAN;
+  misspelled   : Dict.Table;   (* words hunspell flagged as wrong  *)
+  personalDict : Dict.Table;   (* personal word list (always OK)   *)
+  personalPath : ARRAY 512 OF CHAR;
+
   (* Misc *)
   needRedraw  : BOOLEAN;
 
@@ -197,6 +203,9 @@ END ThBlkBg;
 (* Search-match highlight: yellow background for all themes *)
 PROCEDURE ThHlFg(): INTEGER; BEGIN RETURN TUI.Black END ThHlFg;
 PROCEDURE ThHlBg(): INTEGER; BEGIN RETURN TUI.Yellow END ThHlBg;
+
+(* Spell-error: bright red foreground, same background as theme *)
+PROCEDURE ThSpFg(): INTEGER; BEGIN RETURN 9 END ThSpFg;   (* xterm bright-red *)
 
 (* ── Utility ─────────────────────────────────────────────────────── *)
 
@@ -1129,10 +1138,240 @@ END DrawSplash;
 
 (* ── Display ─────────────────────────────────────────────────────── *)
 
+(* ── Spell Check ─────────────────────────────────────────────────── *)
+
+PROCEDURE IsAllCaps(w: ARRAY OF CHAR): BOOLEAN;
+(* TRUE for acronyms like "NASA" — skip spell check *)
+VAR i: INTEGER;
+BEGIN
+  i := 0;
+  WHILE w[i] # 0X DO
+    IF (w[i] >= 'a') & (w[i] <= 'z') THEN RETURN FALSE END;
+    INC(i)
+  END;
+  RETURN w[0] # 0X
+END IsAllCaps;
+
+PROCEDURE HasDigit(w: ARRAY OF CHAR): BOOLEAN;
+VAR i: INTEGER;
+BEGIN
+  i := 0;
+  WHILE w[i] # 0X DO
+    IF (w[i] >= '0') & (w[i] <= '9') THEN RETURN TRUE END;
+    INC(i)
+  END;
+  RETURN FALSE
+END HasDigit;
+
+(* Build a boolean mask for one line: mask[col] = TRUE iff that character
+   is part of a word that hunspell flagged and is not in personalDict.    *)
+PROCEDURE BuildSpellMask(row: INTEGER; VAR mask: ARRAY OF BOOLEAN);
+VAR col, len, ws, we: INTEGER; word, lword: Line;
+BEGIN
+  len := LineLen(row);
+  FOR col := 0 TO len DO mask[col] := FALSE END;
+  col := 0;
+  WHILE col < len DO
+    IF IsWordChar(lines[row][col]) THEN
+      ws := col;
+      WHILE (col < len) & IsWordChar(lines[row][col]) DO INC(col) END;
+      we := col;
+      IF we - ws > 1 THEN
+        Strings.Extract(lines[row], ws, we - ws, word);
+        IF ~IsAllCaps(word) & ~HasDigit(word) THEN
+          COPY(word, lword); Strings.ToLower(lword);
+          IF Dict.Has(misspelled, lword) & ~Dict.Has(personalDict, lword) THEN
+            FOR col := ws TO we - 1 DO mask[col] := TRUE END
+          END
+        END;
+        col := we
+      END
+    ELSE INC(col)
+    END
+  END
+END BuildSpellMask;
+
+(* Return the word that straddles curRow/curCol (empty if not on a word). *)
+PROCEDURE WordUnderCursor(VAR word: ARRAY OF CHAR);
+VAR c, len, ws: INTEGER;
+BEGIN
+  word[0] := 0X;
+  len := LineLen(curRow);
+  IF (curCol >= len) OR ~IsWordChar(lines[curRow][curCol]) THEN RETURN END;
+  ws := curCol;
+  WHILE (ws > 0) & IsWordChar(lines[curRow][ws - 1]) DO DEC(ws) END;
+  c := ws;
+  WHILE (c < len) & IsWordChar(lines[curRow][c]) DO INC(c) END;
+  Strings.Extract(lines[curRow], ws, c - ws, word)
+END WordUnderCursor;
+
+PROCEDURE LoadPersonalDict;
+VAR f: Files.File; r: Files.Rider; word: Line;
+BEGIN
+  Dict.Init(personalDict);
+  IF personalPath[0] = 0X THEN RETURN END;
+  f := Files.Old(personalPath);
+  IF f = NIL THEN RETURN END;
+  Files.Set(r, f, 0);
+  WHILE ~r.eof DO
+    Files.ReadLine(r, word);
+    IF word[0] # 0X THEN Strings.ToLower(word); Dict.Put(personalDict, word, "") END
+  END;
+  Files.Close(f)
+END LoadPersonalDict;
+
+(* Batch-check every word in the document via `hunspell -l`.
+   Results land in `misspelled`; highlights appear on the next redraw. *)
+PROCEDURE RunSpellCheck;
+VAR f: Files.File; r: Files.Rider; row, col, len, ws: INTEGER;
+    word, lword: Line; cmd: ARRAY 768 OF CHAR;
+    tmpDir, wordsFile, badFile: ARRAY 512 OF CHAR;
+    seen: Dict.Table; cnt: INTEGER; tmp: ARRAY 32 OF CHAR;
+BEGIN
+  SetStatus("Spell checking...");
+
+  (* Use $TMPDIR (Termux: /data/data/com.termux/files/usr/tmp) *)
+  Env.Get("TMPDIR", tmpDir);
+  IF tmpDir[0] = 0X THEN COPY("/tmp", tmpDir) END;
+  COPY(tmpDir, wordsFile); Strings.Append("/ostar_words.txt",  wordsFile);
+  COPY(tmpDir, badFile);   Strings.Append("/ostar_bad.txt",    badFile);
+
+  Dict.Init(seen);
+  f := Files.New(wordsFile);
+  IF f = NIL THEN SetStatus("Spell check: cannot write temp file"); RETURN END;
+  Files.Set(r, f, 0);
+  cnt := 0;
+  FOR row := 0 TO numLines - 1 DO
+    col := 0; len := LineLen(row);
+    WHILE col < len DO
+      IF IsWordChar(lines[row][col]) THEN
+        ws := col;
+        WHILE (col < len) & IsWordChar(lines[row][col]) DO INC(col) END;
+        IF col - ws > 1 THEN
+          Strings.Extract(lines[row], ws, col - ws, word);
+          IF ~IsAllCaps(word) & ~HasDigit(word) THEN
+            COPY(word, lword); Strings.ToLower(lword);
+            IF ~Dict.Has(seen, lword) THEN
+              Files.WriteLine(r, lword);
+              Dict.Put(seen, lword, "");
+              INC(cnt)
+            END
+          END
+        END
+      ELSE INC(col)
+      END
+    END
+  END;
+  Files.Register(f); Files.Close(f);
+  Dict.Clear(seen);
+
+  IF cnt = 0 THEN Dict.Init(misspelled); SetStatus("Nothing to check"); RETURN END;
+
+  COPY("hunspell -l < '", cmd);
+  Strings.Append(wordsFile, cmd); Strings.Append("' > '", cmd);
+  Strings.Append(badFile,   cmd); Strings.Append("' 2>/dev/null", cmd);
+  OS.Exec(cmd);
+
+  Dict.Init(misspelled);
+  cnt := 0;
+  f := Files.Old(badFile);
+  IF f # NIL THEN
+    Files.Set(r, f, 0);
+    WHILE ~r.eof DO
+      Files.ReadLine(r, word);
+      IF word[0] # 0X THEN
+        Strings.ToLower(word);
+        IF ~Dict.Has(personalDict, word) THEN
+          Dict.Put(misspelled, word, "");
+          INC(cnt)
+        END
+      END
+    END;
+    Files.Close(f)
+  END;
+
+  IF cnt = 0 THEN SetStatus("Spell check: no errors found")
+  ELSE
+    COPY("Misspellings: ", statusMsg);
+    Strings.IntToStr(cnt, tmp); Strings.Append(tmp, statusMsg)
+  END;
+  needRedraw := TRUE
+END RunSpellCheck;
+
+(* ^QN — jump cursor to the next misspelled word *)
+PROCEDURE NextMisspelling;
+VAR row, col, len, ws, we: INTEGER; word, lword: Line;
+BEGIN
+  IF ~spellEnabled THEN SetStatus("Spell off — ^OS to enable"); RETURN END;
+  row := curRow; col := curCol + 1;
+  IF col > LineLen(row) THEN INC(row); col := 0 END;
+  LOOP
+    IF row >= numLines THEN SetStatus("No more misspellings"); RETURN END;
+    len := LineLen(row);
+    WHILE col < len DO
+      IF IsWordChar(lines[row][col]) THEN
+        ws := col;
+        WHILE (col < len) & IsWordChar(lines[row][col]) DO INC(col) END;
+        we := col;
+        IF we - ws > 1 THEN
+          Strings.Extract(lines[row], ws, we - ws, word);
+          IF ~IsAllCaps(word) & ~HasDigit(word) THEN
+            COPY(word, lword); Strings.ToLower(lword);
+            IF Dict.Has(misspelled, lword) & ~Dict.Has(personalDict, lword) THEN
+              curRow := row; curCol := ws;
+              COPY("Misspelling: ", statusMsg); Strings.Append(word, statusMsg);
+              needRedraw := TRUE; RETURN
+            END
+          END
+        END
+      ELSE INC(col)
+      END
+    END;
+    INC(row); col := 0
+  END
+END NextMisspelling;
+
+(* ^OA — add the word under the cursor to the personal dictionary *)
+PROCEDURE AddToPersonalDict;
+VAR word, lword: Line; f: Files.File; r: Files.Rider;
+    mkdirCmd: ARRAY 600 OF CHAR; dirPath: ARRAY 512 OF CHAR; i: INTEGER;
+BEGIN
+  WordUnderCursor(word);
+  IF word[0] = 0X THEN SetStatus("No word under cursor"); RETURN END;
+  COPY(word, lword); Strings.ToLower(lword);
+  Dict.Put(personalDict, lword, "");
+  Dict.Remove(misspelled, lword);
+  (* Persist to file *)
+  IF personalPath[0] # 0X THEN
+    (* Ensure parent directory exists *)
+    COPY(personalPath, dirPath);
+    i := Strings.Length(dirPath) - 1;
+    WHILE (i >= 0) & (dirPath[i] # '/') DO DEC(i) END;
+    IF i > 0 THEN
+      dirPath[i] := 0X;
+      COPY("mkdir -p '", mkdirCmd);
+      Strings.Append(dirPath, mkdirCmd);
+      Strings.Append("' 2>/dev/null", mkdirCmd);
+      OS.Exec(mkdirCmd)
+    END;
+    f := Files.Old(personalPath);
+    IF f = NIL THEN f := Files.New(personalPath) END;
+    IF f # NIL THEN
+      Files.Set(r, f, Files.Length(f));
+      Files.WriteLine(r, lword);
+      Files.Register(f); Files.Close(f)
+    END
+  END;
+  COPY("Added to dictionary: ", statusMsg); Strings.Append(word, statusMsg);
+  needRedraw := TRUE
+END AddToPersonalDict;
+
 PROCEDURE DrawTextLine(screenY, docRow: INTEGER);
-VAR col, len, x, fg, bg: INTEGER; c: CHAR; inSrch: BOOLEAN;
+VAR col, len, x, fg, bg: INTEGER; c: CHAR;
+    mask: ARRAY (MaxLineLen + 1) OF BOOLEAN;
 BEGIN
   len := LineLen(docRow);
+  IF spellEnabled THEN BuildSpellMask(docRow, mask) END;
   x := 1;
   col := leftCol;
   WHILE (x <= TUI.Cols) & (col <= len) DO
@@ -1143,6 +1382,8 @@ BEGIN
     ELSIF (docRow = searchRow) & (col >= searchCol) & (col < searchCol + searchLen)
         & (mode = ModeSearch) THEN
       fg := ThHlFg(); bg := ThHlBg()
+    ELSIF spellEnabled & (col < LEN(mask)) & mask[col] THEN
+      fg := ThSpFg(); bg := ThBg()
     ELSE
       fg := ThFg(); bg := ThBg()
     END;
@@ -1532,7 +1773,7 @@ BEGIN
   | 'y', 'Y': DeleteToEOL
   | 'p', 'P': (* TODO: previous position *)
       SetStatus("^QP (previous position) — not yet implemented")
-  | 'n', 'N': SetStatus("Spellcheck not available in this build")
+  | 'n', 'N': NextMisspelling
   ELSE SetStatus("Unknown ^Q command")
   END;
   needRedraw := TRUE
@@ -1567,6 +1808,12 @@ BEGIN
       overtype := ~overtype;
       IF overtype THEN SetStatus("Overtype ON") ELSE SetStatus("Insert ON") END
   | 'r', 'R': StartInput("Set wrap margin (columns)", ActMargin)
+  | 's', 'S':
+      spellEnabled := ~spellEnabled;
+      IF spellEnabled THEN RunSpellCheck
+      ELSE Dict.Init(misspelled); SetStatus("Spell check OFF")
+      END
+  | 'a', 'A': AddToPersonalDict
   ELSE SetStatus("Unknown ^O command")
   END;
   needRedraw := TRUE
@@ -1708,6 +1955,16 @@ BEGIN
   inReplace := FALSE;
   needRedraw := TRUE;
   palScroll := 0;
+  spellEnabled := FALSE;
+  Dict.Init(misspelled);
+  Dict.Init(personalDict);
+
+  (* Personal dictionary: ~/.config/ostar/personal.txt *)
+  Env.Get("HOME", personalPath);
+  IF personalPath[0] # 0X THEN
+    Strings.Append("/.config/ostar/personal.txt", personalPath)
+  END;
+  LoadPersonalDict;
 
   (* Open file from command line if provided *)
   IF Args.Count() >= 1 THEN
