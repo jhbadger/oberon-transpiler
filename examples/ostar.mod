@@ -14,7 +14,8 @@ MODULE OStar;
  *              ^OS spellcheck, ^OT typewriter scroll, ^OC word count,
  *              ^OF focus mode, ^OL style check.
  * ^QI — next style issue (adverb/filler/passive/long sentence).
- * Prefix ^P  — Project (future).
+ * Prefix ^P  — Project: ^PN new, ^PP open, ^PA add, ^PR remove,
+ *              ^PE prev doc, ^PX next doc, ^PL list.
  * Other: ^G delete, ^H backspace, ^T del-word, ^Y del-line,
  *        ^N insert line, ^U undo, ^L find next, ^V overtype toggle,
  *        F1 command palette (shows key list).
@@ -53,6 +54,8 @@ CONST
   ActWBlk    = 3;  (* write block to file *)
   ActRFile   = 4;  (* read file at cursor *)
   ActMargin  = 5;  (* set wrap margin     *)
+  ActProjNew = 6;  (* create project      *)
+  ActProjOpen= 7;  (* open project file   *)
 
   (* Undo record kinds *)
   UKLine  = 0;   (* one line's content changed  *)
@@ -60,6 +63,9 @@ CONST
   UKJoin  = 2;   (* BS/Del join; line1 = joined-away line, col = split pt *)
   UKIns   = 3;   (* blank line inserted at row  *)
   UKDel   = 4;   (* line deleted; line1 = deleted content *)
+
+  (* Project *)
+  MaxProjDocs = 128;   (* documents per project *)
 
   (* Key codes — use TUI.Kxxx qualifiers in code to avoid C macro collisions *)
 
@@ -178,6 +184,12 @@ VAR
   (* Style check *)
   styleEnabled : BOOLEAN;
   styleCurKind : INTEGER;   (* kind at cursor position, set during DrawTextLine/DrawSegment *)
+
+  (* Project *)
+  projPath     : ARRAY 512 OF CHAR;               (* path of open .pstarproj file, or empty *)
+  projDocs     : ARRAY MaxProjDocs OF ARRAY 512 OF CHAR;
+  projDocCount : INTEGER;
+  projCurDoc   : INTEGER;   (* index of currently open doc in projDocs, or -1 *)
 
   (* Palette scroll *)
   palScroll   : INTEGER;
@@ -1690,12 +1702,19 @@ BEGIN
   | 59: COPY("^OF",  chord); COPY("focus mode toggle",      desc)
   | 60: COPY("^OL",  chord); COPY("style check toggle",     desc)
   | 61: COPY("^QI",  chord); COPY("next style issue",        desc)
+  | 62: COPY("^PN",  chord); COPY("new project",             desc)
+  | 63: COPY("^PP",  chord); COPY("open project",            desc)
+  | 64: COPY("^PA",  chord); COPY("add doc to project",      desc)
+  | 65: COPY("^PR",  chord); COPY("remove doc from project", desc)
+  | 66: COPY("^PE",  chord); COPY("project: prev doc",       desc)
+  | 67: COPY("^PX",  chord); COPY("project: next doc",       desc)
+  | 68: COPY("^PL",  chord); COPY("project: list docs",      desc)
   ELSE (* end *)
   END
 END PaletteEntry;
 
 PROCEDURE PaletteCount(): INTEGER;
-BEGIN RETURN 62 END PaletteCount;
+BEGIN RETURN 69 END PaletteCount;
 
 (* ── Splash Screen ───────────────────────────────────────────────── *)
 
@@ -2628,6 +2647,17 @@ BEGIN
         COPY("Wrap margin: ", statusMsg);
         Strings.Append(tmp, statusMsg)
       END
+  | ActProjNew:
+      IF inpValue[0] # 0X THEN ProjNew(inpValue) END
+  | ActProjOpen:
+      IF inpValue[0] # 0X THEN
+        IF LoadProjFile(inpValue) THEN
+          projCurDoc := ProjIndexOf(filePath);
+          COPY("Project opened: ", statusMsg);
+          Strings.Append(projPath, statusMsg)
+        ELSE SetStatus("Cannot open project file")
+        END
+      END
   ELSE
   END;
   needRedraw := TRUE
@@ -2847,10 +2877,180 @@ BEGIN
   needRedraw := TRUE
 END HandlePrefixO;
 
+(* ── Project system (^P) ─────────────────────────────────────────── *)
+
+PROCEDURE SaveProjFile;
+(* Write projDocs[0..projDocCount-1] to projPath, one path per line. *)
+VAR f: Files.File; r: Files.Rider; i: INTEGER;
+BEGIN
+  IF projPath[0] = 0X THEN RETURN END;
+  f := Files.New(projPath);
+  IF f = NIL THEN SetStatus("Project: cannot write manifest"); RETURN END;
+  Files.Set(r, f, 0);
+  FOR i := 0 TO projDocCount - 1 DO
+    Files.WriteLine(r, projDocs[i])
+  END;
+  Files.Register(f);
+  Files.Close(f)
+END SaveProjFile;
+
+PROCEDURE LoadProjFile(path: ARRAY OF CHAR): BOOLEAN;
+(* Read a .pstarproj manifest into projDocs. Returns TRUE on success. *)
+VAR f: Files.File; r: Files.Rider; buf: ARRAY 512 OF CHAR;
+BEGIN
+  f := Files.Old(path);
+  IF f = NIL THEN RETURN FALSE END;
+  projDocCount := 0;
+  Files.Set(r, f, 0);
+  WHILE ~r.eof & (projDocCount < MaxProjDocs) DO
+    Files.ReadLine(r, buf);
+    IF buf[0] # 0X THEN
+      COPY(buf, projDocs[projDocCount]);
+      INC(projDocCount)
+    END
+  END;
+  Files.Close(f);
+  COPY(path, projPath);
+  RETURN projDocCount > 0
+END LoadProjFile;
+
+(* Find filePath in projDocs; returns index or -1. *)
+PROCEDURE ProjIndexOf(path: ARRAY OF CHAR): INTEGER;
+VAR i: INTEGER;
+BEGIN
+  FOR i := 0 TO projDocCount - 1 DO
+    IF Strings.Compare(projDocs[i], path) = 0 THEN RETURN i END
+  END;
+  RETURN -1
+END ProjIndexOf;
+
+(* Save current file and open projDocs[idx]. *)
+PROCEDURE OpenProjDoc(idx: INTEGER);
+VAR msg: ARRAY 64 OF CHAR;
+BEGIN
+  IF (idx < 0) OR (idx >= projDocCount) THEN RETURN END;
+  IF dirty THEN
+    IF ~SaveFile() THEN SetStatus("Save failed — not switching"); RETURN END
+  END;
+  IF LoadFile(projDocs[idx]) THEN
+    projCurDoc := idx;
+    curRow := 0; curCol := 0; topLine := 0; undoTop := 0;
+    hasBlkB := FALSE; hasBlkE := FALSE;
+    COPY("Project: opened ", msg); Strings.Append(projDocs[idx], msg);
+    SetStatus(msg)
+  ELSE
+    SetStatus("Project: file not found")
+  END;
+  needRedraw := TRUE
+END OpenProjDoc;
+
+PROCEDURE ProjNew(name: ARRAY OF CHAR);
+(* Create a new project named <name>, manifest at <name>.pstarproj *)
+VAR tmp: ARRAY 32 OF CHAR;
+BEGIN
+  COPY(name, projPath);
+  Strings.Append(".pstarproj", projPath);
+  projDocCount := 0;
+  projCurDoc := -1;
+  (* Add current file if we have one *)
+  IF filePath[0] # 0X THEN
+    COPY(filePath, projDocs[0]);
+    projDocCount := 1;
+    projCurDoc := 0
+  END;
+  SaveProjFile;
+  Strings.IntToStr(projDocCount, tmp);
+  COPY("Project created: ", statusMsg);
+  Strings.Append(projPath, statusMsg);
+  needRedraw := TRUE
+END ProjNew;
+
+PROCEDURE ProjAdd;
+(* Add current file to the open project (if not already present). *)
+VAR tmp: ARRAY 32 OF CHAR;
+BEGIN
+  IF projPath[0] = 0X THEN SetStatus("No open project — ^PN to create"); RETURN END;
+  IF filePath[0] = 0X THEN SetStatus("Save file first (^KD)"); RETURN END;
+  IF ProjIndexOf(filePath) >= 0 THEN SetStatus("Already in project"); RETURN END;
+  IF projDocCount >= MaxProjDocs THEN SetStatus("Project full"); RETURN END;
+  COPY(filePath, projDocs[projDocCount]);
+  projCurDoc := projDocCount;
+  INC(projDocCount);
+  SaveProjFile;
+  COPY("Added to project: ", statusMsg);
+  Strings.Append(filePath, statusMsg);
+  needRedraw := TRUE
+END ProjAdd;
+
+PROCEDURE ProjRemove;
+(* Remove current file from the project manifest. *)
+VAR i, idx: INTEGER;
+BEGIN
+  IF projPath[0] = 0X THEN SetStatus("No open project"); RETURN END;
+  idx := ProjIndexOf(filePath);
+  IF idx < 0 THEN SetStatus("Current file not in project"); RETURN END;
+  FOR i := idx TO projDocCount - 2 DO
+    COPY(projDocs[i + 1], projDocs[i])
+  END;
+  DEC(projDocCount);
+  IF projCurDoc >= projDocCount THEN projCurDoc := projDocCount - 1 END;
+  SaveProjFile;
+  SetStatus("Removed from project")
+END ProjRemove;
+
+PROCEDURE ProjNext;
+BEGIN
+  IF projPath[0] = 0X THEN SetStatus("No open project — ^PN to create"); RETURN END;
+  IF projDocCount = 0 THEN SetStatus("Project is empty"); RETURN END;
+  projCurDoc := ProjIndexOf(filePath);
+  IF projCurDoc < 0 THEN projCurDoc := 0
+  ELSE projCurDoc := (projCurDoc + 1) MOD projDocCount
+  END;
+  OpenProjDoc(projCurDoc)
+END ProjNext;
+
+PROCEDURE ProjPrev;
+BEGIN
+  IF projPath[0] = 0X THEN SetStatus("No open project — ^PN to create"); RETURN END;
+  IF projDocCount = 0 THEN SetStatus("Project is empty"); RETURN END;
+  projCurDoc := ProjIndexOf(filePath);
+  IF projCurDoc < 0 THEN projCurDoc := projDocCount - 1
+  ELSIF projCurDoc = 0 THEN projCurDoc := projDocCount - 1
+  ELSE DEC(projCurDoc)
+  END;
+  OpenProjDoc(projCurDoc)
+END ProjPrev;
+
+PROCEDURE ProjList;
+(* Show project document list in the status message area. *)
+VAR i: INTEGER; tmp: ARRAY 32 OF CHAR;
+BEGIN
+  IF projPath[0] = 0X THEN SetStatus("No open project — ^PN to create"); RETURN END;
+  COPY("Project (", statusMsg);
+  Strings.IntToStr(projDocCount, tmp); Strings.Append(tmp, statusMsg);
+  Strings.Append(" docs): ", statusMsg);
+  FOR i := 0 TO projDocCount - 1 DO
+    IF i > 0 THEN Strings.Append(", ", statusMsg) END;
+    IF i = projCurDoc THEN Strings.Append("[", statusMsg) END;
+    Strings.Append(projDocs[i], statusMsg);
+    IF i = projCurDoc THEN Strings.Append("]", statusMsg) END
+  END;
+  needRedraw := TRUE
+END ProjList;
+
 PROCEDURE HandlePrefixP(k: CHAR);
 BEGIN
   prefix := PrefNone;
-  SetStatus("^P Project — not yet implemented");
+  CASE k OF
+    'n', 'N': StartInput("New project name", ActProjNew)
+  | 'p', 'P': StartInput("Open project (.pstarproj)", ActProjOpen)
+  | 'a', 'A': ProjAdd
+  | 'r', 'R': ProjRemove
+  | 'e', 'E': ProjPrev
+  | 'x', 'X': ProjNext
+  | 'l', 'L': ProjList
+  ELSE SetStatus("Unknown ^P command")
+  END;
   needRedraw := TRUE
 END HandlePrefixP;
 
@@ -3032,6 +3232,7 @@ BEGIN
   palScroll := 0;
   focusMode := FALSE; focusParaS := 0; focusParaE := 0;
   styleEnabled := FALSE; styleCurKind := StNone;
+  projPath[0] := 0X; projDocCount := 0; projCurDoc := -1;
   spellEnabled := FALSE;
   Dict.Init(misspelled);
   Dict.Init(personalDict);
