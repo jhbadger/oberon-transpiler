@@ -12,7 +12,8 @@ MODULE OStar;
  *              ^QO next heading, ^QG transpose chars, ^QT transpose words.
  * Prefix ^O  — Onscreen: ^OB cycle theme, ^OH cycle help, ^OW wrap,
  *              ^OS spellcheck, ^OT typewriter scroll, ^OC word count,
- *              ^OF focus mode.
+ *              ^OF focus mode, ^OL style check.
+ * ^QI — next style issue (adverb/filler/passive/long sentence).
  * Prefix ^P  — Project (future).
  * Other: ^G delete, ^H backspace, ^T del-word, ^Y del-line,
  *        ^N insert line, ^U undo, ^L find next, ^V overtype toggle,
@@ -61,6 +62,17 @@ CONST
   UKDel   = 4;   (* line deleted; line1 = deleted content *)
 
   (* Key codes — use TUI.Kxxx qualifiers in code to avoid C macro collisions *)
+
+  (* Style-check kinds *)
+  StNone    = 0;
+  StAdverb  = 1;   (* -ly adverb                 *)
+  StFiller  = 2;   (* intensifier / filter word  *)
+  StPassive = 3;   (* passive-voice construction *)
+  StLong    = 4;   (* very long sentence         *)
+  StyleSentWords = 30;  (* sentence-word threshold *)
+
+  (* Max words per line for style scan (1 word per ~4 chars is realistic) *)
+  MaxStyleWords = 1024;
 
 (* ── Types ───────────────────────────────────────────────────────── *)
 TYPE
@@ -163,6 +175,10 @@ VAR
   focusParaS  : INTEGER;
   focusParaE  : INTEGER;
 
+  (* Style check *)
+  styleEnabled : BOOLEAN;
+  styleCurKind : INTEGER;   (* kind at cursor position, set during DrawTextLine/DrawSegment *)
+
   (* Palette scroll *)
   palScroll   : INTEGER;
 
@@ -220,6 +236,16 @@ PROCEDURE ThHlBg(): INTEGER; BEGIN RETURN TUI.Yellow END ThHlBg;
 
 (* Spell-error: bright red foreground, same background as theme *)
 PROCEDURE ThSpFg(): INTEGER; BEGIN RETURN 9 END ThSpFg;   (* xterm bright-red *)
+
+(* Style-issue foreground by kind *)
+PROCEDURE ThStylFg(kind: INTEGER): INTEGER;
+BEGIN
+  IF kind = StAdverb  THEN RETURN 11   (* bright yellow  *)
+  ELSIF kind = StFiller  THEN RETURN 13 (* bright magenta *)
+  ELSIF kind = StPassive THEN RETURN 14 (* bright cyan    *)
+  ELSE RETURN 10                        (* bright green for long sentence *)
+  END
+END ThStylFg;
 
 (* ── Utility ─────────────────────────────────────────────────────── *)
 
@@ -1662,12 +1688,14 @@ BEGIN
   | 57: COPY("^KN",  chord); COPY("snapshot/backup",        desc)
   | 58: COPY("^OC",  chord); COPY("word count",             desc)
   | 59: COPY("^OF",  chord); COPY("focus mode toggle",      desc)
+  | 60: COPY("^OL",  chord); COPY("style check toggle",     desc)
+  | 61: COPY("^QI",  chord); COPY("next style issue",        desc)
   ELSE (* end *)
   END
 END PaletteEntry;
 
 PROCEDURE PaletteCount(): INTEGER;
-BEGIN RETURN 60 END PaletteCount;
+BEGIN RETURN 62 END PaletteCount;
 
 (* ── Splash Screen ───────────────────────────────────────────────── *)
 
@@ -1747,6 +1775,282 @@ BEGIN
   END;
   RETURN FALSE
 END HasDigit;
+
+(* ── Style-check word lists and helpers ─────────────────────────── *)
+
+PROCEDURE IsFiller(w: ARRAY OF CHAR): BOOLEAN;
+BEGIN
+  RETURN (Strings.Compare(w,"very")=0) OR (Strings.Compare(w,"really")=0)
+      OR (Strings.Compare(w,"quite")=0) OR (Strings.Compare(w,"rather")=0)
+      OR (Strings.Compare(w,"somewhat")=0) OR (Strings.Compare(w,"actually")=0)
+      OR (Strings.Compare(w,"basically")=0) OR (Strings.Compare(w,"literally")=0)
+      OR (Strings.Compare(w,"simply")=0) OR (Strings.Compare(w,"totally")=0)
+      OR (Strings.Compare(w,"utterly")=0) OR (Strings.Compare(w,"certainly")=0)
+      OR (Strings.Compare(w,"definitely")=0) OR (Strings.Compare(w,"probably")=0)
+      OR (Strings.Compare(w,"perhaps")=0) OR (Strings.Compare(w,"maybe")=0)
+      OR (Strings.Compare(w,"just")=0) OR (Strings.Compare(w,"even")=0)
+      OR (Strings.Compare(w,"suddenly")=0) OR (Strings.Compare(w,"somehow")=0)
+      OR (Strings.Compare(w,"seemed")=0) OR (Strings.Compare(w,"felt")=0)
+      OR (Strings.Compare(w,"saw")=0) OR (Strings.Compare(w,"heard")=0)
+      OR (Strings.Compare(w,"noticed")=0) OR (Strings.Compare(w,"watched")=0)
+      OR (Strings.Compare(w,"realized")=0) OR (Strings.Compare(w,"realised")=0)
+      OR (Strings.Compare(w,"wondered")=0) OR (Strings.Compare(w,"thought")=0)
+      OR (Strings.Compare(w,"decided")=0) OR (Strings.Compare(w,"knew")=0)
+END IsFiller;
+
+PROCEDURE IsBeForm(w: ARRAY OF CHAR): BOOLEAN;
+BEGIN
+  RETURN (Strings.Compare(w,"am")=0) OR (Strings.Compare(w,"is")=0)
+      OR (Strings.Compare(w,"are")=0) OR (Strings.Compare(w,"was")=0)
+      OR (Strings.Compare(w,"were")=0) OR (Strings.Compare(w,"be")=0)
+      OR (Strings.Compare(w,"been")=0) OR (Strings.Compare(w,"being")=0)
+      OR (Strings.Compare(w,"get")=0) OR (Strings.Compare(w,"gets")=0)
+      OR (Strings.Compare(w,"got")=0)
+END IsBeForm;
+
+PROCEDURE IsNotAdverb(w: ARRAY OF CHAR): BOOLEAN;
+(* Words ending in -ly that are NOT adverbs — exclude from adverb flagging *)
+BEGIN
+  RETURN (Strings.Compare(w,"ally")=0) OR (Strings.Compare(w,"apply")=0)
+      OR (Strings.Compare(w,"belly")=0) OR (Strings.Compare(w,"bully")=0)
+      OR (Strings.Compare(w,"comply")=0) OR (Strings.Compare(w,"family")=0)
+      OR (Strings.Compare(w,"folly")=0) OR (Strings.Compare(w,"holy")=0)
+      OR (Strings.Compare(w,"imply")=0) OR (Strings.Compare(w,"italy")=0)
+      OR (Strings.Compare(w,"jelly")=0) OR (Strings.Compare(w,"jolly")=0)
+      OR (Strings.Compare(w,"july")=0) OR (Strings.Compare(w,"lily")=0)
+      OR (Strings.Compare(w,"melancholy")=0) OR (Strings.Compare(w,"multiply")=0)
+      OR (Strings.Compare(w,"only")=0) OR (Strings.Compare(w,"rally")=0)
+      OR (Strings.Compare(w,"rely")=0) OR (Strings.Compare(w,"reply")=0)
+      OR (Strings.Compare(w,"silly")=0) OR (Strings.Compare(w,"supply")=0)
+      OR (Strings.Compare(w,"tally")=0) OR (Strings.Compare(w,"ugly")=0)
+END IsNotAdverb;
+
+PROCEDURE IsStyleLyAdverb(w: ARRAY OF CHAR): BOOLEAN;
+VAR len, i: INTEGER;
+BEGIN
+  len := Strings.Length(w);
+  IF len < 4 THEN RETURN FALSE END;
+  IF (w[len-2] # 'l') OR (w[len-1] # 'y') THEN RETURN FALSE END;
+  FOR i := 0 TO len - 1 DO
+    IF ~((w[i] >= 'a') & (w[i] <= 'z')) THEN RETURN FALSE END
+  END;
+  RETURN ~IsNotAdverb(w)
+END IsStyleLyAdverb;
+
+PROCEDURE IsAdjectivalEd(w: ARRAY OF CHAR): BOOLEAN;
+(* -ed words that are adjectives after "to be", not passive constructions *)
+BEGIN
+  RETURN (Strings.Compare(w,"aged")=0) OR (Strings.Compare(w,"annoyed")=0)
+      OR (Strings.Compare(w,"ashamed")=0) OR (Strings.Compare(w,"blessed")=0)
+      OR (Strings.Compare(w,"bored")=0) OR (Strings.Compare(w,"confused")=0)
+      OR (Strings.Compare(w,"crooked")=0) OR (Strings.Compare(w,"crowded")=0)
+      OR (Strings.Compare(w,"delighted")=0) OR (Strings.Compare(w,"disappointed")=0)
+      OR (Strings.Compare(w,"dressed")=0) OR (Strings.Compare(w,"embarrassed")=0)
+      OR (Strings.Compare(w,"excited")=0) OR (Strings.Compare(w,"exhausted")=0)
+      OR (Strings.Compare(w,"frustrated")=0) OR (Strings.Compare(w,"interested")=0)
+      OR (Strings.Compare(w,"learned")=0) OR (Strings.Compare(w,"married")=0)
+      OR (Strings.Compare(w,"naked")=0) OR (Strings.Compare(w,"pleased")=0)
+      OR (Strings.Compare(w,"sacred")=0) OR (Strings.Compare(w,"satisfied")=0)
+      OR (Strings.Compare(w,"scared")=0) OR (Strings.Compare(w,"tired")=0)
+      OR (Strings.Compare(w,"wicked")=0) OR (Strings.Compare(w,"worried")=0)
+END IsAdjectivalEd;
+
+PROCEDURE IsIrregularParticiple(w: ARRAY OF CHAR): BOOLEAN;
+BEGIN
+  IF w[0] = 0X THEN RETURN FALSE END;
+  CASE w[0] OF
+    'b': RETURN (Strings.Compare(w,"beaten")=0) OR (Strings.Compare(w,"become")=0)
+             OR (Strings.Compare(w,"begun")=0) OR (Strings.Compare(w,"bent")=0)
+             OR (Strings.Compare(w,"bitten")=0) OR (Strings.Compare(w,"blown")=0)
+             OR (Strings.Compare(w,"born")=0) OR (Strings.Compare(w,"borne")=0)
+             OR (Strings.Compare(w,"bought")=0) OR (Strings.Compare(w,"bound")=0)
+             OR (Strings.Compare(w,"broken")=0) OR (Strings.Compare(w,"brought")=0)
+             OR (Strings.Compare(w,"built")=0) OR (Strings.Compare(w,"burnt")=0)
+             OR (Strings.Compare(w,"burst")=0) OR (Strings.Compare(w,"bust")=0)
+  | 'c': RETURN (Strings.Compare(w,"caught")=0) OR (Strings.Compare(w,"chosen")=0)
+             OR (Strings.Compare(w,"clung")=0) OR (Strings.Compare(w,"come")=0)
+             OR (Strings.Compare(w,"cut")=0)
+  | 'd': RETURN (Strings.Compare(w,"dealt")=0) OR (Strings.Compare(w,"done")=0)
+             OR (Strings.Compare(w,"drawn")=0) OR (Strings.Compare(w,"driven")=0)
+             OR (Strings.Compare(w,"drunk")=0)
+  | 'e': RETURN Strings.Compare(w,"eaten")=0
+  | 'f': RETURN (Strings.Compare(w,"fallen")=0) OR (Strings.Compare(w,"fed")=0)
+             OR (Strings.Compare(w,"felt")=0) OR (Strings.Compare(w,"fought")=0)
+             OR (Strings.Compare(w,"found")=0) OR (Strings.Compare(w,"flown")=0)
+             OR (Strings.Compare(w,"flung")=0) OR (Strings.Compare(w,"forgiven")=0)
+             OR (Strings.Compare(w,"forgotten")=0) OR (Strings.Compare(w,"frozen")=0)
+  | 'g': RETURN (Strings.Compare(w,"given")=0) OR (Strings.Compare(w,"gone")=0)
+             OR (Strings.Compare(w,"grown")=0)
+  | 'h': RETURN (Strings.Compare(w,"heard")=0) OR (Strings.Compare(w,"held")=0)
+             OR (Strings.Compare(w,"hidden")=0) OR (Strings.Compare(w,"hit")=0)
+             OR (Strings.Compare(w,"hung")=0) OR (Strings.Compare(w,"hurt")=0)
+  | 'k': RETURN (Strings.Compare(w,"kept")=0) OR (Strings.Compare(w,"known")=0)
+  | 'l': RETURN (Strings.Compare(w,"laid")=0) OR (Strings.Compare(w,"led")=0)
+             OR (Strings.Compare(w,"left")=0) OR (Strings.Compare(w,"lent")=0)
+             OR (Strings.Compare(w,"let")=0) OR (Strings.Compare(w,"lit")=0)
+             OR (Strings.Compare(w,"lost")=0)
+  | 'm': RETURN (Strings.Compare(w,"made")=0) OR (Strings.Compare(w,"meant")=0)
+             OR (Strings.Compare(w,"met")=0)
+  | 'p': RETURN (Strings.Compare(w,"paid")=0) OR (Strings.Compare(w,"put")=0)
+  | 'r': RETURN (Strings.Compare(w,"read")=0) OR (Strings.Compare(w,"ridden")=0)
+             OR (Strings.Compare(w,"risen")=0) OR (Strings.Compare(w,"run")=0)
+  | 's': RETURN (Strings.Compare(w,"said")=0) OR (Strings.Compare(w,"seen")=0)
+             OR (Strings.Compare(w,"sent")=0) OR (Strings.Compare(w,"set")=0)
+             OR (Strings.Compare(w,"sewn")=0) OR (Strings.Compare(w,"shaken")=0)
+             OR (Strings.Compare(w,"shot")=0) OR (Strings.Compare(w,"shown")=0)
+             OR (Strings.Compare(w,"shut")=0) OR (Strings.Compare(w,"slept")=0)
+             OR (Strings.Compare(w,"slid")=0) OR (Strings.Compare(w,"sold")=0)
+             OR (Strings.Compare(w,"sought")=0) OR (Strings.Compare(w,"sown")=0)
+             OR (Strings.Compare(w,"spent")=0) OR (Strings.Compare(w,"spoken")=0)
+             OR (Strings.Compare(w,"spun")=0) OR (Strings.Compare(w,"stolen")=0)
+             OR (Strings.Compare(w,"struck")=0) OR (Strings.Compare(w,"stuck")=0)
+             OR (Strings.Compare(w,"stung")=0) OR (Strings.Compare(w,"sung")=0)
+             OR (Strings.Compare(w,"sunk")=0) OR (Strings.Compare(w,"swept")=0)
+             OR (Strings.Compare(w,"swum")=0) OR (Strings.Compare(w,"swung")=0)
+  | 't': RETURN (Strings.Compare(w,"taken")=0) OR (Strings.Compare(w,"taught")=0)
+             OR (Strings.Compare(w,"thrown")=0) OR (Strings.Compare(w,"told")=0)
+             OR (Strings.Compare(w,"torn")=0)
+  | 'u': RETURN Strings.Compare(w,"understood")=0
+  | 'w': RETURN (Strings.Compare(w,"woken")=0) OR (Strings.Compare(w,"won")=0)
+             OR (Strings.Compare(w,"worn")=0) OR (Strings.Compare(w,"woven")=0)
+             OR (Strings.Compare(w,"written")=0) OR (Strings.Compare(w,"wrung")=0)
+  ELSE RETURN FALSE
+  END
+END IsIrregularParticiple;
+
+PROCEDURE IsParticiple(w: ARRAY OF CHAR): BOOLEAN;
+VAR len: INTEGER;
+BEGIN
+  IF IsAdjectivalEd(w) THEN RETURN FALSE END;
+  len := Strings.Length(w);
+  IF (len >= 4) & (w[len-2] = 'e') & (w[len-1] = 'd') THEN RETURN TRUE END;
+  RETURN IsIrregularParticiple(w)
+END IsParticiple;
+
+(* Build a style mask for one line: mask[col] = StXxx for each char of a
+   flagged word or span (adverb, filler, passive, long sentence).
+   Words are lowercased before matching; note lines are skipped. *)
+PROCEDURE BuildStyleMask(row: INTEGER; VAR mask: ARRAY OF INTEGER);
+VAR col, len, i, j, k, nw, ws, we, nextPos, sentStart, sentWC: INTEGER;
+    wordBuf: LineBuf; c: CHAR;
+    wstart, wend: ARRAY MaxStyleWords OF INTEGER;
+BEGIN
+  len := LineLen(row);
+  FOR col := 0 TO len DO mask[col] := StNone END;
+  IF len = 0 THEN RETURN END;
+  IF (lines[row].s[0] = '.') & (lines[row].s[1] = '.') THEN RETURN END;
+
+  (* Collect word spans *)
+  nw := 0; col := 0;
+  WHILE (col < len) & (nw < MaxStyleWords) DO
+    IF IsWordChar(lines[row].s[col]) THEN
+      ws := col;
+      WHILE (col < len) & IsWordChar(lines[row].s[col]) DO INC(col) END;
+      wstart[nw] := ws; wend[nw] := col; INC(nw)
+    ELSE INC(col)
+    END
+  END;
+
+  (* Adverb and filler checks *)
+  FOR i := 0 TO nw - 1 DO
+    Strings.Extract(lines[row].s, wstart[i], wend[i] - wstart[i], wordBuf);
+    Strings.ToLower(wordBuf);
+    IF IsStyleLyAdverb(wordBuf) THEN
+      FOR j := wstart[i] TO wend[i] - 1 DO mask[j] := StAdverb END
+    END;
+    IF IsFiller(wordBuf) THEN
+      FOR j := wstart[i] TO wend[i] - 1 DO mask[j] := StFiller END
+    END
+  END;
+
+  (* Passive voice: be-form [optional adverb] participle *)
+  i := 0;
+  WHILE i < nw DO
+    Strings.Extract(lines[row].s, wstart[i], wend[i] - wstart[i], wordBuf);
+    Strings.ToLower(wordBuf);
+    IF IsBeForm(wordBuf) THEN
+      IF i + 1 < nw THEN
+        Strings.Extract(lines[row].s, wstart[i+1], wend[i+1] - wstart[i+1], wordBuf);
+        Strings.ToLower(wordBuf);
+        IF IsParticiple(wordBuf) THEN
+          FOR j := wstart[i] TO wend[i+1] - 1 DO
+            IF mask[j] = StNone THEN mask[j] := StPassive END
+          END
+        ELSIF IsStyleLyAdverb(wordBuf) & (i + 2 < nw) THEN
+          Strings.Extract(lines[row].s, wstart[i+2], wend[i+2] - wstart[i+2], wordBuf);
+          Strings.ToLower(wordBuf);
+          IF IsParticiple(wordBuf) THEN
+            FOR j := wstart[i] TO wend[i+2] - 1 DO
+              IF mask[j] = StNone THEN mask[j] := StPassive END
+            END
+          END
+        END
+      END
+    END;
+    INC(i)
+  END;
+
+  (* Long sentence: mark word chars when sentence word-count > StyleSentWords *)
+  sentStart := 0; sentWC := 0;
+  i := 0;
+  WHILE i <= nw DO
+    IF i = nw THEN
+      (* Flush final sentence (no terminal punctuation) *)
+      IF (sentWC > StyleSentWords) & (sentStart < nw) THEN
+        FOR j := wstart[sentStart] TO wend[nw - 1] - 1 DO
+          IF mask[j] = StNone THEN mask[j] := StLong END
+        END
+      END
+    ELSE
+      INC(sentWC);
+      IF i + 1 < nw THEN nextPos := wstart[i + 1] ELSE nextPos := len END;
+      k := wend[i];
+      WHILE k < nextPos DO
+        c := lines[row].s[k];
+        IF (c = '.') OR (c = '!') OR (c = '?') THEN
+          IF (sentWC > StyleSentWords) & (sentStart < nw) THEN
+            FOR j := wstart[sentStart] TO wend[i] - 1 DO
+              IF mask[j] = StNone THEN mask[j] := StLong END
+            END
+          END;
+          sentStart := i + 1; sentWC := 0;
+          k := nextPos  (* break *)
+        ELSE
+          INC(k)
+        END
+      END
+    END;
+    INC(i)
+  END
+END BuildStyleMask;
+
+(* ^QI — jump cursor to the next style-flagged position *)
+PROCEDURE NextStyleIssue;
+VAR row, col, len: INTEGER;
+    smask: ARRAY (MaxLineLen + 1) OF INTEGER;
+BEGIN
+  IF ~styleEnabled THEN SetStatus("Style off — ^OL to enable"); RETURN END;
+  row := curRow; col := curCol + 1;
+  IF col > LineLen(row) THEN INC(row); col := 0 END;
+  LOOP
+    IF row >= numLines THEN SetStatus("No more style issues"); RETURN END;
+    len := LineLen(row);
+    BuildStyleMask(row, smask);
+    WHILE col < len DO
+      IF smask[col] # StNone THEN
+        curRow := row; curCol := col;
+        IF smask[col] = StAdverb  THEN SetStatus("Style: -ly adverb")
+        ELSIF smask[col] = StFiller  THEN SetStatus("Style: filler word")
+        ELSIF smask[col] = StPassive THEN SetStatus("Style: passive voice")
+        ELSE SetStatus("Style: long sentence")
+        END;
+        goalCol := -1; needRedraw := TRUE; RETURN
+      END;
+      INC(col)
+    END;
+    INC(row); col := 0
+  END
+END NextStyleIssue;
 
 (* Build a boolean mask for one line: mask[col] = TRUE iff that character
    is part of a word that hunspell flagged and is not in personalDict.    *)
@@ -1955,11 +2259,13 @@ BEGIN
 END AddToPersonalDict;
 
 PROCEDURE DrawTextLine(screenY, docRow: INTEGER);
-VAR col, len, x, fg, bg: INTEGER; c: CHAR; dimmed: BOOLEAN;
+VAR col, len, x, fg, bg, sk: INTEGER; c: CHAR; dimmed: BOOLEAN;
     mask: ARRAY (MaxLineLen + 1) OF BOOLEAN;
+    smask: ARRAY (MaxLineLen + 1) OF INTEGER;
 BEGIN
   len := LineLen(docRow);
   IF spellEnabled THEN BuildSpellMask(docRow, mask) END;
+  IF styleEnabled THEN BuildStyleMask(docRow, smask) END;
   dimmed := focusMode & ((docRow < focusParaS) OR (docRow > focusParaE));
   x := 1;
   col := leftCol;
@@ -1975,7 +2281,12 @@ BEGIN
       fg := ThHlFg(); bg := ThHlBg()
     ELSIF spellEnabled & (col < LEN(mask)) & mask[col] THEN
       fg := ThSpFg(); bg := ThBg()
+    ELSIF styleEnabled & (col < LEN(smask)) & (smask[col] # StNone) THEN
+      sk := smask[col];
+      IF (docRow = curRow) & (col = curCol) THEN styleCurKind := sk END;
+      fg := ThStylFg(sk); bg := ThBg()
     ELSE
+      IF styleEnabled & (docRow = curRow) & (col = curCol) THEN styleCurKind := StNone END;
       fg := ThFg(); bg := ThBg()
     END;
     TUI.PutCell(x, screenY, c, fg, bg);
@@ -2016,6 +2327,10 @@ BEGIN
   ELSIF mode = ModeConfirm THEN
     COPY("Quit without saving? (Y/N)", s)
   ELSIF overtype THEN COPY("OVR", s)
+  ELSIF styleEnabled & (styleCurKind = StAdverb)  THEN COPY("-ly adverb",   s)
+  ELSIF styleEnabled & (styleCurKind = StFiller)  THEN COPY("filler word",  s)
+  ELSIF styleEnabled & (styleCurKind = StPassive) THEN COPY("passive voice", s)
+  ELSIF styleEnabled & (styleCurKind = StLong)    THEN COPY("long sentence", s)
   END;
   IF statusMsg[0] # 0X THEN COPY(statusMsg, s) END;
   (* Search and input prompts are left-aligned so the cursor lands right
@@ -2126,11 +2441,13 @@ END DrawPalette;
 
 PROCEDURE DrawSegment(screenY, docRow, segFrom: INTEGER);
 (* Draw one visual wrap segment of docRow on screen row screenY. *)
-VAR col, segEnd, x, fg, bg: INTEGER; c: CHAR; dimmed: BOOLEAN;
+VAR col, segEnd, x, fg, bg, sk: INTEGER; c: CHAR; dimmed: BOOLEAN;
     mask: ARRAY (MaxLineLen + 1) OF BOOLEAN;
+    smask: ARRAY (MaxLineLen + 1) OF INTEGER;
 BEGIN
   segEnd := SegEnd(docRow, segFrom);
   IF spellEnabled THEN BuildSpellMask(docRow, mask) END;
+  IF styleEnabled THEN BuildStyleMask(docRow, smask) END;
   dimmed := focusMode & ((docRow < focusParaS) OR (docRow > focusParaE));
   x := 1; col := segFrom;
   WHILE (x <= TUI.Cols) & (col < segEnd) DO
@@ -2145,7 +2462,12 @@ BEGIN
       fg := ThHlFg(); bg := ThHlBg()
     ELSIF spellEnabled & (col < LEN(mask)) & mask[col] THEN
       fg := ThSpFg(); bg := ThBg()
+    ELSIF styleEnabled & (col < LEN(smask)) & (smask[col] # StNone) THEN
+      sk := smask[col];
+      IF (docRow = curRow) & (col = curCol) THEN styleCurKind := sk END;
+      fg := ThStylFg(sk); bg := ThBg()
     ELSE
+      IF styleEnabled & (docRow = curRow) & (col = curCol) THEN styleCurKind := StNone END;
       fg := ThFg(); bg := ThBg()
     END;
     TUI.PutCell(x, screenY, c, fg, bg);
@@ -2168,6 +2490,7 @@ BEGIN
   TUI.InvalidateFront;
   TUI.ClearBack(ThFg(), ThBg());
   EnsureVisible;
+  styleCurKind := StNone;
   (* Compute focus paragraph bounds around curRow *)
   IF focusMode THEN
     focusParaS := curRow;
@@ -2466,6 +2789,7 @@ BEGIN
   | 'g', 'G': TransposeChars
   | 't', 'T': TransposeWords
   | 'n', 'N': NextMisspelling
+  | 'i', 'I': NextStyleIssue
   ELSE SetStatus("Unknown ^Q command")
   END;
   needRedraw := TRUE
@@ -2513,6 +2837,11 @@ BEGIN
       ELSE Dict.Init(misspelled); SetStatus("Spell check OFF")
       END
   | 'a', 'A': AddToPersonalDict
+  | 'l', 'L':
+      styleEnabled := ~styleEnabled;
+      IF styleEnabled THEN SetStatus("Style check ON")
+      ELSE styleCurKind := StNone; SetStatus("Style check OFF")
+      END
   ELSE SetStatus("Unknown ^O command")
   END;
   needRedraw := TRUE
@@ -2702,6 +3031,7 @@ BEGIN
   needRedraw := TRUE;
   palScroll := 0;
   focusMode := FALSE; focusParaS := 0; focusParaE := 0;
+  styleEnabled := FALSE; styleCurKind := StNone;
   spellEnabled := FALSE;
   Dict.Init(misspelled);
   Dict.Init(personalDict);
