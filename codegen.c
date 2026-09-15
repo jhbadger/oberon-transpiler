@@ -1323,11 +1323,11 @@ static int try_emit_import(CG *g, Node *fa, Node *args) {
         if (!strcmp(proc,"Copy"))    { emit(g,"Strings_Copy(");    emit_as_string(g,a0); emit(g,","); emit_expr(g,a1); emit(g,","); emit_string_capacity(g,a1); emit(g,")"); return 1; }
         if (!strcmp(proc,"Compare")) { emit(g,"Strings_Compare("); emit_as_string(g,a0); emit(g,","); emit_as_string(g,a1); emit(g,")"); return 1; }
         if (!strcmp(proc,"Pos"))      { emit(g,"Strings_PosFrom(");   emit_as_string(g,a0); emit(g,","); emit_as_string(g,a1); emit(g,","); if (a2) emit_expr(g,a2); else emit(g,"0"); emit(g,")"); return 1; }
-        if (!strcmp(proc,"Extract"))  { emit(g,"Strings_Extract(");   emit_as_string(g,a0); emit(g,","); emit_expr(g,a1); emit(g,","); emit_expr(g,a2); emit(g,","); emit_expr(g,a2->next); emit(g,")"); return 1; }
+        if (!strcmp(proc,"Extract"))  { emit(g,"Strings_Extract(");   emit_as_string(g,a0); emit(g,","); emit_expr(g,a1); emit(g,","); emit_expr(g,a2); emit(g,","); emit_expr(g,a2->next); emit(g,","); emit_string_capacity(g,a2->next); emit(g,")"); return 1; }
         if (!strcmp(proc,"NextWord")) { emit(g,"Strings_NextWord(");   emit_as_string(g,a0); emit(g,",&"); emit_expr(g,a1); emit(g,","); emit_expr(g,a2); emit(g,")"); return 1; }
-        if (!strcmp(proc,"Insert"))   { emit(g,"Strings_Insert(");    emit_as_string(g,a0); emit(g,","); emit_expr(g,a1); emit(g,","); emit_expr(g,a2); emit(g,")"); return 1; }
+        if (!strcmp(proc,"Insert"))   { emit(g,"Strings_Insert(");    emit_as_string(g,a0); emit(g,","); emit_expr(g,a1); emit(g,","); emit_expr(g,a2); emit(g,","); emit_string_capacity(g,a2); emit(g,")"); return 1; }
         if (!strcmp(proc,"Delete"))   { emit(g,"Strings_Delete(");    emit_expr(g,a0); emit(g,","); emit_expr(g,a1); emit(g,","); emit_expr(g,a2); emit(g,")"); return 1; }
-        if (!strcmp(proc,"Replace"))  { emit(g,"Strings_Replace(");   emit_as_string(g,a0); emit(g,","); emit_expr(g,a1); emit(g,","); emit_expr(g,a2); emit(g,")"); return 1; }
+        if (!strcmp(proc,"Replace"))  { emit(g,"Strings_Replace(");   emit_as_string(g,a0); emit(g,","); emit_expr(g,a1); emit(g,","); emit_expr(g,a2); emit(g,","); emit_string_capacity(g,a2); emit(g,")"); return 1; }
         if (!strcmp(proc,"ToUpper"))   { emit(g,"Strings_ToUpper(");    emit_expr(g,a0); emit(g,")"); return 1; }
         if (!strcmp(proc,"ToLower"))   { emit(g,"Strings_ToLower(");    emit_expr(g,a0); emit(g,")"); return 1; }
         if (!strcmp(proc,"Trim"))      { emit(g,"Strings_Trim(");       emit_expr(g,a0); emit(g,")"); return 1; }
@@ -3110,12 +3110,12 @@ void codegen(Node *module, FILE *out, int is_main, const char *srcfile) {
         emit(g,"    const char *p=strstr(s+from,pat); return p?(int)(p-s):-1;\n");
         emit(g,"}\n");
         /* Extract(src, pos, len, VAR dst) — copy substring */
-        emit(g,"static void Strings_Extract(const char *src, int pos, int len, char *dst) {\n");
+        emit(g,"static void Strings_Extract(const char *src, int pos, int len, char *dst, int dstcap) {\n");
         emit(g,"    int slen=(int)strlen(src);\n");
         emit(g,"    if (pos<0) pos=0;\n");
         emit(g,"    if (pos>slen) { dst[0]=0; return; }\n");
         emit(g,"    if (len>slen-pos) len=slen-pos;\n");
-        emit(g,"    if (len>255) len=255;\n");
+        emit(g,"    if (dstcap>0 && len>=dstcap) len=dstcap-1;\n");
         emit(g,"    memmove(dst, src+pos, len); dst[len]=0;\n");
         emit(g,"}\n");
         /* NextWord(src, VAR pos, VAR dst) — skip whitespace, copy next word, advance pos */
@@ -3126,12 +3126,13 @@ void codegen(Node *module, FILE *out, int is_main, const char *srcfile) {
         emit(g,"    dst[j]=0; *pos=i;\n");
         emit(g,"}\n");
         /* Insert(src, pos, VAR dst) — insert src into dst at pos */
-        emit(g,"static void Strings_Insert(const char *src, int pos, char *dst) {\n");
+        emit(g,"static void Strings_Insert(const char *src, int pos, char *dst, int dstcap) {\n");
         emit(g,"    int dlen=(int)strlen(dst), slen=(int)strlen(src);\n");
         emit(g,"    if (pos<0) pos=0; if (pos>dlen) pos=dlen;\n");
-        emit(g,"    int tail=dlen-pos; if (pos+slen+tail>255) tail=255-pos-slen; if (tail<0) tail=0;\n");
+        emit(g,"    int cap=dstcap>0?dstcap-1:dlen+slen;\n");
+        emit(g,"    int tail=dlen-pos; if (pos+slen+tail>cap) tail=cap-pos-slen; if (tail<0) tail=0;\n");
         emit(g,"    memmove(dst+pos+slen, dst+pos, tail);\n");
-        emit(g,"    int copy=slen; if (pos+copy>255) copy=255-pos; if (copy>0) memcpy(dst+pos,src,copy);\n");
+        emit(g,"    int copy=slen; if (pos+copy>cap) copy=cap-pos; if (copy>0) memcpy(dst+pos,src,copy);\n");
         emit(g,"    int newlen=pos+copy+tail; dst[newlen]=0;\n");
         emit(g,"}\n");
         /* Delete(VAR s, pos, len) — delete len chars at pos */
@@ -3142,10 +3143,11 @@ void codegen(Node *module, FILE *out, int is_main, const char *srcfile) {
         emit(g,"    memmove(s+pos, s+pos+len, slen-pos-len+1);\n");
         emit(g,"}\n");
         /* Replace(src, pos, VAR dst) — overwrite dst at pos with src */
-        emit(g,"static void Strings_Replace(const char *src, int pos, char *dst) {\n");
+        emit(g,"static void Strings_Replace(const char *src, int pos, char *dst, int dstcap) {\n");
         emit(g,"    int dlen=(int)strlen(dst), slen=(int)strlen(src);\n");
         emit(g,"    if (pos<0) pos=0; if (pos>dlen) pos=dlen;\n");
-        emit(g,"    int end=pos+slen; if (end>255) end=255;\n");
+        emit(g,"    int cap=dstcap>0?dstcap-1:pos+slen;\n");
+        emit(g,"    int end=pos+slen; if (end>cap) end=cap;\n");
         emit(g,"    memcpy(dst+pos, src, end-pos);\n");
         emit(g,"    if (end>dlen) dst[end]=0;\n");
         emit(g,"}\n");
