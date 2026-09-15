@@ -1076,7 +1076,10 @@ BEGIN
   | 38: COPY("^OH",  chord); COPY("cycle help level",      desc)
   | 39: COPY("^OW",  chord); COPY("word wrap on/off",      desc)
   | 40: COPY("^OT",  chord); COPY("typewriter scroll",     desc)
-  | 41: COPY("F1",   chord); COPY("this key list",         desc)
+  | 41: COPY("^OS",  chord); COPY("spell check on/off",    desc)
+  | 42: COPY("^OA",  chord); COPY("add word to dict",      desc)
+  | 43: COPY("^QN",  chord); COPY("next misspelling",      desc)
+  | 44: COPY("F1",   chord); COPY("this key list",         desc)
   ELSE (* end *)
   END
 END PaletteEntry;
