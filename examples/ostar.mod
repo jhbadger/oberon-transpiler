@@ -1274,6 +1274,7 @@ BEGIN
   Strings.Append(wordsFile, cmd); Strings.Append("' > '", cmd);
   Strings.Append(badFile,   cmd); Strings.Append("' 2>/dev/null", cmd);
   OS.Exec(cmd);
+  TUI.InvalidateFront;  (* shell subprocess may have disturbed the terminal *)
 
   Dict.Init(misspelled);
   cnt := 0;
@@ -1366,6 +1367,7 @@ BEGIN
     Strings.Append("'", cmd);
     OS.Exec(cmd)
   END;
+  TUI.InvalidateFront;  (* shell subprocess may have disturbed the terminal *)
   COPY("Added to dictionary: ", statusMsg); Strings.Append(word, statusMsg);
   needRedraw := TRUE
 END AddToPersonalDict;
@@ -1537,6 +1539,7 @@ PROCEDURE DrawAll;
 VAR row, screenY, textH: INTEGER;
 BEGIN
   textH := TUI.Rows - 1;  (* last row is status bar *)
+  TUI.InvalidateFront;     (* force full repaint every frame — prevents stale *)
   TUI.ClearBack(ThFg(), ThBg());
   EnsureVisible;
   (* Text lines *)
