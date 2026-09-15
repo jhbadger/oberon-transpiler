@@ -473,7 +473,7 @@ END SaveFile;
 (* ── Text Editing ────────────────────────────────────────────────── *)
 
 PROCEDURE InsChar(c: CHAR);
-VAR tmp: ARRAY 2 OF CHAR;
+VAR tmp: ARRAY 2 OF CHAR; sp, newCol: INTEGER; rest: Line;
 BEGIN
   IF LineLen(curRow) >= MaxLineLen THEN RETURN END;
   UndoSaveLine;
@@ -484,6 +484,21 @@ BEGIN
     Strings.Insert(tmp, curCol, lines[curRow])
   END;
   INC(curCol);
+  (* Hard word wrap: if line now exceeds margin, break at last space *)
+  IF wrap & ~overtype & (LineLen(curRow) > wrapMargin) THEN
+    sp := wrapMargin;
+    WHILE (sp > 0) & (lines[curRow][sp] # ' ') DO DEC(sp) END;
+    IF sp > 0 THEN
+      newCol := curCol - sp - 1;  (* cursor offset into the wrapped-down text *)
+      Strings.Extract(lines[curRow], sp + 1, MaxLineLen, rest);
+      lines[curRow][sp] := 0X;    (* trim at the space *)
+      ShiftLinesDown(curRow + 1);
+      COPY(rest, lines[curRow + 1]);
+      INC(curRow);
+      IF newCol < 0 THEN newCol := 0 END;
+      curCol := newCol
+    END
+  END;
   dirty := TRUE;
   needRedraw := TRUE
 END InsChar;
@@ -1965,7 +1980,7 @@ BEGIN
   mode := ModeNormal; prefix := PrefNone;
   theme := ThWP;
   helpLevel := 1;
-  wrap := FALSE; wrapMargin := 72;
+  wrap := TRUE; wrapMargin := 72;
   overtype := FALSE; typewriter := FALSE;
   running := TRUE; showSplash := TRUE;
   statusMsg[0] := 0X;
