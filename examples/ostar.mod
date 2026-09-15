@@ -446,30 +446,9 @@ BEGIN
   Files.Close(f);
   IF numLines = 0 THEN lines[0][0] := 0X; numLines := 1 END;
   COPY(path, filePath);
-  IF wrap THEN ReflowLines END;
   dirty := FALSE;
   RETURN TRUE
 END LoadFile;
-
-PROCEDURE ReflowLines;
-(* Walk every line; split any that exceed wrapMargin at the last space.
-   Called after LoadFile when wrap is on so existing long lines are broken. *)
-VAR row, sp: INTEGER; rest: Line;
-BEGIN
-  row := 0;
-  WHILE row < numLines DO
-    WHILE (LineLen(row) > wrapMargin) & (numLines < MaxLines) DO
-      sp := wrapMargin;
-      WHILE (sp > 0) & (lines[row][sp] # ' ') DO DEC(sp) END;
-      IF sp = 0 THEN EXIT END;   (* no space to break at — leave line alone *)
-      Strings.Extract(lines[row], sp + 1, MaxLineLen, rest);
-      lines[row][sp] := 0X;
-      ShiftLinesDown(row + 1);
-      COPY(rest, lines[row + 1])
-    END;
-    INC(row)
-  END
-END ReflowLines;
 
 PROCEDURE SaveFile(): BOOLEAN;
 VAR f: Files.File; r: Files.Rider; i: INTEGER;
@@ -494,7 +473,7 @@ END SaveFile;
 (* ── Text Editing ────────────────────────────────────────────────── *)
 
 PROCEDURE InsChar(c: CHAR);
-VAR tmp: ARRAY 2 OF CHAR; sp, newCol: INTEGER; rest: Line;
+VAR tmp: ARRAY 2 OF CHAR;
 BEGIN
   IF LineLen(curRow) >= MaxLineLen THEN RETURN END;
   UndoSaveLine;
@@ -505,21 +484,6 @@ BEGIN
     Strings.Insert(tmp, curCol, lines[curRow])
   END;
   INC(curCol);
-  (* Hard word wrap: if line now exceeds margin, break at last space *)
-  IF wrap & ~overtype & (LineLen(curRow) > wrapMargin) THEN
-    sp := wrapMargin;
-    WHILE (sp > 0) & (lines[curRow][sp] # ' ') DO DEC(sp) END;
-    IF sp > 0 THEN
-      newCol := curCol - sp - 1;  (* cursor offset into the wrapped-down text *)
-      Strings.Extract(lines[curRow], sp + 1, MaxLineLen, rest);
-      lines[curRow][sp] := 0X;    (* trim at the space *)
-      ShiftLinesDown(curRow + 1);
-      COPY(rest, lines[curRow + 1]);
-      INC(curRow);
-      IF newCol < 0 THEN newCol := 0 END;
-      curCol := newCol
-    END
-  END;
   dirty := TRUE;
   needRedraw := TRUE
 END InsChar;
@@ -654,22 +618,111 @@ BEGIN
   IF curCol > LineLen(curRow) THEN curCol := LineLen(curRow) END
 END ClampCursor;
 
-PROCEDURE MoveUp;
+(* ── Soft-wrap segment helpers ──────────────────────────────────────── *)
+
+PROCEDURE SegEnd(row, from: INTEGER): INTEGER;
+(* One-past-end column of the wrap segment starting at 'from'. *)
+VAR len, bp: INTEGER;
 BEGIN
-  IF goalCol < 0 THEN goalCol := curCol END;
-  IF curRow > 0 THEN
-    DEC(curRow);
-    curCol := Min(goalCol, LineLen(curRow))
+  len := LineLen(row);
+  IF ~wrap OR (len - from <= wrapMargin) THEN RETURN len END;
+  bp := from + wrapMargin;
+  WHILE (bp > from) & (lines[row][bp] # ' ') DO DEC(bp) END;
+  IF bp = from THEN RETURN from + wrapMargin END;
+  RETURN bp
+END SegEnd;
+
+PROCEDURE SegNext(row, from: INTEGER): INTEGER;
+(* Start column of the next segment after the segment beginning at 'from'. *)
+VAR e: INTEGER;
+BEGIN
+  e := SegEnd(row, from);
+  IF (e < LineLen(row)) & (lines[row][e] = ' ') THEN RETURN e + 1 END;
+  RETURN e
+END SegNext;
+
+PROCEDURE NumSegs(row: INTEGER): INTEGER;
+(* Number of visual screen rows that buffer line 'row' occupies. *)
+VAR n, from: INTEGER;
+BEGIN
+  n := 0; from := 0;
+  LOOP
+    INC(n);
+    IF SegEnd(row, from) >= LineLen(row) THEN EXIT END;
+    from := SegNext(row, from)
+  END;
+  RETURN n
+END NumSegs;
+
+PROCEDURE CurSeg(VAR segFrom: INTEGER);
+(* Set segFrom to the start column of the wrap segment containing curCol. *)
+VAR from, e: INTEGER;
+BEGIN
+  from := 0;
+  LOOP
+    e := SegEnd(curRow, from);
+    segFrom := from;
+    IF e >= LineLen(curRow) THEN EXIT END;
+    IF curCol < e THEN EXIT END;
+    from := SegNext(curRow, from)
+  END
+END CurSeg;
+
+PROCEDURE MoveUp;
+VAR sf, from, prevSF: INTEGER;
+BEGIN
+  IF wrap THEN
+    CurSeg(sf);
+    IF goalCol < 0 THEN goalCol := curCol - sf END;
+    IF sf > 0 THEN
+      (* Previous visual row is previous segment of same buffer line *)
+      from := 0; prevSF := 0;
+      WHILE from < sf DO prevSF := from; from := SegNext(curRow, from) END;
+      curCol := prevSF + goalCol;
+      IF curCol > LineLen(curRow) THEN curCol := LineLen(curRow) END
+    ELSIF curRow > 0 THEN
+      DEC(curRow);
+      (* Find last segment of new curRow *)
+      from := 0;
+      WHILE SegEnd(curRow, from) < LineLen(curRow) DO
+        from := SegNext(curRow, from)
+      END;
+      curCol := from + goalCol;
+      IF curCol > LineLen(curRow) THEN curCol := LineLen(curRow) END
+    END
+  ELSE
+    IF goalCol < 0 THEN goalCol := curCol END;
+    IF curRow > 0 THEN
+      DEC(curRow);
+      curCol := Min(goalCol, LineLen(curRow))
+    END
   END;
   needRedraw := TRUE
 END MoveUp;
 
 PROCEDURE MoveDown;
+VAR sf, e, nf: INTEGER;
 BEGIN
-  IF goalCol < 0 THEN goalCol := curCol END;
-  IF curRow < numLines - 1 THEN
-    INC(curRow);
-    curCol := Min(goalCol, LineLen(curRow))
+  IF wrap THEN
+    CurSeg(sf);
+    IF goalCol < 0 THEN goalCol := curCol - sf END;
+    e := SegEnd(curRow, sf);
+    IF e < LineLen(curRow) THEN
+      (* Next visual row is next segment in same buffer line *)
+      nf := SegNext(curRow, sf);
+      curCol := nf + goalCol;
+      IF curCol > LineLen(curRow) THEN curCol := LineLen(curRow) END
+    ELSIF curRow < numLines - 1 THEN
+      INC(curRow);
+      curCol := goalCol;
+      IF curCol > LineLen(curRow) THEN curCol := LineLen(curRow) END
+    END
+  ELSE
+    IF goalCol < 0 THEN goalCol := curCol END;
+    IF curRow < numLines - 1 THEN
+      INC(curRow);
+      curCol := Min(goalCol, LineLen(curRow))
+    END
   END;
   needRedraw := TRUE
 END MoveDown;
@@ -810,16 +863,32 @@ BEGIN
 END ScreenBottom;
 
 PROCEDURE EnsureVisible;
-(* Adjust topLine so the cursor is visible *)
-VAR h: INTEGER;
+VAR h, vrow, row, from, e, segF: INTEGER;
 BEGIN
   h := Max(1, TUI.Rows - 1);
   IF typewriter THEN
     topLine := curRow - h DIV 2;
     IF topLine < 0 THEN topLine := 0 END
-  ELSE
+  ELSIF ~wrap THEN
     IF curRow < topLine THEN topLine := curRow END;
     IF curRow >= topLine + h THEN topLine := curRow - h + 1 END
+  ELSE
+    (* Scroll up if cursor is above top *)
+    IF curRow < topLine THEN topLine := curRow; RETURN END;
+    (* Count visual rows from topLine to cursor's segment *)
+    CurSeg(segF);
+    vrow := 0;
+    FOR row := topLine TO curRow - 1 DO vrow := vrow + NumSegs(row) END;
+    (* Add segment offset within curRow *)
+    from := 0;
+    WHILE from < segF DO INC(vrow); from := SegNext(curRow, from) END;
+    IF vrow < h THEN RETURN END;  (* cursor already visible *)
+    (* Cursor below screen: advance topLine until cursor fits *)
+    WHILE (vrow >= h) & (topLine < curRow) DO
+      vrow := vrow - NumSegs(topLine);
+      INC(topLine)
+    END;
+    IF vrow >= h THEN topLine := curRow END
   END
 END EnsureVisible;
 
@@ -1571,32 +1640,92 @@ BEGIN
   END
 END DrawPalette;
 
+PROCEDURE DrawSegment(screenY, docRow, segFrom: INTEGER);
+(* Draw one visual wrap segment of docRow on screen row screenY. *)
+VAR col, segEnd, x, fg, bg: INTEGER; c: CHAR;
+    mask: ARRAY (MaxLineLen + 1) OF BOOLEAN;
+BEGIN
+  segEnd := SegEnd(docRow, segFrom);
+  IF spellEnabled THEN BuildSpellMask(docRow, mask) END;
+  x := 1; col := segFrom;
+  WHILE (x <= TUI.Cols) & (col < segEnd) DO
+    c := lines[docRow][col];
+    IF c = 0X THEN c := ' ' END;
+    IF InBlock(docRow, col) THEN
+      fg := ThBlkFg(); bg := ThBlkBg()
+    ELSIF (docRow = searchRow) & (col >= searchCol) & (col < searchCol + searchLen)
+        & (mode = ModeSearch) THEN
+      fg := ThHlFg(); bg := ThHlBg()
+    ELSIF spellEnabled & (col < LEN(mask)) & mask[col] THEN
+      fg := ThSpFg(); bg := ThBg()
+    ELSE
+      fg := ThFg(); bg := ThBg()
+    END;
+    TUI.PutCell(x, screenY, c, fg, bg);
+    INC(x); INC(col)
+  END;
+  IF x <= TUI.Cols THEN
+    TUI.FillRect(x, screenY, TUI.Cols - x + 1, 1, ' ', ThFg(), ThBg())
+  END
+END DrawSegment;
+
 PROCEDURE DrawAll;
 VAR row, screenY, textH: INTEGER;
+    bufRow, segF, csf, screenX, screenRow, row2, sf2, e: INTEGER;
 BEGIN
-  textH := TUI.Rows - 1;  (* last row is status bar *)
-  TUI.InvalidateFront;     (* force full repaint every frame — prevents stale *)
+  textH := TUI.Rows - 1;
+  TUI.InvalidateFront;
   TUI.ClearBack(ThFg(), ThBg());
   EnsureVisible;
-  (* Text lines *)
-  FOR screenY := 1 TO textH DO
-    row := topLine + screenY - 1;
-    IF row < numLines THEN
-      DrawTextLine(screenY, row)
-    ELSE
-      TUI.FillRect(1, screenY, TUI.Cols, 1, ' ', ThFg(), ThBg())
+  (* Draw text lines *)
+  IF wrap THEN
+    bufRow := topLine; segF := 0;
+    FOR screenY := 1 TO textH DO
+      IF bufRow < numLines THEN
+        DrawSegment(screenY, bufRow, segF);
+        IF SegEnd(bufRow, segF) >= LineLen(bufRow) THEN
+          INC(bufRow); segF := 0
+        ELSE
+          segF := SegNext(bufRow, segF)
+        END
+      ELSE
+        TUI.FillRect(1, screenY, TUI.Cols, 1, ' ', ThFg(), ThBg())
+      END
+    END
+  ELSE
+    FOR screenY := 1 TO textH DO
+      row := topLine + screenY - 1;
+      IF row < numLines THEN
+        DrawTextLine(screenY, row)
+      ELSE
+        TUI.FillRect(1, screenY, TUI.Cols, 1, ' ', ThFg(), ThBg())
+      END
     END
   END;
   DrawStatus;
-  IF (helpLevel >= 1) & (prefix # PrefNone) THEN
-    DrawPrefixMenu(prefix)
-  END;
+  IF (helpLevel >= 1) & (prefix # PrefNone) THEN DrawPrefixMenu(prefix) END;
   IF mode = ModePalette THEN DrawPalette END;
   TUI.Flush;
+  (* Place hardware cursor *)
   IF mode = ModeSearch THEN
     TUI.SetCursor(7 + Strings.Length(searchStr), TUI.Rows)
   ELSIF mode = ModeInput THEN
     TUI.SetCursor(Strings.Length(inpLabel) + 3 + Strings.Length(inpValue), TUI.Rows)
+  ELSIF wrap THEN
+    CurSeg(csf);
+    screenX := curCol - csf + 1;
+    screenRow := 1;
+    row2 := topLine; sf2 := 0;
+    LOOP
+      IF (row2 = curRow) & (sf2 = csf) THEN EXIT END;
+      e := SegEnd(row2, sf2);
+      IF e >= LineLen(row2) THEN INC(row2); sf2 := 0
+      ELSE sf2 := SegNext(row2, sf2)
+      END;
+      INC(screenRow);
+      IF screenRow > textH THEN screenRow := textH; EXIT END
+    END;
+    TUI.SetCursor(screenX, screenRow)
   ELSE
     TUI.SetCursor(curCol - leftCol + 1, curRow - topLine + 1)
   END
