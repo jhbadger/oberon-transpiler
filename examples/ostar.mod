@@ -1336,15 +1336,16 @@ END NextMisspelling;
 
 (* ^OA — add the word under the cursor to the personal dictionary *)
 PROCEDURE AddToPersonalDict;
-VAR word, lword: Line; f: Files.File; r: Files.Rider;
-    mkdirCmd: ARRAY 600 OF CHAR; dirPath: ARRAY 512 OF CHAR; i: INTEGER;
+(* Files.Old opens read-only ("rb") so we cannot write through it.
+   Files.New truncates.  Shell append is the only safe option here. *)
+VAR word, lword: Line; cmd: ARRAY 700 OF CHAR;
+    dirPath: ARRAY 512 OF CHAR; i: INTEGER;
 BEGIN
   WordUnderCursor(word);
   IF word[0] = 0X THEN SetStatus("No word under cursor"); RETURN END;
   COPY(word, lword); Strings.ToLower(lword);
   Dict.Put(personalDict, lword, "");
   Dict.Remove(misspelled, lword);
-  (* Persist to file *)
   IF personalPath[0] # 0X THEN
     (* Ensure parent directory exists *)
     COPY(personalPath, dirPath);
@@ -1352,18 +1353,18 @@ BEGIN
     WHILE (i >= 0) & (dirPath[i] # '/') DO DEC(i) END;
     IF i > 0 THEN
       dirPath[i] := 0X;
-      COPY("mkdir -p '", mkdirCmd);
-      Strings.Append(dirPath, mkdirCmd);
-      Strings.Append("' 2>/dev/null", mkdirCmd);
-      OS.Exec(mkdirCmd)
+      COPY("mkdir -p '", cmd);
+      Strings.Append(dirPath, cmd);
+      Strings.Append("' 2>/dev/null", cmd);
+      OS.Exec(cmd)
     END;
-    f := Files.Old(personalPath);
-    IF f = NIL THEN f := Files.New(personalPath) END;
-    IF f # NIL THEN
-      Files.Set(r, f, Files.Length(f));
-      Files.WriteLine(r, lword);
-      Files.Register(f); Files.Close(f)
-    END
+    (* Append the word as a new line *)
+    COPY("printf '%s\n' '", cmd);
+    Strings.Append(lword, cmd);
+    Strings.Append("' >> '", cmd);
+    Strings.Append(personalPath, cmd);
+    Strings.Append("'", cmd);
+    OS.Exec(cmd)
   END;
   COPY("Added to dictionary: ", statusMsg); Strings.Append(word, statusMsg);
   needRedraw := TRUE
