@@ -150,6 +150,14 @@ VAR
   ev          : TUI.Event;
 
 (* ── Theme Colours ───────────────────────────────────────────────── *)
+(*
+ * WP Blue uses xterm-256 indices so the background matches DOS CGA #0000AA:
+ *   19 = #0000af  — text background  (nearest to CGA blue #0000AA)
+ *   17 = #00005f  — block-highlight fg on white (dark enough for contrast)
+ * The status bar stays ANSI cyan (TUI.Cyan = 6) — the lighter band is correct.
+ *)
+CONST WPBlueBg = 19;  (* xterm-256 #0000af, closest to CGA #0000AA *)
+      WPBlueBlkFg = 17; (* xterm-256 #00005f for block highlight *)
 
 PROCEDURE ThFg(): INTEGER;
 BEGIN
@@ -158,7 +166,7 @@ END ThFg;
 
 PROCEDURE ThBg(): INTEGER;
 BEGIN
-  IF theme = ThWP THEN RETURN TUI.Blue ELSE RETURN TUI.Black END
+  IF theme = ThWP THEN RETURN WPBlueBg ELSE RETURN TUI.Black END
 END ThBg;
 
 PROCEDURE ThDimFg(): INTEGER;
@@ -178,7 +186,7 @@ END ThStBg;
 
 PROCEDURE ThBlkFg(): INTEGER;
 BEGIN
-  IF theme = ThWP THEN RETURN TUI.Blue ELSE RETURN TUI.Black END
+  IF theme = ThWP THEN RETURN WPBlueBlkFg ELSE RETURN TUI.Black END
 END ThBlkFg;
 
 PROCEDURE ThBlkBg(): INTEGER;
@@ -717,7 +725,7 @@ PROCEDURE PageUp;
 VAR h: INTEGER;
 BEGIN
   goalCol := -1;
-  h := Max(1, TUI.Rows - 2);
+  h := Max(1, TUI.Rows - 1);
   DEC(curRow, h); DEC(topLine, h);
   IF topLine < 0 THEN topLine := 0 END;
   ClampCursor;
@@ -729,7 +737,7 @@ PROCEDURE PageDown;
 VAR h: INTEGER;
 BEGIN
   goalCol := -1;
-  h := Max(1, TUI.Rows - 2);
+  h := Max(1, TUI.Rows - 1);
   INC(curRow, h); INC(topLine, h);
   IF topLine >= numLines THEN topLine := numLines - 1 END;
   ClampCursor;
@@ -750,7 +758,7 @@ PROCEDURE ScreenBottom;
 VAR h: INTEGER;
 BEGIN
   goalCol := -1;
-  h := Max(1, TUI.Rows - 2);
+  h := Max(1, TUI.Rows - 1);
   curRow := Min(topLine + h - 1, numLines - 1);
   curCol := Min(curCol, LineLen(curRow));
   needRedraw := TRUE
@@ -760,7 +768,7 @@ PROCEDURE EnsureVisible;
 (* Adjust topLine so the cursor is visible *)
 VAR h: INTEGER;
 BEGIN
-  h := Max(1, TUI.Rows - 2);
+  h := Max(1, TUI.Rows - 1);
   IF typewriter THEN
     topLine := curRow - h DIV 2;
     IF topLine < 0 THEN topLine := 0 END
