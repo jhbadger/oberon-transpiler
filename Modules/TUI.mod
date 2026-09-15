@@ -427,8 +427,8 @@ END InvalidateLine;
     Call after Flush to position the blinking cursor in an editor view. **)
 PROCEDURE SetCursor*(x, y: INTEGER);
 BEGIN
-  Terminal.ShowCursor();
-  Terminal.Goto(x, y)
+  Terminal.Goto(x, y);
+  Terminal.ShowCursor()
 END SetCursor;
 
 (* ════════════════════════════════════════════════════════════════════════

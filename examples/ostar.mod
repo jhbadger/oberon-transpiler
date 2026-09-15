@@ -1549,15 +1549,14 @@ BEGIN
     DrawPrefixMenu(prefix)
   END;
   IF mode = ModePalette THEN DrawPalette END;
-  (* Hardware cursor: in search/input the user is typing into the status bar *)
+  TUI.Flush;
   IF mode = ModeSearch THEN
     TUI.SetCursor(7 + Strings.Length(searchStr), TUI.Rows)
   ELSIF mode = ModeInput THEN
     TUI.SetCursor(Strings.Length(inpLabel) + 3 + Strings.Length(inpValue), TUI.Rows)
   ELSE
     TUI.SetCursor(curCol - leftCol + 1, curRow - topLine + 1)
-  END;
-  TUI.Flush
+  END
 END DrawAll;
 
 (* ── Input Prompt Helpers ────────────────────────────────────────── *)
