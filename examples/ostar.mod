@@ -66,6 +66,7 @@ CONST
 
   (* Project *)
   MaxProjDocs = 128;   (* documents per project *)
+  BinderW     = 28;    (* binder sidebar width in columns *)
 
   (* Key codes — use TUI.Kxxx qualifiers in code to avoid C macro collisions *)
 
@@ -190,6 +191,8 @@ VAR
   projDocs     : ARRAY MaxProjDocs OF ARRAY 512 OF CHAR;
   projDocCount : INTEGER;
   projCurDoc   : INTEGER;   (* index of currently open doc in projDocs, or -1 *)
+  binderOpen   : BOOLEAN;
+  binderSel    : INTEGER;   (* highlighted entry in the binder panel *)
 
   (* Palette scroll *)
   palScroll   : INTEGER;
@@ -258,6 +261,14 @@ BEGIN
   ELSE RETURN 10                        (* bright green for long sentence *)
   END
 END ThStylFg;
+
+(* ── Text-area layout (binder offsets) ───────────────────────────── *)
+
+PROCEDURE TextX0(): INTEGER;
+BEGIN IF binderOpen THEN RETURN BinderW + 1 ELSE RETURN 1 END END TextX0;
+
+PROCEDURE TextW(): INTEGER;
+BEGIN IF binderOpen THEN RETURN TUI.Cols - BinderW ELSE RETURN TUI.Cols END END TextW;
 
 (* ── Utility ─────────────────────────────────────────────────────── *)
 
@@ -1709,12 +1720,16 @@ BEGIN
   | 66: COPY("^PE",  chord); COPY("project: prev doc",       desc)
   | 67: COPY("^PX",  chord); COPY("project: next doc",       desc)
   | 68: COPY("^PL",  chord); COPY("project: list docs",      desc)
+  | 69: COPY("^PK",  chord); COPY("project: compile RTF",    desc)
+  | 70: COPY("^PT",  chord); COPY("project: compile text",   desc)
+  | 71: COPY("^PS",  chord); COPY("project: find in all",    desc)
+  | 72: COPY("^PB",  chord); COPY("binder panel toggle",     desc)
   ELSE (* end *)
   END
 END PaletteEntry;
 
 PROCEDURE PaletteCount(): INTEGER;
-BEGIN RETURN 69 END PaletteCount;
+BEGIN RETURN 73 END PaletteCount;
 
 (* ── Splash Screen ───────────────────────────────────────────────── *)
 
@@ -2286,7 +2301,7 @@ BEGIN
   IF spellEnabled THEN BuildSpellMask(docRow, mask) END;
   IF styleEnabled THEN BuildStyleMask(docRow, smask) END;
   dimmed := focusMode & ((docRow < focusParaS) OR (docRow > focusParaE));
-  x := 1;
+  x := TextX0();
   col := leftCol;
   WHILE (x <= TUI.Cols) & (col <= len) DO
     c := lines[docRow].s[col];
@@ -2468,7 +2483,7 @@ BEGIN
   IF spellEnabled THEN BuildSpellMask(docRow, mask) END;
   IF styleEnabled THEN BuildStyleMask(docRow, smask) END;
   dimmed := focusMode & ((docRow < focusParaS) OR (docRow > focusParaE));
-  x := 1; col := segFrom;
+  x := TextX0(); col := segFrom;
   WHILE (x <= TUI.Cols) & (col < segEnd) DO
     c := lines[docRow].s[col];
     IF c = 0X THEN c := ' ' END;
@@ -2501,6 +2516,47 @@ BEGIN
   END
 END DrawSegment;
 
+PROCEDURE DrawBinder;
+(* Draw the left sidebar listing project documents, one per row. *)
+VAR i, y, textH, nameStart, nameLen: INTEGER;
+    name: ARRAY (BinderW + 1) OF CHAR;
+    fg, bg, sfg, sbg: INTEGER;
+BEGIN
+  textH := TUI.Rows - 1;
+  sfg := ThStFg(); sbg := ThStBg();
+  (* Header *)
+  TUI.FillRect(1, 1, BinderW, 1, ' ', sfg, sbg);
+  TUI.PutStr(2, 1, "PROJECT", sfg, sbg);
+  (* Divider column *)
+  FOR y := 1 TO textH DO
+    TUI.PutCell(BinderW + 1, y, TUI.BoxV, ThDimFg(), ThBg())
+  END;
+  (* Doc list *)
+  FOR i := 0 TO projDocCount - 1 DO
+    y := i + 2;  (* row 1 = header, rows 2.. = docs *)
+    IF y > textH THEN EXIT END;
+    (* Extract basename for display *)
+    nameStart := 0;
+    nameLen := Strings.Length(projDocs[i]);
+    WHILE (nameLen > 0) & (projDocs[i][nameLen - 1] # '/') DO DEC(nameLen) END;
+    nameStart := nameLen; nameLen := Strings.Length(projDocs[i]) - nameStart;
+    IF nameLen > BinderW - 2 THEN nameLen := BinderW - 2 END;
+    Strings.Extract(projDocs[i], nameStart, nameLen, name);
+    IF (i = projCurDoc) OR (i = binderSel) THEN
+      fg := ThBg(); bg := ThFg()
+    ELSE
+      fg := ThFg(); bg := ThBg()
+    END;
+    TUI.FillRect(1, y, BinderW, 1, ' ', fg, bg);
+    TUI.PutStr(2, y, name, fg, bg)
+  END;
+  (* Fill remaining rows *)
+  FOR y := projDocCount + 2 TO textH DO
+    IF y > textH THEN EXIT END;
+    TUI.FillRect(1, y, BinderW, 1, ' ', ThFg(), ThBg())
+  END
+END DrawBinder;
+
 PROCEDURE DrawAll;
 VAR row, screenY, textH: INTEGER;
     bufRow, segF, csf, screenX, screenRow, row2, sf2, e: INTEGER;
@@ -2529,7 +2585,7 @@ BEGIN
           segF := SegNext(bufRow, segF)
         END
       ELSE
-        TUI.FillRect(1, screenY, TUI.Cols, 1, ' ', ThFg(), ThBg())
+        TUI.FillRect(TextX0(), screenY, TextW(), 1, ' ', ThFg(), ThBg())
       END
     END
   ELSE
@@ -2538,10 +2594,11 @@ BEGIN
       IF row < numLines THEN
         DrawTextLine(screenY, row)
       ELSE
-        TUI.FillRect(1, screenY, TUI.Cols, 1, ' ', ThFg(), ThBg())
+        TUI.FillRect(TextX0(), screenY, TextW(), 1, ' ', ThFg(), ThBg())
       END
     END
   END;
+  IF binderOpen THEN DrawBinder END;
   DrawStatus;
   IF (helpLevel >= 1) & (prefix # PrefNone) THEN DrawPrefixMenu(prefix) END;
   IF mode = ModePalette THEN DrawPalette END;
@@ -2565,9 +2622,9 @@ BEGIN
       INC(screenRow);
       IF screenRow > textH THEN screenRow := textH; EXIT END
     END;
-    TUI.SetCursor(screenX, screenRow)
+    TUI.SetCursor(screenX + TextX0() - 1, screenRow)
   ELSE
-    TUI.SetCursor(curCol - leftCol + 1, curRow - topLine + 1)
+    TUI.SetCursor(curCol - leftCol + TextX0(), curRow - topLine + 1)
   END
 END DrawAll;
 
@@ -3038,6 +3095,253 @@ BEGIN
   needRedraw := TRUE
 END ProjList;
 
+(* ── Project compile (^PK = RTF, ^PT = plain text) ──────────────── *)
+
+PROCEDURE CompileRTF;
+VAR f: Files.File; r: Files.Rider; sf: Files.File; sr: Files.Rider;
+    outPath: ARRAY 512 OF CHAR; lb: LineBuf;
+    j, k, lev, cp, di: INTEGER; first: BOOLEAN; tmp: ARRAY 32 OF CHAR;
+
+  PROCEDURE RWStr(s: ARRAY OF CHAR); BEGIN Files.WriteString(r, s) END RWStr;
+  PROCEDURE RWCh(c: CHAR);           BEGIN Files.Write(r, c) END RWCh;
+  PROCEDURE RWLn;                    BEGIN Files.Write(r, 0AX) END RWLn;
+
+  PROCEDURE RWUni(codePoint: INTEGER; fallback: CHAR);
+  BEGIN
+    RWStr("\u"); Strings.IntToStr(codePoint, tmp); RWStr(tmp); RWCh(' '); RWCh(fallback)
+  END RWUni;
+
+  PROCEDURE RWEsc(c: CHAR);
+  BEGIN
+    IF    c = 5CH THEN RWStr("\\\\")
+    ELSIF c = 7BH THEN RWStr("\{")
+    ELSIF c = 7DH THEN RWStr("\}")
+    ELSIF c = 9X  THEN RWStr("\tab ")
+    ELSIF ORD(c) >= 128 THEN
+      RWStr("\u"); Strings.IntToStr(ORD(c) - 256, tmp); RWStr(tmp); RWCh(' '); RWCh('?')
+    ELSE RWCh(c)
+    END
+  END RWEsc;
+
+  PROCEDURE RWTitle(from: INTEGER);
+  VAR ki, len: INTEGER;
+  BEGIN
+    len := Strings.Length(lb);
+    FOR ki := from TO len - 1 DO RWEsc(lb[ki]) END
+  END RWTitle;
+
+  PROCEDURE RWBody;
+  VAR ki, len: INTEGER; c, prev: CHAR; bold, ital: BOOLEAN;
+  BEGIN
+    bold := FALSE; ital := FALSE; len := Strings.Length(lb);
+    ki := 0; prev := ' ';
+    WHILE ki < len DO
+      c := lb[ki];
+      IF (c = '*') & (ki + 1 < len) & (lb[ki + 1] = '*') THEN
+        IF bold THEN RWStr("\b0 ") ELSE RWStr("\b ") END;
+        bold := ~bold; INC(ki, 2)
+      ELSIF c = '*' THEN
+        IF ital THEN RWStr("\i0 ") ELSE RWStr("\i ") END;
+        ital := ~ital; INC(ki)
+      ELSIF (c = '-') & (ki + 1 < len) & (lb[ki + 1] = '-') THEN
+        RWUni(8212, '-'); INC(ki, 2)
+      ELSIF (c = '.') & (ki + 1 < len) & (lb[ki + 1] = '.') &
+            (ki + 2 < len) & (lb[ki + 2] = '.') THEN
+        RWUni(8230, '.'); INC(ki, 3)
+      ELSIF c = 22X THEN
+        IF IsWordChar(prev) OR (prev = '.') OR (prev = ',') OR
+           (prev = '?') OR (prev = '!') OR (prev = 27X) OR (prev = ')') THEN
+          RWUni(8221, 22X) ELSE RWUni(8220, 22X) END;
+        prev := c; INC(ki)
+      ELSIF c = 27X THEN
+        IF IsWordChar(prev) OR (prev = ',') OR (prev = '.') THEN
+          RWUni(8217, 27X) ELSE RWUni(8216, 27X) END;
+        prev := c; INC(ki)
+      ELSIF c = 5CH THEN RWStr("\\\\"); prev := c; INC(ki)
+      ELSIF c = 7BH THEN RWStr("\{");  prev := c; INC(ki)
+      ELSIF c = 7DH THEN RWStr("\}");  prev := c; INC(ki)
+      ELSE RWEsc(c); prev := c; INC(ki)
+      END
+    END;
+    IF bold THEN RWStr("\b0 ") END;
+    IF ital THEN RWStr("\i0 ") END
+  END RWBody;
+
+BEGIN
+  IF projPath[0] = 0X THEN SetStatus("No open project — ^PN to create"); RETURN END;
+  IF projDocCount = 0   THEN SetStatus("Project is empty"); RETURN END;
+  IF dirty THEN IF ~SaveFile() THEN SetStatus("Save failed"); RETURN END END;
+
+  COPY(projPath, outPath);
+  j := Strings.Length(outPath) - 1;
+  WHILE (j > 0) & (outPath[j] # '.') & (outPath[j] # '/') DO DEC(j) END;
+  IF (j > 0) & (outPath[j] = '.') THEN outPath[j] := 0X END;
+  Strings.Append(".rtf", outPath);
+
+  f := Files.New(outPath);
+  IF f = NIL THEN SetStatus("Compile: cannot create RTF file"); RETURN END;
+  Files.Set(r, f, 0);
+
+  RWStr("{\rtf1\ansi\ansicpg1252\deff0\deflang1033"); RWLn;
+  RWStr("{\fonttbl{\f0\froman\fcharset0 Times New Roman;}}"); RWLn;
+  RWStr("\viewkind4\uc1\margl1440\margr1440\margt1440\margb1440"); RWLn;
+
+  first := TRUE;
+  FOR di := 0 TO projDocCount - 1 DO
+    sf := Files.Old(projDocs[di]);
+    IF sf # NIL THEN
+      Files.Set(sr, sf, 0);
+      WHILE ~sr.eof DO
+        Files.ReadLine(sr, lb);
+        IF ~sr.eof OR (lb[0] # 0X) THEN
+          IF (lb[0] = '.') & (lb[1] = '.') THEN (* note: skip *)
+          ELSIF lb[0] = 0X THEN (* blank: skip *)
+          ELSE
+            lev := 0;
+            WHILE (lev < Strings.Length(lb)) & (lb[lev] = '#') DO INC(lev) END;
+            IF (lev > 0) & (lb[lev] = ' ') THEN
+              IF lev = 1 THEN
+                IF ~first THEN RWStr("\page"); RWLn END;
+                FOR j := 1 TO 9 DO
+                  RWStr("\pard\plain\f0\fs24\sl480\slmult1\par"); RWLn
+                END;
+                RWStr("\pard\plain\qc\b\f0\fs24 "); RWTitle(2);
+                RWStr("\b0\par"); RWLn
+              ELSE
+                RWStr("\pard\plain\f0\fs24\ql\sl480\slmult1\fi720 \b ");
+                RWTitle(lev + 1); RWStr("\b0\par"); RWLn
+              END
+            ELSE
+              RWStr("\pard\plain\f0\fs24\ql\sl480\slmult1\fi720 ");
+              RWBody; RWStr("\par"); RWLn
+            END;
+            first := FALSE
+          END
+        END
+      END;
+      Files.Close(sf)
+    END
+  END;
+
+  RWStr("}"); RWLn;
+  Files.Register(f); Files.Close(f);
+  COPY("Compiled RTF: ", statusMsg); Strings.Append(outPath, statusMsg);
+  needRedraw := TRUE
+END CompileRTF;
+
+PROCEDURE CompileClean;
+VAR f: Files.File; r: Files.Rider; sf: Files.File; sr: Files.Rider;
+    outPath: ARRAY 512 OF CHAR; lb: LineBuf;
+    j, di: INTEGER; firstDoc: BOOLEAN;
+BEGIN
+  IF projPath[0] = 0X THEN SetStatus("No open project — ^PN to create"); RETURN END;
+  IF projDocCount = 0   THEN SetStatus("Project is empty"); RETURN END;
+  IF dirty THEN IF ~SaveFile() THEN SetStatus("Save failed"); RETURN END END;
+
+  COPY(projPath, outPath);
+  j := Strings.Length(outPath) - 1;
+  WHILE (j > 0) & (outPath[j] # '.') & (outPath[j] # '/') DO DEC(j) END;
+  IF (j > 0) & (outPath[j] = '.') THEN outPath[j] := 0X END;
+  Strings.Append(".txt", outPath);
+
+  f := Files.New(outPath);
+  IF f = NIL THEN SetStatus("Compile: cannot create text file"); RETURN END;
+  Files.Set(r, f, 0);
+
+  firstDoc := TRUE;
+  FOR di := 0 TO projDocCount - 1 DO
+    sf := Files.Old(projDocs[di]);
+    IF sf # NIL THEN
+      IF ~firstDoc THEN lb[0] := 0X; Files.WriteLine(r, lb) END;
+      Files.Set(sr, sf, 0);
+      WHILE ~sr.eof DO
+        Files.ReadLine(sr, lb);
+        IF ~sr.eof OR (lb[0] # 0X) THEN
+          IF ~((lb[0] = '.') & (lb[1] = '.')) THEN Files.WriteLine(r, lb) END
+        END
+      END;
+      Files.Close(sf);
+      firstDoc := FALSE
+    END
+  END;
+
+  Files.Register(f); Files.Close(f);
+  COPY("Compiled text: ", statusMsg); Strings.Append(outPath, statusMsg);
+  needRedraw := TRUE
+END CompileClean;
+
+(* ── Project-wide search (^PS) ───────────────────────────────────── *)
+
+PROCEDURE ProjFind;
+(* Search searchStr across all project docs, starting after current cursor. *)
+VAR sf: Files.File; sr: Files.Rider; lb: LineBuf;
+    startDi, di, row, pos, tryCol: INTEGER; found: BOOLEAN;
+BEGIN
+  IF projPath[0] = 0X THEN SetStatus("No open project"); RETURN END;
+  IF searchStr[0] = 0X THEN
+    SetStatus("No search string — use ^QF first"); RETURN
+  END;
+
+  startDi := ProjIndexOf(filePath);
+  IF startDi < 0 THEN startDi := 0 END;
+  found := FALSE;
+
+  (* First: continue searching current in-memory doc from cursor forward *)
+  row := curRow;
+  WHILE (row < numLines) & ~found DO
+    IF row = curRow THEN tryCol := curCol + 1 ELSE tryCol := 0 END;
+    Strings.Extract(lines[row].s, tryCol, MaxLineLen, lb);
+    pos := Strings.Pos(searchStr, lb);
+    IF pos >= 0 THEN
+      curRow := row; curCol := tryCol + pos;
+      searchRow := row; searchCol := curCol; searchLen := Strings.Length(searchStr);
+      goalCol := -1; found := TRUE
+    END;
+    INC(row)
+  END;
+
+  (* Then scan remaining project docs *)
+  IF ~found THEN
+    di := (startDi + 1) MOD projDocCount;
+    WHILE ~found & (di # startDi) DO
+      sf := Files.Old(projDocs[di]);
+      IF sf # NIL THEN
+        Files.Set(sr, sf, 0);
+        row := 0;
+        WHILE ~sr.eof & ~found DO
+          Files.ReadLine(sr, lb);
+          pos := Strings.Pos(searchStr, lb);
+          IF (~sr.eof OR (lb[0] # 0X)) & (pos >= 0) THEN
+            Files.Close(sf); sf := NIL;
+            IF dirty & ~SaveFile() THEN
+              SetStatus("Save failed — not switching"); found := TRUE
+            ELSE
+              IF LoadFile(projDocs[di]) THEN
+                projCurDoc := di;
+                curRow := row; curCol := pos; topLine := 0; undoTop := 0;
+                hasBlkB := FALSE; hasBlkE := FALSE;
+                searchRow := row; searchCol := pos;
+                searchLen := Strings.Length(searchStr);
+                goalCol := -1; found := TRUE
+              END
+            END
+          END;
+          IF ~found THEN INC(row) END
+        END;
+        IF sf # NIL THEN Files.Close(sf) END
+      END;
+      di := (di + 1) MOD projDocCount
+    END
+  END;
+
+  IF found & (statusMsg[0] = 0X) THEN
+    COPY("Found in ", statusMsg); Strings.Append(filePath, statusMsg)
+  ELSIF ~found THEN
+    SetStatus("Not found in project")
+  END;
+  needRedraw := TRUE
+END ProjFind;
+
 PROCEDURE HandlePrefixP(k: CHAR);
 BEGIN
   prefix := PrefNone;
@@ -3049,6 +3353,14 @@ BEGIN
   | 'e', 'E': ProjPrev
   | 'x', 'X': ProjNext
   | 'l', 'L': ProjList
+  | 'k', 'K': CompileRTF
+  | 't', 'T': CompileClean
+  | 's', 'S': ProjFind
+  | 'b', 'B':
+      binderOpen := ~binderOpen;
+      IF binderOpen THEN binderSel := projCurDoc; SetStatus("Binder ON")
+      ELSE SetStatus("Binder OFF")
+      END
   ELSE SetStatus("Unknown ^P command")
   END;
   needRedraw := TRUE
@@ -3139,6 +3451,8 @@ BEGIN
 
   (* Left click: find document position from screen position *)
   IF sy >= TUI.Rows THEN RETURN END;  (* status bar — ignore *)
+  IF binderOpen & (sx <= BinderW) THEN RETURN END;  (* click in binder: ignore *)
+  DEC(sx, TextX0() - 1);  (* adjust for binder offset *)
 
   IF wrap THEN
     (* Walk visual rows from topLine until we reach screen row sy *)
@@ -3233,6 +3547,7 @@ BEGIN
   focusMode := FALSE; focusParaS := 0; focusParaE := 0;
   styleEnabled := FALSE; styleCurKind := StNone;
   projPath[0] := 0X; projDocCount := 0; projCurDoc := -1;
+  binderOpen := FALSE; binderSel := 0;
   spellEnabled := FALSE;
   Dict.Init(misspelled);
   Dict.Init(personalDict);
