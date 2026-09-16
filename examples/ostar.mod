@@ -227,7 +227,8 @@ END ThBg;
 
 PROCEDURE ThDimFg(): INTEGER;
 BEGIN
-  IF theme = ThWP THEN RETURN TUI.Cyan ELSE RETURN TUI.Cyan END
+  RETURN 245  (* xterm-256 medium gray — recedes against either theme's dark
+                 background, unlike full-saturation Cyan *)
 END ThDimFg;
 
 PROCEDURE ThStFg(): INTEGER;
@@ -257,13 +258,16 @@ PROCEDURE ThHlBg(): INTEGER; BEGIN RETURN TUI.Yellow END ThHlBg;
 (* Spell-error: bright red foreground, same background as theme *)
 PROCEDURE ThSpFg(): INTEGER; BEGIN RETURN 9 END ThSpFg;   (* xterm bright-red *)
 
-(* Style-issue foreground by kind *)
+(* Style-issue foreground by kind. Uses explicit xterm-256 corner colors
+   (max saturation) rather than the ANSI "bright" 8-15 slots — those get
+   remapped to muted tones (e.g. 11 renders as a dim orange, not yellow)
+   by this terminal's 16-color theme, which made them too dim to read. *)
 PROCEDURE ThStylFg(kind: INTEGER): INTEGER;
 BEGIN
-  IF kind = StAdverb  THEN RETURN 11   (* bright yellow  *)
-  ELSIF kind = StFiller  THEN RETURN 13 (* bright magenta *)
-  ELSIF kind = StPassive THEN RETURN 14 (* bright cyan    *)
-  ELSE RETURN 10                        (* bright green for long sentence *)
+  IF kind = StAdverb  THEN RETURN 226  (* vivid yellow  *)
+  ELSIF kind = StFiller  THEN RETURN 201 (* vivid magenta *)
+  ELSIF kind = StPassive THEN RETURN 51  (* vivid cyan    *)
+  ELSE RETURN 46                         (* vivid green for long sentence *)
   END
 END ThStylFg;
 
