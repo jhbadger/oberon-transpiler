@@ -2697,9 +2697,9 @@ BEGIN
   IF (mode = ModeBinder) OR (mode = ModeOutline) THEN
     TUI.SetCursor(1, TUI.Rows)
   ELSIF mode = ModeSearch THEN
-    TUI.SetCursor(7 + Strings.Length(searchStr), TUI.Rows)
+    TUI.SetCursor(Min(7 + Strings.Length(searchStr), TUI.Cols), TUI.Rows)
   ELSIF mode = ModeInput THEN
-    TUI.SetCursor(Strings.Length(inpLabel) + 3 + Strings.Length(inpValue), TUI.Rows)
+    TUI.SetCursor(Min(Strings.Length(inpLabel) + 3 + Strings.Length(inpValue), TUI.Cols), TUI.Rows)
   ELSIF wrap THEN
     CurSeg(csf);
     screenX := curCol - csf + 1;
@@ -2829,7 +2829,7 @@ PROCEDURE HandleSearchKey(k: CHAR);
 VAR slen: INTEGER;
 BEGIN
   IF k = TUI.KEsc THEN
-    mode := ModeNormal; searchLen := 0; needRedraw := TRUE
+    mode := ModeNormal; searchLen := 0; inReplace := FALSE; needRedraw := TRUE
   ELSIF k = TUI.KEnter THEN
     (* Confirm search, stay in Normal and position on match *)
     IF SearchForward(curRow, curCol) THEN
@@ -2870,7 +2870,7 @@ BEGIN
     END;
     mode := ModeNormal; SetStatus("All replaced")
   ELSIF (k = 'n') OR (k = 'N') THEN
-    IF SearchForward(searchRow, searchCol + 1) THEN
+    IF SearchForward(searchRow, searchCol + searchLen) THEN
       curRow := searchRow; curCol := searchCol
     ELSE mode := ModeNormal; SetStatus("No more matches")
     END
@@ -2950,6 +2950,7 @@ BEGIN
   | 'f', 'F':
       mode := ModeSearch;
       searchStr[0] := 0X; searchLen := 0;
+      inReplace := FALSE;
       SetStatus("Find (type string, Enter to confirm)")
   | 'a', 'A':
       mode := ModeSearch;
@@ -3556,7 +3557,16 @@ BEGIN
 
   (* Left click: find document position from screen position *)
   IF sy >= TUI.Rows THEN RETURN END;  (* status bar — ignore *)
-  IF binderOpen & (sx <= BinderW) THEN RETURN END;  (* click in binder: ignore *)
+  IF binderOpen & (sx <= BinderW) THEN
+    (* Click in binder panel: select/open the doc under the cursor *)
+    IF sy >= 2 THEN
+      binderSel := sy - 2;
+      IF (binderSel >= 0) & (binderSel < projDocCount) THEN
+        OpenProjDoc(binderSel); mode := ModeNormal; needRedraw := TRUE
+      END
+    END;
+    RETURN
+  END;
   DEC(sx, TextX0() - 1);  (* adjust for binder offset *)
 
   IF wrap THEN
@@ -3653,7 +3663,7 @@ BEGIN
   | ModeInput:
       IF inpAction = 99 THEN  (* completing replace *)
         HandleInputKey(k);
-        IF mode = ModeNormal THEN
+        IF (mode = ModeNormal) & (k = TUI.KEnter) THEN
           (* User confirmed the replace-with string *)
           COPY(inpValue, replWith);
           COPY(replSearch, searchStr);
@@ -3662,6 +3672,8 @@ BEGIN
             mode := ModeReplace
           ELSE SetStatus("Not found"); mode := ModeNormal
           END
+        ELSIF (mode = ModeNormal) & (k = TUI.KEsc) THEN
+          SetStatus("Replace cancelled")
         END
       ELSE HandleInputKey(k)
       END
