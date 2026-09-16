@@ -272,21 +272,41 @@ BEGIN
   END
 END PutCellMB;
 
-(** PutStr — write a string left-to-right starting at (x, y). **)
+(* Length in bytes of the UTF-8 sequence starting with lead byte c. *)
+PROCEDURE Utf8SeqLen(c: CHAR): INTEGER;
+BEGIN
+  IF ORD(c) < 128 THEN RETURN 1
+  ELSIF (ORD(c) >= 192) & (ORD(c) <= 223) THEN RETURN 2
+  ELSIF (ORD(c) >= 224) & (ORD(c) <= 239) THEN RETURN 3
+  ELSIF (ORD(c) >= 240) & (ORD(c) <= 247) THEN RETURN 4
+  ELSE RETURN 1  (* stray continuation byte or invalid lead byte *)
+  END
+END Utf8SeqLen;
+
+(** PutStr — write a string left-to-right starting at (x, y). Callers may
+    embed multi-byte UTF-8 characters (e.g. an em dash) directly in the
+    string; each one occupies exactly one screen cell, matching how
+    PutCellMB/DrawTextLine-style callers already treat them. **)
 PROCEDURE PutStr*(x, y: INTEGER; s: ARRAY OF CHAR; fg, bg: INTEGER);
-VAR k, col, row: INTEGER;
+VAR k, col, row, n: INTEGER;
 BEGIN
   row := y - 1;  col := x - 1;  k := 0;
   WHILE (s[k] # 0X) & (col < Cols) DO
+    n := Utf8SeqLen(s[k]);
+    (* Don't let a truncated/malformed sequence swallow the terminator *)
+    IF (n >= 2) & (s[k + 1] = 0X) THEN n := 1
+    ELSIF (n >= 3) & (s[k + 2] = 0X) THEN n := 1
+    ELSIF (n >= 4) & (s[k + 3] = 0X) THEN n := 1
+    END;
     IF (row >= 0) & (row < Rows) & (col >= 0) THEN
       back[row][col].ch := s[k];
-      back[row][col].c2 := 0X;
-      back[row][col].c3 := 0X;
-      back[row][col].c4 := 0X;
+      IF n >= 2 THEN back[row][col].c2 := s[k + 1] ELSE back[row][col].c2 := 0X END;
+      IF n >= 3 THEN back[row][col].c3 := s[k + 2] ELSE back[row][col].c3 := 0X END;
+      IF n >= 4 THEN back[row][col].c4 := s[k + 3] ELSE back[row][col].c4 := 0X END;
       back[row][col].fg := fg;
       back[row][col].bg := bg
     END;
-    INC(k);  INC(col)
+    INC(k, n);  INC(col)
   END
 END PutStr;
 
