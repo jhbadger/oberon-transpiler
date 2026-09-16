@@ -2948,6 +2948,7 @@ BEGIN
       IF inpValue[0] # 0X THEN ProjNew(inpValue) END
   | ActProjOpen:
       IF inpValue[0] # 0X THEN
+        EnsureProjExt(inpValue);
         IF LoadProjFile(inpValue) THEN
           projCurDoc := ProjIndexOf(filePath);
           COPY("Project opened: ", statusMsg);
@@ -3249,12 +3250,21 @@ BEGIN
   needRedraw := TRUE
 END OpenProjDoc;
 
+PROCEDURE EnsureProjExt(VAR path: ARRAY OF CHAR);
+(* Append .ostarproj if it isn't already there, so "fred" and
+   "fred.ostarproj" both refer to the same project file. *)
+BEGIN
+  IF ~Strings.EndsWith(path, ".ostarproj") THEN
+    Strings.Append(".ostarproj", path)
+  END
+END EnsureProjExt;
+
 PROCEDURE ProjNew(name: ARRAY OF CHAR);
 (* Create a new project named <name>, manifest at <name>.ostarproj *)
 VAR tmp: ARRAY 32 OF CHAR;
 BEGIN
   COPY(name, projPath);
-  Strings.Append(".ostarproj", projPath);
+  EnsureProjExt(projPath);
   projDocCount := 0;
   projCurDoc := -1;
   (* Add current file if we have one *)
