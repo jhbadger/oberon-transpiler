@@ -20,7 +20,7 @@ MODULE OStar;
  *        ^N insert line, ^U undo, ^L find next, ^V overtype toggle,
  *        F1 command palette (shows key list).
  *)
-IMPORT TUI, Terminal, Files, Strings, Args, Dict, OS, Env, Time;
+IMPORT TUI, Terminal, Files, Strings, Args, Dict, OS, Env, Time, Markdown;
 
 (* ── Constants ───────────────────────────────────────────────────── *)
 CONST
@@ -130,6 +130,7 @@ VAR
   numLines : INTEGER;
   filePath : ARRAY 512 OF CHAR;
   dirty    : BOOLEAN;
+  expRider : Files.Rider;  (* current Markdown.mod export target (RTF/HTML) *)
 
   (* Cursor & view *)
   curRow, curCol  : INTEGER;
@@ -740,101 +741,22 @@ END SaveFile;
 
 (* ── RTF Export (^KM) ────────────────────────────────────────────── *)
 
+PROCEDURE MdSink(c: CHAR);
+(* Markdown.WriteProc callback: writes wherever expRider currently
+   points. Only one export runs at a time, so one shared rider is
+   enough (see ExportRTF/ExportHtml/CompileRTF/CompileClean's HTML/RTF
+   siblings). *)
+BEGIN Files.Write(expRider, c) END MdSink;
+
 PROCEDURE ExportRTF;
-(* Standard-manuscript-format RTF, matching pstar's ^KM output:
+(* ^KM — Standard-manuscript-format RTF, matching pstar's ^KM output:
    12pt Times New Roman, double-spaced, 1-inch margins, first-line
    indent, chapter headings on new pages, *italic*/**bold** emphasis,
-   smart typography (curly quotes, em dash, ellipsis), note lines stripped. *)
-VAR f: Files.File; r: Files.Rider;
+   smart typography (curly quotes, em dash, ellipsis), note lines
+   stripped. Rendered via Markdown.mod's manuscript-mode RTF renderer. *)
+VAR f: Files.File;
     rtfPath: ARRAY 512 OF CHAR;
-    i, j, lev, cp: INTEGER;
-    first: BOOLEAN;
-    tmp: ARRAY 32 OF CHAR;
-
-  PROCEDURE WStr(s: ARRAY OF CHAR);
-  BEGIN Files.WriteString(r, s) END WStr;
-
-  PROCEDURE WCh(c: CHAR);
-  BEGIN Files.Write(r, c) END WCh;
-
-  PROCEDURE WLn;
-  BEGIN Files.Write(r, 0AX) END WLn;
-
-  (* Emit RTF \uN unicode escape with one ASCII fallback char *)
-  PROCEDURE WUni(codePoint: INTEGER; fallback: CHAR);
-  BEGIN
-    WStr("\u"); Strings.IntToStr(codePoint, tmp); WStr(tmp);
-    WCh(' '); WCh(fallback)
-  END WUni;
-
-  (* RTF-escape one character (no smart typography) *)
-  PROCEDURE WEsc(c: CHAR);
-  BEGIN
-    IF    c = 5CH THEN WStr("\\\\")
-    ELSIF c = 7BH THEN WStr("\{")
-    ELSIF c = 7DH THEN WStr("\}")
-    ELSIF c = 9X  THEN WStr("\tab ")
-    ELSIF ORD(c) >= 128 THEN
-      (* 8-bit: output as \uN with ? fallback *)
-      WStr("\u"); Strings.IntToStr(ORD(c) - 256, tmp); WStr(tmp);
-      WCh(' '); WCh('?')
-    ELSE WCh(c)
-    END
-  END WEsc;
-
-  (* Render a heading title: RTF-escape only, no emphasis or smart typography *)
-  PROCEDURE WTitle(from: INTEGER);
-  VAR k, len: INTEGER;
-  BEGIN
-    len := LineLen(i);
-    FOR k := from TO len - 1 DO WEsc(lines[i].s[k]) END
-  END WTitle;
-
-  (* Render a body paragraph line with *italic*/**bold** and smart typography *)
-  PROCEDURE WBody;
-  VAR k, len: INTEGER; c, prev: CHAR; bold, ital: BOOLEAN;
-  BEGIN
-    bold := FALSE; ital := FALSE;
-    len := LineLen(i);
-    k := 0; prev := ' ';
-    WHILE k < len DO
-      c := lines[i].s[k];
-      IF (c = '*') & (k + 1 < len) & (lines[i].s[k + 1] = '*') THEN
-        IF bold THEN WStr("\b0 ") ELSE WStr("\b ") END;
-        bold := ~bold; INC(k, 2)
-      ELSIF c = '*' THEN
-        IF ital THEN WStr("\i0 ") ELSE WStr("\i ") END;
-        ital := ~ital; INC(k)
-      ELSIF (c = '-') & (k + 1 < len) & (lines[i].s[k + 1] = '-') THEN
-        WUni(8212, '-'); INC(k, 2)   (* em dash *)
-      ELSIF (c = '.') & (k + 1 < len) & (lines[i].s[k + 1] = '.') &
-            (k + 2 < len) & (lines[i].s[k + 2] = '.') THEN
-        WUni(8230, '.'); INC(k, 3)   (* ellipsis *)
-      ELSIF c = 22X THEN             (* " double quote *)
-        IF IsWordChar(prev) OR (prev = '.') OR (prev = ',') OR
-           (prev = '?') OR (prev = '!') OR (prev = 27X) OR (prev = ')') THEN
-          WUni(8221, 22X)            (* close " *)
-        ELSE
-          WUni(8220, 22X)            (* open " *)
-        END;
-        prev := c; INC(k)
-      ELSIF c = 27X THEN             (* ' apostrophe / single quote *)
-        IF IsWordChar(prev) OR (prev = ',') OR (prev = '.') THEN
-          WUni(8217, 27X)            (* apostrophe / close ' *)
-        ELSE
-          WUni(8216, 27X)            (* open ' *)
-        END;
-        prev := c; INC(k)
-      ELSIF c = 5CH THEN WStr("\\\\"); prev := c; INC(k)
-      ELSIF c = 7BH THEN WStr("\{");  prev := c; INC(k)
-      ELSIF c = 7DH THEN WStr("\}");  prev := c; INC(k)
-      ELSE WEsc(c); prev := c; INC(k)
-      END
-    END;
-    IF bold THEN WStr("\b0 ") END;
-    IF ital THEN WStr("\i0 ") END
-  END WBody;
-
+    i, j: INTEGER;
 BEGIN
   IF filePath[0] = 0X THEN SetStatus("Save file first (^KD)"); RETURN END;
 
@@ -847,54 +769,15 @@ BEGIN
 
   f := Files.New(rtfPath);
   IF f = NIL THEN SetStatus("RTF export: cannot create file"); RETURN END;
-  Files.Set(r, f, 0);
+  Files.Set(expRider, f, 0);
 
-  (* RTF document header *)
-  WStr("{\rtf1\ansi\ansicpg1252\deff0\deflang1033"); WLn;
-  WStr("{\fonttbl{\f0\froman\fcharset0 Times New Roman;}"); WLn;
-  WStr("{\f1\fmodern\fcharset0 Courier New;}}"); WLn;
-  WStr("\viewkind4\uc1"); WLn;
-  WStr("\margl1440\margr1440\margt1440\margb1440"); WLn;
-
-  first := TRUE;
-  i := 0;
-  WHILE i < numLines DO
-    IF (lines[i].s[0] = '.') & (lines[i].s[1] = '.') THEN
-      (* note line: skip *)
-    ELSIF LineLen(i) = 0 THEN
-      (* blank line: skip — SMF uses first-line indent, not blank separators *)
-    ELSE
-      (* Measure heading level *)
-      lev := 0;
-      WHILE (lev < LineLen(i)) & (lines[i].s[lev] = '#') DO INC(lev) END;
-      IF (lev > 0) & (lines[i].s[lev] = ' ') THEN
-        IF lev = 1 THEN
-          (* Chapter: page break (except first) + 9 blank lines + centred bold *)
-          IF ~first THEN WStr("\page"); WLn END;
-          FOR j := 1 TO 9 DO
-            WStr("\pard\plain\f0\fs24\sl480\slmult1\par"); WLn
-          END;
-          WStr("\pard\plain\qc\b\f0\fs24 ");
-          WTitle(2);
-          WStr("\b0\par"); WLn
-        ELSE
-          (* Sub-heading: bold body paragraph *)
-          WStr("\pard\plain\f0\fs24\ql\sl480\slmult1\fi720 \b ");
-          WTitle(lev + 1);
-          WStr("\b0\par"); WLn
-        END
-      ELSE
-        (* Body paragraph *)
-        WStr("\pard\plain\f0\fs24\ql\sl480\slmult1\fi720 ");
-        WBody;
-        WStr("\par"); WLn
-      END;
-      first := FALSE
-    END;
-    INC(i)
+  Markdown.Reset;
+  Markdown.RtfManuscriptHeader;
+  FOR i := 0 TO numLines - 1 DO
+    Markdown.RtfManuscriptLine(lines[i].s)
   END;
+  Markdown.RtfManuscriptFooter;
 
-  WStr("}"); WLn;
   Files.Register(f);
   Files.Close(f);
 
@@ -902,6 +785,47 @@ BEGIN
   Strings.Append(rtfPath, statusMsg);
   needRedraw := TRUE
 END ExportRTF;
+
+PROCEDURE ExportHtml;
+(* ^KJ — export this document as HTML via Markdown.mod's generic
+   markdown-to-HTML renderer (headings, emphasis, links, lists, tables,
+   blockquotes, code fences). Unlike ^K M this is plain single-spaced
+   HTML, not manuscript format — Markdown.mod's HTML renderer has no
+   manuscript mode. Note lines (".."), same convention as ^K M/^K E,
+   are stripped before rendering since Markdown.mod doesn't know about
+   them. *)
+VAR f: Files.File;
+    htmlPath: ARRAY 512 OF CHAR;
+    i, j: INTEGER;
+BEGIN
+  IF filePath[0] = 0X THEN SetStatus("Save file first (^KD)"); RETURN END;
+
+  COPY(filePath, htmlPath);
+  j := Strings.Length(htmlPath) - 1;
+  WHILE (j > 0) & (htmlPath[j] # '.') & (htmlPath[j] # '/') DO DEC(j) END;
+  IF (j > 0) & (htmlPath[j] = '.') THEN htmlPath[j] := 0X END;
+  Strings.Append(".html", htmlPath);
+
+  f := Files.New(htmlPath);
+  IF f = NIL THEN SetStatus("HTML export: cannot create file"); RETURN END;
+  Files.Set(expRider, f, 0);
+
+  Markdown.Reset;
+  Markdown.HtmlHeader;
+  FOR i := 0 TO numLines - 1 DO
+    IF ~((lines[i].s[0] = '.') & (lines[i].s[1] = '.')) THEN
+      Markdown.HtmlLine(lines[i].s)
+    END
+  END;
+  Markdown.HtmlFooter;
+
+  Files.Register(f);
+  Files.Close(f);
+
+  COPY("HTML exported: ", statusMsg);
+  Strings.Append(htmlPath, statusMsg);
+  needRedraw := TRUE
+END ExportHtml;
 
 (* ── Clean Export (^KE) ─────────────────────────────────────────── *)
 
@@ -2163,12 +2087,13 @@ BEGIN
   | 89: COPY("^PC",  chord); COPY("insert comment",          desc)
   | 90: COPY("^PO",  chord); COPY("open doc's notes file",   desc)
   | 91: COPY("^PV",  chord); COPY("open binder doc in split", desc)
+  | 92: COPY("^KJ",  chord); COPY("export HTML",              desc)
   ELSE (* end *)
   END
 END PaletteEntry;
 
 PROCEDURE PaletteCount(): INTEGER;
-BEGIN RETURN 92 END PaletteCount;
+BEGIN RETURN 93 END PaletteCount;
 
 (* ── Splash Screen ───────────────────────────────────────────────── *)
 
@@ -3533,6 +3458,7 @@ BEGIN
   | 'w', 'W': StartInput("Write block to file", ActWBlk)
   | 'r', 'R': StartInput("Read file", ActRFile)
   | 'm', 'M': ExportRTF
+  | 'j', 'J': ExportHtml
   | 'e', 'E': ExportClean
   | 'n', 'N': SaveSnapshot
   | 'a', 'A': CopyFromOther
@@ -3833,75 +3759,12 @@ END ProjList;
 (* ── Project compile (^PK = RTF, ^PT = plain text) ──────────────── *)
 
 PROCEDURE CompileRTF;
-VAR f: Files.File; r: Files.Rider; sf: Files.File; sr: Files.Rider;
+(* ^PK — concatenate every non-note project document, in manifest
+   order, through Markdown.mod's manuscript-mode RTF renderer (same
+   formatting as ^K M). *)
+VAR f: Files.File; sf: Files.File; sr: Files.Rider;
     outPath: ARRAY 512 OF CHAR; lb: LineBuf;
-    j, k, lev, cp, di: INTEGER; first: BOOLEAN; tmp: ARRAY 32 OF CHAR;
-
-  PROCEDURE RWStr(s: ARRAY OF CHAR); BEGIN Files.WriteString(r, s) END RWStr;
-  PROCEDURE RWCh(c: CHAR);           BEGIN Files.Write(r, c) END RWCh;
-  PROCEDURE RWLn;                    BEGIN Files.Write(r, 0AX) END RWLn;
-
-  PROCEDURE RWUni(codePoint: INTEGER; fallback: CHAR);
-  BEGIN
-    RWStr("\u"); Strings.IntToStr(codePoint, tmp); RWStr(tmp); RWCh(' '); RWCh(fallback)
-  END RWUni;
-
-  PROCEDURE RWEsc(c: CHAR);
-  BEGIN
-    IF    c = 5CH THEN RWStr("\\\\")
-    ELSIF c = 7BH THEN RWStr("\{")
-    ELSIF c = 7DH THEN RWStr("\}")
-    ELSIF c = 9X  THEN RWStr("\tab ")
-    ELSIF ORD(c) >= 128 THEN
-      RWStr("\u"); Strings.IntToStr(ORD(c) - 256, tmp); RWStr(tmp); RWCh(' '); RWCh('?')
-    ELSE RWCh(c)
-    END
-  END RWEsc;
-
-  PROCEDURE RWTitle(from: INTEGER);
-  VAR ki, len: INTEGER;
-  BEGIN
-    len := Strings.Length(lb);
-    FOR ki := from TO len - 1 DO RWEsc(lb[ki]) END
-  END RWTitle;
-
-  PROCEDURE RWBody;
-  VAR ki, len: INTEGER; c, prev: CHAR; bold, ital: BOOLEAN;
-  BEGIN
-    bold := FALSE; ital := FALSE; len := Strings.Length(lb);
-    ki := 0; prev := ' ';
-    WHILE ki < len DO
-      c := lb[ki];
-      IF (c = '*') & (ki + 1 < len) & (lb[ki + 1] = '*') THEN
-        IF bold THEN RWStr("\b0 ") ELSE RWStr("\b ") END;
-        bold := ~bold; INC(ki, 2)
-      ELSIF c = '*' THEN
-        IF ital THEN RWStr("\i0 ") ELSE RWStr("\i ") END;
-        ital := ~ital; INC(ki)
-      ELSIF (c = '-') & (ki + 1 < len) & (lb[ki + 1] = '-') THEN
-        RWUni(8212, '-'); INC(ki, 2)
-      ELSIF (c = '.') & (ki + 1 < len) & (lb[ki + 1] = '.') &
-            (ki + 2 < len) & (lb[ki + 2] = '.') THEN
-        RWUni(8230, '.'); INC(ki, 3)
-      ELSIF c = 22X THEN
-        IF IsWordChar(prev) OR (prev = '.') OR (prev = ',') OR
-           (prev = '?') OR (prev = '!') OR (prev = 27X) OR (prev = ')') THEN
-          RWUni(8221, 22X) ELSE RWUni(8220, 22X) END;
-        prev := c; INC(ki)
-      ELSIF c = 27X THEN
-        IF IsWordChar(prev) OR (prev = ',') OR (prev = '.') THEN
-          RWUni(8217, 27X) ELSE RWUni(8216, 27X) END;
-        prev := c; INC(ki)
-      ELSIF c = 5CH THEN RWStr("\\\\"); prev := c; INC(ki)
-      ELSIF c = 7BH THEN RWStr("\{");  prev := c; INC(ki)
-      ELSIF c = 7DH THEN RWStr("\}");  prev := c; INC(ki)
-      ELSE RWEsc(c); prev := c; INC(ki)
-      END
-    END;
-    IF bold THEN RWStr("\b0 ") END;
-    IF ital THEN RWStr("\i0 ") END
-  END RWBody;
-
+    j, di: INTEGER;
 BEGIN
   IF projPath[0] = 0X THEN SetStatus("No open project — ^PN to create"); RETURN END;
   IF projDocCount = 0   THEN SetStatus("Project is empty"); RETURN END;
@@ -3915,52 +3778,28 @@ BEGIN
 
   f := Files.New(outPath);
   IF f = NIL THEN SetStatus("Compile: cannot create RTF file"); RETURN END;
-  Files.Set(r, f, 0);
+  Files.Set(expRider, f, 0);
 
-  RWStr("{\rtf1\ansi\ansicpg1252\deff0\deflang1033"); RWLn;
-  RWStr("{\fonttbl{\f0\froman\fcharset0 Times New Roman;}}"); RWLn;
-  RWStr("\viewkind4\uc1\margl1440\margr1440\margt1440\margb1440"); RWLn;
+  Markdown.Reset;
+  Markdown.RtfManuscriptHeader;
 
-  first := TRUE;
   FOR di := 0 TO projDocCount - 1 DO
     IF ~projIsNote[di] THEN
-    sf := Files.Old(projDocs[di]);
-    IF sf # NIL THEN
-      Files.Set(sr, sf, 0);
-      WHILE ~sr.eof DO
-        Files.ReadLine(sr, lb);
-        IF ~sr.eof OR (lb[0] # 0X) THEN
-          IF (lb[0] = '.') & (lb[1] = '.') THEN (* note line: skip *)
-          ELSIF lb[0] = 0X THEN (* blank: skip *)
-          ELSE
-            lev := 0;
-            WHILE (lev < Strings.Length(lb)) & (lb[lev] = '#') DO INC(lev) END;
-            IF (lev > 0) & (lb[lev] = ' ') THEN
-              IF lev = 1 THEN
-                IF ~first THEN RWStr("\page"); RWLn END;
-                FOR j := 1 TO 9 DO
-                  RWStr("\pard\plain\f0\fs24\sl480\slmult1\par"); RWLn
-                END;
-                RWStr("\pard\plain\qc\b\f0\fs24 "); RWTitle(2);
-                RWStr("\b0\par"); RWLn
-              ELSE
-                RWStr("\pard\plain\f0\fs24\ql\sl480\slmult1\fi720 \b ");
-                RWTitle(lev + 1); RWStr("\b0\par"); RWLn
-              END
-            ELSE
-              RWStr("\pard\plain\f0\fs24\ql\sl480\slmult1\fi720 ");
-              RWBody; RWStr("\par"); RWLn
-            END;
-            first := FALSE
+      sf := Files.Old(projDocs[di]);
+      IF sf # NIL THEN
+        Files.Set(sr, sf, 0);
+        WHILE ~sr.eof DO
+          Files.ReadLine(sr, lb);
+          IF ~sr.eof OR (lb[0] # 0X) THEN
+            Markdown.RtfManuscriptLine(lb)
           END
-        END
-      END;
-      Files.Close(sf)
-    END
+        END;
+        Files.Close(sf)
+      END
     END
   END;
 
-  RWStr("}"); RWLn;
+  Markdown.RtfManuscriptFooter;
   Files.Register(f); Files.Close(f);
   COPY("Compiled RTF: ", statusMsg); Strings.Append(outPath, statusMsg);
   needRedraw := TRUE
@@ -4602,6 +4441,8 @@ BEGIN
     Args.Get(1, filePath);
     IF ~LoadFile(filePath) THEN filePath[0] := 0X END
   END;
+
+  Markdown.SetSink(MdSink);
 
   TUI.Init;
 

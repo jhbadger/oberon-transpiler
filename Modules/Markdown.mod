@@ -20,6 +20,15 @@ MODULE Markdown;
  * IsHRule/IsTableSep/GetCell/CountCols are generic markdown-structure
  * recognizers with no HTML/RTF dependency, exported for renderers (like
  * plume's PDF/LaTeX output) that build their own inline rendering.
+ *
+ * RtfManuscriptHeader/RtfManuscriptLine/RtfManuscriptFooter are a
+ * separate, self-contained "Standard Manuscript Format" RTF renderer
+ * (double-spaced, first-line indent, chapter page-breaks, smart
+ * typography, ".."-prefixed note lines stripped) used by ostar.mod's
+ * ^K M / ^P K — unrelated to the generic RtfHeader/RtfLine/RtfFooter
+ * above beyond both producing RTF. Each input line becomes a complete
+ * paragraph on its own (no cross-line accumulation), so it needs no
+ * end-of-block flush the way the generic renderers do.
  *)
 
 IMPORT Strings;
@@ -44,6 +53,10 @@ VAR
   tableHdr                 : ARRAY MaxLine OF CHAR;
   tableCols                : INTEGER;
 
+  (* Manuscript-mode RTF state: just whether we've emitted a chapter
+     yet (so the very first one skips the leading page break). *)
+  msFirst                  : BOOLEAN;
+
 (* ── Output primitives ────────────────────────────────── *)
 
 PROCEDURE SetSink*(w: WriteProc);
@@ -65,8 +78,15 @@ BEGIN
   inPara := FALSE; inList := FALSE; listOrd := FALSE; listN := 1;
   inCode := FALSE; inBQ := FALSE;
   bold := FALSE; ital := FALSE;
-  inTable := FALSE; inTableHead := FALSE; tableCols := 0
+  inTable := FALSE; inTableHead := FALSE; tableCols := 0;
+  msFirst := TRUE
 END Reset;
+
+PROCEDURE IsWordChar(c: CHAR): BOOLEAN;
+BEGIN
+  RETURN ((c >= 'a') & (c <= 'z')) OR ((c >= 'A') & (c <= 'Z'))
+      OR ((c >= '0') & (c <= '9')) OR (c = '_')
+END IsWordChar;
 
 (* ── Generic markdown structure ──────────────────────────
    No output-format dependency; usable by any renderer. *)
@@ -567,5 +587,137 @@ END RtfHeader;
 
 PROCEDURE RtfFooter*;
 BEGIN EndBlockRtf; Wch('}'); Wln END RtfFooter;
+
+(* ── RTF, manuscript mode ─────────────────────────────────
+   Standard Manuscript Format: 12pt Times New Roman, double-spaced,
+   1-inch margins, first-line indent, chapter headings (level-1 #) on
+   their own page, *italic*/**bold** emphasis, smart typography (curly
+   quotes, em dash, ellipsis), ".."-prefixed note lines stripped. Every
+   non-blank, non-note line is its own complete paragraph. *)
+
+PROCEDURE MsUni(codePoint: INTEGER; fallback: CHAR);
+VAR tmp: ARRAY 16 OF CHAR;
+BEGIN
+  Wstr("\u"); Strings.IntToStr(codePoint, tmp); Wstr(tmp);
+  Wch(' '); Wch(fallback)
+END MsUni;
+
+PROCEDURE MsEsc(c: CHAR);
+VAR tmp: ARRAY 16 OF CHAR;
+BEGIN
+  IF    c = 5CH THEN Wstr("\\\\")
+  ELSIF c = 7BH THEN Wstr("\{")
+  ELSIF c = 7DH THEN Wstr("\}")
+  ELSIF c = 9X  THEN Wstr("\tab ")
+  ELSIF ORD(c) >= 128 THEN
+    Wstr("\u"); Strings.IntToStr(ORD(c) - 256, tmp); Wstr(tmp);
+    Wch(' '); Wch('?')
+  ELSE Wch(c)
+  END
+END MsEsc;
+
+(* Render a heading title from byte `from` on: escape only, no emphasis
+   or smart typography. *)
+PROCEDURE MsTitle(s: ARRAY OF CHAR; from: INTEGER);
+VAR k, len: INTEGER;
+BEGIN
+  len := Strings.Length(s);
+  FOR k := from TO len - 1 DO MsEsc(s[k]) END
+END MsTitle;
+
+(* Render a body paragraph line with *italic*/**bold** and smart
+   typography (em dash, ellipsis, curly quotes/apostrophes). *)
+PROCEDURE MsBody(s: ARRAY OF CHAR);
+VAR k, len: INTEGER; c, prev: CHAR; msBold, msItal: BOOLEAN;
+BEGIN
+  msBold := FALSE; msItal := FALSE;
+  len := Strings.Length(s);
+  k := 0; prev := ' ';
+  WHILE k < len DO
+    c := s[k];
+    IF (c = '*') & (k + 1 < len) & (s[k + 1] = '*') THEN
+      IF msBold THEN Wstr("\b0 ") ELSE Wstr("\b ") END;
+      msBold := ~msBold; INC(k, 2)
+    ELSIF c = '*' THEN
+      IF msItal THEN Wstr("\i0 ") ELSE Wstr("\i ") END;
+      msItal := ~msItal; INC(k)
+    ELSIF (c = '-') & (k + 1 < len) & (s[k + 1] = '-') THEN
+      MsUni(8212, '-'); INC(k, 2)   (* em dash *)
+    ELSIF (c = '.') & (k + 1 < len) & (s[k + 1] = '.') &
+          (k + 2 < len) & (s[k + 2] = '.') THEN
+      MsUni(8230, '.'); INC(k, 3)   (* ellipsis *)
+    ELSIF c = 22X THEN             (* " double quote *)
+      IF IsWordChar(prev) OR (prev = '.') OR (prev = ',') OR
+         (prev = '?') OR (prev = '!') OR (prev = 27X) OR (prev = ')') THEN
+        MsUni(8221, 22X)            (* close " *)
+      ELSE
+        MsUni(8220, 22X)            (* open " *)
+      END;
+      prev := c; INC(k)
+    ELSIF c = 27X THEN             (* ' apostrophe / single quote *)
+      IF IsWordChar(prev) OR (prev = ',') OR (prev = '.') THEN
+        MsUni(8217, 27X)            (* apostrophe / close ' *)
+      ELSE
+        MsUni(8216, 27X)            (* open ' *)
+      END;
+      prev := c; INC(k)
+    ELSIF c = 5CH THEN Wstr("\\\\"); prev := c; INC(k)
+    ELSIF c = 7BH THEN Wstr("\{");  prev := c; INC(k)
+    ELSIF c = 7DH THEN Wstr("\}");  prev := c; INC(k)
+    ELSE MsEsc(c); prev := c; INC(k)
+    END
+  END;
+  IF msBold THEN Wstr("\b0 ") END;
+  IF msItal THEN Wstr("\i0 ") END
+END MsBody;
+
+PROCEDURE RtfManuscriptHeader*;
+BEGIN
+  Wstr("{\rtf1\ansi\ansicpg1252\deff0\deflang1033"); Wln;
+  Wstr("{\fonttbl{\f0\froman\fcharset0 Times New Roman;}"); Wln;
+  Wstr("{\f1\fmodern\fcharset0 Courier New;}}"); Wln;
+  Wstr("\viewkind4\uc1"); Wln;
+  Wstr("\margl1440\margr1440\margt1440\margb1440"); Wln
+END RtfManuscriptHeader;
+
+PROCEDURE RtfManuscriptLine*(s: ARRAY OF CHAR);
+VAR lev, len, j: INTEGER;
+BEGIN
+  len := Strings.Length(s);
+  IF (s[0] = '.') & (s[1] = '.') THEN
+    (* note line: skip *)
+  ELSIF len = 0 THEN
+    (* blank line: skip — SMF uses first-line indent, not blank separators *)
+  ELSE
+    lev := 0;
+    WHILE (lev < len) & (s[lev] = '#') DO INC(lev) END;
+    IF (lev > 0) & (s[lev] = ' ') THEN
+      IF lev = 1 THEN
+        (* Chapter: page break (except first) + 9 blank lines + centred bold *)
+        IF ~msFirst THEN Wstr("\page"); Wln END;
+        FOR j := 1 TO 9 DO
+          Wstr("\pard\plain\f0\fs24\sl480\slmult1\par"); Wln
+        END;
+        Wstr("\pard\plain\qc\b\f0\fs24 ");
+        MsTitle(s, 2);
+        Wstr("\b0\par"); Wln
+      ELSE
+        (* Sub-heading: bold body paragraph *)
+        Wstr("\pard\plain\f0\fs24\ql\sl480\slmult1\fi720 \b ");
+        MsTitle(s, lev + 1);
+        Wstr("\b0\par"); Wln
+      END
+    ELSE
+      (* Body paragraph *)
+      Wstr("\pard\plain\f0\fs24\ql\sl480\slmult1\fi720 ");
+      MsBody(s);
+      Wstr("\par"); Wln
+    END;
+    msFirst := FALSE
+  END
+END RtfManuscriptLine;
+
+PROCEDURE RtfManuscriptFooter*;
+BEGIN Wstr("}"); Wln END RtfManuscriptFooter;
 
 END Markdown.

@@ -51,7 +51,7 @@ arrow keys, Home/End, Page Up/Down, and the mouse, so you can mix styles.
 | Spell check | hunspell-backed; flags misspellings in the theme's error color, jump between them, maintain a personal dictionary |
 | Style check | Flags `-ly` adverbs, filler/hedge words, passive voice, and overlong sentences, each in its own color |
 | Projects | Group several files into a `.ostarproj` manifest; binder popup with per-doc synopses (`^PI`/`^PY`) and note/manuscript roles (`^PM`), outline panel, project-wide search and replace (`^PS`/`^PW`), and "compile" (concatenate all non-note docs to one RTF or text file) |
-| Export | Manuscript-format RTF (`^KM`), a notes-stripped clean `.txt` (`^KE`), and timestamped backup snapshots (`^KN`, browsable with `^KO`) |
+| Export | Manuscript-format RTF (`^KM`), plain HTML (`^KJ`), a notes-stripped clean `.txt` (`^KE`), and timestamped backup snapshots (`^KN`, browsable with `^KO`) — RTF and HTML rendering both live in the shared `Modules/Markdown.mod` |
 | Other window | A second, independently-scrolled pane (`^OK`) for reference material or a companion file, with block-copy (`^KA`) and jump-to-source (`^QV`) between the two |
 | Look & feel | Three themes (WordPerfect blue, WordStar black, terminal default), three help-verbosity levels, focus mode, typewriter scrolling, reveal codes (`^OD`) |
 
@@ -300,9 +300,9 @@ voice`, `long sentence`) whenever the cursor sits on one.
 
 ### 11. Export a manuscript
 
-Two export commands turn your working file into a deliverable, both
+Three export commands turn your working file into a deliverable, all
 derived from the current filename (`draft.txt` → `draft.rtf` /
-`draft.txt`… careful with extensions, see below):
+`draft.html` / `draft.txt`… careful with extensions, see below):
 
 - `^K M` — **RTF manuscript export**. Produces a standard-manuscript-format
   `.rtf`: 12pt Times New Roman, double-spaced, one-inch margins,
@@ -312,11 +312,19 @@ derived from the current filename (`draft.txt` → `draft.rtf` /
   emphasis, and "smart" typography (curly quotes, em dashes from `--`,
   ellipses from `...`). Note lines (`..`) and blank lines are dropped —
   paragraph spacing comes from the first-line indent, not blank lines.
+  (Rendered by `Modules/Markdown.mod`'s manuscript-mode RTF renderer,
+  shared with `^P K`'s project-wide compile.)
+- `^K J` — **HTML export**. Plain (not manuscript-format, single-spaced)
+  HTML via the same `Modules/Markdown.mod` used by the `plume` markdown
+  converter: headings, `*italic*`/`**bold**` emphasis, `` `code` ``,
+  `[links](url)`, lists, tables, blockquotes, and fenced code blocks all
+  render as real HTML tags, with a small embedded stylesheet. Note lines
+  (`..`) are stripped first, same convention as `^K M`/`^K E`.
 - `^K E` — **clean export**. Writes a plain `.txt` copy with note lines
   stripped, everything else left as-is — good for sending a quick draft to
   someone who doesn't want your margin notes.
 
-Both report the path they wrote to in the status line.
+All three report the path they wrote to in the status line.
 
 ### 12. Where to go next
 
@@ -459,7 +467,7 @@ outlines together.
 
 ## Part 4 — Command Reference
 
-Chords are grouped by prefix, matching OStar's own `F1` palette (92
+Chords are grouped by prefix, matching OStar's own `F1` palette (93
 entries) and the `^O`-menu help boxes. `^X` means hold Ctrl and press X;
 `^K X` means press `^K` then, after releasing Ctrl, press X (X is
 case-insensitive).
@@ -533,6 +541,7 @@ case-insensitive).
 | `^K W` | Write the marked block to a new file |
 | `^K R` | Read a file's contents into the buffer at the cursor |
 | `^K M` | Export RTF manuscript |
+| `^K J` | Export HTML |
 | `^K E` | Clean export (notes stripped, plain `.txt`) |
 | `^K N` | Save a timestamped `.bak` snapshot |
 | `^K A` | Copy the block marked in the other window (`^O K`) here |
@@ -676,5 +685,5 @@ case-insensitive).
 ---
 
 *This manual documents the behavior implemented in `examples/ostar.mod` as
-of the commits tagged `feat(ostar)`/`fix(ostar)` through
-"the other window, snapshot browser, and expanded binder/project commands."*
+of the commits tagged `feat(ostar)`/`fix(ostar)`/`refactor(ostar)` through
+"replace RTF export and add HTML export via Modules/Markdown.mod."*
