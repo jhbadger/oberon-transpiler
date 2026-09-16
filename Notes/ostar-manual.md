@@ -50,9 +50,10 @@ arrow keys, Home/End, Page Up/Down, and the mouse, so you can mix styles.
 | Word wrap | Soft (visual) wrap at a configurable column, on by default at 72 |
 | Spell check | hunspell-backed; flags misspellings in the theme's error color, jump between them, maintain a personal dictionary |
 | Style check | Flags `-ly` adverbs, filler/hedge words, passive voice, and overlong sentences, each in its own color |
-| Projects | Group several files into a `.ostarproj` manifest; binder popup, outline panel, project-wide search, and "compile" (concatenate all docs to one RTF or text file) |
-| Export | Manuscript-format RTF (`^KM`), a notes-stripped clean `.txt` (`^KE`), and timestamped backup snapshots (`^KN`) |
-| Look & feel | Three themes (WordPerfect blue, WordStar black, terminal default), three help-verbosity levels, focus mode, typewriter scrolling |
+| Projects | Group several files into a `.ostarproj` manifest; binder popup with per-doc synopses (`^PI`/`^PY`) and note/manuscript roles (`^PM`), outline panel, project-wide search and replace (`^PS`/`^PW`), and "compile" (concatenate all non-note docs to one RTF or text file) |
+| Export | Manuscript-format RTF (`^KM`), a notes-stripped clean `.txt` (`^KE`), and timestamped backup snapshots (`^KN`, browsable with `^KO`) |
+| Other window | A second, independently-scrolled pane (`^OK`) for reference material or a companion file, with block-copy (`^KA`) and jump-to-source (`^QV`) between the two |
+| Look & feel | Three themes (WordPerfect blue, WordStar black, terminal default), three help-verbosity levels, focus mode, typewriter scrolling, reveal codes (`^OD`) |
 
 ### Building and running OStar
 
@@ -330,21 +331,25 @@ then use Part 4 as your day-to-day command reference.
 
 A **project** is a small manifest file, extension `.ostarproj`, that lists
 the paths of the documents that belong together — one path per line, plain
-text, no other syntax. All project commands live under the `^P` prefix.
+text. A line prefixed with `!` marks that document as a **note** rather
+than manuscript (`^P M`, see below); everything else about the format is
+unchanged. All project commands live under the `^P` prefix.
 
 ### Creating and populating a project
 
 - `^P N` — create a new project. You're prompted for a project name; the
-  manifest is written to `<name>.ostarproj` in the current directory. If a
-  file is already open, it becomes the project's first document
-  automatically.
+  manifest is written to `<name>.ostarproj` in the current directory (a
+  bare name like `fred` becomes `fred.ostarproj` automatically — no need
+  to type the extension). If a file is already open, it becomes the
+  project's first document automatically.
 - `^P A` — add the **currently open** file to the open project (the file
   must already be saved — save it first with `^K D` if needed).
 - `^P R` — remove the currently open file from the project's manifest
   (does not delete the file itself).
 - `^P L` — list the project's documents in the status line, with the
   currently open one shown in `[brackets]`.
-- `^P P` — open an *existing* `.ostarproj` file, loading its document list.
+- `^P P` — open an *existing* `.ostarproj` file, loading its document list
+  (same bare-name convenience as `^P N`).
 
 Every add/remove immediately rewrites the manifest file, so the project
 stays in sync on disk without an explicit "save project" step.
@@ -361,20 +366,86 @@ stays in sync on disk without an explicit "save project" step.
   - Up/Down (or `^E`/`^X`) move the highlighted entry.
   - Enter opens the highlighted document and closes the popup.
   - Escape closes the popup without changing documents.
+  - `^P` re-enters the Project prefix without leaving the binder, so
+    `^P I`, `^P Y`, `^P M`, and `^P V` (all below) act on whichever entry
+    is highlighted.
 
-### Searching and compiling across the whole project
+### Synopses and document roles
+
+- `^P I` — edit the highlighted (or, outside the binder, the current)
+  document's one-line **synopsis** — a short blurb describing what the
+  chapter covers. It's stored next to the document as `<file>.synopsis`,
+  not in the manifest, so it survives re-ordering the project.
+- `^P Y` — toggle whether the binder shows each document's synopsis as a
+  dimmed second line under its title. Off by default to keep the binder
+  compact.
+- `^P M` — toggle the highlighted (or current) document between
+  **manuscript** and **note**. A note is marked `[note]` in the binder
+  and skipped by `^P K` / `^P T` compile — useful for a synopsis,
+  character sheet, or outline file you keep in the project but don't
+  want in the finished book. (This is a whole-document flag, distinct
+  from the `..`-prefixed note *lines* `^Q M`/`^Q U` navigate within a
+  single document — see "Document conventions" below.)
+
+### Annotations
+
+- `^P C` — insert a `..`-prefixed comment line above the cursor (you're
+  prompted for the text). It's the same convention `^Q M`/`^Q U`
+  navigate between and `^K E`/project compile strip out — `^P C` is
+  just a quick way to drop one in without typing `.. ` yourself.
+
+### Searching and replacing across the whole project
 
 - `^P S` — **project-wide find**: searches every document listed in the
   manifest (not just the open one) for a string you type, and reports
   matches (with file and line) so you can jump to them.
-- `^P K` — **compile to RTF**: concatenates every document in the project,
-  in manifest order, through the same manuscript-format renderer as `^K M`
-  (chapter breaks, smart typography, etc.), producing one combined `.rtf`.
-  This is the "build the whole manuscript" command — write each chapter as
-  its own file during drafting, then compile the finished book in one
-  shot.
+- `^P W` — **project-wide replace**: prompts for a find string and a
+  replacement, then applies it to every occurrence in every document in
+  the project (not a per-match confirmation like `^Q A` — it's a
+  find-and-replace-all across the whole manifest). Each file is loaded,
+  fully replaced, and saved in turn; you end up back on the document you
+  started from. Use this for a name change or terminology fix that spans
+  chapters.
+
+### Compiling the project
+
+- `^P K` — **compile to RTF**: concatenates every non-note document in
+  the project, in manifest order, through the same manuscript-format
+  renderer as `^K M` (chapter breaks, smart typography, etc.), producing
+  one combined `.rtf`. This is the "build the whole manuscript"
+  command — write each chapter as its own file during drafting, then
+  compile the finished book in one shot.
 - `^P T` — the same idea, but compiles to a single clean, note-stripped
   plain-text file instead of RTF.
+
+### The other window
+
+`^O K` opens (or switches focus between) a second, independently
+scrolled pane below the main one — useful for glancing at another
+chapter, a style sheet, or research notes without losing your place.
+
+- `^O K` — if no other window is open, prompts for a file to open there
+  (an existing document, or a new filename to start one); the main
+  document keeps keyboard focus. Press it again to switch focus to the
+  other pane, and again to switch back.
+- `^K A` — copy the block marked *in the other window* into this one at
+  the cursor (the reverse of the usual `^K C`, which only copies within
+  the current document).
+- `^Q V` — jump to wherever the marked block actually is: if it's marked
+  in the current pane this is the same as `^Q B`/`^Q K`; if it's only
+  marked in the other pane, focus switches there and the cursor lands on
+  it.
+- `^P O` — open the current document's free-form notes file
+  (`<file>.notes`, distinct from the one-line `^P I` synopsis) in the
+  other window — a scratch area beside your manuscript.
+- `^P V` — from the binder, open the highlighted document in the other
+  window instead of replacing the active one with `Enter`.
+- **Esc** closes the other window, always landing you back on your
+  original document regardless of which pane currently has focus.
+
+Both panes redraw unwrapped while split (word wrap resumes once you
+close the other window), and undo history isn't preserved across a
+focus switch — each pane's undo stack starts fresh when it gains focus.
 
 ### Outline panel
 
@@ -388,7 +459,7 @@ outlines together.
 
 ## Part 4 — Command Reference
 
-Chords are grouped by prefix, matching OStar's own `F1` palette (76
+Chords are grouped by prefix, matching OStar's own `F1` palette (92
 entries) and the `^O`-menu help boxes. `^X` means hold Ctrl and press X;
 `^K X` means press `^K` then, after releasing Ctrl, press X (X is
 case-insensitive).
@@ -440,6 +511,7 @@ case-insensitive).
 | `^Q I` | Next style issue (requires style check on, `^O L`) |
 | `^Q M` | Next comment/note line (starts with `..`) |
 | `^Q U` | Previous comment/note line |
+| `^Q V` | Jump to the marked block, wherever it is (this pane or the other window) |
 | `^Q H` | Open the outline panel |
 
 `^L` (no prefix) repeats the last `^Q F` search — "find next."
@@ -463,6 +535,9 @@ case-insensitive).
 | `^K M` | Export RTF manuscript |
 | `^K E` | Clean export (notes stripped, plain `.txt`) |
 | `^K N` | Save a timestamped `.bak` snapshot |
+| `^K A` | Copy the block marked in the other window (`^O K`) here |
+| `^K U` | Jump to the previously-marked block |
+| `^K O` | Browse and restore this document's `^K N` snapshots |
 
 ### `^O` — Onscreen (display and mode toggles)
 
@@ -479,6 +554,8 @@ case-insensitive).
 | `^O L` | Toggle style check |
 | `^O C` | Show word and line count |
 | `^O F` | Toggle focus mode |
+| `^O K` | Open/switch focus to the other window (Esc closes it) |
+| `^O D` | Toggle reveal codes (markdown markers shown in inverse video) |
 
 ### `^P` — Project
 
@@ -491,10 +568,17 @@ case-insensitive).
 | `^P E` | Previous document in the project |
 | `^P X` | Next document in the project |
 | `^P L` | List the project's documents |
-| `^P K` | Compile all project documents to one RTF file |
-| `^P T` | Compile all project documents to one clean text file |
+| `^P K` | Compile all non-note project documents to one RTF file |
+| `^P T` | Compile all non-note project documents to one clean text file |
 | `^P S` | Find a string across every document in the project |
+| `^P W` | Replace a string across every document in the project |
 | `^P B` | Toggle the binder popup |
+| `^P I` | Edit the current (or binder-highlighted) doc's synopsis |
+| `^P Y` | Toggle showing synopses in the binder |
+| `^P M` | Toggle the current (or binder-highlighted) doc as a note |
+| `^P C` | Insert a `..` comment line above the cursor |
+| `^P O` | Open the current doc's notes file in the other window |
+| `^P V` | From the binder, open the highlighted doc in the other window |
 
 ### Direct editing (no prefix)
 
@@ -524,7 +608,27 @@ case-insensitive).
 |---|---|
 | Up/Down or `^E`/`^X` | Move the highlighted document |
 | Enter | Open the highlighted document and close the popup |
+| `^P` | Re-enter the Project prefix — `^P I`/`^P Y`/`^P M`/`^P V` act on the highlighted document |
 | Esc | Close the popup without changing documents |
+
+### Snapshot browser keys (active after `^K O`)
+
+| Key | Action |
+|---|---|
+| Up/Down or `^E`/`^X` | Move the highlighted snapshot |
+| Enter | Load that snapshot's content into the current buffer (marked dirty — `^K D` to actually overwrite the file) and close |
+| Esc | Close without restoring anything |
+
+### Other window keys
+
+| Chord | Action |
+|---|---|
+| `^O K` | Open the other window (prompts for a file), or switch focus to it |
+| `^K A` | Copy the block marked in the other window into this one |
+| `^Q V` | Jump to the marked block, switching focus if it's in the other window |
+| `^P O` | Open this document's notes file (`<file>.notes`) in the other window |
+| `^P V` | From the binder, open the highlighted document in the other window |
+| Esc | Close the other window and return to a single pane |
 
 ### Outline-panel keys (active after `^Q H`)
 
@@ -548,21 +652,24 @@ case-insensitive).
 | Convention | Effect |
 |---|---|
 | A line starting with `#` | Heading. Leading `#` count = nesting level; level 1 becomes a chapter break (page break + centered bold title) on RTF export. |
-| A line starting with `..` | Note/comment line — visible while editing, navigable with `^Q M`/`^Q U`, stripped from both RTF and clean exports. |
-| `*italic text*` | Rendered as italic in RTF export. |
-| `**bold text**` | Rendered as bold in RTF export. |
+| A line starting with `..` | Note/comment line — visible while editing, navigable with `^Q M`/`^Q U` (or inserted with `^P C`), stripped from both RTF and clean exports. |
+| `*italic text*` | Rendered as italic in RTF export; shown in inverse video when reveal codes (`^O D`) is on. |
+| `**bold text**` | Rendered as bold in RTF export; shown in inverse video when reveal codes is on. |
 | `--` | Rendered as an em dash in RTF export. |
 | `...` | Rendered as an ellipsis character in RTF export. |
 | Straight quotes (`"`, `'`) | Rendered as curly/smart quotes in RTF export. |
+| A project manifest line starting with `!` | That document is a **note** (`^P M`) — skipped by `^P K`/`^P T` compile. Whole-document flag, unrelated to the `..` line convention above. |
 
 ### Files OStar reads and writes on its own
 
 | Path | Purpose |
 |---|---|
-| `<name>.ostarproj` | Project manifest — one document path per line |
+| `<name>.ostarproj` | Project manifest — one document path per line, `!`-prefixed for a note doc |
 | `<name>.rtf` | Output of `^K M` / `^P K` |
 | `<name>.txt` | Output of `^K E` / `^P T` — derived by replacing the source file's extension. **Warning:** if your source file is already `.txt`, this overwrites it in place. |
-| `<name>.YYYYMMDD-HHMMSS.bak` | Output of `^K N` |
+| `<name>.YYYYMMDD-HHMMSS.bak` | Output of `^K N`; browse/restore with `^K O` |
+| `<file>.synopsis` | The document's one-line blurb, set with `^P I` |
+| `<file>.notes` | The document's free-form notes, opened in the other window with `^P O` |
 | `~/.config/ostar/personal.txt` | Your persisted spell-check personal dictionary |
 | `$TMPDIR` (or `/tmp`) | Scratch files used while shelling out to `hunspell` |
 
@@ -570,4 +677,4 @@ case-insensitive).
 
 *This manual documents the behavior implemented in `examples/ostar.mod` as
 of the commits tagged `feat(ostar)`/`fix(ostar)` through
-"fix find/replace state bugs, binder mouse clicks, and off-screen cursor."*
+"the other window, snapshot browser, and expanded binder/project commands."*

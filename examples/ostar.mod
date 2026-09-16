@@ -46,6 +46,7 @@ CONST
   ModePalette = 5;   (* F1 key list             *)
   ModeBinder  = 6;   (* binder panel navigation *)
   ModeOutline = 7;   (* outline panel           *)
+  ModeRevisions = 8; (* snapshot browser (^KO)  *)
 
   (* Prefix keys *)
   PrefNone = 0;  PrefK = 1;  PrefQ = 2;  PrefO = 3;  PrefP = 4;
@@ -58,6 +59,11 @@ CONST
   ActMargin  = 5;  (* set wrap margin     *)
   ActProjNew = 6;  (* create project      *)
   ActProjOpen= 7;  (* open project file   *)
+  ActProjReplFind = 8;  (* project-wide replace: find string  *)
+  ActProjReplWith = 9;  (* project-wide replace: replacement  *)
+  ActSynopsis     = 10; (* edit a project doc's synopsis      *)
+  ActOtherOpen    = 11; (* open a file into the other window  *)
+  ActAnnotate     = 12; (* insert a ".." comment line (^PC)   *)
 
   (* Undo record kinds *)
   UKLine  = 0;   (* one line's content changed  *)
@@ -68,6 +74,7 @@ CONST
 
   (* Project *)
   MaxProjDocs = 128;   (* documents per project *)
+  MaxRevisions = 200;  (* snapshots listed per document (^KO) *)
 
   (* Key codes — use TUI.Kxxx qualifiers in code to avoid C macro collisions *)
 
@@ -96,6 +103,21 @@ TYPE
     line2             : Line;
   END;
 
+  (* A snapshot of everything that makes up "the document being edited",
+     used for the other window (^OK) — its content lives here while it
+     isn't focused, and swaps into the live globals when it is. Undo
+     history is intentionally not part of this: switching panes resets
+     undo rather than trying to keep two histories consistent. *)
+  PaneSnap = RECORD
+    lines    : ARRAY MaxLines OF Line;
+    numLines : INTEGER;
+    filePath : ARRAY 512 OF CHAR;
+    dirty    : BOOLEAN;
+    curRow, curCol, goalCol, topLine, leftCol : INTEGER;
+    hasBlkB, hasBlkE                          : BOOLEAN;
+    blkBRow, blkBCol, blkERow, blkECol        : INTEGER;
+  END;
+
   KillBlock = RECORD
     n    : INTEGER;
     data : ARRAY KRLines OF Line;
@@ -119,6 +141,9 @@ VAR
   hasBlkB, hasBlkE : BOOLEAN;
   blkBRow, blkBCol : INTEGER;
   blkERow, blkECol : INTEGER;
+  hasPrevBlk       : BOOLEAN;   (* the block mark just overwritten by BlockBegin, for ^KU *)
+  prevBlkBRow, prevBlkBCol : INTEGER;
+  prevBlkERow, prevBlkECol : INTEGER;
 
   (* Kill ring *)
   killRing   : ARRAY KRSlots OF KillBlock;
@@ -190,10 +215,31 @@ VAR
   (* Project *)
   projPath     : ARRAY 512 OF CHAR;               (* path of open .ostarproj file, or empty *)
   projDocs     : ARRAY MaxProjDocs OF ARRAY 512 OF CHAR;
+  projIsNote   : ARRAY MaxProjDocs OF BOOLEAN;    (* doc excluded from compile (^PM) *)
   projDocCount : INTEGER;
   projCurDoc   : INTEGER;   (* index of currently open doc in projDocs, or -1 *)
   binderSel    : INTEGER;   (* highlighted entry in the binder popup *)
   binderScroll : INTEGER;   (* first visible entry in the binder popup *)
+  showSynopsis : BOOLEAN;   (* ^PY: show each binder entry's synopsis line *)
+  synopsisTarget     : ARRAY 512 OF CHAR;  (* doc path being edited by ^PI *)
+  synopsisFromBinder : BOOLEAN;            (* re-open the binder after ^PI's prompt *)
+
+  (* Other window (^OK / ^KA / ^QV / ^PO / ^PV) *)
+  otherPane     : PaneSnap;
+  otherPaneOpen : BOOLEAN;
+  focusOther    : BOOLEAN;   (* TRUE = the active globals are the *bottom* pane *)
+  swapTmp       : PaneSnap;  (* scratch space for pane swaps — kept global; a
+                                PaneSnap is too large to put on the C stack *)
+
+  (* Reveal codes (^OD) *)
+  revealCodes : BOOLEAN;
+
+  (* Revisions browser (^KO) *)
+  revNames  : ARRAY MaxRevisions OF ARRAY 512 OF CHAR;
+  revCount  : INTEGER;
+  revSel    : INTEGER;
+  revScroll : INTEGER;
+  revDir    : ARRAY 512 OF CHAR;  (* directory the snapshots live in *)
 
   (* Palette scroll *)
   palScroll   : INTEGER;
@@ -916,6 +962,48 @@ BEGIN
   needRedraw := TRUE
 END SaveSnapshot;
 
+PROCEDURE ListRevisions;
+(* ^KO — browse the snapshots ^KN has taken of this document. *)
+VAR base, prefix, name: ARRAY 512 OF CHAR; j, i, n: INTEGER;
+BEGIN
+  IF filePath[0] = 0X THEN SetStatus("Save this file first"); needRedraw := TRUE; RETURN END;
+  COPY(filePath, base);
+  j := Strings.Length(base) - 1;
+  WHILE (j > 0) & (base[j] # '/') DO DEC(j) END;
+  IF base[j] = '/' THEN
+    Strings.Extract(base, 0, j, revDir);
+    Strings.Extract(base, j + 1, Strings.Length(base) - j - 1, prefix)
+  ELSE
+    revDir[0] := 0X;
+    COPY(base, prefix)
+  END;
+  (* Strip the basename's own extension, matching SaveSnapshot's naming *)
+  j := Strings.Length(prefix) - 1;
+  WHILE (j > 0) & (prefix[j] # '.') DO DEC(j) END;
+  IF (j > 0) & (prefix[j] = '.') THEN prefix[j] := 0X END;
+  Strings.Append(".", prefix);
+
+  OS.DirOpen(revDir, ".bak");
+  n := OS.DirCount();
+  revCount := 0;
+  FOR i := 0 TO n - 1 DO
+    IF (revCount < MaxRevisions) & ~OS.DirIsDir(i) THEN
+      OS.DirName(i, name);
+      IF Strings.StartsWith(name, prefix) THEN
+        COPY(name, revNames[revCount]);
+        INC(revCount)
+      END
+    END
+  END;
+  IF revCount = 0 THEN
+    SetStatus("No snapshots for this file (^KN to make one)"); needRedraw := TRUE; RETURN
+  END;
+  revSel := revCount - 1;  (* timestamps sort ascending, so this is most recent *)
+  revScroll := 0;
+  mode := ModeRevisions;
+  needRedraw := TRUE
+END ListRevisions;
+
 (* ── Text Editing ────────────────────────────────────────────────── *)
 
 PROCEDURE InsChar(c: CHAR);
@@ -1571,11 +1659,28 @@ END EnsureVisible;
 PROCEDURE BlockBegin;
 (* ^KB *)
 BEGIN
+  (* Remember the block we're about to replace, if it was a complete one,
+     so ^KU (BlockPrev) can jump back to it. *)
+  IF hasBlkB & hasBlkE THEN
+    prevBlkBRow := blkBRow; prevBlkBCol := blkBCol;
+    prevBlkERow := blkERow; prevBlkECol := blkECol;
+    hasPrevBlk := TRUE
+  END;
   hasBlkB := TRUE; hasBlkE := FALSE;
   blkBRow := curRow; blkBCol := curCol;
   SetStatus("Block begin marked");
   needRedraw := TRUE
 END BlockBegin;
+
+PROCEDURE BlockPrev;
+(* ^KU — jump to the previously-marked block, so re-marking a block
+   elsewhere doesn't lose track of the last one. *)
+BEGIN
+  IF ~hasPrevBlk THEN SetStatus("No previous block"); RETURN END;
+  SavePrev;
+  curRow := prevBlkBRow; curCol := prevBlkBCol;
+  goalCol := -1; needRedraw := TRUE
+END BlockPrev;
 
 PROCEDURE BlockEnd;
 (* ^KK *)
@@ -1723,6 +1828,151 @@ BEGIN
   (* For now just warn if block overlaps cursor — full move is complex *)
   SetStatus("Block moved (copied; delete original with ^KY)")
 END BlockMove;
+
+(* ── Other window (^OK) ─────────────────────────────────────────────
+   A second, independently-scrolled document beside the active one.
+   Rather than duplicating every editing procedure for a second buffer,
+   the "other" document's state lives in a PaneSnap when it isn't
+   focused; focusing it means swapping its fields with the live globals,
+   so all the normal editing code keeps working unmodified on "whichever
+   buffer is active right now". Undo history is not preserved across a
+   focus swap (see PaneSnap's declaration). *)
+
+PROCEDURE SnapFromActive(VAR snap: PaneSnap);
+BEGIN
+  snap.lines := lines; snap.numLines := numLines; COPY(filePath, snap.filePath);
+  snap.dirty := dirty;
+  snap.curRow := curRow; snap.curCol := curCol; snap.goalCol := goalCol;
+  snap.topLine := topLine; snap.leftCol := leftCol;
+  snap.hasBlkB := hasBlkB; snap.hasBlkE := hasBlkE;
+  snap.blkBRow := blkBRow; snap.blkBCol := blkBCol;
+  snap.blkERow := blkERow; snap.blkECol := blkECol
+END SnapFromActive;
+
+PROCEDURE CopySnapToActive(VAR snap: PaneSnap);
+(* Bring a snapshot's content into the live globals. Does NOT touch undo
+   history — callers doing a real focus switch reset undoTop themselves;
+   callers just peeking (to render the other pane) restore the real
+   active buffer afterward instead. *)
+BEGIN
+  lines := snap.lines; numLines := snap.numLines; COPY(snap.filePath, filePath);
+  dirty := snap.dirty;
+  curRow := snap.curRow; curCol := snap.curCol; goalCol := snap.goalCol;
+  topLine := snap.topLine; leftCol := snap.leftCol;
+  hasBlkB := snap.hasBlkB; hasBlkE := snap.hasBlkE;
+  blkBRow := snap.blkBRow; blkBCol := snap.blkBCol;
+  blkERow := snap.blkERow; blkECol := snap.blkECol
+END CopySnapToActive;
+
+PROCEDURE LoadFileIntoSnap(path: ARRAY OF CHAR; VAR snap: PaneSnap): BOOLEAN;
+(* Like LoadFile, but into a PaneSnap instead of the live globals — for
+   opening a second document without disturbing the active one. Like
+   LoadFile, a non-existent path just starts a fresh empty document
+   there rather than failing (this always returns TRUE; the result is
+   kept for symmetry with LoadFile and in case that ever changes). *)
+VAR f: Files.File; r: Files.Rider;
+BEGIN
+  f := Files.Old(path);
+  snap.numLines := 0;
+  IF f # NIL THEN
+    Files.Set(r, f, 0);
+    WHILE ~r.eof & (snap.numLines < MaxLines) DO
+      NEW(snap.lines[snap.numLines]);
+      Files.ReadLine(r, snap.lines[snap.numLines].s);
+      IF ~r.eof OR (snap.lines[snap.numLines].s[0] # 0X) THEN
+        INC(snap.numLines)
+      ELSE
+        FREE(snap.lines[snap.numLines])
+      END
+    END;
+    Files.Close(f)
+  END;
+  IF snap.numLines = 0 THEN NEW(snap.lines[0]); snap.lines[0].s[0] := 0X; snap.numLines := 1 END;
+  COPY(path, snap.filePath);
+  snap.dirty := FALSE;
+  snap.curRow := 0; snap.curCol := 0; snap.goalCol := -1;
+  snap.topLine := 0; snap.leftCol := 0;
+  snap.hasBlkB := FALSE; snap.hasBlkE := FALSE;
+  RETURN TRUE
+END LoadFileIntoSnap;
+
+PROCEDURE SwapWithOther;
+(* Exchange the active globals and otherPane's content, leaving undo and
+   focusOther untouched — the raw swap primitive used both for a real
+   focus switch (SwapPaneFocus) and for briefly viewing the other pane's
+   buffer to reuse single-buffer logic on it (CopyFromOther, rendering). *)
+BEGIN
+  swapTmp := otherPane;
+  SnapFromActive(otherPane);
+  CopySnapToActive(swapTmp)
+END SwapWithOther;
+
+PROCEDURE SwapPaneFocus;
+(* Move keyboard focus to the other pane. Resets undo (see PaneSnap). *)
+BEGIN
+  SwapWithOther;
+  undoTop := 0;
+  focusOther := ~focusOther;
+  needRedraw := TRUE
+END SwapPaneFocus;
+
+PROCEDURE ToggleOtherWindow;
+(* ^OK — open a second pane, or switch focus between the two open ones.
+   Esc closes it (see CloseOtherWindow). *)
+BEGIN
+  IF ~otherPaneOpen THEN
+    StartInput("Open in other window", ActOtherOpen)
+  ELSE
+    SwapPaneFocus
+  END
+END ToggleOtherWindow;
+
+PROCEDURE CloseOtherWindow;
+(* Esc, while the other window is open — collapse back to a single pane.
+   focusOther tracks parity: an odd number of focus swaps since opening
+   means the active globals currently hold the *other* pane's content,
+   so swap once more first to land back on the original document. *)
+BEGIN
+  IF focusOther THEN SwapPaneFocus END;
+  otherPaneOpen := FALSE;
+  focusOther := FALSE;
+  SetStatus("Other window closed");
+  needRedraw := TRUE
+END CloseOtherWindow;
+
+PROCEDURE CopyFromOther;
+(* ^KA — copy the block marked in the other window into this one, at
+   the cursor. Reuses BlockCopy's own machinery (NormBlock/KillPushBlock/
+   KillPut) by briefly viewing the other pane's buffer through the
+   active globals — see CopySnapToActive. *)
+VAR r1, c1, r2, c2: INTEGER;
+BEGIN
+  IF ~otherPaneOpen THEN SetStatus("No other window — ^OK to open one"); RETURN END;
+  IF ~(otherPane.hasBlkB & otherPane.hasBlkE) THEN
+    SetStatus("No block marked in the other window"); RETURN
+  END;
+  SwapWithOther;
+  NormBlock(r1, c1, r2, c2);
+  KillPushBlock(r1, c1, r2, c2);
+  SwapWithOther;
+  KillPut;
+  SetStatus("Copied block from other window")
+END CopyFromOther;
+
+PROCEDURE JumpBlockSource;
+(* ^QV — jump to wherever the marked block actually is: in this pane if
+   it's marked here, otherwise switch focus to the other pane if it's
+   marked there. *)
+BEGIN
+  IF hasBlkB THEN
+    curRow := blkBRow; curCol := blkBCol; goalCol := -1; needRedraw := TRUE
+  ELSIF otherPaneOpen & otherPane.hasBlkB THEN
+    SwapPaneFocus;
+    curRow := blkBRow; curCol := blkBCol; goalCol := -1; needRedraw := TRUE
+  ELSE
+    SetStatus("No block marked")
+  END
+END JumpBlockSource;
 
 (* ── Search ──────────────────────────────────────────────────────── *)
 
@@ -1897,12 +2147,28 @@ BEGIN
   | 73: COPY("^QM", chord); COPY("next comment",            desc)
   | 74: COPY("^QU", chord); COPY("prev comment",            desc)
   | 75: COPY("^QH", chord); COPY("outline panel",           desc)
+  | 76: COPY("^KW",  chord); COPY("write block to file",     desc)
+  | 77: COPY("^KR",  chord); COPY("read file at cursor",     desc)
+  | 78: COPY("^OR",  chord); COPY("set wrap margin",         desc)
+  | 79: COPY("^OK",  chord); COPY("other window (open/switch)", desc)
+  | 80: COPY("^KA",  chord); COPY("copy block from other window", desc)
+  | 81: COPY("^QV",  chord); COPY("jump to block's pane",    desc)
+  | 82: COPY("^OD",  chord); COPY("reveal codes toggle",     desc)
+  | 83: COPY("^KU",  chord); COPY("jump to previous block",  desc)
+  | 84: COPY("^KO",  chord); COPY("browse snapshots",        desc)
+  | 85: COPY("^PI",  chord); COPY("edit doc synopsis",       desc)
+  | 86: COPY("^PY",  chord); COPY("toggle synopsis in binder", desc)
+  | 87: COPY("^PW",  chord); COPY("replace across project",  desc)
+  | 88: COPY("^PM",  chord); COPY("toggle doc as note",      desc)
+  | 89: COPY("^PC",  chord); COPY("insert comment",          desc)
+  | 90: COPY("^PO",  chord); COPY("open doc's notes file",   desc)
+  | 91: COPY("^PV",  chord); COPY("open binder doc in split", desc)
   ELSE (* end *)
   END
 END PaletteEntry;
 
 PROCEDURE PaletteCount(): INTEGER;
-BEGIN RETURN 77 END PaletteCount;
+BEGIN RETURN 92 END PaletteCount;
 
 (* ── Splash Screen ───────────────────────────────────────────────── *)
 
@@ -2465,8 +2731,26 @@ BEGIN
   needRedraw := TRUE
 END AddToPersonalDict;
 
+PROCEDURE IsMarkupChar(row, col: INTEGER): BOOLEAN;
+(* ^OD reveal codes: is the char at (row,col) a markdown marker —
+   *emphasis*, a leading run of #s, or a leading ".." comment prefix? *)
+VAR c: CHAR; lev: INTEGER;
+BEGIN
+  c := lines[row].s[col];
+  IF c = '*' THEN RETURN TRUE END;
+  IF ((col = 0) OR (col = 1)) & (lines[row].s[0] = '.') & (lines[row].s[1] = '.') THEN
+    RETURN TRUE
+  END;
+  IF c = '#' THEN
+    lev := 0;
+    WHILE (lev < Strings.Length(lines[row].s)) & (lines[row].s[lev] = '#') DO INC(lev) END;
+    RETURN col < lev
+  END;
+  RETURN FALSE
+END IsMarkupChar;
+
 PROCEDURE DrawTextLine(screenY, docRow: INTEGER);
-VAR col, len, x, fg, bg, sk: INTEGER; dimmed: BOOLEAN;
+VAR col, len, x, fg, bg, sk, swp: INTEGER; dimmed: BOOLEAN;
     mask: ARRAY (MaxLineLen + 1) OF BOOLEAN;
     smask: ARRAY (MaxLineLen + 1) OF INTEGER;
 BEGIN
@@ -2493,6 +2777,9 @@ BEGIN
     ELSE
       IF styleEnabled & (docRow = curRow) & (col = curCol) THEN styleCurKind := StNone END;
       fg := ThFg(); bg := ThBg()
+    END;
+    IF revealCodes & (col < len) & IsMarkupChar(docRow, col) THEN
+      swp := fg; fg := bg; bg := swp
     END;
     INC(col, PutLineCell(docRow, col, len, x, screenY, fg, bg));
     INC(x)
@@ -2543,10 +2830,12 @@ BEGIN
   IF mode = ModeSearch THEN
     s[0] := 0X;
     COPY("FIND: ", s); Strings.Append(searchStr, s);
+    TUI.FillRect(1, TUI.Rows, TUI.Cols, 1, ' ', fg, bg);  (* the filename status drawn above may be longer *)
     TUI.PutStr(1, TUI.Rows, s, fg, bg)
   ELSIF mode = ModeInput THEN
     s[0] := 0X;
     COPY(inpLabel, s); Strings.Append(": ", s); Strings.Append(inpValue, s);
+    TUI.FillRect(1, TUI.Rows, TUI.Cols, 1, ' ', fg, bg);  (* the filename status drawn above may be longer *)
     TUI.PutStr(1, TUI.Rows, s, fg, bg)
   ELSIF s[0] # 0X THEN
     col := TUI.Cols - Strings.Length(s);
@@ -2646,7 +2935,7 @@ END DrawPalette;
 
 PROCEDURE DrawSegment(screenY, docRow, segFrom: INTEGER);
 (* Draw one visual wrap segment of docRow on screen row screenY. *)
-VAR col, segEnd, x, fg, bg, sk: INTEGER; dimmed: BOOLEAN;
+VAR col, segEnd, x, fg, bg, sk, swp: INTEGER; dimmed: BOOLEAN;
     mask: ARRAY (MaxLineLen + 1) OF BOOLEAN;
     smask: ARRAY (MaxLineLen + 1) OF INTEGER;
 BEGIN
@@ -2673,6 +2962,9 @@ BEGIN
       IF styleEnabled & (docRow = curRow) & (col = curCol) THEN styleCurKind := StNone END;
       fg := ThFg(); bg := ThBg()
     END;
+    IF revealCodes & IsMarkupChar(docRow, col) THEN
+      swp := fg; fg := bg; bg := swp
+    END;
     INC(col, PutLineCell(docRow, col, segEnd, x, screenY, fg, bg));
     INC(x)
   END;
@@ -2685,67 +2977,132 @@ BEGIN
   END
 END DrawSegment;
 
+PROCEDURE RowsForEntry(i: INTEGER): INTEGER;
+(* A binder entry takes a second row when its synopsis is shown (^PY). *)
+VAR syn: ARRAY 256 OF CHAR;
+BEGIN
+  IF ~showSynopsis THEN RETURN 1 END;
+  ReadSynopsis(projDocs[i], syn);
+  IF syn[0] = 0X THEN RETURN 1 ELSE RETURN 2 END
+END RowsForEntry;
+
 PROCEDURE DrawBinder;
 (* Draw the binder as a centered popup listing project documents,
    navigable with Up/Down/Enter/Esc (^PB) — matches PerfectStar's
-   floating binder rather than a permanent sidebar. *)
+   floating binder rather than a permanent sidebar. A doc with a
+   synopsis (^PI) shown (^PY) takes a second, dimmed row. *)
 CONST BW = 50; BH = 16;
-VAR i, y, n, px, py, vis, maxScroll, nameStart, nameLen: INTEGER;
+VAR i, y, n, px, py, vis, first, used, totalRows, lineNo: INTEGER;
+    nameStart, nameLen, room: INTEGER;
     name: ARRAY (BW + 1) OF CHAR;
     line: ARRAY (BW + 1) OF CHAR;
+    syn: ARRAY 256 OF CHAR; synLine: ARRAY (BW + 1) OF CHAR;
     fg, bg, hfg, hbg: INTEGER;
 BEGIN
   n := projDocCount;
-  vis := n;
-  IF vis < 1 THEN vis := 1 END;
+  fg := ThFg(); bg := ThBg(); hfg := ThBg(); hbg := ThFg();
+
+  IF n = 0 THEN
+    px := (TUI.Cols - BW) DIV 2 + 1;
+    py := (TUI.Rows - 1) DIV 2;
+    IF py < 1 THEN py := 1 END;
+    TUI.DrawBox(px - 1, py - 1, BW + 2, 3, ThStFg(), ThStBg());
+    TUI.PutStr(px, py - 1, " Binder  (Enter=open  Esc=close) ", ThStFg(), ThStBg());
+    TUI.FillRect(px, py, BW, 1, ' ', ThDimFg(), bg);
+    TUI.PutStr(px, py, " (no documents in project)", ThDimFg(), bg);
+    RETURN
+  END;
+
+  totalRows := 0;
+  FOR i := 0 TO n - 1 DO totalRows := totalRows + RowsForEntry(i) END;
+  vis := totalRows;
   IF vis > BH THEN vis := BH END;
-  fg := ThFg(); bg := ThBg();
-  hfg := ThBg(); hbg := ThFg();
+
+  (* First visible entry: scan back from the selection so it, and its
+     synopsis line if any, stay in view. *)
+  first := binderSel; used := RowsForEntry(binderSel);
+  WHILE (first > 0) & (used + RowsForEntry(first - 1) <= vis) DO
+    DEC(first); used := used + RowsForEntry(first)
+  END;
+
   px := (TUI.Cols - BW) DIV 2 + 1;
   py := (TUI.Rows - vis) DIV 2;
   IF py < 1 THEN py := 1 END;
   TUI.DrawBox(px - 1, py - 1, BW + 2, vis + 2, ThStFg(), ThStBg());
   TUI.PutStr(px, py - 1, " Binder  (Enter=open  Esc=close) ", ThStFg(), ThStBg());
 
-  IF n = 0 THEN
-    TUI.FillRect(px, py, BW, 1, ' ', ThDimFg(), bg);
-    TUI.PutStr(px, py, " (no documents in project)", ThDimFg(), bg);
-    FOR y := py + 1 TO py + vis - 1 DO TUI.FillRect(px, y, BW, 1, ' ', fg, bg) END;
-    RETURN
-  END;
-
-  (* Keep the selected entry in view *)
-  maxScroll := n - vis;
-  IF maxScroll < 0 THEN maxScroll := 0 END;
-  IF binderScroll > maxScroll THEN binderScroll := maxScroll END;
-  IF binderScroll < 0 THEN binderScroll := 0 END;
-  IF binderSel < binderScroll THEN binderScroll := binderSel END;
-  IF binderSel >= binderScroll + vis THEN binderScroll := binderSel - vis + 1 END;
-
-  FOR i := binderScroll TO binderScroll + vis - 1 DO
-    y := py + (i - binderScroll);
-    IF i < n THEN
-      (* Extract basename for display *)
-      nameLen := Strings.Length(projDocs[i]);
-      WHILE (nameLen > 0) & (projDocs[i][nameLen - 1] # '/') DO DEC(nameLen) END;
-      nameStart := nameLen; nameLen := Strings.Length(projDocs[i]) - nameStart;
-      IF nameLen > BW - 4 THEN nameLen := BW - 4 END;
-      Strings.Extract(projDocs[i], nameStart, nameLen, name);
-      line[0] := 0X;
-      IF i = projCurDoc THEN Strings.Append("* ", line) ELSE Strings.Append("  ", line) END;
-      Strings.Append(name, line);
-      IF i = binderSel THEN
-        TUI.FillRect(px, y, BW, 1, ' ', hfg, hbg);
-        TUI.PutStr(px, y, line, hfg, hbg)
-      ELSE
-        TUI.FillRect(px, y, BW, 1, ' ', fg, bg);
-        TUI.PutStr(px, y, line, fg, bg)
-      END
+  lineNo := 0;
+  i := first;
+  WHILE (i < n) & (lineNo < vis) DO
+    y := py + lineNo;
+    nameLen := Strings.Length(projDocs[i]);
+    WHILE (nameLen > 0) & (projDocs[i][nameLen - 1] # '/') DO DEC(nameLen) END;
+    nameStart := nameLen; nameLen := Strings.Length(projDocs[i]) - nameStart;
+    IF nameLen > BW - 6 THEN nameLen := BW - 6 END;
+    Strings.Extract(projDocs[i], nameStart, nameLen, name);
+    line[0] := 0X;
+    IF i = projCurDoc THEN Strings.Append("* ", line) ELSE Strings.Append("  ", line) END;
+    Strings.Append(name, line);
+    IF projIsNote[i] THEN Strings.Append(" [note]", line) END;
+    IF i = binderSel THEN
+      TUI.FillRect(px, y, BW, 1, ' ', hfg, hbg); TUI.PutStr(px, y, line, hfg, hbg)
     ELSE
-      TUI.FillRect(px, y, BW, 1, ' ', fg, bg)
-    END
+      TUI.FillRect(px, y, BW, 1, ' ', fg, bg); TUI.PutStr(px, y, line, fg, bg)
+    END;
+    INC(lineNo);
+    IF showSynopsis & (lineNo < vis) THEN
+      ReadSynopsis(projDocs[i], syn);
+      IF syn[0] # 0X THEN
+        y := py + lineNo;
+        synLine[0] := 0X; Strings.Append("   ", synLine);
+        room := BW - 3;
+        IF Strings.Length(syn) > room THEN syn[room] := 0X END;
+        Strings.Append(syn, synLine);
+        TUI.FillRect(px, y, BW, 1, ' ', ThDimFg(), bg);
+        TUI.PutStr(px, y, synLine, ThDimFg(), bg);
+        INC(lineNo)
+      END
+    END;
+    INC(i)
+  END;
+  FOR y := py + lineNo TO py + vis - 1 DO
+    TUI.FillRect(px, y, BW, 1, ' ', fg, bg)
   END
 END DrawBinder;
+
+PROCEDURE DrawRevisions;
+(* Popup: this document's ^KN snapshots, navigable with Up/Down/Enter/Esc *)
+CONST RW = 50; RH = 16;
+VAR i, r, px, py, maxScroll: INTEGER; fg, bg, hfg, hbg: INTEGER;
+    line: ARRAY (RW + 1) OF CHAR;
+BEGIN
+  fg := ThFg(); bg := ThBg(); hfg := ThBg(); hbg := ThFg();
+  px := (TUI.Cols - RW) DIV 2 + 1;
+  py := (TUI.Rows - RH) DIV 2;
+  IF py < 1 THEN py := 1 END;
+  TUI.DrawBox(px - 1, py - 1, RW + 2, RH + 2, ThStFg(), ThStBg());
+  TUI.PutStr(px, py - 1, " Snapshots  (Enter=restore  Esc=close) ", ThStFg(), ThStBg());
+  maxScroll := revCount - RH;
+  IF maxScroll < 0 THEN maxScroll := 0 END;
+  IF revScroll > maxScroll THEN revScroll := maxScroll END;
+  IF revScroll < 0 THEN revScroll := 0 END;
+  IF revSel < revScroll THEN revScroll := revSel END;
+  IF revSel >= revScroll + RH THEN revScroll := revSel - RH + 1 END;
+  FOR i := 0 TO RH - 1 DO
+    r := revScroll + i;
+    IF r < revCount THEN
+      COPY(revNames[r], line);
+      IF Strings.Length(line) > RW THEN line[RW] := 0X END;
+      IF r = revSel THEN
+        TUI.FillRect(px, py + i, RW, 1, ' ', hfg, hbg); TUI.PutStr(px, py + i, line, hfg, hbg)
+      ELSE
+        TUI.FillRect(px, py + i, RW, 1, ' ', fg, bg); TUI.PutStr(px, py + i, line, fg, bg)
+      END
+    ELSE
+      TUI.FillRect(px, py + i, RW, 1, ' ', fg, bg)
+    END
+  END
+END DrawRevisions;
 
 PROCEDURE DrawOutline;
 (* Draw overlay showing all # headings; navigable with Up/Down/Enter *)
@@ -2798,14 +3155,78 @@ BEGIN
   END
 END DrawOutline;
 
+PROCEDURE DrawPaneHeader(y: INTEGER; focused: BOOLEAN);
+VAR s: ARRAY 256 OF CHAR; fg, bg: INTEGER;
+BEGIN
+  IF focused THEN fg := ThStFg(); bg := ThStBg() ELSE fg := ThDimFg(); bg := ThBg() END;
+  IF filePath[0] = 0X THEN COPY("[No Name]", s) ELSE COPY(filePath, s) END;
+  IF dirty THEN Strings.Append(" *", s) END;
+  TUI.FillRect(TextX0(), y, TextW(), 1, ' ', fg, bg);
+  TUI.PutStr(TextX0(), y, s, fg, bg)
+END DrawPaneHeader;
+
+PROCEDURE DrawPaneContent(y0, h: INTEGER);
+(* Draw the active buffer's lines, unwrapped, into screen rows y0..y0+h-1.
+   Used for both windows when split (see the "wrap disabled" note on
+   ^OK in the manual). *)
+VAR screenY, row: INTEGER;
+BEGIN
+  FOR screenY := 0 TO h - 1 DO
+    row := topLine + screenY;
+    IF row < numLines THEN DrawTextLine(y0 + screenY, row)
+    ELSE TUI.FillRect(TextX0(), y0 + screenY, TextW(), 1, ' ', ThFg(), ThBg())
+    END
+  END
+END DrawPaneContent;
+
+PROCEDURE ClampTopLine(h: INTEGER);
+(* Simple (non-wrap-aware) scroll clamp, used for split panes. *)
+BEGIN
+  IF curRow < topLine THEN topLine := curRow END;
+  IF curRow >= topLine + h THEN topLine := curRow - h + 1 END;
+  IF topLine < 0 THEN topLine := 0 END
+END ClampTopLine;
+
+PROCEDURE SplitPaneHeights(textH: INTEGER; VAR topH, botH: INTEGER);
+VAR avail: INTEGER;
+BEGIN
+  avail := textH - 2;
+  IF avail < 2 THEN avail := 2 END;
+  topH := avail DIV 2; botH := avail - topH
+END SplitPaneHeights;
+
+PROCEDURE DrawSplitPanes(textH: INTEGER);
+(* ^OK: two panes, one above the other, each with a one-line header
+   showing its filename. Whichever pane is NOT focused is rendered by
+   briefly swapping it into the active globals (SwapWithOther) so the
+   normal single-buffer drawing code can be reused unmodified. *)
+VAR topH, botH: INTEGER;
+BEGIN
+  SplitPaneHeights(textH, topH, botH);
+  IF ~focusOther THEN
+    ClampTopLine(topH);
+    DrawPaneHeader(1, TRUE); DrawPaneContent(2, topH);
+    SwapWithOther;
+    DrawPaneHeader(2 + topH, FALSE); DrawPaneContent(3 + topH, botH);
+    SwapWithOther
+  ELSE
+    SwapWithOther;
+    DrawPaneHeader(1, FALSE); DrawPaneContent(2, topH);
+    SwapWithOther;
+    ClampTopLine(botH);
+    DrawPaneHeader(2 + topH, TRUE); DrawPaneContent(3 + topH, botH)
+  END
+END DrawSplitPanes;
+
 PROCEDURE DrawAll;
 VAR row, screenY, textH: INTEGER;
     bufRow, segF, csf, screenX, screenRow, row2, sf2, e: INTEGER;
+    topH2, botH2, y0: INTEGER;
 BEGIN
   textH := TUI.Rows - 1;
   TUI.InvalidateFront;
   TUI.ClearBack(ThFg(), ThBg());
-  EnsureVisible;
+  IF ~otherPaneOpen THEN EnsureVisible END;
   styleCurKind := StNone;
   (* Compute focus paragraph bounds around curRow *)
   IF focusMode THEN
@@ -2815,7 +3236,9 @@ BEGIN
     WHILE (focusParaE < numLines - 1) & (LineLen(focusParaE + 1) > 0) DO INC(focusParaE) END
   END;
   (* Draw text lines *)
-  IF wrap THEN
+  IF otherPaneOpen THEN
+    DrawSplitPanes(textH)
+  ELSIF wrap THEN
     bufRow := topLine; segF := 0;
     FOR screenY := 1 TO textH DO
       IF bufRow < numLines THEN
@@ -2844,14 +3267,19 @@ BEGIN
   IF mode = ModePalette THEN DrawPalette END;
   IF mode = ModeOutline THEN DrawOutline END;
   IF mode = ModeBinder THEN DrawBinder END;
+  IF mode = ModeRevisions THEN DrawRevisions END;
   TUI.Flush;
   (* Place hardware cursor *)
-  IF (mode = ModeBinder) OR (mode = ModeOutline) THEN
+  IF (mode = ModeBinder) OR (mode = ModeOutline) OR (mode = ModeRevisions) THEN
     TUI.SetCursor(1, TUI.Rows)
   ELSIF mode = ModeSearch THEN
     TUI.SetCursor(Min(7 + Strings.Length(searchStr), TUI.Cols), TUI.Rows)
   ELSIF mode = ModeInput THEN
     TUI.SetCursor(Min(Strings.Length(inpLabel) + 3 + Strings.Length(inpValue), TUI.Cols), TUI.Rows)
+  ELSIF otherPaneOpen THEN
+    SplitPaneHeights(textH, topH2, botH2);
+    IF ~focusOther THEN y0 := 2 ELSE y0 := 3 + topH2 END;
+    TUI.SetCursor(CellCount(curRow, leftCol, curCol) + TextX0(), curRow - topLine + y0)
   ELSIF wrap THEN
     CurSeg(csf);
     screenX := CellCount(curRow, csf, curCol) + 1;
@@ -2959,6 +3387,28 @@ BEGIN
           Strings.Append(projPath, statusMsg)
         ELSE SetStatus("Cannot open project file")
         END
+      END
+  | ActProjReplFind:
+      COPY(inpValue, replSearch);
+      StartInput("Replace with (project-wide)", ActProjReplWith)
+  | ActProjReplWith:
+      ProjReplace(replSearch, inpValue)
+  | ActSynopsis:
+      WriteSynopsis(synopsisTarget, inpValue);
+      IF synopsisFromBinder THEN mode := ModeBinder END
+  | ActOtherOpen:
+      IF inpValue[0] # 0X THEN
+        ok := LoadFileIntoSnap(inpValue, otherPane);
+        otherPaneOpen := TRUE; focusOther := FALSE;
+        COPY("Opened in other window: ", statusMsg); Strings.Append(otherPane.filePath, statusMsg)
+      END
+  | ActAnnotate:
+      IF inpValue[0] # 0X THEN
+        ShiftLinesDown(curRow);
+        UndoSaveInsLine(curRow);
+        COPY(".. ", lines[curRow].s); Strings.Append(inpValue, lines[curRow].s);
+        curCol := Strings.Length(lines[curRow].s);
+        dirty := TRUE
       END
   ELSE
   END;
@@ -3085,6 +3535,9 @@ BEGIN
   | 'm', 'M': ExportRTF
   | 'e', 'E': ExportClean
   | 'n', 'N': SaveSnapshot
+  | 'a', 'A': CopyFromOther
+  | 'u', 'U': BlockPrev
+  | 'o', 'O': ListRevisions
   ELSE SetStatus("Unknown ^K command")
   END;
   needRedraw := TRUE
@@ -3125,6 +3578,7 @@ BEGIN
   | 'i', 'I': NextStyleIssue
   | 'm', 'M': NextComment
   | 'u', 'U': PrevComment
+  | 'v', 'V': JumpBlockSource
   | 'h', 'H':
       outlineSel := curRow;
       WHILE (outlineSel < numLines) & (lines[outlineSel].s[0] # '#') DO INC(outlineSel) END;
@@ -3182,6 +3636,10 @@ BEGIN
       IF styleEnabled THEN SetStatus("Style check ON")
       ELSE styleCurKind := StNone; SetStatus("Style check OFF")
       END
+  | 'k', 'K': ToggleOtherWindow
+  | 'd', 'D':
+      revealCodes := ~revealCodes;
+      IF revealCodes THEN SetStatus("Reveal codes ON") ELSE SetStatus("Reveal codes OFF") END
   ELSE SetStatus("Unknown ^O command")
   END;
   needRedraw := TRUE
@@ -3190,15 +3648,21 @@ END HandlePrefixO;
 (* ── Project system (^P) ─────────────────────────────────────────── *)
 
 PROCEDURE SaveProjFile;
-(* Write projDocs[0..projDocCount-1] to projPath, one path per line. *)
-VAR f: Files.File; r: Files.Rider; i: INTEGER;
+(* Write projDocs[0..projDocCount-1] to projPath, one path per line. A
+   note doc (^PM) is written with a leading "!" so LoadProjFile can tell
+   it apart from a plain manuscript doc. *)
+VAR f: Files.File; r: Files.Rider; i: INTEGER; ln: ARRAY 512 OF CHAR;
 BEGIN
   IF projPath[0] = 0X THEN RETURN END;
   f := Files.New(projPath);
   IF f = NIL THEN SetStatus("Project: cannot write manifest"); RETURN END;
   Files.Set(r, f, 0);
   FOR i := 0 TO projDocCount - 1 DO
-    Files.WriteLine(r, projDocs[i])
+    IF projIsNote[i] THEN
+      COPY("!", ln); Strings.Append(projDocs[i], ln); Files.WriteLine(r, ln)
+    ELSE
+      Files.WriteLine(r, projDocs[i])
+    END
   END;
   Files.Register(f);
   Files.Close(f)
@@ -3215,7 +3679,13 @@ BEGIN
   WHILE ~r.eof & (projDocCount < MaxProjDocs) DO
     Files.ReadLine(r, buf);
     IF buf[0] # 0X THEN
-      COPY(buf, projDocs[projDocCount]);
+      IF buf[0] = '!' THEN
+        Strings.Extract(buf, 1, Strings.Length(buf) - 1, projDocs[projDocCount]);
+        projIsNote[projDocCount] := TRUE
+      ELSE
+        COPY(buf, projDocs[projDocCount]);
+        projIsNote[projDocCount] := FALSE
+      END;
       INC(projDocCount)
     END
   END;
@@ -3274,6 +3744,7 @@ BEGIN
   (* Add current file if we have one *)
   IF filePath[0] # 0X THEN
     COPY(filePath, projDocs[0]);
+    projIsNote[0] := FALSE;
     projDocCount := 1;
     projCurDoc := 0
   END;
@@ -3293,6 +3764,7 @@ BEGIN
   IF ProjIndexOf(filePath) >= 0 THEN SetStatus("Already in project"); RETURN END;
   IF projDocCount >= MaxProjDocs THEN SetStatus("Project full"); RETURN END;
   COPY(filePath, projDocs[projDocCount]);
+  projIsNote[projDocCount] := FALSE;
   projCurDoc := projDocCount;
   INC(projDocCount);
   SaveProjFile;
@@ -3309,7 +3781,8 @@ BEGIN
   idx := ProjIndexOf(filePath);
   IF idx < 0 THEN SetStatus("Current file not in project"); RETURN END;
   FOR i := idx TO projDocCount - 2 DO
-    COPY(projDocs[i + 1], projDocs[i])
+    COPY(projDocs[i + 1], projDocs[i]);
+    projIsNote[i] := projIsNote[i + 1]
   END;
   DEC(projDocCount);
   IF projCurDoc >= projDocCount THEN projCurDoc := projDocCount - 1 END;
@@ -3450,13 +3923,14 @@ BEGIN
 
   first := TRUE;
   FOR di := 0 TO projDocCount - 1 DO
+    IF ~projIsNote[di] THEN
     sf := Files.Old(projDocs[di]);
     IF sf # NIL THEN
       Files.Set(sr, sf, 0);
       WHILE ~sr.eof DO
         Files.ReadLine(sr, lb);
         IF ~sr.eof OR (lb[0] # 0X) THEN
-          IF (lb[0] = '.') & (lb[1] = '.') THEN (* note: skip *)
+          IF (lb[0] = '.') & (lb[1] = '.') THEN (* note line: skip *)
           ELSIF lb[0] = 0X THEN (* blank: skip *)
           ELSE
             lev := 0;
@@ -3482,6 +3956,7 @@ BEGIN
         END
       END;
       Files.Close(sf)
+    END
     END
   END;
 
@@ -3512,6 +3987,7 @@ BEGIN
 
   firstDoc := TRUE;
   FOR di := 0 TO projDocCount - 1 DO
+    IF ~projIsNote[di] THEN
     sf := Files.Old(projDocs[di]);
     IF sf # NIL THEN
       IF ~firstDoc THEN lb[0] := 0X; Files.WriteLine(r, lb) END;
@@ -3524,6 +4000,7 @@ BEGIN
       END;
       Files.Close(sf);
       firstDoc := FALSE
+    END
     END
   END;
 
@@ -3604,6 +4081,175 @@ BEGIN
   needRedraw := TRUE
 END ProjFind;
 
+(* ── Project-wide replace (^PW) ──────────────────────────────────── *)
+
+PROCEDURE ProjReplace(findStr, withStr: ARRAY OF CHAR);
+(* Replace every occurrence of findStr with withStr in every project
+   document (not just the open one). Each file is loaded, fully
+   replaced, and saved in turn; the originally active document is
+   reloaded afterward so the writer ends up back where they started. *)
+VAR i, n, replCount, fileCount: INTEGER;
+    savedPath: ARRAY 512 OF CHAR; tmp1, tmp2: ARRAY 16 OF CHAR;
+BEGIN
+  IF projPath[0] = 0X THEN SetStatus("No open project — ^PN to create"); RETURN END;
+  IF projDocCount = 0 THEN SetStatus("Project is empty"); RETURN END;
+  IF findStr[0] = 0X THEN SetStatus("No search string"); RETURN END;
+  IF dirty & ~SaveFile() THEN SetStatus("Save failed — aborted"); RETURN END;
+  COPY(filePath, savedPath);
+  COPY(findStr, searchStr); COPY(withStr, replWith);
+  replCount := 0; fileCount := 0;
+  FOR i := 0 TO projDocCount - 1 DO
+    IF LoadFile(projDocs[i]) THEN
+      curRow := 0; curCol := 0; n := 0;
+      WHILE SearchForward(curRow, curCol) DO
+        curRow := searchRow; curCol := searchCol;
+        DoReplace;
+        INC(n)
+      END;
+      IF n > 0 THEN
+        INC(replCount, n); INC(fileCount);
+        IF ~SaveFile() THEN SetStatus("Save failed partway through — stopped"); RETURN END
+      END
+    END
+  END;
+  IF (savedPath[0] # 0X) & LoadFile(savedPath) THEN
+    curRow := 0; curCol := 0; topLine := 0; undoTop := 0;
+    hasBlkB := FALSE; hasBlkE := FALSE;
+    projCurDoc := ProjIndexOf(filePath)
+  END;
+  Strings.IntToStr(replCount, tmp1); Strings.IntToStr(fileCount, tmp2);
+  COPY("Replaced ", statusMsg); Strings.Append(tmp1, statusMsg);
+  Strings.Append(" occurrence(s) in ", statusMsg); Strings.Append(tmp2, statusMsg);
+  Strings.Append(" file(s)", statusMsg);
+  needRedraw := TRUE
+END ProjReplace;
+
+PROCEDURE StartProjReplace;
+(* ^PW *)
+BEGIN
+  IF projPath[0] = 0X THEN SetStatus("No open project — ^PN to create"); needRedraw := TRUE; RETURN END;
+  StartInput("Replace across project — find", ActProjReplFind)
+END StartProjReplace;
+
+(* ── Per-document synopsis (^PI edit, ^PY toggle) ────────────────── *)
+
+PROCEDURE SynopsisPath(docPath: ARRAY OF CHAR; VAR out: ARRAY OF CHAR);
+BEGIN COPY(docPath, out); Strings.Append(".synopsis", out) END SynopsisPath;
+
+PROCEDURE ReadSynopsis(docPath: ARRAY OF CHAR; VAR out: ARRAY OF CHAR);
+VAR p: ARRAY 512 OF CHAR; f: Files.File; r: Files.Rider;
+BEGIN
+  out[0] := 0X;
+  SynopsisPath(docPath, p);
+  f := Files.Old(p);
+  IF f # NIL THEN
+    Files.Set(r, f, 0);
+    Files.ReadLine(r, out);
+    Files.Close(f)
+  END
+END ReadSynopsis;
+
+PROCEDURE WriteSynopsis(docPath, text: ARRAY OF CHAR);
+VAR p: ARRAY 512 OF CHAR; f: Files.File; r: Files.Rider;
+BEGIN
+  SynopsisPath(docPath, p);
+  f := Files.New(p);
+  IF f # NIL THEN
+    Files.Set(r, f, 0);
+    Files.WriteLine(r, text);
+    Files.Register(f); Files.Close(f)
+  END
+END WriteSynopsis;
+
+PROCEDURE EditSynopsis;
+(* ^PI — edit a project doc's one-line synopsis (the binder-selected one
+   if invoked from the binder, otherwise the currently-open document). *)
+VAR existing: ARRAY 256 OF CHAR;
+BEGIN
+  IF mode = ModeBinder THEN
+    IF (binderSel < 0) OR (binderSel >= projDocCount) THEN RETURN END;
+    COPY(projDocs[binderSel], synopsisTarget);
+    synopsisFromBinder := TRUE
+  ELSE
+    IF filePath[0] = 0X THEN SetStatus("Save this file first"); needRedraw := TRUE; RETURN END;
+    COPY(filePath, synopsisTarget);
+    synopsisFromBinder := FALSE
+  END;
+  ReadSynopsis(synopsisTarget, existing);
+  StartInput("Synopsis", ActSynopsis);
+  COPY(existing, inpValue); inpCursor := Strings.Length(inpValue)
+END EditSynopsis;
+
+PROCEDURE ToggleSynopsis;
+(* ^PY *)
+BEGIN
+  showSynopsis := ~showSynopsis;
+  IF showSynopsis THEN SetStatus("Binder synopses shown")
+  ELSE SetStatus("Binder synopses hidden")
+  END;
+  needRedraw := TRUE
+END ToggleSynopsis;
+
+(* ── Doc role: manuscript vs. note (^PM) ──────────────────────────── *)
+
+PROCEDURE ToggleDocNote;
+(* ^PM — mark a project doc as a "note" so ^PK/^PT compile skip it
+   (the binder-selected doc if invoked from the binder, otherwise the
+   currently-open document). This is a whole-document flag, distinct
+   from the ".."-prefixed comment *lines* ^QM/^QU navigate within a doc. *)
+VAR idx: INTEGER;
+BEGIN
+  IF projPath[0] = 0X THEN SetStatus("No open project"); needRedraw := TRUE; RETURN END;
+  IF mode = ModeBinder THEN idx := binderSel ELSE idx := ProjIndexOf(filePath) END;
+  IF (idx < 0) OR (idx >= projDocCount) THEN
+    SetStatus("Current file not in project"); needRedraw := TRUE; RETURN
+  END;
+  projIsNote[idx] := ~projIsNote[idx];
+  SaveProjFile;
+  IF projIsNote[idx] THEN SetStatus("Marked as note (excluded from compile)")
+  ELSE SetStatus("Marked as manuscript (included in compile)")
+  END;
+  needRedraw := TRUE
+END ToggleDocNote;
+
+(* ── Annotation (^PC) ────────────────────────────────────────────── *)
+
+PROCEDURE Annotate;
+(* ^PC — insert a ".."-prefixed comment line above the cursor, using the
+   same convention ^QM/^QU already navigate between. *)
+BEGIN
+  StartInput("Comment", ActAnnotate)
+END Annotate;
+
+(* ── Other-window helpers reachable from the binder (^PO, ^PV) ──── *)
+
+PROCEDURE OpenNotes;
+(* ^PO — open this document's free-form notes file in the other window
+   (a longer scratch area, distinct from the one-line ^PI synopsis). *)
+VAR notesPath: ARRAY 512 OF CHAR;
+BEGIN
+  IF filePath[0] = 0X THEN SetStatus("Save this file first"); needRedraw := TRUE; RETURN END;
+  COPY(filePath, notesPath); Strings.Append(".notes", notesPath);
+  IF LoadFileIntoSnap(notesPath, otherPane) THEN
+    otherPaneOpen := TRUE; focusOther := FALSE;
+    COPY("Notes: ", statusMsg); Strings.Append(notesPath, statusMsg)
+  END;
+  needRedraw := TRUE
+END OpenNotes;
+
+PROCEDURE OpenProjDocInOther;
+(* ^PV — open the binder-selected document in the other window instead
+   of replacing the active one. *)
+BEGIN
+  IF (binderSel < 0) OR (binderSel >= projDocCount) THEN RETURN END;
+  IF LoadFileIntoSnap(projDocs[binderSel], otherPane) THEN
+    otherPaneOpen := TRUE; focusOther := FALSE;
+    mode := ModeNormal;
+    COPY("Opened in other window: ", statusMsg); Strings.Append(otherPane.filePath, statusMsg)
+  END;
+  needRedraw := TRUE
+END OpenProjDocInOther;
+
 PROCEDURE HandlePrefixP(k: CHAR);
 BEGIN
   prefix := PrefNone;
@@ -3626,6 +4272,16 @@ BEGIN
         IF binderSel < 0 THEN binderSel := 0 END;
         binderScroll := 0;
         mode := ModeBinder
+      END
+  | 'i', 'I': EditSynopsis
+  | 'y', 'Y': ToggleSynopsis
+  | 'w', 'W': StartProjReplace
+  | 'm', 'M': ToggleDocNote
+  | 'c', 'C': Annotate
+  | 'o', 'O': OpenNotes
+  | 'v', 'V':
+      IF mode = ModeBinder THEN OpenProjDocInOther
+      ELSE SetStatus("^P V opens a binder-selected doc in the other window")
       END
   ELSE SetStatus("Unknown ^P command")
   END;
@@ -3689,6 +4345,7 @@ BEGIN
     | TUI.KEnter:     BreakLine;  goalCol := -1
     | TUI.KTab: InsTab
     | TUI.KF1:        mode := ModePalette; palScroll := 0; needRedraw := TRUE
+    | TUI.KEsc:       IF otherPaneOpen THEN CloseOtherWindow END
     ELSE
       IF (ORD(k) >= 32) & (ORD(k) < 127) THEN
         InsChar(k); goalCol := -1
@@ -3746,6 +4403,7 @@ END HandleMouse;
 
 PROCEDURE HandleBinderKey(k: CHAR);
 BEGIN
+  IF prefix = PrefP THEN HandlePrefixP(k); RETURN END;
   IF (k = TUI.KUp) OR (k = CHR(5)) THEN   (* Up or ^E *)
     IF binderSel > 0 THEN DEC(binderSel) END
   ELSIF (k = TUI.KDown) OR (k = CHR(24)) THEN  (* Down or ^X *)
@@ -3754,6 +4412,8 @@ BEGIN
     IF (binderSel >= 0) & (binderSel < projDocCount) THEN
       OpenProjDoc(binderSel); mode := ModeNormal
     END
+  ELSIF k = CHR(16) THEN  (* ^P: reach ^PI/^PM/^PV etc. from within the binder *)
+    prefix := PrefP
   ELSIF (k = TUI.KEsc) OR (k = TUI.KTab) THEN
     mode := ModeNormal
   END;
@@ -3790,6 +4450,35 @@ BEGIN
   IF i >= outlineScroll + 20 THEN outlineScroll := i - 19 END;
   needRedraw := TRUE
 END HandleOutlineKey;
+
+PROCEDURE HandleRevisionsKey(k: CHAR);
+VAR full, keepPath: ARRAY 512 OF CHAR;
+BEGIN
+  IF (k = TUI.KUp) OR (k = CHR(5)) THEN
+    IF revSel > 0 THEN DEC(revSel) END
+  ELSIF (k = TUI.KDown) OR (k = CHR(24)) THEN
+    IF revSel < revCount - 1 THEN INC(revSel) END
+  ELSIF k = TUI.KEnter THEN
+    IF (revSel >= 0) & (revSel < revCount) THEN
+      COPY(revDir, full);
+      IF full[0] # 0X THEN Strings.Append("/", full) END;
+      Strings.Append(revNames[revSel], full);
+      COPY(filePath, keepPath);
+      IF LoadFile(full) THEN
+        COPY(keepPath, filePath);   (* restore content, but keep editing the real file *)
+        dirty := TRUE;
+        curRow := 0; curCol := 0; topLine := 0; undoTop := 0;
+        hasBlkB := FALSE; hasBlkE := FALSE;
+        COPY("Restored from ", statusMsg); Strings.Append(revNames[revSel], statusMsg);
+        Strings.Append(" — ^KD to save", statusMsg)
+      END;
+      mode := ModeNormal
+    END
+  ELSIF k = TUI.KEsc THEN
+    mode := ModeNormal
+  END;
+  needRedraw := TRUE
+END HandleRevisionsKey;
 
 PROCEDURE HandleKey(k: CHAR);
 BEGIN
@@ -3829,6 +4518,7 @@ BEGIN
   | ModePalette: HandlePaletteKey(k)
   | ModeBinder:  HandleBinderKey(k)
   | ModeOutline: HandleOutlineKey(k)
+  | ModeRevisions: HandleRevisionsKey(k)
   ELSE HandleNormalKey(k)
   END;
   needRedraw := TRUE
@@ -3890,7 +4580,12 @@ BEGIN
   focusMode := FALSE; focusParaS := 0; focusParaE := 0;
   styleEnabled := FALSE; styleCurKind := StNone;
   projPath[0] := 0X; projDocCount := 0; projCurDoc := -1;
-  binderSel := 0; binderScroll := 0;
+  binderSel := 0; binderScroll := 0; showSynopsis := FALSE;
+  synopsisFromBinder := FALSE;
+  otherPaneOpen := FALSE; focusOther := FALSE;
+  revealCodes := FALSE;
+  hasPrevBlk := FALSE;
+  revCount := 0; revSel := 0; revScroll := 0;
   spellEnabled := FALSE;
   Dict.Init(misspelled);
   Dict.Init(personalDict);
