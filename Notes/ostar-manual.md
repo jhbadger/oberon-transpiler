@@ -5,7 +5,7 @@ system.*
 
 Source: `examples/ostar.mod`. OStar is a full-screen, keyboard-driven prose
 editor modeled on the classic WordStar/WordPerfect "diamond and prefix key"
-control scheme, ported from the author's earlier Rust program *PerfectStar
+control scheme, ported from an earlier Rust program *PerfectStar
 2k*. It is aimed at long-form writing — manuscripts, chapters, notes — rather
 than source code, and it bundles the tools a writer actually reaches for:
 block/kill-ring editing, incremental search and replace, undo, word wrap,
