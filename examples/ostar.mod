@@ -20,7 +20,7 @@ MODULE OStar;
  *        ^N insert line, ^U undo, ^L find next, ^V overtype toggle,
  *        F1 command palette (shows key list).
  *)
-IMPORT TUI, Files, Strings, Args, Dict, OS, Env, Time;
+IMPORT TUI, Terminal, Files, Strings, Args, Dict, OS, Env, Time;
 
 (* ── Constants ───────────────────────────────────────────────────── *)
 CONST
@@ -305,6 +305,116 @@ BEGIN
   RETURN ((c >= 'a') & (c <= 'z')) OR ((c >= 'A') & (c <= 'Z'))
       OR ((c >= '0') & (c <= '9')) OR (c = '_')
 END IsWordChar;
+
+(* ── UTF-8 helpers ───────────────────────────────────────────────── *)
+(* Lines are stored as raw UTF-8 bytes; curCol/leftCol/etc are byte
+   offsets. These keep multi-byte characters (em dash, curly quotes,
+   accented letters) treated as one screen cell / one edit unit instead
+   of being split byte-by-byte, which is what made Backspace and cursor
+   placement land on the wrong byte after such a character. *)
+
+PROCEDURE UTF8SeqLen(c: CHAR): INTEGER;
+(* Length in bytes of the UTF-8 sequence starting with lead byte c *)
+BEGIN
+  IF ORD(c) < 128 THEN RETURN 1
+  ELSIF (ORD(c) >= 192) & (ORD(c) <= 223) THEN RETURN 2
+  ELSIF (ORD(c) >= 224) & (ORD(c) <= 239) THEN RETURN 3
+  ELSIF (ORD(c) >= 240) & (ORD(c) <= 247) THEN RETURN 4
+  ELSE RETURN 1  (* stray continuation byte or invalid lead byte *)
+  END
+END UTF8SeqLen;
+
+PROCEDURE IsContByte(c: CHAR): BOOLEAN;
+BEGIN RETURN (ORD(c) >= 128) & (ORD(c) <= 191) END IsContByte;
+
+PROCEDURE ReadUTF8Seq(lead: CHAR; VAR seq: ARRAY OF CHAR): INTEGER;
+(* `lead` was already read from the terminal as a UTF-8 lead byte (its
+   value is guaranteed to fall outside TUI's special-key code range, so
+   it can never be a real Home/PgUp/F-key/etc). Its continuation bytes,
+   though, land in the same byte range TUI uses for those special keys
+   (0x80-0xBF overlaps 0x80-0x94/0xA0-0xA8) — reading them straight from
+   Terminal (bypassing TUI's event classification) instead of through
+   another TUI.WaitEvent is what stops e.g. a typed em dash's middle
+   byte from being read back as PageUp. Fills seq (NUL-terminated) and
+   returns the sequence length. *)
+VAR n, i: INTEGER;
+BEGIN
+  n := UTF8SeqLen(lead);
+  seq[0] := lead;
+  FOR i := 1 TO n - 1 DO seq[i] := Terminal.ReadKey() END;
+  seq[n] := 0X;
+  RETURN n
+END ReadUTF8Seq;
+
+PROCEDURE TrimLastUTF8Char(VAR buf: ARRAY OF CHAR);
+(* Strip the last character (1-4 bytes) from a NUL-terminated byte
+   buffer, e.g. a search string or input prompt value. *)
+VAR slen, p: INTEGER;
+BEGIN
+  slen := Strings.Length(buf);
+  IF slen > 0 THEN
+    p := slen - 1;
+    WHILE (p > 0) & IsContByte(buf[p]) DO DEC(p) END;
+    buf[p] := 0X
+  END
+END TrimLastUTF8Char;
+
+PROCEDURE AppendUTF8(VAR buf: ARRAY OF CHAR; maxLen: INTEGER; seq: ARRAY OF CHAR; n: INTEGER);
+(* Append n raw bytes (from ReadUTF8Seq) to a NUL-terminated buffer. *)
+VAR slen, i: INTEGER;
+BEGIN
+  slen := Strings.Length(buf);
+  IF slen + n <= maxLen THEN
+    FOR i := 0 TO n - 1 DO buf[slen + i] := seq[i] END;
+    buf[slen + n] := 0X
+  END
+END AppendUTF8;
+
+PROCEDURE CellCount(row, fromCol, toCol: INTEGER): INTEGER;
+(* Number of screen cells (UTF-8 characters) between byte columns
+   fromCol and toCol on row. Both must be on character boundaries. *)
+VAR col, n: INTEGER;
+BEGIN
+  col := fromCol; n := 0;
+  WHILE col < toCol DO
+    INC(col, UTF8SeqLen(lines[row].s[col]));
+    INC(n)
+  END;
+  RETURN n
+END CellCount;
+
+PROCEDURE ColAtCells(row, fromCol, cells: INTEGER): INTEGER;
+(* Byte column reached after advancing `cells` screen cells from fromCol *)
+VAR col, n, len: INTEGER;
+BEGIN
+  col := fromCol; n := 0; len := LineLen(row);
+  WHILE (n < cells) & (col < len) DO
+    INC(col, UTF8SeqLen(lines[row].s[col]));
+    INC(n)
+  END;
+  RETURN col
+END ColAtCells;
+
+PROCEDURE PutLineCell(row, col, len, screenX, screenY, fg, bg: INTEGER): INTEGER;
+(* Draw the character at byte column col (row) into one screen cell,
+   gathering the full UTF-8 sequence if it is multi-byte.
+   Returns the number of bytes consumed (>= 1). *)
+VAR c, b2, b3, b4: CHAR; n: INTEGER;
+BEGIN
+  c := lines[row].s[col];
+  IF c = 0X THEN c := ' ' END;
+  n := UTF8SeqLen(c);
+  IF col + n > len THEN n := 1 END;  (* truncated/invalid sequence *)
+  IF n = 1 THEN
+    TUI.PutCell(screenX, screenY, c, fg, bg)
+  ELSE
+    b2 := lines[row].s[col + 1];
+    IF n >= 3 THEN b3 := lines[row].s[col + 2] ELSE b3 := 0X END;
+    IF n >= 4 THEN b4 := lines[row].s[col + 3] ELSE b4 := 0X END;
+    TUI.PutCellMB(screenX, screenY, c, b2, b3, b4, fg, bg)
+  END;
+  RETURN n
+END PutLineCell;
 
 (* Is position (row, col) inside the marked block? *)
 PROCEDURE InBlock(row, col: INTEGER): BOOLEAN;
@@ -819,6 +929,20 @@ BEGIN
   needRedraw := TRUE
 END InsChar;
 
+PROCEDURE InsUTF8(seq: ARRAY OF CHAR; n: INTEGER);
+(* Insert a full multi-byte UTF-8 character (n bytes, from ReadUTF8Seq)
+   as one unit. Always inserts (rather than overtyping) since replacing
+   exactly one prior on-screen cell isn't well defined when the byte
+   widths differ. *)
+BEGIN
+  IF LineLen(curRow) + n > MaxLineLen THEN RETURN END;
+  UndoSaveLine;
+  Strings.Insert(seq, curCol, lines[curRow].s);
+  INC(curCol, n);
+  dirty := TRUE;
+  needRedraw := TRUE
+END InsUTF8;
+
 PROCEDURE InsTab;
 VAR spaces: INTEGER; tmp: ARRAY 2 OF CHAR; i: INTEGER;
 BEGIN
@@ -829,12 +953,14 @@ END InsTab;
 
 PROCEDURE DelChar;
 (* Delete char under cursor (^G / Del) *)
-VAR len: INTEGER;
+VAR len, n: INTEGER;
 BEGIN
   len := LineLen(curRow);
   IF curCol < len THEN
     UndoSaveLine;
-    Strings.Delete(lines[curRow].s, curCol, 1);
+    n := UTF8SeqLen(lines[curRow].s[curCol]);
+    IF curCol + n > len THEN n := 1 END;  (* truncated/invalid sequence *)
+    Strings.Delete(lines[curRow].s, curCol, n);
     dirty := TRUE; needRedraw := TRUE
   ELSIF curRow < numLines - 1 THEN
     UndoSaveJoin(curRow, len);
@@ -848,12 +974,15 @@ END DelChar;
 
 PROCEDURE BackspaceChar;
 (* Delete char before cursor (^H / Backspace) *)
-VAR upperLen: INTEGER;
+VAR upperLen, delFrom, n: INTEGER;
 BEGIN
   IF curCol > 0 THEN
     UndoSaveLine;
-    DEC(curCol);
-    Strings.Delete(lines[curRow].s, curCol, 1);
+    delFrom := curCol - 1;
+    WHILE (delFrom > 0) & IsContByte(lines[curRow].s[delFrom]) DO DEC(delFrom) END;
+    n := curCol - delFrom;
+    Strings.Delete(lines[curRow].s, delFrom, n);
+    curCol := delFrom;
     dirty := TRUE; needRedraw := TRUE
   ELSIF curRow > 0 THEN
     upperLen := LineLen(curRow - 1);
@@ -1065,16 +1194,22 @@ END MoveDown;
 PROCEDURE MoveLeft;
 BEGIN
   goalCol := -1;
-  IF curCol > 0 THEN DEC(curCol)
+  IF curCol > 0 THEN
+    DEC(curCol);
+    WHILE (curCol > 0) & IsContByte(lines[curRow].s[curCol]) DO DEC(curCol) END
   ELSIF curRow > 0 THEN DEC(curRow); curCol := LineLen(curRow)
   END;
   needRedraw := TRUE
 END MoveLeft;
 
 PROCEDURE MoveRight;
+VAR len: INTEGER;
 BEGIN
   goalCol := -1;
-  IF curCol < LineLen(curRow) THEN INC(curCol)
+  len := LineLen(curRow);
+  IF curCol < len THEN
+    INC(curCol, UTF8SeqLen(lines[curRow].s[curCol]));
+    IF curCol > len THEN curCol := len END
   ELSIF curRow < numLines - 1 THEN INC(curRow); curCol := 0
   END;
   needRedraw := TRUE
@@ -2327,7 +2462,7 @@ BEGIN
 END AddToPersonalDict;
 
 PROCEDURE DrawTextLine(screenY, docRow: INTEGER);
-VAR col, len, x, fg, bg, sk: INTEGER; c: CHAR; dimmed: BOOLEAN;
+VAR col, len, x, fg, bg, sk: INTEGER; dimmed: BOOLEAN;
     mask: ARRAY (MaxLineLen + 1) OF BOOLEAN;
     smask: ARRAY (MaxLineLen + 1) OF INTEGER;
 BEGIN
@@ -2338,8 +2473,6 @@ BEGIN
   x := TextX0();
   col := leftCol;
   WHILE (x <= TUI.Cols) & (col <= len) DO
-    c := lines[docRow].s[col];
-    IF c = 0X THEN c := ' ' END;
     IF dimmed THEN
       fg := ThDimFg(); bg := ThBg()
     ELSIF InBlock(docRow, col) THEN
@@ -2357,8 +2490,8 @@ BEGIN
       IF styleEnabled & (docRow = curRow) & (col = curCol) THEN styleCurKind := StNone END;
       fg := ThFg(); bg := ThBg()
     END;
-    TUI.PutCell(x, screenY, c, fg, bg);
-    INC(x); INC(col)
+    INC(col, PutLineCell(docRow, col, len, x, screenY, fg, bg));
+    INC(x)
   END;
   (* Fill remainder of line *)
   IF x <= TUI.Cols THEN
@@ -2399,8 +2532,8 @@ BEGIN
   ELSIF styleEnabled & (styleCurKind = StFiller)  THEN COPY("filler word",  s)
   ELSIF styleEnabled & (styleCurKind = StPassive) THEN COPY("passive voice", s)
   ELSIF styleEnabled & (styleCurKind = StLong)    THEN COPY("long sentence", s)
+  ELSIF statusMsg[0] # 0X THEN COPY(statusMsg, s)
   END;
-  IF statusMsg[0] # 0X THEN COPY(statusMsg, s) END;
   (* Search and input prompts are left-aligned so the cursor lands right
      after the typed text (position is computable without measuring the line). *)
   IF mode = ModeSearch THEN
@@ -2509,7 +2642,7 @@ END DrawPalette;
 
 PROCEDURE DrawSegment(screenY, docRow, segFrom: INTEGER);
 (* Draw one visual wrap segment of docRow on screen row screenY. *)
-VAR col, segEnd, x, fg, bg, sk: INTEGER; c: CHAR; dimmed: BOOLEAN;
+VAR col, segEnd, x, fg, bg, sk: INTEGER; dimmed: BOOLEAN;
     mask: ARRAY (MaxLineLen + 1) OF BOOLEAN;
     smask: ARRAY (MaxLineLen + 1) OF INTEGER;
 BEGIN
@@ -2519,8 +2652,6 @@ BEGIN
   dimmed := focusMode & ((docRow < focusParaS) OR (docRow > focusParaE));
   x := TextX0(); col := segFrom;
   WHILE (x <= TUI.Cols) & (col < segEnd) DO
-    c := lines[docRow].s[col];
-    IF c = 0X THEN c := ' ' END;
     IF dimmed THEN
       fg := ThDimFg(); bg := ThBg()
     ELSIF InBlock(docRow, col) THEN
@@ -2538,8 +2669,8 @@ BEGIN
       IF styleEnabled & (docRow = curRow) & (col = curCol) THEN styleCurKind := StNone END;
       fg := ThFg(); bg := ThBg()
     END;
-    TUI.PutCell(x, screenY, c, fg, bg);
-    INC(x); INC(col)
+    INC(col, PutLineCell(docRow, col, segEnd, x, screenY, fg, bg));
+    INC(x)
   END;
   IF x <= TUI.Cols THEN
     IF dimmed THEN
@@ -2702,7 +2833,7 @@ BEGIN
     TUI.SetCursor(Min(Strings.Length(inpLabel) + 3 + Strings.Length(inpValue), TUI.Cols), TUI.Rows)
   ELSIF wrap THEN
     CurSeg(csf);
-    screenX := curCol - csf + 1;
+    screenX := CellCount(curRow, csf, curCol) + 1;
     screenRow := 1;
     row2 := topLine; sf2 := 0;
     LOOP
@@ -2716,7 +2847,7 @@ BEGIN
     END;
     TUI.SetCursor(screenX + TextX0() - 1, screenRow)
   ELSE
-    TUI.SetCursor(curCol - leftCol + TextX0(), curRow - topLine + 1)
+    TUI.SetCursor(CellCount(curRow, leftCol, curCol) + TextX0(), curRow - topLine + 1)
   END
 END DrawAll;
 
@@ -2838,8 +2969,7 @@ BEGIN
     END;
     mode := ModeNormal; needRedraw := TRUE
   ELSIF k = TUI.KBackspace THEN
-    slen := Strings.Length(searchStr);
-    IF slen > 0 THEN searchStr[slen - 1] := 0X END;
+    TrimLastUTF8Char(searchStr);
     (* Live search as you type *)
     IF SearchForward(0, 0) THEN curRow := searchRow; curCol := searchCol END;
     needRedraw := TRUE
@@ -2889,7 +3019,8 @@ BEGIN
     CommitInput
   ELSIF k = TUI.KBackspace THEN
     slen := Strings.Length(inpValue);
-    IF slen > 0 THEN inpValue[slen - 1] := 0X; DEC(inpCursor) END;
+    TrimLastUTF8Char(inpValue);
+    DEC(inpCursor, slen - Strings.Length(inpValue));
     needRedraw := TRUE
   ELSIF (ORD(k) >= 32) & (ORD(k) < 127) THEN
     slen := Strings.Length(inpValue);
@@ -3581,13 +3712,11 @@ BEGIN
       IF bufRow >= numLines THEN bufRow := numLines - 1; segF := 0; sy := 0 END
     END;
     targetRow := bufRow;
-    targetCol := segF + (sx - 1);
-    IF targetCol > LineLen(targetRow) THEN targetCol := LineLen(targetRow) END
+    targetCol := ColAtCells(targetRow, segF, sx - 1);
   ELSE
     targetRow := topLine + (sy - 1);
     IF targetRow >= numLines THEN targetRow := numLines - 1 END;
-    targetCol := leftCol + (sx - 1);
-    IF targetCol > LineLen(targetRow) THEN targetCol := LineLen(targetRow) END
+    targetCol := ColAtCells(targetRow, leftCol, sx - 1);
   END;
 
   SavePrev;
@@ -3686,6 +3815,34 @@ BEGIN
   needRedraw := TRUE
 END HandleKey;
 
+PROCEDURE HandleUTF8Key(lead: CHAR);
+(* A UTF-8 multi-byte character's lead byte arrived as raw input. Read
+   the rest of the sequence directly from the terminal (ReadUTF8Seq)
+   and insert it as literal text if the current mode accepts typed
+   text; otherwise the whole sequence is consumed and discarded. Either
+   way this keeps its continuation bytes from ever being reinterpreted
+   as a special key (see ReadUTF8Seq). *)
+VAR seq: ARRAY 5 OF CHAR; n: INTEGER;
+BEGIN
+  n := ReadUTF8Seq(lead, seq);
+  IF prefix # PrefNone THEN
+    IF prefix = PrefK THEN HandlePrefixK(lead)
+    ELSIF prefix = PrefQ THEN HandlePrefixQ(lead)
+    ELSIF prefix = PrefO THEN HandlePrefixO(lead)
+    ELSIF prefix = PrefP THEN HandlePrefixP(lead)
+    END
+  ELSIF mode = ModeNormal THEN
+    InsUTF8(seq, n)
+  ELSIF mode = ModeSearch THEN
+    AppendUTF8(searchStr, 255, seq, n);
+    IF SearchForward(0, 0) THEN curRow := searchRow; curCol := searchCol END
+  ELSIF mode = ModeInput THEN
+    AppendUTF8(inpValue, 511, seq, n);
+    INC(inpCursor, n)
+  END;
+  needRedraw := TRUE
+END HandleUTF8Key;
+
 (* ── Main Program ────────────────────────────────────────────────── *)
 
 BEGIN
@@ -3750,7 +3907,9 @@ BEGIN
       TUI.InvalidateFront;
       needRedraw := TRUE
     ELSIF ev.kind = TUI.EvKey THEN
-      HandleKey(ev.key)
+      IF UTF8SeqLen(ev.key) > 1 THEN HandleUTF8Key(ev.key)
+      ELSE HandleKey(ev.key)
+      END
     ELSIF ev.kind = TUI.EvMouse THEN
       HandleMouse
     END;
