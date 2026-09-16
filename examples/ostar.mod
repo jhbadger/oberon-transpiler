@@ -68,7 +68,6 @@ CONST
 
   (* Project *)
   MaxProjDocs = 128;   (* documents per project *)
-  BinderW     = 28;    (* binder sidebar width in columns *)
 
   (* Key codes — use TUI.Kxxx qualifiers in code to avoid C macro collisions *)
 
@@ -193,8 +192,8 @@ VAR
   projDocs     : ARRAY MaxProjDocs OF ARRAY 512 OF CHAR;
   projDocCount : INTEGER;
   projCurDoc   : INTEGER;   (* index of currently open doc in projDocs, or -1 *)
-  binderOpen   : BOOLEAN;
-  binderSel    : INTEGER;   (* highlighted entry in the binder panel *)
+  binderSel    : INTEGER;   (* highlighted entry in the binder popup *)
+  binderScroll : INTEGER;   (* first visible entry in the binder popup *)
 
   (* Palette scroll *)
   palScroll   : INTEGER;
@@ -268,13 +267,15 @@ BEGIN
   END
 END ThStylFg;
 
-(* ── Text-area layout (binder offsets) ───────────────────────────── *)
+(* ── Text-area layout ────────────────────────────────────────────── *)
+(* The binder is a popup (like PerfectStar's), not a sidebar, so the
+   text area always spans the full width. *)
 
 PROCEDURE TextX0(): INTEGER;
-BEGIN IF binderOpen THEN RETURN BinderW + 1 ELSE RETURN 1 END END TextX0;
+BEGIN RETURN 1 END TextX0;
 
 PROCEDURE TextW(): INTEGER;
-BEGIN IF binderOpen THEN RETURN TUI.Cols - BinderW ELSE RETURN TUI.Cols END END TextW;
+BEGIN RETURN TUI.Cols END TextW;
 
 (* ── Utility ─────────────────────────────────────────────────────── *)
 
@@ -1888,11 +1889,10 @@ BEGIN
   | 69: COPY("^PK",  chord); COPY("project: compile RTF",    desc)
   | 70: COPY("^PT",  chord); COPY("project: compile text",   desc)
   | 71: COPY("^PS",  chord); COPY("project: find in all",    desc)
-  | 72: COPY("^PB",  chord); COPY("binder panel toggle",     desc)
+  | 72: COPY("^PB",  chord); COPY("binder popup",            desc)
   | 73: COPY("^QM", chord); COPY("next comment",            desc)
   | 74: COPY("^QU", chord); COPY("prev comment",            desc)
   | 75: COPY("^QH", chord); COPY("outline panel",           desc)
-  | 76: COPY("Tab",  chord); COPY("focus binder (when open)", desc)
   ELSE (* end *)
   END
 END PaletteEntry;
@@ -2682,47 +2682,64 @@ BEGIN
 END DrawSegment;
 
 PROCEDURE DrawBinder;
-(* Draw the left sidebar listing project documents, one per row. *)
-VAR i, y, textH, nameStart, nameLen: INTEGER;
-    name: ARRAY (BinderW + 1) OF CHAR;
-    fg, bg, sfg, sbg: INTEGER;
+(* Draw the binder as a centered popup listing project documents,
+   navigable with Up/Down/Enter/Esc (^PB) — matches PerfectStar's
+   floating binder rather than a permanent sidebar. *)
+CONST BW = 50; BH = 16;
+VAR i, y, n, px, py, vis, maxScroll, nameStart, nameLen: INTEGER;
+    name: ARRAY (BW + 1) OF CHAR;
+    line: ARRAY (BW + 1) OF CHAR;
+    fg, bg, hfg, hbg: INTEGER;
 BEGIN
-  textH := TUI.Rows - 1;
-  sfg := ThStFg(); sbg := ThStBg();
-  (* Header *)
-  TUI.FillRect(1, 1, BinderW, 1, ' ', sfg, sbg);
-  IF mode = ModeBinder THEN
-    TUI.PutStr(2, 1, "PROJECT (nav)", sfg, sbg)
-  ELSE
-    TUI.PutStr(2, 1, "PROJECT", sfg, sbg)
+  n := projDocCount;
+  vis := n;
+  IF vis < 1 THEN vis := 1 END;
+  IF vis > BH THEN vis := BH END;
+  fg := ThFg(); bg := ThBg();
+  hfg := ThBg(); hbg := ThFg();
+  px := (TUI.Cols - BW) DIV 2 + 1;
+  py := (TUI.Rows - vis) DIV 2;
+  IF py < 1 THEN py := 1 END;
+  TUI.DrawBox(px - 1, py - 1, BW + 2, vis + 2, ThStFg(), ThStBg());
+  TUI.PutStr(px, py - 1, " Binder  (Enter=open  Esc=close) ", ThStFg(), ThStBg());
+
+  IF n = 0 THEN
+    TUI.FillRect(px, py, BW, 1, ' ', ThDimFg(), bg);
+    TUI.PutStr(px, py, " (no documents in project)", ThDimFg(), bg);
+    FOR y := py + 1 TO py + vis - 1 DO TUI.FillRect(px, y, BW, 1, ' ', fg, bg) END;
+    RETURN
   END;
-  (* Divider column *)
-  FOR y := 1 TO textH DO
-    TUI.PutCell(BinderW + 1, y, TUI.BoxV, ThDimFg(), ThBg())
-  END;
-  (* Doc list *)
-  FOR i := 0 TO projDocCount - 1 DO
-    y := i + 2;  (* row 1 = header, rows 2.. = docs *)
-    IF y > textH THEN EXIT END;
-    (* Extract basename for display *)
-    nameStart := 0;
-    nameLen := Strings.Length(projDocs[i]);
-    WHILE (nameLen > 0) & (projDocs[i][nameLen - 1] # '/') DO DEC(nameLen) END;
-    nameStart := nameLen; nameLen := Strings.Length(projDocs[i]) - nameStart;
-    IF nameLen > BinderW - 2 THEN nameLen := BinderW - 2 END;
-    Strings.Extract(projDocs[i], nameStart, nameLen, name);
-    IF (i = projCurDoc) OR (i = binderSel) THEN
-      fg := ThBg(); bg := ThFg()
+
+  (* Keep the selected entry in view *)
+  maxScroll := n - vis;
+  IF maxScroll < 0 THEN maxScroll := 0 END;
+  IF binderScroll > maxScroll THEN binderScroll := maxScroll END;
+  IF binderScroll < 0 THEN binderScroll := 0 END;
+  IF binderSel < binderScroll THEN binderScroll := binderSel END;
+  IF binderSel >= binderScroll + vis THEN binderScroll := binderSel - vis + 1 END;
+
+  FOR i := binderScroll TO binderScroll + vis - 1 DO
+    y := py + (i - binderScroll);
+    IF i < n THEN
+      (* Extract basename for display *)
+      nameLen := Strings.Length(projDocs[i]);
+      WHILE (nameLen > 0) & (projDocs[i][nameLen - 1] # '/') DO DEC(nameLen) END;
+      nameStart := nameLen; nameLen := Strings.Length(projDocs[i]) - nameStart;
+      IF nameLen > BW - 4 THEN nameLen := BW - 4 END;
+      Strings.Extract(projDocs[i], nameStart, nameLen, name);
+      line[0] := 0X;
+      IF i = projCurDoc THEN Strings.Append("* ", line) ELSE Strings.Append("  ", line) END;
+      Strings.Append(name, line);
+      IF i = binderSel THEN
+        TUI.FillRect(px, y, BW, 1, ' ', hfg, hbg);
+        TUI.PutStr(px, y, line, hfg, hbg)
+      ELSE
+        TUI.FillRect(px, y, BW, 1, ' ', fg, bg);
+        TUI.PutStr(px, y, line, fg, bg)
+      END
     ELSE
-      fg := ThFg(); bg := ThBg()
-    END;
-    TUI.FillRect(1, y, BinderW, 1, ' ', fg, bg);
-    TUI.PutStr(2, y, name, fg, bg)
-  END;
-  (* Fill remaining rows *)
-  FOR y := projDocCount + 2 TO textH DO
-    IF y > textH THEN EXIT END;
-    TUI.FillRect(1, y, BinderW, 1, ' ', ThFg(), ThBg())
+      TUI.FillRect(px, y, BW, 1, ' ', fg, bg)
+    END
   END
 END DrawBinder;
 
@@ -2818,11 +2835,11 @@ BEGIN
       END
     END
   END;
-  IF binderOpen THEN DrawBinder END;
   DrawStatus;
   IF (helpLevel >= 1) & (prefix # PrefNone) THEN DrawPrefixMenu(prefix) END;
   IF mode = ModePalette THEN DrawPalette END;
   IF mode = ModeOutline THEN DrawOutline END;
+  IF mode = ModeBinder THEN DrawBinder END;
   TUI.Flush;
   (* Place hardware cursor *)
   IF (mode = ModeBinder) OR (mode = ModeOutline) THEN
@@ -3588,9 +3605,13 @@ BEGIN
   | 't', 'T': CompileClean
   | 's', 'S': ProjFind
   | 'b', 'B':
-      binderOpen := ~binderOpen;
-      IF binderOpen THEN binderSel := projCurDoc; SetStatus("Binder ON")
-      ELSE SetStatus("Binder OFF")
+      IF mode = ModeBinder THEN
+        mode := ModeNormal
+      ELSE
+        binderSel := projCurDoc;
+        IF binderSel < 0 THEN binderSel := 0 END;
+        binderScroll := 0;
+        mode := ModeBinder
       END
   ELSE SetStatus("Unknown ^P command")
   END;
@@ -3652,13 +3673,7 @@ BEGIN
     | TUI.KDel:       DelChar
     | TUI.KBackspace: BackspaceChar
     | TUI.KEnter:     BreakLine;  goalCol := -1
-    | TUI.KTab:
-        IF binderOpen THEN
-          mode := ModeBinder;
-          IF binderSel < 0 THEN binderSel := 0 END;
-          needRedraw := TRUE
-        ELSE InsTab
-        END
+    | TUI.KTab: InsTab
     | TUI.KF1:        mode := ModePalette; palScroll := 0; needRedraw := TRUE
     ELSE
       IF (ORD(k) >= 32) & (ORD(k) < 127) THEN
@@ -3688,16 +3703,6 @@ BEGIN
 
   (* Left click: find document position from screen position *)
   IF sy >= TUI.Rows THEN RETURN END;  (* status bar — ignore *)
-  IF binderOpen & (sx <= BinderW) THEN
-    (* Click in binder panel: select/open the doc under the cursor *)
-    IF sy >= 2 THEN
-      binderSel := sy - 2;
-      IF (binderSel >= 0) & (binderSel < projDocCount) THEN
-        OpenProjDoc(binderSel); mode := ModeNormal; needRedraw := TRUE
-      END
-    END;
-    RETURN
-  END;
   DEC(sx, TextX0() - 1);  (* adjust for binder offset *)
 
   IF wrap THEN
@@ -3871,7 +3876,7 @@ BEGIN
   focusMode := FALSE; focusParaS := 0; focusParaE := 0;
   styleEnabled := FALSE; styleCurKind := StNone;
   projPath[0] := 0X; projDocCount := 0; projCurDoc := -1;
-  binderOpen := FALSE; binderSel := 0;
+  binderSel := 0; binderScroll := 0;
   spellEnabled := FALSE;
   Dict.Init(misspelled);
   Dict.Init(personalDict);

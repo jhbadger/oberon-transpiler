@@ -50,7 +50,7 @@ arrow keys, Home/End, Page Up/Down, and the mouse, so you can mix styles.
 | Word wrap | Soft (visual) wrap at a configurable column, on by default at 72 |
 | Spell check | hunspell-backed; flags misspellings in the theme's error color, jump between them, maintain a personal dictionary |
 | Style check | Flags `-ly` adverbs, filler/hedge words, passive voice, and overlong sentences, each in its own color |
-| Projects | Group several files into a `.ostarproj` manifest; binder sidebar, outline panel, project-wide search, and "compile" (concatenate all docs to one RTF or text file) |
+| Projects | Group several files into a `.ostarproj` manifest; binder popup, outline panel, project-wide search, and "compile" (concatenate all docs to one RTF or text file) |
 | Export | Manuscript-format RTF (`^KM`), a notes-stripped clean `.txt` (`^KE`), and timestamped backup snapshots (`^KN`) |
 | Look & feel | Three themes (WordPerfect blue, WordStar black, terminal default), three help-verbosity levels, focus mode, typewriter scrolling |
 
@@ -355,14 +355,12 @@ stays in sync on disk without an explicit "save project" step.
   If the current file has unsaved changes, OStar saves it first
   automatically before switching (a failed save cancels the switch, so you
   never silently lose edits).
-- `^P B` — toggle the **binder**: a sidebar (28 columns wide) down the left
-  edge of the screen listing every document in the project, with the
-  currently open one highlighted. With the binder open:
-  - `Tab` moves keyboard focus into the binder.
+- `^P B` — toggle the **binder**: a centered popup (like PerfectStar's)
+  listing every document in the project, with the currently open one
+  marked. The popup opens straight into navigation:
   - Up/Down (or `^E`/`^X`) move the highlighted entry.
-  - Enter opens the highlighted document.
-  - Escape or `Tab` again returns focus to the text.
-  - You can also just click an entry with the mouse.
+  - Enter opens the highlighted document and closes the popup.
+  - Escape closes the popup without changing documents.
 
 ### Searching and compiling across the whole project
 
@@ -390,7 +388,7 @@ outlines together.
 
 ## Part 4 — Command Reference
 
-Chords are grouped by prefix, matching OStar's own `F1` palette (77
+Chords are grouped by prefix, matching OStar's own `F1` palette (76
 entries) and the `^O`-menu help boxes. `^X` means hold Ctrl and press X;
 `^K X` means press `^K` then, after releasing Ctrl, press X (X is
 case-insensitive).
@@ -496,7 +494,7 @@ case-insensitive).
 | `^P K` | Compile all project documents to one RTF file |
 | `^P T` | Compile all project documents to one clean text file |
 | `^P S` | Find a string across every document in the project |
-| `^P B` | Toggle the binder sidebar |
+| `^P B` | Toggle the binder popup |
 
 ### Direct editing (no prefix)
 
@@ -510,7 +508,7 @@ case-insensitive).
 | `^U` | Undo (up to 400 steps) |
 | `^V` | Toggle insert / overtype |
 | Enter | Split the line at the cursor |
-| Tab | Insert a tab stop (or, if the binder is open, move focus into it) |
+| Tab | Insert a tab stop |
 | Del | Delete character under cursor (same as `^G`) |
 
 ### Other
@@ -520,13 +518,13 @@ case-insensitive).
 | `F1` | Open the command palette (the full key list, scrollable) — press again or `Esc` to close |
 | `Esc` | Cancel the current prompt/search/palette/panel |
 
-### Binder-panel keys (active once `^P B` opens the binder and `Tab` gives it focus)
+### Binder popup keys (active once `^P B` opens the binder)
 
 | Key | Action |
 |---|---|
 | Up/Down or `^E`/`^X` | Move the highlighted document |
-| Enter | Open the highlighted document |
-| Esc or Tab | Return focus to the text area |
+| Enter | Open the highlighted document and close the popup |
+| Esc | Close the popup without changing documents |
 
 ### Outline-panel keys (active after `^Q H`)
 
