@@ -88,10 +88,11 @@ several already-registered files — see Part 3.)
   check silently finds nothing to flag).
 - A writable `$TMPDIR` (or `/tmp`) for spell-check scratch files, and
   `$HOME/.config/ostar/personal.txt` for your persisted personal dictionary.
-- For `^O Y` dictionary/thesaurus lookup, either `~/.config/ostar/thesaurus.txt`
-  or `ostar-thesaurus.txt` in the current directory (the copy in `examples/`
-  covers the latter when run from there) — without one, `^O Y` just reports
-  the resource unavailable.
+- For `^O Y` dictionary/thesaurus lookup, an `ostar-thesaurus.txt` findable
+  via one of the three paths in §10 (a `~/.config/ostar/thesaurus.txt`
+  override, the current directory, or next to the binary — the copy in
+  `examples/` covers the latter two when run from there or installed
+  alongside it) — without one, `^O Y` just reports the resource unavailable.
 
 ---
 
@@ -309,14 +310,22 @@ to close it and keep writing.
 This is a small, offline word list (ported from a companion project,
 *PerfectStar 2k*), not a full dictionary — a miss just reports "No
 dictionary entry for '\<word\>'" in the status line rather than an error.
-OStar looks for the word list at `~/.config/ostar/thesaurus.txt` first,
-then falls back to `ostar-thesaurus.txt` in the current directory (the copy
-that ships in `examples/`). If neither is found, `^O Y` reports "Thesaurus
-unavailable" instead of doing nothing silently. To use a bigger or
-different word list, copy a file in the same tab-separated format
+OStar looks for the word list in this order, using the first one it finds:
+
+1. `~/.config/ostar/thesaurus.txt` — a personal override.
+2. `ostar-thesaurus.txt` in the **current directory**.
+3. `ostar-thesaurus.txt` next to the **running binary** (wherever `ostar`
+   itself lives, resolved the same way as `Help.mod`'s stdlib lookup) — so
+   the bundled starter list is still found even when you launch OStar from
+   elsewhere, e.g. editing a manuscript in its own directory with an
+   installed or symlinked `ostar`.
+
+If none of the three is found, `^O Y` reports "Thesaurus unavailable"
+instead of doing nothing silently. To use a bigger or different word list,
+write one in the same tab-separated format
 (`word<TAB>synonym,synonym,...<TAB>definition`, `#`-comments and blank
-lines ignored) to `~/.config/ostar/thesaurus.txt` — that path always takes
-priority.
+lines ignored) at `~/.config/ostar/thesaurus.txt` — that path always takes
+priority over the other two.
 
 ### 11. Save your work
 
@@ -743,7 +752,7 @@ case-insensitive).
 | `<file>.synopsis` | The document's one-line blurb, set with `^P I` |
 | `<file>.notes` | The document's free-form notes, opened in the other window with `^P O` |
 | `~/.config/ostar/personal.txt` | Your persisted spell-check personal dictionary |
-| `~/.config/ostar/thesaurus.txt` (or `./ostar-thesaurus.txt`) | Word list read by `^O Y` (see §10 for the tab-separated format) |
+| `~/.config/ostar/thesaurus.txt`, `./ostar-thesaurus.txt`, or `<exe dir>/ostar-thesaurus.txt` | Word list read by `^O Y`, first found wins (see §10 for the search order and format) |
 | `$TMPDIR` (or `/tmp`) | Scratch files used while shelling out to `hunspell` |
 
 ---

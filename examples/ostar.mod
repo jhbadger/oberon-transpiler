@@ -2782,19 +2782,34 @@ BEGIN
 END LoadPersonalDict;
 
 PROCEDURE LoadThesaurus;
-(* Loads the ^O Y lookup resource: ~/.config/ostar/thesaurus.txt if present,
-   else the bundled starter list in the current directory
-   (ostar-thesaurus.txt) — same tab-separated "word / synonyms / definition"
-   format as PerfectStar 2k's bundled thesaurus, ported by hand since this
-   runtime has no compile-time string embedding to bundle it the way pstar
-   does (ADR-016). A missing/empty resource just leaves thesReady FALSE;
-   ^O Y reports that rather than doing anything unexpected. *)
+(* Loads the ^O Y lookup resource, trying in order:
+     1. ~/.config/ostar/thesaurus.txt — a user override (a bigger or custom
+        list always wins if present).
+     2. ostar-thesaurus.txt in the current directory.
+     3. ostar-thesaurus.txt next to the running binary (via Args.ExeDir) —
+        so lookup still finds the bundled starter list even when OStar is
+        invoked from elsewhere (an installed copy, a shell alias, editing
+        a file in a different directory).
+   Same tab-separated "word / synonyms / definition" format as PerfectStar
+   2k's bundled thesaurus, ported by hand since this runtime has no
+   compile-time string embedding to bundle it the way pstar does (ADR-016).
+   A missing/empty resource just leaves thesReady FALSE; ^O Y reports that
+   rather than doing anything unexpected. *)
 VAR f: Files.File; r: Files.Rider; line, head, synCol, defCol: LineBuf; n: INTEGER;
+    exeDir, candidate: ARRAY 512 OF CHAR;
 BEGIN
   Dict.Init(thesSyn); Dict.Init(thesDef);
   n := 0;
   f := Files.Old(thesPath);
   IF f = NIL THEN f := Files.Old("ostar-thesaurus.txt") END;
+  IF f = NIL THEN
+    Args.ExeDir(exeDir);
+    IF exeDir[0] # 0X THEN
+      COPY(exeDir, candidate);
+      Strings.Append("/ostar-thesaurus.txt", candidate);
+      f := Files.Old(candidate)
+    END
+  END;
   IF f # NIL THEN
     Files.Set(r, f, 0);
     WHILE ~r.eof DO
@@ -2826,7 +2841,7 @@ BEGIN
   WordUnderCursor(word);
   IF word[0] = 0X THEN SetStatus("No word under cursor"); RETURN END;
   IF ~thesReady THEN
-    SetStatus("Thesaurus unavailable (no ~/.config/ostar/thesaurus.txt or ./ostar-thesaurus.txt)");
+    SetStatus("Thesaurus unavailable (no thesaurus.txt found — see manual for search paths)");
     RETURN
   END;
   COPY(word, lword); Strings.ToLower(lword);
