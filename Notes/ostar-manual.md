@@ -51,8 +51,8 @@ arrow keys, Home/End, Page Up/Down, and the mouse, so you can mix styles.
 | Spell check | hunspell-backed; flags misspellings in the theme's error color, jump between them, maintain a personal dictionary |
 | Dictionary & thesaurus | `^OY` looks up the word under the cursor — synonyms and a short definition in a dismissable popup, from an offline, replaceable word list |
 | Style check | Flags `-ly` adverbs, filler/hedge words, passive voice, and overlong sentences, each in its own color |
-| Projects | Group several files into a `.ostarproj` manifest; binder popup with per-doc synopses (`^PI`/`^PY`) and note/manuscript roles (`^PM`), outline panel, project-wide search and replace (`^PS`/`^PW`), and "compile" (concatenate all non-note docs to one RTF or text file) |
-| Export | Manuscript-format RTF (`^KM`), plain HTML (`^KJ`), a notes-stripped clean `.txt` (`^KE`), and timestamped backup snapshots (`^KN`, browsable with `^KO` and diffable against the live document by pressing `D` there) — RTF and HTML rendering both live in the shared `Modules/Markdown.mod` |
+| Projects | Group several files into a `.ostarproj` manifest; binder popup with per-doc synopses (`^PI`/`^PY`) and note/manuscript roles (`^PM`), outline panel, project-wide search and replace (`^PS`/`^PW`), and "compile" (concatenate all non-note docs to one RTF, EPUB, DOCX, or text file) |
+| Export | Manuscript-format RTF (`^KM`), plain HTML (`^KJ`), DOCX (`^KI`), a notes-stripped clean `.txt` (`^KE`), and timestamped backup snapshots (`^KN`, browsable with `^KO` and diffable against the live document by pressing `D` there) — RTF/HTML/DOCX rendering all live in the shared `Modules/Markdown.mod` |
 | Other window | A second, independently-scrolled pane (`^OK`) for reference material or a companion file, with block-copy (`^KA`) and jump-to-source (`^QV`) between the two |
 | Look & feel | Three themes (WordPerfect blue, WordStar black, terminal default), three help-verbosity levels, focus mode, typewriter scrolling, reveal codes (`^OD`) |
 
@@ -354,9 +354,10 @@ priority over the other two.
 
 ### 12. Export a manuscript
 
-Three export commands turn your working file into a deliverable, all
+Five export commands turn your working file into a deliverable, all
 derived from the current filename (`draft.txt` → `draft.rtf` /
-`draft.html` / `draft.txt`… careful with extensions, see below):
+`draft.html` / `draft.docx` / `draft.epub` / `draft.txt`… careful with
+extensions, see below):
 
 - `^K M` — **RTF manuscript export**. Produces a standard-manuscript-format
   `.rtf`: 12pt Times New Roman, double-spaced, one-inch margins,
@@ -374,11 +375,24 @@ derived from the current filename (`draft.txt` → `draft.rtf` /
   `[links](url)`, lists, tables, blockquotes, and fenced code blocks all
   render as real HTML tags, with a small embedded stylesheet. Note lines
   (`..`) are stripped first, same convention as `^K M`/`^K E`.
+- `^K I` — **DOCX export**. A real `.docx` a word processor can open
+  directly — headings (any level, via Word's built-in Heading1–6 paragraph
+  styles), `*italic*`/`**bold**`/`` `code` `` runs, and the same smart
+  typography as RTF export. Deliberately smaller than the HTML renderer's
+  feature set (no lists/tables/links/images), matching PerfectStar 2k's
+  own DOCX export — see Markdown.mod's Docx* procedures. Note lines are
+  stripped, same convention as the others.
+- `^K G` — **EPUB export**. A real `.epub` e-readers can open, with one
+  chapter file per level-1 (`#`) heading and a linked table of contents —
+  see Markdown.mod's Epub* procedures for the details.
 - `^K E` — **clean export**. Writes a plain `.txt` copy with note lines
   stripped, everything else left as-is — good for sending a quick draft to
   someone who doesn't want your margin notes.
 
-All three report the path they wrote to in the status line.
+All five report the path they wrote to in the status line. DOCX and EPUB
+are real ZIP archives (via `Modules/ZipWriter.mod`), assembled from
+temp files that are cleaned up afterward whether the export succeeds or
+fails partway through.
 
 ### 13. Where to go next
 
@@ -521,7 +535,7 @@ outlines together.
 
 ## Part 4 — Command Reference
 
-Chords are grouped by prefix, matching OStar's own `F1` palette (98
+Chords are grouped by prefix, matching OStar's own `F1` palette (100
 entries) and the `^O`-menu help boxes. `^X` means hold Ctrl and press X;
 `^K X` means press `^K` then, after releasing Ctrl, press X (X is
 case-insensitive).
@@ -597,6 +611,8 @@ case-insensitive).
 | `^K R` | Read a file's contents into the buffer at the cursor |
 | `^K M` | Export RTF manuscript |
 | `^K J` | Export HTML |
+| `^K I` | Export DOCX |
+| `^K G` | Export EPUB |
 | `^K E` | Clean export (notes stripped, plain `.txt`) |
 | `^K N` | Save a timestamped `.bak` snapshot |
 | `^K A` | Copy the block marked in the other window (`^O K`) here |
@@ -635,6 +651,8 @@ case-insensitive).
 | `^P X` | Next document in the project |
 | `^P L` | List the project's documents |
 | `^P K` | Compile all non-note project documents to one RTF file |
+| `^P G` | Compile all non-note project documents to one EPUB file |
+| `^P D` | Compile all non-note project documents to one DOCX file |
 | `^P T` | Compile all non-note project documents to one clean text file |
 | `^P S` | Find a string across every document in the project |
 | `^P W` | Replace a string across every document in the project |
@@ -747,6 +765,9 @@ case-insensitive).
 |---|---|
 | `<name>.ostarproj` | Project manifest — one document path per line, `!`-prefixed for a note doc |
 | `<name>.rtf` | Output of `^K M` / `^P K` |
+| `<name>.html` | Output of `^K J` |
+| `<name>.docx` | Output of `^K I` / `^P D` |
+| `<name>.epub` | Output of `^K G` / `^P G` |
 | `<name>.txt` | Output of `^K E` / `^P T` — derived by replacing the source file's extension. **Warning:** if your source file is already `.txt`, this overwrites it in place. |
 | `<name>.YYYYMMDD-HHMMSS.bak` | Output of `^K N`; browse/restore with `^K O` |
 | `<file>.synopsis` | The document's one-line blurb, set with `^P I` |
@@ -759,4 +780,4 @@ case-insensitive).
 
 *This manual documents the behavior implemented in `examples/ostar.mod` as
 of the commits tagged `feat(ostar)`/`fix(ostar)`/`refactor(ostar)` through
-"add dictionary/thesaurus lookup."*
+"add DOCX export."*

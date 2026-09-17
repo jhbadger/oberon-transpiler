@@ -6,8 +6,9 @@ MODULE OStar;
  * Movement: ^E/S/D/X (diamond), ^A/F word, ^W/Z scroll, ^R/C page.
  * Prefix ^K  — Block & File: ^KB/KK marks, ^KC copy, ^KV move, ^KY del,
  *              ^KP put, ^KD/KS save, ^KX save+quit, ^KQ quit,
- *              ^K0-9 set bookmark. ^KO snapshot browser: press D there
- *              to diff a snapshot against the current document.
+ *              ^K0-9 set bookmark, ^KI export DOCX. ^KO snapshot
+ *              browser: press D there to diff a snapshot against the
+ *              current document.
  * Prefix ^Q  — Quick: ^QS/QD line start/end, ^QR/QC doc start/end,
  *              ^QE/QX screen top/bot, ^QB/QK jump block, ^QP prev pos,
  *              ^QF find, ^QA replace, ^Q,/. sentence, ^Q[/] para,
@@ -19,7 +20,7 @@ MODULE OStar;
  *              lookup of the word under the cursor.
  * ^QI — next style issue (adverb/filler/passive/long sentence).
  * Prefix ^P  — Project: ^PN new, ^PP open, ^PA add, ^PR remove,
- *              ^PE prev doc, ^PX next doc, ^PL list.
+ *              ^PE prev doc, ^PX next doc, ^PL list, ^PD compile DOCX.
  * Other: ^G delete, ^H backspace, ^T del-word, ^Y del-line,
  *        ^N insert line, ^U undo, ^L find next, ^V overtype toggle,
  *        F1 command palette (shows key list).
@@ -1000,6 +1001,80 @@ BEGIN
   END;
   needRedraw := TRUE
 END ExportEpub;
+
+PROCEDURE ExportDocx;
+(* ^KI — DOCX export via Markdown.mod's Docx* renderer, modeled on
+   pstar's docx.rs — see Markdown.mod. Simpler than ExportEpub above:
+   a DOCX has no chapter-splitting and no special first-entry rule, just
+   five small members (four fixed, one generated) zipped by ZipWriter. *)
+VAR f: Files.File;
+    docxPath, tmpTypes, tmpRels, tmpDocRels, tmpStyles, tmpDoc: ARRAY 512 OF CHAR;
+    i, j: INTEGER; ok: BOOLEAN;
+BEGIN
+  IF filePath[0] = 0X THEN SetStatus("Save file first (^KD)"); RETURN END;
+
+  COPY(filePath, docxPath);
+  j := Strings.Length(docxPath) - 1;
+  WHILE (j > 0) & (docxPath[j] # '.') & (docxPath[j] # '/') DO DEC(j) END;
+  IF (j > 0) & (docxPath[j] = '.') THEN docxPath[j] := 0X END;
+  Strings.Append(".docx", docxPath);
+
+  MakeTempPath(docxPath, ".ctypes.tmp", tmpTypes);
+  MakeTempPath(docxPath, ".rels.tmp", tmpRels);
+  MakeTempPath(docxPath, ".docrels.tmp", tmpDocRels);
+  MakeTempPath(docxPath, ".styles.tmp", tmpStyles);
+  MakeTempPath(docxPath, ".doc.tmp", tmpDoc);
+
+  Markdown.Reset;
+
+  f := Files.New(tmpTypes);
+  IF f = NIL THEN SetStatus("DOCX export: cannot create temp file"); RETURN END;
+  Files.Set(expRider, f, 0);
+  Markdown.DocxContentTypes;
+  Files.Register(f); Files.Close(f);
+
+  f := Files.New(tmpRels);
+  Files.Set(expRider, f, 0);
+  Markdown.DocxRels;
+  Files.Register(f); Files.Close(f);
+
+  f := Files.New(tmpDocRels);
+  Files.Set(expRider, f, 0);
+  Markdown.DocxDocumentRels;
+  Files.Register(f); Files.Close(f);
+
+  f := Files.New(tmpStyles);
+  Files.Set(expRider, f, 0);
+  Markdown.DocxStyles;
+  Files.Register(f); Files.Close(f);
+
+  f := Files.New(tmpDoc);
+  Files.Set(expRider, f, 0);
+  Markdown.DocxHeader;
+  FOR i := 0 TO numLines - 1 DO
+    Markdown.DocxLine(lines[i].s)
+  END;
+  Markdown.DocxFooter;
+  Files.Register(f); Files.Close(f);
+
+  ok := ZipWriter.Begin(docxPath);
+  ok := ZipWriter.Add("[Content_Types].xml", tmpTypes) & ok;
+  ok := ZipWriter.Add("_rels/.rels", tmpRels) & ok;
+  ok := ZipWriter.Add("word/_rels/document.xml.rels", tmpDocRels) & ok;
+  ok := ZipWriter.Add("word/styles.xml", tmpStyles) & ok;
+  ok := ZipWriter.Add("word/document.xml", tmpDoc) & ok;
+  ok := ZipWriter.Finish() & ok;
+
+  Files.Delete(tmpTypes); Files.Delete(tmpRels); Files.Delete(tmpDocRels);
+  Files.Delete(tmpStyles); Files.Delete(tmpDoc);
+
+  IF ok THEN
+    COPY("DOCX exported: ", statusMsg); Strings.Append(docxPath, statusMsg)
+  ELSE
+    SetStatus("DOCX export failed")
+  END;
+  needRedraw := TRUE
+END ExportDocx;
 
 (* ── Clean Export (^KE) ─────────────────────────────────────────── *)
 
@@ -2362,12 +2437,14 @@ BEGIN
   | 95: COPY("^K0-9", chord); COPY("set bookmark",             desc)
   | 96: COPY("^Q0-9", chord); COPY("jump to bookmark",         desc)
   | 97: COPY("^OY",   chord); COPY("look up word (dictionary/thesaurus)", desc)
+  | 98: COPY("^KI",   chord); COPY("export DOCX",             desc)
+  | 99: COPY("^PD",   chord); COPY("project: compile DOCX",   desc)
   ELSE (* end *)
   END
 END PaletteEntry;
 
 PROCEDURE PaletteCount(): INTEGER;
-BEGIN RETURN 98 END PaletteCount;
+BEGIN RETURN 100 END PaletteCount;
 
 (* ── Splash Screen ───────────────────────────────────────────────── *)
 
@@ -3921,6 +3998,7 @@ BEGIN
   | 'm', 'M': ExportRTF
   | 'j', 'J': ExportHtml
   | 'g', 'G': ExportEpub
+  | 'i', 'I': ExportDocx
   | 'e', 'E': ExportClean
   | 'n', 'N': SaveSnapshot
   | 'a', 'A': CopyFromOther
@@ -4379,6 +4457,95 @@ BEGIN
   needRedraw := TRUE
 END CompileEpub;
 
+PROCEDURE CompileDocx;
+(* ^PD — concatenate every non-note project document, in manifest
+   order, through Markdown.mod's Docx* renderer (same content as
+   ^K I), then package via ZipWriter — the project-compile sibling of
+   CompileRTF/CompileEpub above. *)
+VAR f: Files.File; sf: Files.File; sr: Files.Rider;
+    outPath, tmpTypes, tmpRels, tmpDocRels, tmpStyles, tmpDoc: ARRAY 512 OF CHAR;
+    lb: LineBuf;
+    j, di: INTEGER; ok: BOOLEAN;
+BEGIN
+  IF projPath[0] = 0X THEN SetStatus("No open project — ^PN to create"); RETURN END;
+  IF projDocCount = 0   THEN SetStatus("Project is empty"); RETURN END;
+  IF dirty THEN IF ~SaveFile() THEN SetStatus("Save failed"); RETURN END END;
+
+  COPY(projPath, outPath);
+  j := Strings.Length(outPath) - 1;
+  WHILE (j > 0) & (outPath[j] # '.') & (outPath[j] # '/') DO DEC(j) END;
+  IF (j > 0) & (outPath[j] = '.') THEN outPath[j] := 0X END;
+  Strings.Append(".docx", outPath);
+
+  MakeTempPath(outPath, ".ctypes.tmp", tmpTypes);
+  MakeTempPath(outPath, ".rels.tmp", tmpRels);
+  MakeTempPath(outPath, ".docrels.tmp", tmpDocRels);
+  MakeTempPath(outPath, ".styles.tmp", tmpStyles);
+  MakeTempPath(outPath, ".doc.tmp", tmpDoc);
+
+  Markdown.Reset;
+
+  f := Files.New(tmpTypes);
+  IF f = NIL THEN SetStatus("Compile: cannot create temp file"); RETURN END;
+  Files.Set(expRider, f, 0);
+  Markdown.DocxContentTypes;
+  Files.Register(f); Files.Close(f);
+
+  f := Files.New(tmpRels);
+  Files.Set(expRider, f, 0);
+  Markdown.DocxRels;
+  Files.Register(f); Files.Close(f);
+
+  f := Files.New(tmpDocRels);
+  Files.Set(expRider, f, 0);
+  Markdown.DocxDocumentRels;
+  Files.Register(f); Files.Close(f);
+
+  f := Files.New(tmpStyles);
+  Files.Set(expRider, f, 0);
+  Markdown.DocxStyles;
+  Files.Register(f); Files.Close(f);
+
+  f := Files.New(tmpDoc);
+  Files.Set(expRider, f, 0);
+  Markdown.DocxHeader;
+  FOR di := 0 TO projDocCount - 1 DO
+    IF ~projIsNote[di] THEN
+      sf := Files.Old(projDocs[di]);
+      IF sf # NIL THEN
+        Files.Set(sr, sf, 0);
+        WHILE ~sr.eof DO
+          Files.ReadLine(sr, lb);
+          IF ~sr.eof OR (lb[0] # 0X) THEN
+            Markdown.DocxLine(lb)
+          END
+        END;
+        Files.Close(sf)
+      END
+    END
+  END;
+  Markdown.DocxFooter;
+  Files.Register(f); Files.Close(f);
+
+  ok := ZipWriter.Begin(outPath);
+  ok := ZipWriter.Add("[Content_Types].xml", tmpTypes) & ok;
+  ok := ZipWriter.Add("_rels/.rels", tmpRels) & ok;
+  ok := ZipWriter.Add("word/_rels/document.xml.rels", tmpDocRels) & ok;
+  ok := ZipWriter.Add("word/styles.xml", tmpStyles) & ok;
+  ok := ZipWriter.Add("word/document.xml", tmpDoc) & ok;
+  ok := ZipWriter.Finish() & ok;
+
+  Files.Delete(tmpTypes); Files.Delete(tmpRels); Files.Delete(tmpDocRels);
+  Files.Delete(tmpStyles); Files.Delete(tmpDoc);
+
+  IF ok THEN
+    COPY("Compiled DOCX: ", statusMsg); Strings.Append(outPath, statusMsg)
+  ELSE
+    SetStatus("DOCX compile failed")
+  END;
+  needRedraw := TRUE
+END CompileDocx;
+
 PROCEDURE CompileClean;
 VAR f: Files.File; r: Files.Rider; sf: Files.File; sr: Files.Rider;
     outPath: ARRAY 512 OF CHAR; lb: LineBuf;
@@ -4676,6 +4843,7 @@ BEGIN
   | 'l', 'L': ProjList
   | 'k', 'K': CompileRTF
   | 'g', 'G': CompileEpub
+  | 'd', 'D': CompileDocx
   | 't', 'T': CompileClean
   | 's', 'S': ProjFind
   | 'b', 'B':

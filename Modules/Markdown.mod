@@ -58,6 +58,31 @@ MODULE Markdown;
  *   Markdown.EpubPackageOpf(Markdown.EpubChapterNum());
  *   Markdown.SetSink(...);              (* -> nav.xhtml *)
  *   Markdown.EpubNavXhtml;
+ *
+ * DocxContentTypes/DocxRels/DocxDocumentRels/DocxStyles/DocxHeader/
+ * DocxLine/DocxFooter generate the text members of a minimal DOCX —
+ * modeled on PerfectStar 2k's docx.rs: headings (any level; a plain
+ * paragraph style, not chapter-page-break formatting like the RTF
+ * manuscript renderer above), paragraphs, *italic*/**bold**/`code`
+ * spans, smart typography, ".."-notes stripped. No images, tables,
+ * lists, or links — same deliberately small feature set as EPUB above.
+ * The four Docx*(ContentTypes|Rels|DocumentRels|Styles) procedures
+ * emit fixed, document-independent XML (call each once, each to its
+ * own sink/temp file); DocxHeader/DocxLine/DocxFooter generate
+ * word/document.xml the same way HtmlHeader/HtmlLine/HtmlFooter do.
+ * As with RTF/HTML/EPUB above, only the XML text comes from here —
+ * packing the five members into an actual .docx (a ZIP with no
+ * special first-entry rule, unlike EPUB's mimetype) is caller
+ * bookkeeping atop SetSink:
+ *   Markdown.SetSink(...); Markdown.DocxContentTypes;
+ *   Markdown.SetSink(...); Markdown.DocxRels;
+ *   Markdown.SetSink(...); Markdown.DocxDocumentRels;
+ *   Markdown.SetSink(...); Markdown.DocxStyles;
+ *   Markdown.SetSink(...); Markdown.DocxHeader;
+ *   (* per input line: *) Markdown.DocxLine(line);
+ *   Markdown.DocxFooter;
+ *   (* zip the five files as [Content_Types].xml, _rels/.rels,
+ *      word/_rels/document.xml.rels, word/styles.xml, word/document.xml *)
  *)
 
 IMPORT Strings;
@@ -1173,5 +1198,162 @@ BEGIN
   Wstr("</ol></nav>"); Wln;
   Wstr("</body></html>"); Wln
 END EpubNavXhtml;
+
+(* ── DOCX ─────────────────────────────────────────────────
+   Minimal WordprocessingML content generation, modeled on PerfectStar
+   2k's docx.rs: headings, paragraphs, *italic*/**bold**/`code` spans,
+   smart typography, ".."-notes stripped. Unlike Epub*Title/EpubBody's
+   split (kept separate there only to feed nav.xhtml's <li> links from
+   the same title text), headings and paragraphs share one inline
+   renderer (DocxBody) — DOCX has no navigation document to build
+   alongside the content, so there's no reason to duplicate it. As
+   documented at the top of the file, only each member's XML text comes
+   from here; packing them into an actual .docx is caller bookkeeping
+   atop SetSink. *)
+
+PROCEDURE DocxOpenRun(bold, ital, code: BOOLEAN);
+BEGIN
+  Wstr("<w:r>");
+  IF bold OR ital OR code THEN
+    Wstr("<w:rPr>");
+    IF bold THEN Wstr("<w:b/>") END;
+    IF ital THEN Wstr("<w:i/>") END;
+    IF code THEN Wstr('<w:rFonts w:ascii="Courier New" w:hAnsi="Courier New"/>') END;
+    Wstr("</w:rPr>")
+  END;
+  Wstr('<w:t xml:space="preserve">')
+END DocxOpenRun;
+
+PROCEDURE DocxCloseRun;
+BEGIN Wstr("</w:t></w:r>") END DocxCloseRun;
+
+PROCEDURE DocxBody(s: ARRAY OF CHAR; from: INTEGER);
+(* Render s[from..] as a sequence of <w:r> runs — WordprocessingML has
+   no open/close inline tags the way HTML and XHTML do, so (unlike
+   WriteInlineHtml/EpubBody) a style change means closing the current
+   run and opening a new one, not just emitting a tag in place. Same
+   *italic*/**bold**/`code` markers and em-dash/ellipsis/smart-quote
+   typography as EpubBody, reusing the same XmlEscCp/DecodeUtf8Cp/
+   MsOpensQuote helpers. *)
+VAR k, len, n, run, cp, prevCp: INTEGER; dBold, dItal, open: BOOLEAN;
+BEGIN
+  dBold := FALSE; dItal := FALSE; open := FALSE;
+  len := Strings.Length(s);
+  k := from; prevCp := -1;
+  WHILE k < len DO
+    IF (s[k] = '*') & (k + 1 < len) & (s[k + 1] = '*') THEN
+      IF open THEN DocxCloseRun; open := FALSE END;
+      dBold := ~dBold; INC(k, 2)
+    ELSIF s[k] = '*' THEN
+      IF open THEN DocxCloseRun; open := FALSE END;
+      dItal := ~dItal; INC(k)
+    ELSIF s[k] = '`' THEN
+      IF open THEN DocxCloseRun; open := FALSE END;
+      INC(k);
+      DocxOpenRun(dBold, dItal, TRUE);
+      WHILE (k < len) & (s[k] # '`') DO
+        DecodeUtf8Cp(s, k, len, cp, n); XmlEscCp(cp); INC(k, n)
+      END;
+      DocxCloseRun;
+      IF k < len THEN INC(k) END
+    ELSE
+      IF ~open THEN DocxOpenRun(dBold, dItal, FALSE); open := TRUE END;
+      IF s[k] = '-' THEN
+        run := 0;
+        WHILE (k + run < len) & (s[k + run] = '-') DO INC(run) END;
+        IF run >= 2 THEN
+          XmlEscCp(8212); prevCp := ORD('-'); INC(k, run)
+        ELSE
+          XmlEscCp(ORD('-')); prevCp := ORD('-'); INC(k)
+        END
+      ELSIF (s[k] = '.') & (k + 2 < len) & (s[k + 1] = '.') & (s[k + 2] = '.') THEN
+        XmlEscCp(8230); prevCp := ORD('.'); INC(k, 3)
+      ELSIF s[k] = 22X THEN
+        IF MsOpensQuote(prevCp) THEN XmlEscCp(8220) ELSE XmlEscCp(8221) END;
+        prevCp := ORD(22X); INC(k)
+      ELSIF s[k] = 27X THEN
+        IF MsOpensQuote(prevCp) THEN XmlEscCp(8216) ELSE XmlEscCp(8217) END;
+        prevCp := ORD(27X); INC(k)
+      ELSE
+        DecodeUtf8Cp(s, k, len, cp, n); XmlEscCp(cp); prevCp := cp; INC(k, n)
+      END
+    END
+  END;
+  IF open THEN DocxCloseRun END
+END DocxBody;
+
+PROCEDURE DocxHeader*;
+BEGIN
+  Wstr('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>');
+  Wstr('<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>')
+END DocxHeader;
+
+PROCEDURE DocxLine*(s: ARRAY OF CHAR);
+VAR lev, len: INTEGER;
+BEGIN
+  len := Strings.Length(s);
+  IF (s[0] = '.') & (s[1] = '.') THEN
+    (* note line: skip *)
+  ELSIF len = 0 THEN
+    (* blank line: skip *)
+  ELSE
+    lev := 0;
+    WHILE (lev < 6) & (s[lev] = '#') DO INC(lev) END;
+    IF (lev > 0) & (s[lev] = ' ') THEN
+      Wstr('<w:p><w:pPr><w:pStyle w:val="Heading');
+      Wch(CHR(ORD('0') + lev));
+      Wstr('"/></w:pPr>');
+      DocxBody(s, lev + 1);
+      Wstr("</w:p>"); Wln
+    ELSE
+      Wstr("<w:p>"); DocxBody(s, 0); Wstr("</w:p>"); Wln
+    END
+  END
+END DocxLine;
+
+PROCEDURE DocxFooter*;
+BEGIN
+  Wstr('<w:sectPr><w:pgSz w:w="12240" w:h="15840"/>');
+  Wstr('<w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440"/></w:sectPr>');
+  Wstr("</w:body></w:document>")
+END DocxFooter;
+
+PROCEDURE DocxContentTypes*;
+(* Each Wstr call below is kept under this lexer's 255-character string-
+   literal limit (MAX_TOKEN_LEN in lexer.h — a longer literal is silently
+   truncated, not rejected, the same trap EpubPackageOpf/EpubContainerXml
+   above already work around by chunking their own fixed XML). *)
+BEGIN
+  Wstr('<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">');
+  Wstr('<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/>');
+  Wstr('<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>');
+  Wstr('<Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/></Types>')
+END DocxContentTypes;
+
+PROCEDURE DocxRels*;
+BEGIN
+  Wstr('<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">');
+  Wstr('<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>')
+END DocxRels;
+
+PROCEDURE DocxDocumentRels*;
+BEGIN
+  Wstr('<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">');
+  Wstr('<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>')
+END DocxDocumentRels;
+
+PROCEDURE DocxStyles*;
+BEGIN
+  Wstr('<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">');
+  Wstr('<w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style><w:style w:type="paragraph" w:styleId="Heading1"><w:name w:val="heading 1"/>');
+  Wstr('<w:basedOn w:val="Normal"/><w:next w:val="Normal"/><w:uiPriority w:val="9"/><w:qFormat/><w:pPr><w:outlineLvl w:val="0"/></w:pPr><w:rPr><w:b/><w:sz w:val="32"/></w:rPr></w:style>');
+  Wstr('<w:style w:type="paragraph" w:styleId="Heading2"><w:name w:val="heading 2"/><w:basedOn w:val="Normal"/><w:next w:val="Normal"/><w:qFormat/><w:pPr><w:outlineLvl w:val="1"/></w:pPr>');
+  Wstr('<w:rPr><w:b/><w:sz w:val="28"/></w:rPr></w:style><w:style w:type="paragraph" w:styleId="Heading3"><w:name w:val="heading 3"/><w:basedOn w:val="Normal"/><w:next w:val="Normal"/>');
+  Wstr('<w:qFormat/><w:pPr><w:outlineLvl w:val="2"/></w:pPr><w:rPr><w:b/><w:sz w:val="26"/></w:rPr></w:style><w:style w:type="paragraph" w:styleId="Heading4"><w:name w:val="heading 4"/>');
+  Wstr('<w:basedOn w:val="Normal"/><w:next w:val="Normal"/><w:qFormat/><w:pPr><w:outlineLvl w:val="3"/></w:pPr><w:rPr><w:b/></w:rPr></w:style>');
+  Wstr('<w:style w:type="paragraph" w:styleId="Heading5"><w:name w:val="heading 5"/><w:basedOn w:val="Normal"/><w:next w:val="Normal"/><w:qFormat/><w:pPr><w:outlineLvl w:val="4"/></w:pPr>');
+  Wstr('<w:rPr><w:b/></w:rPr></w:style><w:style w:type="paragraph" w:styleId="Heading6"><w:name w:val="heading 6"/><w:basedOn w:val="Normal"/><w:next w:val="Normal"/><w:qFormat/><w:pPr>');
+  Wstr('<w:outlineLvl w:val="5"/></w:pPr><w:rPr><w:b/></w:rPr></w:style></w:styles>')
+END DocxStyles;
 
 END Markdown.
