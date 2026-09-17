@@ -20,7 +20,7 @@ MODULE OStar;
  *        ^N insert line, ^U undo, ^L find next, ^V overtype toggle,
  *        F1 command palette (shows key list).
  *)
-IMPORT TUI, Terminal, Files, Strings, Args, Dict, OS, Env, Time, Markdown;
+IMPORT TUI, Terminal, Files, Strings, Args, Dict, OS, Env, Time, Markdown, ZipWriter;
 
 (* ── Constants ───────────────────────────────────────────────────── *)
 CONST
@@ -826,6 +826,85 @@ BEGIN
   Strings.Append(htmlPath, statusMsg);
   needRedraw := TRUE
 END ExportHtml;
+
+PROCEDURE MakeTempPath(base, suffix: ARRAY OF CHAR; VAR out: ARRAY OF CHAR);
+BEGIN COPY(base, out); Strings.Append(suffix, out) END MakeTempPath;
+
+PROCEDURE ExportEpub;
+(* ^KG — EPUB export via Markdown.mod's Epub* renderer (content.xhtml
+   + nav.xhtml, modeled on pstar's epub.rs — see Markdown.mod), packed
+   into a real .epub archive by ZipWriter. Each of the five members is
+   built in its own temp file next to the source (removed afterward),
+   the same way Markdown.mod's own doc comment describes layering ZIP
+   bookkeeping atop its sink. *)
+VAR f: Files.File;
+    epubPath, tmpMime, tmpContainer, tmpOpf, tmpContent, tmpNav: ARRAY 512 OF CHAR;
+    i, j: INTEGER; ok: BOOLEAN;
+BEGIN
+  IF filePath[0] = 0X THEN SetStatus("Save file first (^KD)"); RETURN END;
+
+  COPY(filePath, epubPath);
+  j := Strings.Length(epubPath) - 1;
+  WHILE (j > 0) & (epubPath[j] # '.') & (epubPath[j] # '/') DO DEC(j) END;
+  IF (j > 0) & (epubPath[j] = '.') THEN epubPath[j] := 0X END;
+  Strings.Append(".epub", epubPath);
+
+  MakeTempPath(epubPath, ".mime.tmp", tmpMime);
+  MakeTempPath(epubPath, ".container.tmp", tmpContainer);
+  MakeTempPath(epubPath, ".opf.tmp", tmpOpf);
+  MakeTempPath(epubPath, ".content.tmp", tmpContent);
+  MakeTempPath(epubPath, ".nav.tmp", tmpNav);
+
+  Markdown.Reset;
+
+  f := Files.New(tmpMime);
+  IF f = NIL THEN SetStatus("EPUB export: cannot create temp file"); RETURN END;
+  Files.Set(expRider, f, 0);
+  Markdown.EpubMimetype;
+  Files.Register(f); Files.Close(f);
+
+  f := Files.New(tmpContainer);
+  Files.Set(expRider, f, 0);
+  Markdown.EpubContainerXml;
+  Files.Register(f); Files.Close(f);
+
+  f := Files.New(tmpOpf);
+  Files.Set(expRider, f, 0);
+  Markdown.EpubPackageOpf;
+  Files.Register(f); Files.Close(f);
+
+  f := Files.New(tmpContent);
+  Files.Set(expRider, f, 0);
+  Markdown.EpubContentHeader;
+  FOR i := 0 TO numLines - 1 DO
+    Markdown.EpubLine(lines[i].s)
+  END;
+  Markdown.EpubContentFooter;
+  Files.Register(f); Files.Close(f);
+
+  f := Files.New(tmpNav);
+  Files.Set(expRider, f, 0);
+  Markdown.EpubNavXhtml;
+  Files.Register(f); Files.Close(f);
+
+  ok := ZipWriter.Begin(epubPath);
+  ok := ZipWriter.Add("mimetype", tmpMime) & ok;
+  ok := ZipWriter.Add("META-INF/container.xml", tmpContainer) & ok;
+  ok := ZipWriter.Add("OEBPS/package.opf", tmpOpf) & ok;
+  ok := ZipWriter.Add("OEBPS/content.xhtml", tmpContent) & ok;
+  ok := ZipWriter.Add("OEBPS/nav.xhtml", tmpNav) & ok;
+  ok := ZipWriter.Finish() & ok;
+
+  Files.Delete(tmpMime); Files.Delete(tmpContainer); Files.Delete(tmpOpf);
+  Files.Delete(tmpContent); Files.Delete(tmpNav);
+
+  IF ok THEN
+    COPY("EPUB exported: ", statusMsg); Strings.Append(epubPath, statusMsg)
+  ELSE
+    SetStatus("EPUB export failed")
+  END;
+  needRedraw := TRUE
+END ExportEpub;
 
 (* ── Clean Export (^KE) ─────────────────────────────────────────── *)
 
@@ -2088,12 +2167,14 @@ BEGIN
   | 90: COPY("^PO",  chord); COPY("open doc's notes file",   desc)
   | 91: COPY("^PV",  chord); COPY("open binder doc in split", desc)
   | 92: COPY("^KJ",  chord); COPY("export HTML",              desc)
+  | 93: COPY("^KG",  chord); COPY("export EPUB",              desc)
+  | 94: COPY("^PG",  chord); COPY("project: compile EPUB",    desc)
   ELSE (* end *)
   END
 END PaletteEntry;
 
 PROCEDURE PaletteCount(): INTEGER;
-BEGIN RETURN 93 END PaletteCount;
+BEGIN RETURN 95 END PaletteCount;
 
 (* ── Splash Screen ───────────────────────────────────────────────── *)
 
@@ -3459,6 +3540,7 @@ BEGIN
   | 'r', 'R': StartInput("Read file", ActRFile)
   | 'm', 'M': ExportRTF
   | 'j', 'J': ExportHtml
+  | 'g', 'G': ExportEpub
   | 'e', 'E': ExportClean
   | 'n', 'N': SaveSnapshot
   | 'a', 'A': CopyFromOther
@@ -3805,6 +3887,95 @@ BEGIN
   needRedraw := TRUE
 END CompileRTF;
 
+PROCEDURE CompileEpub;
+(* ^PG — concatenate every non-note project document, in manifest
+   order, through Markdown.mod's Epub* renderer (same content as
+   ^K G), then package via ZipWriter — the project-compile sibling of
+   CompileRTF above. *)
+VAR f: Files.File; sf: Files.File; sr: Files.Rider;
+    outPath, tmpMime, tmpContainer, tmpOpf, tmpContent, tmpNav: ARRAY 512 OF CHAR;
+    lb: LineBuf;
+    j, di: INTEGER; ok: BOOLEAN;
+BEGIN
+  IF projPath[0] = 0X THEN SetStatus("No open project — ^PN to create"); RETURN END;
+  IF projDocCount = 0   THEN SetStatus("Project is empty"); RETURN END;
+  IF dirty THEN IF ~SaveFile() THEN SetStatus("Save failed"); RETURN END END;
+
+  COPY(projPath, outPath);
+  j := Strings.Length(outPath) - 1;
+  WHILE (j > 0) & (outPath[j] # '.') & (outPath[j] # '/') DO DEC(j) END;
+  IF (j > 0) & (outPath[j] = '.') THEN outPath[j] := 0X END;
+  Strings.Append(".epub", outPath);
+
+  MakeTempPath(outPath, ".mime.tmp", tmpMime);
+  MakeTempPath(outPath, ".container.tmp", tmpContainer);
+  MakeTempPath(outPath, ".opf.tmp", tmpOpf);
+  MakeTempPath(outPath, ".content.tmp", tmpContent);
+  MakeTempPath(outPath, ".nav.tmp", tmpNav);
+
+  Markdown.Reset;
+
+  f := Files.New(tmpMime);
+  IF f = NIL THEN SetStatus("Compile: cannot create temp file"); RETURN END;
+  Files.Set(expRider, f, 0);
+  Markdown.EpubMimetype;
+  Files.Register(f); Files.Close(f);
+
+  f := Files.New(tmpContainer);
+  Files.Set(expRider, f, 0);
+  Markdown.EpubContainerXml;
+  Files.Register(f); Files.Close(f);
+
+  f := Files.New(tmpOpf);
+  Files.Set(expRider, f, 0);
+  Markdown.EpubPackageOpf;
+  Files.Register(f); Files.Close(f);
+
+  f := Files.New(tmpContent);
+  Files.Set(expRider, f, 0);
+  Markdown.EpubContentHeader;
+  FOR di := 0 TO projDocCount - 1 DO
+    IF ~projIsNote[di] THEN
+      sf := Files.Old(projDocs[di]);
+      IF sf # NIL THEN
+        Files.Set(sr, sf, 0);
+        WHILE ~sr.eof DO
+          Files.ReadLine(sr, lb);
+          IF ~sr.eof OR (lb[0] # 0X) THEN
+            Markdown.EpubLine(lb)
+          END
+        END;
+        Files.Close(sf)
+      END
+    END
+  END;
+  Markdown.EpubContentFooter;
+  Files.Register(f); Files.Close(f);
+
+  f := Files.New(tmpNav);
+  Files.Set(expRider, f, 0);
+  Markdown.EpubNavXhtml;
+  Files.Register(f); Files.Close(f);
+
+  ok := ZipWriter.Begin(outPath);
+  ok := ZipWriter.Add("mimetype", tmpMime) & ok;
+  ok := ZipWriter.Add("META-INF/container.xml", tmpContainer) & ok;
+  ok := ZipWriter.Add("OEBPS/package.opf", tmpOpf) & ok;
+  ok := ZipWriter.Add("OEBPS/content.xhtml", tmpContent) & ok;
+  ok := ZipWriter.Add("OEBPS/nav.xhtml", tmpNav) & ok;
+  ok := ZipWriter.Finish() & ok;
+
+  Files.Delete(tmpMime); Files.Delete(tmpContainer); Files.Delete(tmpOpf);
+  Files.Delete(tmpContent); Files.Delete(tmpNav);
+
+  IF ok THEN
+    COPY("Compiled EPUB: ", statusMsg); Strings.Append(outPath, statusMsg)
+  ELSE
+    SetStatus("EPUB compile failed")
+  END;
+  needRedraw := TRUE
+END CompileEpub;
+
 PROCEDURE CompileClean;
 VAR f: Files.File; r: Files.Rider; sf: Files.File; sr: Files.Rider;
     outPath: ARRAY 512 OF CHAR; lb: LineBuf;
@@ -4101,6 +4272,7 @@ BEGIN
   | 'x', 'X': ProjNext
   | 'l', 'L': ProjList
   | 'k', 'K': CompileRTF
+  | 'g', 'G': CompileEpub
   | 't', 'T': CompileClean
   | 's', 'S': ProjFind
   | 'b', 'B':

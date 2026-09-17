@@ -29,12 +29,30 @@ MODULE Markdown;
  * above beyond both producing RTF. Each input line becomes a complete
  * paragraph on its own (no cross-line accumulation), so it needs no
  * end-of-block flush the way the generic renderers do.
+ *
+ * EpubContentHeader/EpubLine/EpubContentFooter/EpubNavXhtml/
+ * EpubContainerXml/EpubPackageOpf/EpubMimetype generate the five text
+ * members of a minimal EPUB 3 — modeled on PerfectStar 2k's epub.rs,
+ * not on plume's own (separate, EPUB 2/toc.ncx-style) --epub output:
+ * one unstyled content.xhtml (h1-h6 headings, paragraphs, smart
+ * typography, *italic*/**bold**/`code` spans, ".."-notes stripped, no
+ * per-chapter split) plus a flat nav.xhtml linking every heading. As
+ * with the renderers above, only the five members' *text* comes from
+ * here — packing them into an actual .epub (ZIP local/central-
+ * directory headers, per-entry CRC-32) is caller bookkeeping layered
+ * atop SetSink, same as noted for RTF/HTML above.
+ *   Markdown.EpubContentHeader;         (* -> content.xhtml *)
+ *   Markdown.EpubLine(line);            (* once per input line *)
+ *   Markdown.EpubContentFooter;
+ *   Markdown.SetSink(...);              (* -> nav.xhtml *)
+ *   Markdown.EpubNavXhtml;
  *)
 
 IMPORT Strings;
 
 CONST
   MaxLine* = 4096;
+  EpubNavBufSize = 65536;  (* generous cap on total nav.xhtml TOC markup *)
 
 TYPE
   WriteProc* = PROCEDURE(c: CHAR);
@@ -56,6 +74,15 @@ VAR
   (* Manuscript-mode RTF state: just whether we've emitted a chapter
      yet (so the very first one skips the leading page break). *)
   msFirst                  : BOOLEAN;
+
+  (* EPUB state: a heading counter shared between content.xhtml's
+     "heading-N" ids and nav.xhtml's matching links, and an internal
+     accumulator for nav.xhtml's <li> markup, built up during the same
+     single pass over the document that streams content.xhtml (see
+     EpubLine/EpubNavSink). *)
+  epubHeadingN             : INTEGER;
+  epubNavBuf               : ARRAY EpubNavBufSize OF CHAR;
+  epubNavLen               : INTEGER;
 
 (* ── Output primitives ────────────────────────────────── *)
 
@@ -79,26 +106,112 @@ BEGIN
   inCode := FALSE; inBQ := FALSE;
   bold := FALSE; ital := FALSE;
   inTable := FALSE; inTableHead := FALSE; tableCols := 0;
-  msFirst := TRUE
+  msFirst := TRUE;
+  epubHeadingN := 0; epubNavLen := 0; epubNavBuf[0] := 0X
 END Reset;
 
-PROCEDURE IsWordChar(c: CHAR): BOOLEAN;
+(* ── UTF-8 / RTF character escaping ──────────────────────
+   Shared by both RTF renderers below (generic and manuscript-mode).
+   Lines come from UTF-8 source files, but RTF's \uN escape wants one
+   Unicode code point at a time — so any non-ASCII byte run must be
+   decoded to a code point first, never escaped byte-by-byte (a
+   multi-byte UTF-8 character escaped one raw byte at a time comes out
+   as mojibake in the RTF reader, each byte reinterpreted as its own
+   \ansicpg1252 character). *)
+
+(* Decode one Unicode code point starting at byte k of s (well-formed
+   UTF-8). cp is the code point, nbytes how many bytes it occupied. A
+   truncated/invalid lead byte at end-of-line degrades to its own raw
+   byte value, 1 byte consumed. *)
+PROCEDURE DecodeUtf8Cp(s: ARRAY OF CHAR; k, len: INTEGER; VAR cp, nbytes: INTEGER);
+VAR b0, b1, b2, b3: INTEGER;
 BEGIN
-  RETURN ((c >= 'a') & (c <= 'z')) OR ((c >= 'A') & (c <= 'Z'))
-      OR ((c >= '0') & (c <= '9')) OR (c = '_')
-END IsWordChar;
+  b0 := ORD(s[k]);
+  IF b0 < 80H THEN
+    cp := b0; nbytes := 1
+  ELSIF (b0 >= 0C0H) & (b0 < 0E0H) & (k + 1 < len) THEN
+    b1 := ORD(s[k + 1]);
+    cp := ((b0 - 0C0H) * 40H) + (b1 - 80H); nbytes := 2
+  ELSIF (b0 >= 0E0H) & (b0 < 0F0H) & (k + 2 < len) THEN
+    b1 := ORD(s[k + 1]); b2 := ORD(s[k + 2]);
+    cp := ((b0 - 0E0H) * 1000H) + ((b1 - 80H) * 40H) + (b2 - 80H); nbytes := 3
+  ELSIF (b0 >= 0F0H) & (k + 3 < len) THEN
+    b1 := ORD(s[k + 1]); b2 := ORD(s[k + 2]); b3 := ORD(s[k + 3]);
+    cp := ((b0 - 0F0H) * 40000H) + ((b1 - 80H) * 1000H) +
+          ((b2 - 80H) * 40H) + (b3 - 80H);
+    nbytes := 4
+  ELSE
+    cp := b0; nbytes := 1
+  END
+END DecodeUtf8Cp;
+
+(* A single ASCII stand-in for a non-ASCII code point, read by \uc1
+   readers that ignore \uN. Recognizes the handful of typographic
+   substitutes the manuscript renderer produces; anything else (an
+   already-Unicode character carried verbatim from a UTF-8 source, as
+   the generic renderer never smartens ASCII into these) falls back to
+   a bare '?'. *)
+PROCEDURE RtfAsciiFallback(cp: INTEGER): CHAR;
+BEGIN
+  IF (cp = 8216) OR (cp = 8217) THEN RETURN 27X
+  ELSIF (cp = 8220) OR (cp = 8221) THEN RETURN 22X
+  ELSIF (cp = 8212) OR (cp = 8211) THEN RETURN '-'
+  ELSIF cp = 8230 THEN RETURN '.'
+  ELSE RETURN '?'
+  END
+END RtfAsciiFallback;
+
+(* Escape one already-decoded code point for RTF output: backslash/
+   braces/tab as control words, plain ASCII verbatim, astral code
+   points degrade to '?' (no surrogate-pair support), and everything
+   else as a single \uN escape (two's-complement above 0x7FFF) plus a
+   one-character ASCII fallback. *)
+PROCEDURE RtfEscCp(cp: INTEGER);
+VAR tmp: ARRAY 16 OF CHAR; sgn: INTEGER;
+BEGIN
+  IF    cp = 5CH THEN Wstr("\\\\")
+  ELSIF cp = 7BH THEN Wstr("\{")
+  ELSIF cp = 7DH THEN Wstr("\}")
+  ELSIF cp = 9  THEN Wstr("\tab ")
+  ELSIF cp < 80H THEN Wch(CHR(cp))
+  ELSIF cp >= 10000H THEN Wch('?')
+  ELSE
+    IF cp > 7FFFH THEN sgn := cp - 10000H ELSE sgn := cp END;
+    Wstr("\u"); Strings.IntToStr(sgn, tmp); Wstr(tmp);
+    Wch(' '); Wch(RtfAsciiFallback(cp))
+  END
+END RtfEscCp;
+
+(* Escape a whole NUL-terminated string (used for the small txt/url
+   scratch buffers pulled out of `[text](url)` links, and for code-
+   block lines, which have no surrounding line-buffer length handy). *)
+PROCEDURE RtfEscStr(buf: ARRAY OF CHAR);
+VAR k, blen, cp, nbytes: INTEGER;
+BEGIN
+  blen := Strings.Length(buf); k := 0;
+  WHILE k < blen DO
+    DecodeUtf8Cp(buf, k, blen, cp, nbytes); RtfEscCp(cp); INC(k, nbytes)
+  END
+END RtfEscStr;
 
 (* ── Generic markdown structure ──────────────────────────
    No output-format dependency; usable by any renderer. *)
 
 PROCEDURE IsHRule*(s: ARRAY OF CHAR): BOOLEAN;
-VAR i: INTEGER; c: CHAR;
+(* A line of only one marker char (-, *, _) and spaces, with at least
+   three occurrences of the marker itself — e.g. "* * *" (5 chars, 3
+   markers) qualifies, but "-  " (1 marker padded by trailing spaces)
+   must not: count markers, not total line length. *)
+VAR i, count: INTEGER; c: CHAR;
 BEGIN
   c := s[0];
   IF (c # '-') & (c # '*') & (c # '_') THEN RETURN FALSE END;
-  i := 0;
-  WHILE (s[i] = c) OR (s[i] = ' ') DO INC(i) END;
-  RETURN (s[i] = 0X) & (i >= 3)
+  i := 0; count := 0;
+  WHILE (s[i] = c) OR (s[i] = ' ') DO
+    IF s[i] = c THEN INC(count) END;
+    INC(i)
+  END;
+  RETURN (s[i] = 0X) & (count >= 3)
 END IsHRule;
 
 PROCEDURE IsTableSep*(s: ARRAY OF CHAR): BOOLEAN;
@@ -363,27 +476,9 @@ BEGIN EndBlock; Wstr("</body></html>"); Wln END HtmlFooter;
 
 (* ── RTF ──────────────────────────────────────────────── *)
 
-PROCEDURE WriteHex2(n: INTEGER);
-VAR hi, lo: INTEGER;
-BEGIN
-  hi := n DIV 16; lo := n MOD 16;
-  IF hi < 10 THEN Wch(CHR(ORD('0') + hi)) ELSE Wch(CHR(ORD('a') + hi - 10)) END;
-  IF lo < 10 THEN Wch(CHR(ORD('0') + lo)) ELSE Wch(CHR(ORD('a') + lo - 10)) END
-END WriteHex2;
-
-PROCEDURE RtfEsc(c: CHAR);
-BEGIN
-  IF    c = '\' THEN Wstr("\\")
-  ELSIF c = '{' THEN Wstr("\{")
-  ELSIF c = '}' THEN Wstr("\}")
-  ELSIF ORD(c) > 127 THEN Wstr("\'"); WriteHex2(ORD(c))
-  ELSE  Wch(c)
-  END
-END RtfEsc;
-
 PROCEDURE WriteInlineRtf(s: ARRAY OF CHAR);
 VAR
-  i, n, j, k : INTEGER;
+  i, n, j, k, cp, nbytes : INTEGER;
   c           : CHAR;
   txt, url    : ARRAY 512 OF CHAR;
 BEGIN
@@ -399,7 +494,9 @@ BEGIN
       ital := ~ital; INC(i)
     ELSIF c = '`' THEN
       Wstr("{\f1\fs20 "); INC(i);
-      WHILE (i < n) & (s[i] # '`') DO RtfEsc(s[i]); INC(i) END;
+      WHILE (i < n) & (s[i] # '`') DO
+        DecodeUtf8Cp(s, i, n, cp, nbytes); RtfEscCp(cp); INC(i, nbytes)
+      END;
       Wch('}'); IF i < n THEN INC(i) END
     ELSIF c = '[' THEN
       j := i + 1; k := 0;
@@ -413,14 +510,14 @@ BEGIN
           url[k] := s[j]; INC(j); INC(k)
         END;
         url[k] := 0X;
-        k := 0; WHILE txt[k] # 0X DO RtfEsc(txt[k]); INC(k) END;
-        Wstr(" ("); k := 0; WHILE url[k] # 0X DO RtfEsc(url[k]); INC(k) END; Wch(')');
+        RtfEscStr(txt);
+        Wstr(" ("); RtfEscStr(url); Wch(')');
         i := j + 1
       ELSE
-        RtfEsc(c); INC(i)
+        DecodeUtf8Cp(s, i, n, cp, nbytes); RtfEscCp(cp); INC(i, nbytes)
       END
     ELSE
-      RtfEsc(c); INC(i)
+      DecodeUtf8Cp(s, i, n, cp, nbytes); RtfEscCp(cp); INC(i, nbytes)
     END
   END;
   IF bold THEN Wstr("\b0 ") END;
@@ -481,7 +578,7 @@ BEGIN
     IF Strings.StartsWith(s, "```") THEN
       Wstr("\par\pard\f0\fs24\sb120 "); inCode := FALSE
     ELSE
-      i := 0; WHILE s[i] # 0X DO RtfEsc(s[i]); INC(i) END;
+      RtfEscStr(s);
       Wstr("\line ")
     END;
     RETURN
@@ -582,7 +679,7 @@ BEGIN
   Wstr("{\f0\froman\fcharset0 Times New Roman;}"); Wln;
   Wstr("{\f1\fmodern\fcharset0 Courier New;}"); Wln;
   Wstr("{\f2\fswiss\fcharset0 Arial;}}"); Wln;
-  Wstr("\widowctrl\hyphauto\f0\fs24 "); Wln
+  Wstr("\uc1\widowctrl\hyphauto\f0\fs24 "); Wln
 END RtfHeader;
 
 PROCEDURE RtfFooter*;
@@ -602,69 +699,105 @@ BEGIN
   Wch(' '); Wch(fallback)
 END MsUni;
 
-PROCEDURE MsEsc(c: CHAR);
-VAR tmp: ARRAY 16 OF CHAR;
+(* Whether a quote/apostrophe at this point opens (rather than closes),
+   judged by the previous code point — matches pstar's normalize::
+   opens_quote: start of text, whitespace, or an opening bracket/dash.
+   prevCp < 0 is the start-of-text sentinel. *)
+PROCEDURE MsOpensQuote(prevCp: INTEGER): BOOLEAN;
 BEGIN
-  IF    c = 5CH THEN Wstr("\\\\")
-  ELSIF c = 7BH THEN Wstr("\{")
-  ELSIF c = 7DH THEN Wstr("\}")
-  ELSIF c = 9X  THEN Wstr("\tab ")
-  ELSIF ORD(c) >= 128 THEN
-    Wstr("\u"); Strings.IntToStr(ORD(c) - 256, tmp); Wstr(tmp);
-    Wch(' '); Wch('?')
-  ELSE Wch(c)
-  END
-END MsEsc;
+  RETURN (prevCp < 0) OR (prevCp = ORD(' ')) OR (prevCp = 9) OR (prevCp = 10) OR
+         (prevCp = ORD('(')) OR (prevCp = ORD('[')) OR (prevCp = ORD('{')) OR
+         (prevCp = 8212) OR (prevCp = 8211)
+END MsOpensQuote;
 
-(* Render a heading title from byte `from` on: escape only, no emphasis
-   or smart typography. *)
+(* Render a heading title from byte `from` on: smart typography (dash
+   runs, ellipsis, curly quotes) but no *italic*/**bold** emphasis —
+   matches pstar's heading path (normalize::smart_typography run over
+   the title string, then escape_rtf; headings never scan for Markdown
+   emphasis markers). Quote open/close here tracks the *substituted*
+   previous character, not the raw source one — e.g. a quote right
+   after a freshly-collapsed em dash opens — because pstar's heading
+   renderer threads `prev` through the output stream, unlike its body
+   renderer (see MsBody). *)
 PROCEDURE MsTitle(s: ARRAY OF CHAR; from: INTEGER);
-VAR k, len: INTEGER;
+VAR k, len, n, run, cp, prevCp: INTEGER;
 BEGIN
   len := Strings.Length(s);
-  FOR k := from TO len - 1 DO MsEsc(s[k]) END
+  k := from; prevCp := -1;
+  WHILE k < len DO
+    IF s[k] = '-' THEN
+      run := 0;
+      WHILE (k + run < len) & (s[k + run] = '-') DO INC(run) END;
+      IF run >= 2 THEN
+        MsUni(8212, '-'); prevCp := 8212; INC(k, run)
+      ELSE
+        RtfEscCp(ORD('-')); prevCp := ORD('-'); INC(k)
+      END
+    ELSIF (s[k] = '.') & (k + 2 < len) & (s[k + 1] = '.') & (s[k + 2] = '.') THEN
+      MsUni(8230, '.'); prevCp := 8230; INC(k, 3)
+    ELSIF s[k] = 22X THEN
+      IF MsOpensQuote(prevCp) THEN MsUni(8220, 22X); prevCp := 8220
+      ELSE MsUni(8221, 22X); prevCp := 8221
+      END;
+      INC(k)
+    ELSIF s[k] = 27X THEN
+      IF MsOpensQuote(prevCp) THEN MsUni(8216, 27X); prevCp := 8216
+      ELSE MsUni(8217, 27X); prevCp := 8217
+      END;
+      INC(k)
+    ELSE
+      DecodeUtf8Cp(s, k, len, cp, n);
+      RtfEscCp(cp); prevCp := cp; INC(k, n)
+    END
+  END
 END MsTitle;
 
 (* Render a body paragraph line with *italic*/**bold** and smart
-   typography (em dash, ellipsis, curly quotes/apostrophes). *)
+   typography (em dash, ellipsis, curly quotes/apostrophes). Quote
+   open/close tracks the *raw source* previous character — matches
+   pstar's body-paragraph renderer (normalize::smart_char is fed
+   `source[i-1]`, the pre-substitution char, not the curly output —
+   so e.g. a quote right after two raw hyphens still closes, since
+   the immediate predecessor is a plain '-', not a curly em dash).
+   Markdown emphasis markers (`*`, `**`) are transparent to this
+   tracking, same as pstar's marker-stripped `source` array: they are
+   consumed without updating prevCp. *)
 PROCEDURE MsBody(s: ARRAY OF CHAR);
-VAR k, len: INTEGER; c, prev: CHAR; msBold, msItal: BOOLEAN;
+VAR k, len, n, run, cp, prevCp: INTEGER; msBold, msItal: BOOLEAN;
 BEGIN
   msBold := FALSE; msItal := FALSE;
   len := Strings.Length(s);
-  k := 0; prev := ' ';
+  k := 0; prevCp := -1;
   WHILE k < len DO
-    c := s[k];
-    IF (c = '*') & (k + 1 < len) & (s[k + 1] = '*') THEN
+    IF (s[k] = '*') & (k + 1 < len) & (s[k + 1] = '*') THEN
       IF msBold THEN Wstr("\b0 ") ELSE Wstr("\b ") END;
       msBold := ~msBold; INC(k, 2)
-    ELSIF c = '*' THEN
+    ELSIF s[k] = '*' THEN
       IF msItal THEN Wstr("\i0 ") ELSE Wstr("\i ") END;
       msItal := ~msItal; INC(k)
-    ELSIF (c = '-') & (k + 1 < len) & (s[k + 1] = '-') THEN
-      MsUni(8212, '-'); INC(k, 2)   (* em dash *)
-    ELSIF (c = '.') & (k + 1 < len) & (s[k + 1] = '.') &
-          (k + 2 < len) & (s[k + 2] = '.') THEN
-      MsUni(8230, '.'); INC(k, 3)   (* ellipsis *)
-    ELSIF c = 22X THEN             (* " double quote *)
-      IF IsWordChar(prev) OR (prev = '.') OR (prev = ',') OR
-         (prev = '?') OR (prev = '!') OR (prev = 27X) OR (prev = ')') THEN
-        MsUni(8221, 22X)            (* close " *)
+    ELSIF s[k] = '-' THEN
+      run := 0;
+      WHILE (k + run < len) & (s[k + run] = '-') DO INC(run) END;
+      IF run >= 2 THEN
+        MsUni(8212, '-'); prevCp := ORD('-'); INC(k, run)
       ELSE
-        MsUni(8220, 22X)            (* open " *)
+        RtfEscCp(ORD('-')); prevCp := ORD('-'); INC(k)
+      END
+    ELSIF (s[k] = '.') & (k + 2 < len) & (s[k + 1] = '.') & (s[k + 2] = '.') THEN
+      MsUni(8230, '.'); prevCp := ORD('.'); INC(k, 3)   (* ellipsis *)
+    ELSIF s[k] = 22X THEN             (* " double quote *)
+      IF MsOpensQuote(prevCp) THEN MsUni(8220, 22X)     (* open " *)
+      ELSE MsUni(8221, 22X)                             (* close " *)
       END;
-      prev := c; INC(k)
-    ELSIF c = 27X THEN             (* ' apostrophe / single quote *)
-      IF IsWordChar(prev) OR (prev = ',') OR (prev = '.') THEN
-        MsUni(8217, 27X)            (* apostrophe / close ' *)
-      ELSE
-        MsUni(8216, 27X)            (* open ' *)
+      prevCp := ORD(22X); INC(k)
+    ELSIF s[k] = 27X THEN             (* ' apostrophe / single quote *)
+      IF MsOpensQuote(prevCp) THEN MsUni(8216, 27X)     (* open ' *)
+      ELSE MsUni(8217, 27X)                             (* apostrophe / close ' *)
       END;
-      prev := c; INC(k)
-    ELSIF c = 5CH THEN Wstr("\\\\"); prev := c; INC(k)
-    ELSIF c = 7BH THEN Wstr("\{");  prev := c; INC(k)
-    ELSIF c = 7DH THEN Wstr("\}");  prev := c; INC(k)
-    ELSE MsEsc(c); prev := c; INC(k)
+      prevCp := ORD(27X); INC(k)
+    ELSE
+      DecodeUtf8Cp(s, k, len, cp, n);
+      RtfEscCp(cp); prevCp := cp; INC(k, n)
     END
   END;
   IF msBold THEN Wstr("\b0 ") END;
@@ -719,5 +852,260 @@ END RtfManuscriptLine;
 
 PROCEDURE RtfManuscriptFooter*;
 BEGIN Wstr("}"); Wln END RtfManuscriptFooter;
+
+(* ── EPUB ─────────────────────────────────────────────────
+   Minimal EPUB 3 content generation, modeled on PerfectStar 2k's
+   epub.rs: a single, unstyled content.xhtml (every heading level
+   h1-h6, paragraphs, smart typography, *italic*/**bold**/`code`
+   spans, ".."-notes stripped, no per-chapter split — the reading
+   system supplies its own stylesheet) plus a flat nav.xhtml linking
+   every heading by a shared "heading-N" counter. As documented at the
+   top of the file, only the XML text comes from here; ZIP assembly
+   (mimetype/META-INF/container.xml/OEBPS/package.opf/content.xhtml/
+   nav.xhtml, with per-entry CRC-32) is caller bookkeeping layered
+   atop SetSink, the same as for the RTF/HTML renderers above. *)
+
+PROCEDURE XmlEscCp(cp: INTEGER);
+(* Escape one already-decoded code point for XML/XHTML text: the five
+   predefined entities, plain ASCII verbatim, and everything else
+   re-encoded as UTF-8 bytes — matches pstar's escape_xml, except XML
+   has no RTF-style \uN fallback to carry, so a non-ASCII code point
+   is simply its own UTF-8 sequence. *)
+VAR b: INTEGER;
+BEGIN
+  IF    cp = ORD('&') THEN Wstr("&amp;")
+  ELSIF cp = ORD('<') THEN Wstr("&lt;")
+  ELSIF cp = ORD('>') THEN Wstr("&gt;")
+  ELSIF cp = ORD('"') THEN Wstr("&quot;")
+  ELSIF cp = ORD(27X) THEN Wstr("&apos;")
+  ELSIF cp < 80H THEN Wch(CHR(cp))
+  ELSIF cp < 800H THEN
+    Wch(CHR(0C0H + cp DIV 40H)); Wch(CHR(80H + cp MOD 40H))
+  ELSIF cp < 10000H THEN
+    b := cp DIV 40H;
+    Wch(CHR(0E0H + cp DIV 1000H));
+    Wch(CHR(80H + b MOD 40H));
+    Wch(CHR(80H + cp MOD 40H))
+  ELSE
+    b := cp DIV 40H;
+    Wch(CHR(0F0H + cp DIV 40000H));
+    Wch(CHR(80H + (b DIV 40H) MOD 40H));
+    Wch(CHR(80H + b MOD 40H));
+    Wch(CHR(80H + cp MOD 40H))
+  END
+END XmlEscCp;
+
+PROCEDURE EpubEscStr(buf: ARRAY OF CHAR);
+(* Escape a whole NUL-terminated string — used for the fixed <title>
+   text the caller has no per-line context for. *)
+VAR k, blen, cp, nbytes: INTEGER;
+BEGIN
+  blen := Strings.Length(buf); k := 0;
+  WHILE k < blen DO
+    DecodeUtf8Cp(buf, k, blen, cp, nbytes); XmlEscCp(cp); INC(k, nbytes)
+  END
+END EpubEscStr;
+
+(* Render a heading title from byte `from` on: smart typography only,
+   no *italic*/**bold**/`code` — matches pstar's heading path
+   (normalize::smart_typography over the raw title; headings never
+   scan for Markdown emphasis markers). Quote open/close tracks the
+   *substituted* previous character, exactly like MsTitle. *)
+PROCEDURE EpubTitle(s: ARRAY OF CHAR; from: INTEGER);
+VAR k, len, n, run, cp, prevCp: INTEGER;
+BEGIN
+  len := Strings.Length(s);
+  k := from; prevCp := -1;
+  WHILE k < len DO
+    IF s[k] = '-' THEN
+      run := 0;
+      WHILE (k + run < len) & (s[k + run] = '-') DO INC(run) END;
+      IF run >= 2 THEN
+        XmlEscCp(8212); prevCp := 8212; INC(k, run)
+      ELSE
+        XmlEscCp(ORD('-')); prevCp := ORD('-'); INC(k)
+      END
+    ELSIF (s[k] = '.') & (k + 2 < len) & (s[k + 1] = '.') & (s[k + 2] = '.') THEN
+      XmlEscCp(8230); prevCp := 8230; INC(k, 3)
+    ELSIF s[k] = 22X THEN
+      IF MsOpensQuote(prevCp) THEN XmlEscCp(8220); prevCp := 8220
+      ELSE XmlEscCp(8221); prevCp := 8221
+      END;
+      INC(k)
+    ELSIF s[k] = 27X THEN
+      IF MsOpensQuote(prevCp) THEN XmlEscCp(8216); prevCp := 8216
+      ELSE XmlEscCp(8217); prevCp := 8217
+      END;
+      INC(k)
+    ELSE
+      DecodeUtf8Cp(s, k, len, cp, n);
+      XmlEscCp(cp); prevCp := cp; INC(k, n)
+    END
+  END
+END EpubTitle;
+
+(* Render a body paragraph line: *italic*/**bold**/`code` spans plus
+   smart typography (em dash, ellipsis, curly quotes/apostrophes),
+   suppressed inside `code`. Quote open/close tracks the *raw source*
+   previous character, exactly like MsBody. *)
+PROCEDURE EpubBody(s: ARRAY OF CHAR);
+VAR k, len, n, run, cp, prevCp: INTEGER; epBold, epItal: BOOLEAN;
+BEGIN
+  epBold := FALSE; epItal := FALSE;
+  len := Strings.Length(s);
+  k := 0; prevCp := -1;
+  WHILE k < len DO
+    IF (s[k] = '*') & (k + 1 < len) & (s[k + 1] = '*') THEN
+      IF epBold THEN Wstr("</strong>") ELSE Wstr("<strong>") END;
+      epBold := ~epBold; INC(k, 2)
+    ELSIF s[k] = '*' THEN
+      IF epItal THEN Wstr("</em>") ELSE Wstr("<em>") END;
+      epItal := ~epItal; INC(k)
+    ELSIF s[k] = '`' THEN
+      Wstr("<code>"); INC(k);
+      WHILE (k < len) & (s[k] # '`') DO
+        DecodeUtf8Cp(s, k, len, cp, n); XmlEscCp(cp); INC(k, n)
+      END;
+      Wstr("</code>"); IF k < len THEN INC(k) END
+    ELSIF s[k] = '-' THEN
+      run := 0;
+      WHILE (k + run < len) & (s[k + run] = '-') DO INC(run) END;
+      IF run >= 2 THEN
+        XmlEscCp(8212); prevCp := ORD('-'); INC(k, run)
+      ELSE
+        XmlEscCp(ORD('-')); prevCp := ORD('-'); INC(k)
+      END
+    ELSIF (s[k] = '.') & (k + 2 < len) & (s[k + 1] = '.') & (s[k + 2] = '.') THEN
+      XmlEscCp(8230); prevCp := ORD('.'); INC(k, 3)
+    ELSIF s[k] = 22X THEN
+      IF MsOpensQuote(prevCp) THEN XmlEscCp(8220) ELSE XmlEscCp(8221) END;
+      prevCp := ORD(22X); INC(k)
+    ELSIF s[k] = 27X THEN
+      IF MsOpensQuote(prevCp) THEN XmlEscCp(8216) ELSE XmlEscCp(8217) END;
+      prevCp := ORD(27X); INC(k)
+    ELSE
+      DecodeUtf8Cp(s, k, len, cp, n);
+      XmlEscCp(cp); prevCp := cp; INC(k, n)
+    END
+  END;
+  IF epBold THEN Wstr("</strong>") END;
+  IF epItal THEN Wstr("</em>") END
+END EpubBody;
+
+PROCEDURE EpubNavSink(c: CHAR);
+(* WriteProc that appends to epubNavBuf instead of the real sink —
+   temporarily installed by EpubLine (via SetSink) so a heading's
+   <li> can be rendered into the accumulator with the exact same
+   EpubTitle call used for its content.xhtml <hN>, then restored. *)
+BEGIN
+  IF epubNavLen < EpubNavBufSize - 1 THEN
+    epubNavBuf[epubNavLen] := c; INC(epubNavLen);
+    epubNavBuf[epubNavLen] := 0X
+  END
+END EpubNavSink;
+
+PROCEDURE EpubXhtmlStart(title: ARRAY OF CHAR);
+BEGIN
+  Wstr('<?xml version="1.0" encoding="UTF-8"?>'); Wln;
+  Wstr("<!DOCTYPE html>"); Wln;
+  Wstr('<html xmlns="http://www.w3.org/1999/xhtml" ');
+  Wstr('xmlns:epub="http://www.idpf.org/2007/ops" lang="en">'); Wln;
+  Wstr('<head><meta charset="utf-8"/><title>');
+  EpubEscStr(title);
+  Wstr("</title></head><body>"); Wln
+END EpubXhtmlStart;
+
+PROCEDURE EpubMimetype*;
+(* The ZIP entry name is "mimetype" (written by the caller); this is
+   just its exact, unterminated content — no trailing newline. *)
+BEGIN Wstr("application/epub+zip") END EpubMimetype;
+
+PROCEDURE EpubContainerXml*;
+BEGIN
+  Wstr('<?xml version="1.0" encoding="UTF-8"?>'); Wln;
+  Wstr('<container version="1.0" ');
+  Wstr('xmlns="urn:oasis:names:tc:opendocument:xmlns:container">'); Wln;
+  Wstr("<rootfiles>"); Wln;
+  Wstr('<rootfile full-path="OEBPS/package.opf" ');
+  Wstr('media-type="application/oebps-package+xml"/>'); Wln;
+  Wstr("</rootfiles>"); Wln;
+  Wstr("</container>"); Wln
+END EpubContainerXml;
+
+PROCEDURE EpubPackageOpf*;
+(* Fixed, non-derived metadata — same simplification as pstar's own
+   package.opf (a static string, not filled in from the document). *)
+BEGIN
+  Wstr('<?xml version="1.0" encoding="UTF-8"?>'); Wln;
+  Wstr('<package xmlns="http://www.idpf.org/2007/opf" version="3.0" ');
+  Wstr('unique-identifier="book-id">'); Wln;
+  Wstr('<metadata xmlns:dc="http://purl.org/dc/elements/1.1/">'); Wln;
+  Wstr('<dc:identifier id="book-id">urn:uuid:markdown-export</dc:identifier>'); Wln;
+  Wstr("<dc:title>Markdown Export</dc:title>"); Wln;
+  Wstr("<dc:language>en</dc:language>"); Wln;
+  Wstr('<meta property="dcterms:modified">1980-01-01T00:00:00Z</meta>'); Wln;
+  Wstr("</metadata>"); Wln;
+  Wstr("<manifest>"); Wln;
+  Wstr('<item id="content" href="content.xhtml" ');
+  Wstr('media-type="application/xhtml+xml"/>'); Wln;
+  Wstr('<item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" ');
+  Wstr('properties="nav"/>'); Wln;
+  Wstr("</manifest>"); Wln;
+  Wstr('<spine><itemref idref="content"/></spine>'); Wln;
+  Wstr("</package>"); Wln
+END EpubPackageOpf;
+
+PROCEDURE EpubContentHeader*;
+BEGIN EpubXhtmlStart("Markdown Export") END EpubContentHeader;
+
+PROCEDURE EpubContentFooter*;
+BEGIN Wstr("</body></html>"); Wln END EpubContentFooter;
+
+PROCEDURE EpubLine*(s: ARRAY OF CHAR);
+VAR lev, len, n: INTEGER; num: ARRAY 16 OF CHAR; savedSink: WriteProc;
+BEGIN
+  len := Strings.Length(s);
+  IF (s[0] = '.') & (s[1] = '.') THEN
+    (* note line: skip *)
+  ELSIF len = 0 THEN
+    (* blank line: skip *)
+  ELSE
+    lev := 0;
+    WHILE (lev < 6) & (s[lev] = '#') DO INC(lev) END;
+    IF (lev > 0) & (s[lev] = ' ') THEN
+      INC(epubHeadingN); Strings.IntToStr(epubHeadingN, num);
+
+      (* content.xhtml: <hN id="heading-K">title</hN> *)
+      Wch('<'); Wch('h'); Wch(CHR(ORD('0') + lev));
+      Wstr(' id="heading-'); Wstr(num); Wstr('">');
+      EpubTitle(s, lev + 1);
+      Wch('<'); Wch('/'); Wch('h'); Wch(CHR(ORD('0') + lev)); Wch('>'); Wln;
+
+      (* nav.xhtml <li>, rendered into the internal accumulator by
+         swapping in EpubNavSink for the duration of this one entry *)
+      savedSink := sink; SetSink(EpubNavSink);
+      Wstr('<li><a href="content.xhtml#heading-'); Wstr(num); Wstr('">');
+      EpubTitle(s, lev + 1);
+      Wstr("</a></li>"); Wln;
+      SetSink(savedSink)
+    ELSE
+      Wstr("<p>"); EpubBody(s); Wstr("</p>"); Wln
+    END
+  END
+END EpubLine;
+
+PROCEDURE EpubNavXhtml*;
+(* Renders the complete nav.xhtml document — including the <li>
+   entries EpubLine accumulated during the EpubContentHeader/EpubLine/
+   EpubContentFooter pass — to whatever sink is current, so the
+   caller should SetSink to the nav.xhtml destination first. *)
+VAR i: INTEGER;
+BEGIN
+  EpubXhtmlStart("Contents");
+  Wstr('<nav epub:type="toc" id="toc"><h1>Contents</h1><ol>'); Wln;
+  i := 0; WHILE epubNavBuf[i] # 0X DO Wch(epubNavBuf[i]); INC(i) END;
+  Wstr("</ol></nav>"); Wln;
+  Wstr("</body></html>"); Wln
+END EpubNavXhtml;
 
 END Markdown.
