@@ -30,20 +30,32 @@ MODULE Markdown;
  * paragraph on its own (no cross-line accumulation), so it needs no
  * end-of-block flush the way the generic renderers do.
  *
- * EpubContentHeader/EpubLine/EpubContentFooter/EpubNavXhtml/
- * EpubContainerXml/EpubPackageOpf/EpubMimetype generate the five text
- * members of a minimal EPUB 3 — modeled on PerfectStar 2k's epub.rs,
- * not on plume's own (separate, EPUB 2/toc.ncx-style) --epub output:
- * one unstyled content.xhtml (h1-h6 headings, paragraphs, smart
- * typography, *italic*/**bold**/`code` spans, ".."-notes stripped, no
- * per-chapter split) plus a flat nav.xhtml linking every heading. As
- * with the renderers above, only the five members' *text* comes from
- * here — packing them into an actual .epub (ZIP local/central-
- * directory headers, per-entry CRC-32) is caller bookkeeping layered
- * atop SetSink, same as noted for RTF/HTML above.
- *   Markdown.EpubContentHeader;         (* -> content.xhtml *)
- *   Markdown.EpubLine(line);            (* once per input line *)
- *   Markdown.EpubContentFooter;
+ * EpubContentHeader/EpubLine/EpubContentFooter/EpubStartsChapter/
+ * EpubBeginChapter/EpubNavXhtml/EpubContainerXml/EpubPackageOpf/
+ * EpubMimetype generate the text members of a minimal EPUB 3 —
+ * modeled on PerfectStar 2k's epub.rs, not on plume's own (separate,
+ * EPUB 2/toc.ncx-style) --epub output: one unstyled chapterN.xhtml
+ * per level-1 (#) heading (h1-h6 headings, paragraphs, smart
+ * typography, *italic*/**bold**/`code` spans, ".."-notes stripped)
+ * plus a flat nav.xhtml linking every heading. As with the renderers
+ * above, only each member's *text* comes from here — packing them
+ * into an actual .epub (ZIP local/central-directory headers,
+ * per-entry CRC-32) is caller bookkeeping layered atop SetSink, same
+ * as noted for RTF/HTML above. The caller drives one chapter file at
+ * a time, checking EpubStartsChapter before each line to know when to
+ * close the current chapter file and open the next:
+ *   Markdown.EpubContentHeader;         (* -> chapter1.xhtml *)
+ *   (* per input line: *)
+ *     IF Markdown.EpubStartsChapter(line) THEN
+ *       Markdown.EpubContentFooter;     (* close current chapter file *)
+ *       (* register/close it, open the next chapter file, SetSink *)
+ *       Markdown.EpubBeginChapter;
+ *       Markdown.EpubContentHeader      (* -> chapterN.xhtml *)
+ *     END;
+ *     Markdown.EpubLine(line);
+ *   Markdown.EpubContentFooter;         (* close the last chapter file *)
+ *   Markdown.SetSink(...);              (* -> package.opf *)
+ *   Markdown.EpubPackageOpf(Markdown.EpubChapterNum());
  *   Markdown.SetSink(...);              (* -> nav.xhtml *)
  *   Markdown.EpubNavXhtml;
  *)
@@ -75,14 +87,18 @@ VAR
      yet (so the very first one skips the leading page break). *)
   msFirst                  : BOOLEAN;
 
-  (* EPUB state: a heading counter shared between content.xhtml's
+  (* EPUB state: a heading counter shared between each chapter file's
      "heading-N" ids and nav.xhtml's matching links, and an internal
      accumulator for nav.xhtml's <li> markup, built up during the same
-     single pass over the document that streams content.xhtml (see
-     EpubLine/EpubNavSink). *)
+     single pass over the document that streams the chapter files (see
+     EpubLine/EpubNavSink). epubChapterN/epubChapterHasContent track
+     which chapterN.xhtml is current (see EpubStartsChapter/
+     EpubBeginChapter) so nav links point at the right file. *)
   epubHeadingN             : INTEGER;
   epubNavBuf               : ARRAY EpubNavBufSize OF CHAR;
   epubNavLen               : INTEGER;
+  epubChapterN             : INTEGER;
+  epubChapterHasContent    : BOOLEAN;
 
 (* ── Output primitives ────────────────────────────────── *)
 
@@ -107,7 +123,8 @@ BEGIN
   bold := FALSE; ital := FALSE;
   inTable := FALSE; inTableHead := FALSE; tableCols := 0;
   msFirst := TRUE;
-  epubHeadingN := 0; epubNavLen := 0; epubNavBuf[0] := 0X
+  epubHeadingN := 0; epubNavLen := 0; epubNavBuf[0] := 0X;
+  epubChapterN := 1; epubChapterHasContent := FALSE
 END Reset;
 
 (* ── UTF-8 / RTF character escaping ──────────────────────
@@ -855,13 +872,13 @@ BEGIN Wstr("}"); Wln END RtfManuscriptFooter;
 
 (* ── EPUB ─────────────────────────────────────────────────
    Minimal EPUB 3 content generation, modeled on PerfectStar 2k's
-   epub.rs: a single, unstyled content.xhtml (every heading level
-   h1-h6, paragraphs, smart typography, *italic*/**bold**/`code`
-   spans, ".."-notes stripped, no per-chapter split — the reading
+   epub.rs: an unstyled chapterN.xhtml per level-1 (#) heading (every
+   heading level h1-h6, paragraphs, smart typography,
+   *italic*/**bold**/`code` spans, ".."-notes stripped — the reading
    system supplies its own stylesheet) plus a flat nav.xhtml linking
    every heading by a shared "heading-N" counter. As documented at the
    top of the file, only the XML text comes from here; ZIP assembly
-   (mimetype/META-INF/container.xml/OEBPS/package.opf/content.xhtml/
+   (mimetype/META-INF/container.xml/OEBPS/package.opf/chapterN.xhtml/
    nav.xhtml, with per-entry CRC-32) is caller bookkeeping layered
    atop SetSink, the same as for the RTF/HTML renderers above. *)
 
@@ -1032,10 +1049,15 @@ BEGIN
   Wstr("</container>"); Wln
 END EpubContainerXml;
 
-PROCEDURE EpubPackageOpf*;
+PROCEDURE EpubPackageOpf*(chapterCount: INTEGER);
 (* Fixed, non-derived metadata — same simplification as pstar's own
-   package.opf (a static string, not filled in from the document). *)
+   package.opf (a static string, not filled in from the document) —
+   except the manifest/spine, which list one chapterN.xhtml item per
+   chapter the caller actually wrote (see EpubStartsChapter/
+   EpubBeginChapter), in reading order. *)
+VAR i: INTEGER; num: ARRAY 16 OF CHAR; n: INTEGER;
 BEGIN
+  n := chapterCount; IF n < 1 THEN n := 1 END;
   Wstr('<?xml version="1.0" encoding="UTF-8"?>'); Wln;
   Wstr('<package xmlns="http://www.idpf.org/2007/opf" version="3.0" ');
   Wstr('unique-identifier="book-id">'); Wln;
@@ -1046,12 +1068,24 @@ BEGIN
   Wstr('<meta property="dcterms:modified">1980-01-01T00:00:00Z</meta>'); Wln;
   Wstr("</metadata>"); Wln;
   Wstr("<manifest>"); Wln;
-  Wstr('<item id="content" href="content.xhtml" ');
-  Wstr('media-type="application/xhtml+xml"/>'); Wln;
+  i := 1;
+  WHILE i <= n DO
+    Strings.IntToStr(i, num);
+    Wstr('<item id="chapter'); Wstr(num); Wstr('" href="chapter'); Wstr(num);
+    Wstr('.xhtml" media-type="application/xhtml+xml"/>'); Wln;
+    INC(i)
+  END;
   Wstr('<item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" ');
   Wstr('properties="nav"/>'); Wln;
   Wstr("</manifest>"); Wln;
-  Wstr('<spine><itemref idref="content"/></spine>'); Wln;
+  Wstr("<spine>"); Wln;
+  i := 1;
+  WHILE i <= n DO
+    Strings.IntToStr(i, num);
+    Wstr('<itemref idref="chapter'); Wstr(num); Wstr('"/>'); Wln;
+    INC(i)
+  END;
+  Wstr("</spine>"); Wln;
   Wstr("</package>"); Wln
 END EpubPackageOpf;
 
@@ -1061,8 +1095,37 @@ BEGIN EpubXhtmlStart("Markdown Export") END EpubContentHeader;
 PROCEDURE EpubContentFooter*;
 BEGIN Wstr("</body></html>"); Wln END EpubContentFooter;
 
+PROCEDURE EpubStartsChapter*(s: ARRAY OF CHAR): BOOLEAN;
+(* TRUE iff line s is a level-1 (#) heading that should begin a new
+   chapter file — i.e. the current chapter file already holds some
+   content, so this heading isn't just its opening line. A pure check
+   (no state changes): the caller tests it before EpubLine so it can
+   close the current chapter file and open the next one first, then
+   call EpubBeginChapter and EpubLine for this same line. *)
+VAR lev: INTEGER;
+BEGIN
+  lev := 0;
+  WHILE (lev < 6) & (s[lev] = '#') DO INC(lev) END;
+  RETURN (lev = 1) & (s[lev] = ' ') & epubChapterHasContent
+END EpubStartsChapter;
+
+PROCEDURE EpubBeginChapter*;
+(* Advance to the next chapter file — call once, right after closing
+   the previous chapterN.xhtml and opening/SetSink'ing the next one,
+   and before the EpubContentHeader/EpubLine call for the heading that
+   triggered EpubStartsChapter. *)
+BEGIN
+  INC(epubChapterN); epubChapterHasContent := FALSE
+END EpubBeginChapter;
+
+PROCEDURE EpubChapterNum*(): INTEGER;
+(* The chapter file currently being written (1-based); once the whole
+   document has been streamed through EpubLine, this is also the total
+   chapter count, for EpubPackageOpf's manifest/spine. *)
+BEGIN RETURN epubChapterN END EpubChapterNum;
+
 PROCEDURE EpubLine*(s: ARRAY OF CHAR);
-VAR lev, len, n: INTEGER; num: ARRAY 16 OF CHAR; savedSink: WriteProc;
+VAR lev, len, n: INTEGER; num, chNum: ARRAY 16 OF CHAR; savedSink: WriteProc;
 BEGIN
   len := Strings.Length(s);
   IF (s[0] = '.') & (s[1] = '.') THEN
@@ -1070,12 +1133,14 @@ BEGIN
   ELSIF len = 0 THEN
     (* blank line: skip *)
   ELSE
+    epubChapterHasContent := TRUE;
     lev := 0;
     WHILE (lev < 6) & (s[lev] = '#') DO INC(lev) END;
     IF (lev > 0) & (s[lev] = ' ') THEN
       INC(epubHeadingN); Strings.IntToStr(epubHeadingN, num);
+      Strings.IntToStr(epubChapterN, chNum);
 
-      (* content.xhtml: <hN id="heading-K">title</hN> *)
+      (* chapterN.xhtml: <hN id="heading-K">title</hN> *)
       Wch('<'); Wch('h'); Wch(CHR(ORD('0') + lev));
       Wstr(' id="heading-'); Wstr(num); Wstr('">');
       EpubTitle(s, lev + 1);
@@ -1084,7 +1149,8 @@ BEGIN
       (* nav.xhtml <li>, rendered into the internal accumulator by
          swapping in EpubNavSink for the duration of this one entry *)
       savedSink := sink; SetSink(EpubNavSink);
-      Wstr('<li><a href="content.xhtml#heading-'); Wstr(num); Wstr('">');
+      Wstr('<li><a href="chapter'); Wstr(chNum);
+      Wstr('.xhtml#heading-'); Wstr(num); Wstr('">');
       EpubTitle(s, lev + 1);
       Wstr("</a></li>"); Wln;
       SetSink(savedSink)

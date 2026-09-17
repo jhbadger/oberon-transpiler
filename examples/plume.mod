@@ -16,6 +16,10 @@ CONST
   FMTHTML = 1;
   FMTDOCX = 2;
   FMTEPUB = 3;
+  (* One chapterN.xhtml ZIP entry per top-level heading, plus
+     mimetype/container.xml/package.opf/nav.xhtml — capped so the
+     total never exceeds ZipWriter.MaxEntries. *)
+  EpubMaxChapters = ZipWriter.MaxEntries - 4;
   PG_W    = 612;
   PG_H    = 792;
   PG_MAR  = 72;
@@ -753,15 +757,29 @@ BEGIN EndBlockTex; Wstr("\end{document}"); Wln END WriteTexFooter;
 PROCEDURE MakeTempPath(base, suffix: ARRAY OF CHAR; VAR out: ARRAY OF CHAR);
 BEGIN COPY(base, out); Strings.Append(suffix, out) END MakeTempPath;
 
+PROCEDURE EpubChapterTempPath(base: ARRAY OF CHAR; n: INTEGER; VAR out: ARRAY OF CHAR);
+VAR num: ARRAY 16 OF CHAR;
+BEGIN
+  Strings.IntToStr(n, num);
+  COPY(base, out); Strings.Append(".chapter", out); Strings.Append(num, out);
+  Strings.Append(".tmp", out)
+END EpubChapterTempPath;
+
+PROCEDURE EpubChapterEntryName(n: INTEGER; VAR out: ARRAY OF CHAR);
+VAR num: ARRAY 16 OF CHAR;
+BEGIN
+  Strings.IntToStr(n, num);
+  COPY("OEBPS/chapter", out); Strings.Append(num, out); Strings.Append(".xhtml", out)
+END EpubChapterEntryName;
+
 PROCEDURE DoEpub;
 VAR f: Files.File;
-    tmpMime, tmpContainer, tmpOpf, tmpContent, tmpNav: ARRAY LLEN OF CHAR;
-    ok: BOOLEAN;
+    tmpMime, tmpContainer, tmpOpf, tmpNav, tmpContent, entryName: ARRAY LLEN OF CHAR;
+    i, chapters: INTEGER; ok: BOOLEAN;
 BEGIN
   MakeTempPath(outFile, ".mime.tmp", tmpMime);
   MakeTempPath(outFile, ".container.tmp", tmpContainer);
   MakeTempPath(outFile, ".opf.tmp", tmpOpf);
-  MakeTempPath(outFile, ".content.tmp", tmpContent);
   MakeTempPath(outFile, ".nav.tmp", tmpNav);
 
   Markdown.Reset;
@@ -777,11 +795,10 @@ BEGIN
   Markdown.EpubContainerXml;
   Files.Register(f); Files.Close(f);
 
-  f := Files.New(tmpOpf);
-  Files.Set(outR, f, 0);
-  Markdown.EpubPackageOpf;
-  Files.Register(f); Files.Close(f);
-
+  (* Each chapter's temp path is a deterministic function of outFile
+     and its chapter number, so it's recomputed on demand below rather
+     than kept in a (potentially very large) array of paths. *)
+  EpubChapterTempPath(outFile, 1, tmpContent);
   f := Files.New(tmpContent);
   Files.Set(outR, f, 0);
   Markdown.EpubContentHeader;
@@ -789,10 +806,25 @@ BEGIN
   Files.ReadLine(inR, line);
   WHILE ~inR.eof DO
     StripCR(line);
+    IF (Markdown.EpubChapterNum() < EpubMaxChapters) & Markdown.EpubStartsChapter(line) THEN
+      Markdown.EpubContentFooter;
+      Files.Register(f); Files.Close(f);
+      Markdown.EpubBeginChapter;
+      EpubChapterTempPath(outFile, Markdown.EpubChapterNum(), tmpContent);
+      f := Files.New(tmpContent);
+      Files.Set(outR, f, 0);
+      Markdown.EpubContentHeader
+    END;
     Markdown.EpubLine(line);
     Files.ReadLine(inR, line)
   END;
   Markdown.EpubContentFooter;
+  Files.Register(f); Files.Close(f);
+  chapters := Markdown.EpubChapterNum();
+
+  f := Files.New(tmpOpf);
+  Files.Set(outR, f, 0);
+  Markdown.EpubPackageOpf(chapters);
   Files.Register(f); Files.Close(f);
 
   f := Files.New(tmpNav);
@@ -804,12 +836,22 @@ BEGIN
   ok := ZipWriter.Add("mimetype", tmpMime) & ok;
   ok := ZipWriter.Add("META-INF/container.xml", tmpContainer) & ok;
   ok := ZipWriter.Add("OEBPS/package.opf", tmpOpf) & ok;
-  ok := ZipWriter.Add("OEBPS/content.xhtml", tmpContent) & ok;
+  i := 1;
+  WHILE i <= chapters DO
+    EpubChapterTempPath(outFile, i, tmpContent);
+    EpubChapterEntryName(i, entryName);
+    ok := ZipWriter.Add(entryName, tmpContent) & ok;
+    INC(i)
+  END;
   ok := ZipWriter.Add("OEBPS/nav.xhtml", tmpNav) & ok;
   ok := ZipWriter.Finish() & ok;
 
   Files.Delete(tmpMime); Files.Delete(tmpContainer); Files.Delete(tmpOpf);
-  Files.Delete(tmpContent); Files.Delete(tmpNav);
+  i := 1;
+  WHILE i <= chapters DO
+    EpubChapterTempPath(outFile, i, tmpContent); Files.Delete(tmpContent); INC(i)
+  END;
+  Files.Delete(tmpNav);
 
   IF ~ok THEN Out.String("plume: EPUB packaging failed"); Out.Ln; HALT(1) END
 END DoEpub;

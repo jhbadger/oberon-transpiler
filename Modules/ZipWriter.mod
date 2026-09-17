@@ -25,7 +25,10 @@ MODULE ZipWriter;
 IMPORT Files, Strings;
 
 CONST
-  MaxEntries* = 32;
+  (* 512 comfortably covers even a heavily-chaptered book (EPUB export
+     adds one entry per top-level heading) while costing under 100KB
+     of static storage (zNm alone is 128 bytes/entry). *)
+  MaxEntries* = 512;
 
 VAR
   MININT   : INTEGER;
