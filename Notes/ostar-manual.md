@@ -45,13 +45,13 @@ arrow keys, Home/End, Page Up/Down, and the mouse, so you can mix styles.
 | Area | Highlights |
 |---|---|
 | Editing | Insert/overtype, undo (400 levels), word-left/right, transpose char/word, kill ring (8 slots) for cut/copy/paste of lines and blocks |
-| Movement | Diamond keys, word/sentence/paragraph/heading jumps, "previous position" jump (`^QP`), screen top/bottom, doc start/end |
+| Movement | Diamond keys, word/sentence/paragraph/heading jumps, "previous position" jump (`^QP`), ten numbered bookmarks (`^K0`–`9` set, `^Q0`–`9` jump), screen top/bottom, doc start/end |
 | Search | Incremental find (`^QF`), find & replace with per-match Y/N/A confirmation (`^QA`), find-next (`^L`) |
 | Word wrap | Soft (visual) wrap at a configurable column, on by default at 72 |
 | Spell check | hunspell-backed; flags misspellings in the theme's error color, jump between them, maintain a personal dictionary |
 | Style check | Flags `-ly` adverbs, filler/hedge words, passive voice, and overlong sentences, each in its own color |
 | Projects | Group several files into a `.ostarproj` manifest; binder popup with per-doc synopses (`^PI`/`^PY`) and note/manuscript roles (`^PM`), outline panel, project-wide search and replace (`^PS`/`^PW`), and "compile" (concatenate all non-note docs to one RTF or text file) |
-| Export | Manuscript-format RTF (`^KM`), plain HTML (`^KJ`), a notes-stripped clean `.txt` (`^KE`), and timestamped backup snapshots (`^KN`, browsable with `^KO`) — RTF and HTML rendering both live in the shared `Modules/Markdown.mod` |
+| Export | Manuscript-format RTF (`^KM`), plain HTML (`^KJ`), a notes-stripped clean `.txt` (`^KE`), and timestamped backup snapshots (`^KN`, browsable with `^KO` and diffable against the live document by pressing `D` there) — RTF and HTML rendering both live in the shared `Modules/Markdown.mod` |
 | Other window | A second, independently-scrolled pane (`^OK`) for reference material or a companion file, with block-copy (`^KA`) and jump-to-source (`^QV`) between the two |
 | Look & feel | Three themes (WordPerfect blue, WordStar black, terminal default), three help-verbosity levels, focus mode, typewriter scrolling, reveal codes (`^OD`) |
 
@@ -147,6 +147,14 @@ Two more useful jumps, both under the `^Q` (Quick) prefix:
   `#`) — handy once you start structuring a manuscript that way (see §6).
 - `^Q P` — jump back to your previous cursor position (set automatically
   by the big jumps like doc-start/end, search, or heading navigation).
+
+For places you want to return to deliberately rather than just "the last
+big jump," use the ten numbered bookmarks: `^K` then a digit `0`–`9` marks
+the cursor's current position as that bookmark; `^Q` then the same digit
+jumps straight back to it from anywhere in the document (jumping pushes
+your prior position, so `^Q P` still gets you back if you change your
+mind). Bookmarks are cleared when you switch to a different document —
+they mark a place in *this* file, not a location in general.
 
 Made a mistake? `^U` undoes the last edit — up to 400 steps are kept, and
 undo restores both the text and the cursor position at the time of the
@@ -297,6 +305,20 @@ voice`, `long sentence`) whenever the cursor sits on one.
   to cancel and stay in the editor.
 - `^K N` writes a timestamped backup snapshot alongside the file
   (`draft.20260915-143000.bak`) without altering your normal save.
+- `^K O` opens a scrollable list of every snapshot `^K N` has taken of the
+  current file. Up/Down to pick one, then:
+  - `Enter` — load that snapshot's content into the buffer (marked dirty;
+    `^K D` to actually overwrite the file with it).
+  - `D` — **diff** the selected snapshot against your current document: a
+    unified-style view where unchanged lines are plain, lines only in the
+    snapshot (removed since then) are prefixed `-` in red, and lines only
+    in the current buffer (added since then) are prefixed `+` in green.
+    Up/Down scrolls, `Enter` jumps the cursor to that line in the live
+    document (there's nothing to jump to for a `-` line, since it isn't in
+    the current buffer — OStar says so rather than moving the cursor),
+    and `Esc` returns to the snapshot list. Diffing is capped at 2000
+    lines per side.
+  - `Esc` — close without restoring or diffing anything.
 
 ### 11. Export a manuscript
 
@@ -467,7 +489,7 @@ outlines together.
 
 ## Part 4 — Command Reference
 
-Chords are grouped by prefix, matching OStar's own `F1` palette (93
+Chords are grouped by prefix, matching OStar's own `F1` palette (97
 entries) and the `^O`-menu help boxes. `^X` means hold Ctrl and press X;
 `^K X` means press `^K` then, after releasing Ctrl, press X (X is
 case-insensitive).
@@ -521,6 +543,7 @@ case-insensitive).
 | `^Q U` | Previous comment/note line |
 | `^Q V` | Jump to the marked block, wherever it is (this pane or the other window) |
 | `^Q H` | Open the outline panel |
+| `^Q 0`–`9` | Jump to numbered bookmark 0–9 |
 
 `^L` (no prefix) repeats the last `^Q F` search — "find next."
 
@@ -546,7 +569,8 @@ case-insensitive).
 | `^K N` | Save a timestamped `.bak` snapshot |
 | `^K A` | Copy the block marked in the other window (`^O K`) here |
 | `^K U` | Jump to the previously-marked block |
-| `^K O` | Browse and restore this document's `^K N` snapshots |
+| `^K O` | Browse and restore (or diff, with `D`) this document's `^K N` snapshots |
+| `^K 0`–`9` | Set numbered bookmark 0–9 at the cursor |
 
 ### `^O` — Onscreen (display and mode toggles)
 
@@ -626,7 +650,16 @@ case-insensitive).
 |---|---|
 | Up/Down or `^E`/`^X` | Move the highlighted snapshot |
 | Enter | Load that snapshot's content into the current buffer (marked dirty — `^K D` to actually overwrite the file) and close |
+| `D` | Diff the highlighted snapshot against the current document (opens the diff view, below) |
 | Esc | Close without restoring anything |
+
+### Diff view keys (active after `D` from the snapshot browser)
+
+| Key | Action |
+|---|---|
+| Up/Down or `^E`/`^X` | Move the highlighted diff line |
+| Enter | Jump the cursor to that line in the current document (no-op with a status message on a `-` line, which only exists in the snapshot) |
+| Esc | Close and return to the snapshot browser |
 
 ### Other window keys
 
@@ -686,4 +719,4 @@ case-insensitive).
 
 *This manual documents the behavior implemented in `examples/ostar.mod` as
 of the commits tagged `feat(ostar)`/`fix(ostar)`/`refactor(ostar)` through
-"replace RTF export and add HTML export via Modules/Markdown.mod."*
+"add numbered bookmarks and revision diff."*

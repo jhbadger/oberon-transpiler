@@ -5,11 +5,14 @@ MODULE OStar;
  *
  * Movement: ^E/S/D/X (diamond), ^A/F word, ^W/Z scroll, ^R/C page.
  * Prefix ^K  — Block & File: ^KB/KK marks, ^KC copy, ^KV move, ^KY del,
- *              ^KP put, ^KD/KS save, ^KX save+quit, ^KQ quit.
+ *              ^KP put, ^KD/KS save, ^KX save+quit, ^KQ quit,
+ *              ^K0-9 set bookmark. ^KO snapshot browser: press D there
+ *              to diff a snapshot against the current document.
  * Prefix ^Q  — Quick: ^QS/QD line start/end, ^QR/QC doc start/end,
  *              ^QE/QX screen top/bot, ^QB/QK jump block, ^QP prev pos,
  *              ^QF find, ^QA replace, ^Q,/. sentence, ^Q[/] para,
- *              ^QO next heading, ^QG transpose chars, ^QT transpose words.
+ *              ^QO next heading, ^QG transpose chars, ^QT transpose words,
+ *              ^Q0-9 jump to bookmark.
  * Prefix ^O  — Onscreen: ^OB cycle theme, ^OH cycle help, ^OW wrap,
  *              ^OS spellcheck, ^OT typewriter scroll, ^OC word count,
  *              ^OF focus mode, ^OL style check.
@@ -52,6 +55,7 @@ CONST
   ModeBinder  = 6;   (* binder panel navigation *)
   ModeOutline = 7;   (* outline panel           *)
   ModeRevisions = 8; (* snapshot browser (^KO)  *)
+  ModeDiff      = 9; (* revision diff view (D from the snapshot browser) *)
 
   (* Prefix keys *)
   PrefNone = 0;  PrefK = 1;  PrefQ = 2;  PrefO = 3;  PrefP = 4;
@@ -80,6 +84,18 @@ CONST
   (* Project *)
   MaxProjDocs = 128;   (* documents per project *)
   MaxRevisions = 200;  (* snapshots listed per document (^KO) *)
+
+  (* Numbered bookmarks (^K0-9 set, ^Q0-9 jump) *)
+  MaxBookmarks = 10;
+
+  (* Revision diff (D from the ^KO snapshot browser). A full LCS diff is
+     O(n*m) time and space, so document size is capped rather than risking
+     a multi-second stall or a huge allocation on a pathological compare. *)
+  MaxDiffLines = 2000;         (* per-side line cap for the diff table *)
+  MaxDiffOps   = MaxDiffLines * 2;  (* an edit script has at most n+m entries *)
+  DfEq  = 0;   (* line unchanged between the snapshot and now *)
+  DfAdd = 1;   (* line present now but not in the snapshot     *)
+  DfDel = 2;   (* line present in the snapshot but not now     *)
 
   (* Key codes — use TUI.Kxxx qualifiers in code to avoid C macro collisions *)
 
@@ -128,6 +144,17 @@ TYPE
     data : ARRAY KRLines OF Line;
   END;
 
+  (* One line of a revision diff's edit script: DfEq/DfAdd point at a
+     line in the live 'lines' array (and 'row' is its index, for
+     Enter-to-jump); DfDel points at a line that only exists in the old
+     snapshot, so 'row' is -1 — there's nowhere in the current document
+     to jump to. *)
+  DiffOp = RECORD
+    kind : INTEGER;
+    row  : INTEGER;
+    ln   : Line;
+  END;
+
 (* ── Globals ─────────────────────────────────────────────────────── *)
 VAR
   (* Text buffer *)
@@ -150,6 +177,10 @@ VAR
   hasPrevBlk       : BOOLEAN;   (* the block mark just overwritten by BlockBegin, for ^KU *)
   prevBlkBRow, prevBlkBCol : INTEGER;
   prevBlkERow, prevBlkECol : INTEGER;
+
+  (* Numbered bookmarks (^K0-9 / ^Q0-9) *)
+  bmSet        : ARRAY MaxBookmarks OF BOOLEAN;
+  bmRow, bmCol : ARRAY MaxBookmarks OF INTEGER;
 
   (* Kill ring *)
   killRing   : ARRAY KRSlots OF KillBlock;
@@ -246,6 +277,17 @@ VAR
   revSel    : INTEGER;
   revScroll : INTEGER;
   revDir    : ARRAY 512 OF CHAR;  (* directory the snapshots live in *)
+
+  (* Revision diff (D from the snapshot browser) *)
+  diffSnap     : PaneSnap;   (* the selected snapshot's content, loaded via
+                                 LoadFileIntoSnap; too large for the C stack,
+                                 kept global like otherPane/swapTmp *)
+  diffDP       : ARRAY (MaxDiffLines + 1) OF ARRAY (MaxDiffLines + 1) OF INTEGER;
+  diffOps      : ARRAY MaxDiffOps OF DiffOp;
+  diffOpCount  : INTEGER;
+  diffSel      : INTEGER;
+  diffScroll   : INTEGER;
+  diffLabel    : ARRAY 512 OF CHAR;  (* name of the snapshot being compared *)
 
   (* Palette scroll *)
   palScroll   : INTEGER;
@@ -1050,6 +1092,70 @@ BEGIN
   needRedraw := TRUE
 END ListRevisions;
 
+(* ── Revision Diff (D from the snapshot browser) ────────────────── *)
+
+PROCEDURE FreeSnapLines(VAR snap: PaneSnap);
+(* Release a PaneSnap's line pointers before reloading it, so repeated
+   diffs in one session don't leak one buffer's worth of lines each time. *)
+VAR i: INTEGER;
+BEGIN
+  FOR i := 0 TO snap.numLines - 1 DO
+    IF snap.lines[i] # NIL THEN FREE(snap.lines[i]) END
+  END;
+  snap.numLines := 0
+END FreeSnapLines;
+
+PROCEDURE LinesEq(a, b: Line): BOOLEAN;
+BEGIN RETURN Strings.Compare(a.s, b.s) = 0 END LinesEq;
+
+PROCEDURE ComputeDiff(): BOOLEAN;
+(* Line-level diff of the live document ('lines'/numLines) against the
+   snapshot already loaded into 'diffSnap' — classic LCS dynamic-programming
+   diff (the same technique as textbook Wagner-Fischer / GNU diff's -d),
+   backtracked into 'diffOps'. O(n*m) time and space, hence MaxDiffLines. *)
+VAR n, m, i, j, opc, total: INTEGER;
+BEGIN
+  n := numLines; m := diffSnap.numLines;
+  IF (n > MaxDiffLines) OR (m > MaxDiffLines) THEN
+    SetStatus("Document too large to diff (2000-line limit)");
+    RETURN FALSE
+  END;
+  FOR i := 0 TO n DO diffDP[i][0] := 0 END;
+  FOR j := 0 TO m DO diffDP[0][j] := 0 END;
+  FOR i := 1 TO n DO
+    FOR j := 1 TO m DO
+      IF LinesEq(lines[i - 1], diffSnap.lines[j - 1]) THEN
+        diffDP[i][j] := diffDP[i - 1][j - 1] + 1
+      ELSIF diffDP[i - 1][j] >= diffDP[i][j - 1] THEN
+        diffDP[i][j] := diffDP[i - 1][j]
+      ELSE
+        diffDP[i][j] := diffDP[i][j - 1]
+      END
+    END
+  END;
+  (* Backtrack from (n,m) to (0,0). Each step writes one op, from the end
+     of diffOps backward, so what's left after the walk is already in
+     forward (top-to-bottom) order at [opc, total). *)
+  total := n + m;
+  opc := total;
+  i := n; j := m;
+  WHILE (i > 0) OR (j > 0) DO
+    IF (i > 0) & (j > 0) & LinesEq(lines[i - 1], diffSnap.lines[j - 1]) THEN
+      DEC(i); DEC(j);
+      DEC(opc); diffOps[opc].kind := DfEq; diffOps[opc].row := i; diffOps[opc].ln := lines[i]
+    ELSIF (i > 0) & ((j = 0) OR (diffDP[i - 1][j] >= diffDP[i][j - 1])) THEN
+      DEC(i);
+      DEC(opc); diffOps[opc].kind := DfAdd; diffOps[opc].row := i; diffOps[opc].ln := lines[i]
+    ELSE
+      DEC(j);
+      DEC(opc); diffOps[opc].kind := DfDel; diffOps[opc].row := -1; diffOps[opc].ln := diffSnap.lines[j]
+    END
+  END;
+  diffOpCount := total - opc;
+  FOR i := 0 TO diffOpCount - 1 DO diffOps[i] := diffOps[opc + i] END;
+  RETURN TRUE
+END ComputeDiff;
+
 (* ── Text Editing ────────────────────────────────────────────────── *)
 
 PROCEDURE InsChar(c: CHAR);
@@ -1484,6 +1590,37 @@ BEGIN
   curRow := r; curCol := c;
   goalCol := -1; needRedraw := TRUE
 END JumpPrev;
+
+(* ── Numbered Bookmarks (^K0-9 / ^Q0-9) ─────────────────────────── *)
+
+PROCEDURE ClearBookmarks;
+VAR i: INTEGER;
+BEGIN
+  FOR i := 0 TO MaxBookmarks - 1 DO bmSet[i] := FALSE END
+END ClearBookmarks;
+
+PROCEDURE SetBookmark(n: INTEGER);
+VAR tmp: ARRAY 4 OF CHAR;
+BEGIN
+  bmRow[n] := curRow; bmCol[n] := curCol; bmSet[n] := TRUE;
+  COPY("Bookmark ", statusMsg); Strings.IntToStr(n, tmp); Strings.Append(tmp, statusMsg);
+  Strings.Append(" set", statusMsg);
+  needRedraw := TRUE
+END SetBookmark;
+
+PROCEDURE JumpBookmark(n: INTEGER);
+VAR tmp: ARRAY 4 OF CHAR;
+BEGIN
+  IF ~bmSet[n] THEN
+    COPY("Bookmark ", statusMsg); Strings.IntToStr(n, tmp); Strings.Append(tmp, statusMsg);
+    Strings.Append(" not set", statusMsg);
+    needRedraw := TRUE; RETURN
+  END;
+  SavePrev;
+  curRow := bmRow[n]; curCol := bmCol[n];
+  ClampCursor;
+  goalCol := -1; needRedraw := TRUE
+END JumpBookmark;
 
 PROCEDURE JumpBlockBegin;
 (* ^QB *)
@@ -2212,12 +2349,14 @@ BEGIN
   | 92: COPY("^KJ",  chord); COPY("export HTML",              desc)
   | 93: COPY("^KG",  chord); COPY("export EPUB",              desc)
   | 94: COPY("^PG",  chord); COPY("project: compile EPUB",    desc)
+  | 95: COPY("^K0-9", chord); COPY("set bookmark",             desc)
+  | 96: COPY("^Q0-9", chord); COPY("jump to bookmark",         desc)
   ELSE (* end *)
   END
 END PaletteEntry;
 
 PROCEDURE PaletteCount(): INTEGER;
-BEGIN RETURN 95 END PaletteCount;
+BEGIN RETURN 97 END PaletteCount;
 
 (* ── Splash Screen ───────────────────────────────────────────────── *)
 
@@ -3130,7 +3269,7 @@ BEGIN
   py := (TUI.Rows - RH) DIV 2;
   IF py < 1 THEN py := 1 END;
   TUI.DrawBox(px - 1, py - 1, RW + 2, RH + 2, ThStFg(), ThStBg());
-  TUI.PutStr(px, py - 1, " Snapshots  (Enter=restore  Esc=close) ", ThStFg(), ThStBg());
+  TUI.PutStr(px, py - 1, " Snapshots  (Enter=restore  D=diff  Esc=close) ", ThStFg(), ThStBg());
   maxScroll := revCount - RH;
   IF maxScroll < 0 THEN maxScroll := 0 END;
   IF revScroll > maxScroll THEN revScroll := maxScroll END;
@@ -3152,6 +3291,61 @@ BEGIN
     END
   END
 END DrawRevisions;
+
+PROCEDURE DiffPrefix(kind: INTEGER; VAR s: ARRAY OF CHAR);
+BEGIN
+  CASE kind OF
+    DfAdd: COPY("+ ", s)
+  | DfDel: COPY("- ", s)
+  ELSE     COPY("  ", s)
+  END
+END DiffPrefix;
+
+PROCEDURE DrawDiff;
+(* Popup: unified-style diff of 'diffSnap' against the live document.
+   '+' lines exist now but not in the snapshot, '-' lines existed in the
+   snapshot but not now, unmarked lines are unchanged. Enter jumps to a
+   '+'/unchanged line in the document (there's nothing to jump to for a
+   '-' line — it isn't in the current document). *)
+CONST DW = 60; DH = 18;
+VAR i, r, px, py, maxScroll: INTEGER; fg, bg, hfg, hbg, lfg: INTEGER;
+    line, pfx, title: ARRAY (DW + 1) OF CHAR;
+BEGIN
+  fg := ThFg(); bg := ThBg(); hfg := ThBg(); hbg := ThFg();
+  px := (TUI.Cols - DW) DIV 2 + 1;
+  py := (TUI.Rows - DH) DIV 2;
+  IF py < 1 THEN py := 1 END;
+  TUI.DrawBox(px - 1, py - 1, DW + 2, DH + 2, ThStFg(), ThStBg());
+  COPY(" Diff: ", title); Strings.Append(diffLabel, title);
+  Strings.Append("  (Enter=jump  Esc=close) ", title);
+  IF Strings.Length(title) > DW THEN title[DW] := 0X END;
+  TUI.PutStr(px, py - 1, title, ThStFg(), ThStBg());
+  maxScroll := diffOpCount - DH;
+  IF maxScroll < 0 THEN maxScroll := 0 END;
+  IF diffScroll > maxScroll THEN diffScroll := maxScroll END;
+  IF diffScroll < 0 THEN diffScroll := 0 END;
+  IF diffSel < diffScroll THEN diffScroll := diffSel END;
+  IF diffSel >= diffScroll + DH THEN diffScroll := diffSel - DH + 1 END;
+  FOR i := 0 TO DH - 1 DO
+    r := diffScroll + i;
+    IF r < diffOpCount THEN
+      DiffPrefix(diffOps[r].kind, pfx);
+      COPY(pfx, line); Strings.Append(diffOps[r].ln.s, line);
+      IF Strings.Length(line) > DW THEN line[DW] := 0X END;
+      IF diffOps[r].kind = DfAdd THEN lfg := TUI.BrightGreen
+      ELSIF diffOps[r].kind = DfDel THEN lfg := TUI.BrightRed
+      ELSE lfg := fg
+      END;
+      IF r = diffSel THEN
+        TUI.FillRect(px, py + i, DW, 1, ' ', hfg, hbg); TUI.PutStr(px, py + i, line, hfg, hbg)
+      ELSE
+        TUI.FillRect(px, py + i, DW, 1, ' ', lfg, bg); TUI.PutStr(px, py + i, line, lfg, bg)
+      END
+    ELSE
+      TUI.FillRect(px, py + i, DW, 1, ' ', fg, bg)
+    END
+  END
+END DrawDiff;
 
 PROCEDURE DrawOutline;
 (* Draw overlay showing all # headings; navigable with Up/Down/Enter *)
@@ -3317,9 +3511,10 @@ BEGIN
   IF mode = ModeOutline THEN DrawOutline END;
   IF mode = ModeBinder THEN DrawBinder END;
   IF mode = ModeRevisions THEN DrawRevisions END;
+  IF mode = ModeDiff THEN DrawDiff END;
   TUI.Flush;
   (* Place hardware cursor *)
-  IF (mode = ModeBinder) OR (mode = ModeOutline) OR (mode = ModeRevisions) THEN
+  IF (mode = ModeBinder) OR (mode = ModeOutline) OR (mode = ModeRevisions) OR (mode = ModeDiff) THEN
     TUI.SetCursor(1, TUI.Rows)
   ELSIF mode = ModeSearch THEN
     TUI.SetCursor(Min(7 + Strings.Length(searchStr), TUI.Cols), TUI.Rows)
@@ -3375,7 +3570,7 @@ BEGIN
       ok := LoadFile(inpValue);
       IF ok THEN
         curRow := 0; curCol := 0; topLine := 0; undoTop := 0;
-        hasBlkB := FALSE; hasBlkE := FALSE;
+        hasBlkB := FALSE; hasBlkE := FALSE; ClearBookmarks;
         SetStatus("Opened")
       ELSE SetStatus("File not found")
       END
@@ -3589,6 +3784,7 @@ BEGIN
   | 'a', 'A': CopyFromOther
   | 'u', 'U': BlockPrev
   | 'o', 'O': ListRevisions
+  | '0','1','2','3','4','5','6','7','8','9': SetBookmark(ORD(k) - ORD('0'))
   ELSE SetStatus("Unknown ^K command")
   END;
   needRedraw := TRUE
@@ -3635,6 +3831,7 @@ BEGIN
       WHILE (outlineSel < numLines) & (lines[outlineSel].s[0] # '#') DO INC(outlineSel) END;
       IF outlineSel >= numLines THEN outlineSel := 0 END;
       outlineScroll := 0; mode := ModeOutline
+  | '0','1','2','3','4','5','6','7','8','9': JumpBookmark(ORD(k) - ORD('0'))
   ELSE SetStatus("Unknown ^Q command")
   END;
   needRedraw := TRUE
@@ -3766,7 +3963,7 @@ BEGIN
   IF LoadFile(projDocs[idx]) THEN
     projCurDoc := idx;
     curRow := 0; curCol := 0; topLine := 0; undoTop := 0;
-    hasBlkB := FALSE; hasBlkE := FALSE;
+    hasBlkB := FALSE; hasBlkE := FALSE; ClearBookmarks;
     COPY("Project: opened ", msg); Strings.Append(projDocs[idx], msg);
     SetStatus(msg)
   ELSE
@@ -4131,7 +4328,7 @@ BEGIN
               IF LoadFile(projDocs[di]) THEN
                 projCurDoc := di;
                 curRow := row; curCol := pos; topLine := 0; undoTop := 0;
-                hasBlkB := FALSE; hasBlkE := FALSE;
+                hasBlkB := FALSE; hasBlkE := FALSE; ClearBookmarks;
                 searchRow := row; searchCol := pos;
                 searchLen := Strings.Length(searchStr);
                 goalCol := -1; found := TRUE
@@ -4187,7 +4384,7 @@ BEGIN
   END;
   IF (savedPath[0] # 0X) & LoadFile(savedPath) THEN
     curRow := 0; curCol := 0; topLine := 0; undoTop := 0;
-    hasBlkB := FALSE; hasBlkE := FALSE;
+    hasBlkB := FALSE; hasBlkE := FALSE; ClearBookmarks;
     projCurDoc := ProjIndexOf(filePath)
   END;
   Strings.IntToStr(replCount, tmp1); Strings.IntToStr(fileCount, tmp2);
@@ -4542,17 +4739,52 @@ BEGIN
         COPY(keepPath, filePath);   (* restore content, but keep editing the real file *)
         dirty := TRUE;
         curRow := 0; curCol := 0; topLine := 0; undoTop := 0;
-        hasBlkB := FALSE; hasBlkE := FALSE;
+        hasBlkB := FALSE; hasBlkE := FALSE; ClearBookmarks;
         COPY("Restored from ", statusMsg); Strings.Append(revNames[revSel], statusMsg);
         Strings.Append(" — ^KD to save", statusMsg)
       END;
       mode := ModeNormal
+    END
+  ELSIF (k = 'd') OR (k = 'D') THEN
+    IF (revSel >= 0) & (revSel < revCount) THEN
+      COPY(revDir, full);
+      IF full[0] # 0X THEN Strings.Append("/", full) END;
+      Strings.Append(revNames[revSel], full);
+      FreeSnapLines(diffSnap);
+      IF LoadFileIntoSnap(full, diffSnap) THEN
+        IF ComputeDiff() THEN
+          COPY(revNames[revSel], diffLabel);
+          diffSel := 0; diffScroll := 0;
+          mode := ModeDiff
+        END
+      END
     END
   ELSIF k = TUI.KEsc THEN
     mode := ModeNormal
   END;
   needRedraw := TRUE
 END HandleRevisionsKey;
+
+PROCEDURE HandleDiffKey(k: CHAR);
+BEGIN
+  IF (k = TUI.KUp) OR (k = CHR(5)) THEN
+    IF diffSel > 0 THEN DEC(diffSel) END
+  ELSIF (k = TUI.KDown) OR (k = CHR(24)) THEN
+    IF diffSel < diffOpCount - 1 THEN INC(diffSel) END
+  ELSIF k = TUI.KEnter THEN
+    IF (diffSel >= 0) & (diffSel < diffOpCount) THEN
+      IF diffOps[diffSel].row >= 0 THEN
+        SavePrev; curRow := diffOps[diffSel].row; curCol := 0; goalCol := -1;
+        mode := ModeNormal
+      ELSE
+        SetStatus("That line isn't in the current document")
+      END
+    END
+  ELSIF k = TUI.KEsc THEN
+    mode := ModeRevisions
+  END;
+  needRedraw := TRUE
+END HandleDiffKey;
 
 PROCEDURE HandleKey(k: CHAR);
 BEGIN
@@ -4593,6 +4825,7 @@ BEGIN
   | ModeBinder:  HandleBinderKey(k)
   | ModeOutline: HandleOutlineKey(k)
   | ModeRevisions: HandleRevisionsKey(k)
+  | ModeDiff: HandleDiffKey(k)
   ELSE HandleNormalKey(k)
   END;
   needRedraw := TRUE
@@ -4660,6 +4893,9 @@ BEGIN
   revealCodes := FALSE;
   hasPrevBlk := FALSE;
   revCount := 0; revSel := 0; revScroll := 0;
+  ClearBookmarks;
+  diffSnap.numLines := 0;
+  diffOpCount := 0; diffSel := 0; diffScroll := 0; diffLabel[0] := 0X;
   spellEnabled := FALSE;
   Dict.Init(misspelled);
   Dict.Init(personalDict);
