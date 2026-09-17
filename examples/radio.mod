@@ -20,18 +20,11 @@ MODULE Radio;
  *   Q           – stop music and quit
  *)
 
-IMPORT TUI, Strings, Files, OS;
+IMPORT TUI, Strings, Files, OS, Env;
 
 CONST
-  MaxStations = 20;
-  TmpDir     = '/data/data/com.termux/files/usr/tmp';
-  PidFile    = '/data/data/com.termux/files/usr/tmp/radio.pid';
-  StateFile  = '/data/data/com.termux/files/usr/tmp/radio.state';
-  RawFile    = '/data/data/com.termux/files/usr/tmp/radio_raw.json';
-  ResultFile = '/data/data/com.termux/files/usr/tmp/radio_results.txt';
-  ParsePy    = '/data/data/com.termux/files/usr/tmp/radio_parse.py';
-  API        = 'https://de1.api.radio-browser.info/json/stations/search';
-
+  MaxStations  = 20;
+  API          = 'https://de1.api.radio-browser.info/json/stations/search';
   MODE_SEARCH  = 0;
   MODE_RESULTS = 1;
 
@@ -45,7 +38,12 @@ TYPE
   END;
 
 VAR
-  stations  : ARRAY MaxStations OF Station;
+  PidFile    : ARRAY 128 OF CHAR;
+  StateFile  : ARRAY 128 OF CHAR;
+  RawFile    : ARRAY 128 OF CHAR;
+  ResultFile : ARRAY 128 OF CHAR;
+  ParsePy    : ARRAY 128 OF CHAR;
+  stations   : ARRAY MaxStations OF Station;
   stCount   : INTEGER;
   selIdx    : INTEGER;
   scrollOff : INTEGER;
@@ -57,6 +55,17 @@ VAR
   statusMsg : ARRAY 256 OF CHAR;
   ev        : TUI.Event;
   done      : BOOLEAN;
+
+PROCEDURE InitPaths;
+VAR tmp: ARRAY 128 OF CHAR;
+BEGIN
+  IF ~Env.Get('TMPDIR', tmp) OR (tmp[0] = 0X) THEN tmp := '/tmp' END;
+  PidFile    := tmp; Strings.Append('/radio.pid',          PidFile);
+  StateFile  := tmp; Strings.Append('/radio.state',        StateFile);
+  RawFile    := tmp; Strings.Append('/radio_raw.json',     RawFile);
+  ResultFile := tmp; Strings.Append('/radio_results.txt',  ResultFile);
+  ParsePy    := tmp; Strings.Append('/radio_parse.py',     ParsePy)
+END InitPaths;
 
 (* ── I/O helpers ─────────────────────────────────────────────────────── *)
 
@@ -126,7 +135,7 @@ BEGIN
   IF f = NIL THEN RETURN END;
   Files.Set(r, f, 0);
   Files.WriteLine(r, 'import sys,json');
-  Files.WriteLine(r, 'data=json.loads(open("/data/data/com.termux/files/usr/tmp/radio_raw.json").read())');
+  Files.WriteLine(r, 'data=json.loads(open(sys.argv[1]).read())');
   Files.WriteLine(r, 'for s in data[:20]:');
   Files.WriteLine(r, '    name=s.get("name","").replace("|","").strip()[:80]');
   Files.WriteLine(r, '    url=s.get("url_resolved",s.get("url","")).strip()');
@@ -316,6 +325,7 @@ BEGIN
   Strings.Append(RawFile, cmd);
   OS.Exec(cmd);
   cmd := 'python3 '; Strings.Append(ParsePy, cmd);
+  Strings.Append(' ', cmd); Strings.Append(RawFile, cmd);
   Strings.Append(' > ', cmd); Strings.Append(ResultFile, cmd);
   OS.Exec(cmd);
   TUI.Resume;
@@ -326,6 +336,7 @@ END Search;
 (* ── main ─────────────────────────────────────────────────────────────── *)
 
 BEGIN
+  InitPaths;
   TUI.Init;
   WriteParser;
   LoadState;
