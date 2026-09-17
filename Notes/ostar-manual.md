@@ -49,6 +49,7 @@ arrow keys, Home/End, Page Up/Down, and the mouse, so you can mix styles.
 | Search | Incremental find (`^QF`), find & replace with per-match Y/N/A confirmation (`^QA`), find-next (`^L`) |
 | Word wrap | Soft (visual) wrap at a configurable column, on by default at 72 |
 | Spell check | hunspell-backed; flags misspellings in the theme's error color, jump between them, maintain a personal dictionary |
+| Dictionary & thesaurus | `^OY` looks up the word under the cursor — synonyms and a short definition in a dismissable popup, from an offline, replaceable word list |
 | Style check | Flags `-ly` adverbs, filler/hedge words, passive voice, and overlong sentences, each in its own color |
 | Projects | Group several files into a `.ostarproj` manifest; binder popup with per-doc synopses (`^PI`/`^PY`) and note/manuscript roles (`^PM`), outline panel, project-wide search and replace (`^PS`/`^PW`), and "compile" (concatenate all non-note docs to one RTF or text file) |
 | Export | Manuscript-format RTF (`^KM`), plain HTML (`^KJ`), a notes-stripped clean `.txt` (`^KE`), and timestamped backup snapshots (`^KN`, browsable with `^KO` and diffable against the live document by pressing `D` there) — RTF and HTML rendering both live in the shared `Modules/Markdown.mod` |
@@ -87,6 +88,10 @@ several already-registered files — see Part 3.)
   check silently finds nothing to flag).
 - A writable `$TMPDIR` (or `/tmp`) for spell-check scratch files, and
   `$HOME/.config/ostar/personal.txt` for your persisted personal dictionary.
+- For `^O Y` dictionary/thesaurus lookup, either `~/.config/ostar/thesaurus.txt`
+  or `ostar-thesaurus.txt` in the current directory (the copy in `examples/`
+  covers the latter when run from there) — without one, `^O Y` just reports
+  the resource unavailable.
 
 ---
 
@@ -226,7 +231,7 @@ on:
   Escape to close.
 - A line starting with `..` is a **note** — an aside meant for you, not
   the reader. `^Q M` / `^Q U` jump forward/back between note lines. Notes
-  are automatically stripped out of both the RTF export (§8) and the clean
+  are automatically stripped out of both the RTF export (§12) and the clean
   text export.
 
 Try adding a heading and a note to your draft:
@@ -295,7 +300,25 @@ common weaknesses of a first draft, each underlined in its own color:
 the kind of issue under the cursor (`-ly adverb`, `filler word`, `passive
 voice`, `long sentence`) whenever the cursor sits on one.
 
-### 10. Save your work
+### 10. Dictionary & thesaurus lookup
+
+Put the cursor on any word and press `^O Y` to look up synonyms and a short
+definition in a dismissable popup — press any key (`Esc`, `Enter`, anything)
+to close it and keep writing.
+
+This is a small, offline word list (ported from a companion project,
+*PerfectStar 2k*), not a full dictionary — a miss just reports "No
+dictionary entry for '\<word\>'" in the status line rather than an error.
+OStar looks for the word list at `~/.config/ostar/thesaurus.txt` first,
+then falls back to `ostar-thesaurus.txt` in the current directory (the copy
+that ships in `examples/`). If neither is found, `^O Y` reports "Thesaurus
+unavailable" instead of doing nothing silently. To use a bigger or
+different word list, copy a file in the same tab-separated format
+(`word<TAB>synonym,synonym,...<TAB>definition`, `#`-comments and blank
+lines ignored) to `~/.config/ostar/thesaurus.txt` — that path always takes
+priority.
+
+### 11. Save your work
 
 - `^K D` (or `^K S`) saves. If the buffer has no filename yet, you're
   prompted for one first.
@@ -320,7 +343,7 @@ voice`, `long sentence`) whenever the cursor sits on one.
     lines per side.
   - `Esc` — close without restoring or diffing anything.
 
-### 11. Export a manuscript
+### 12. Export a manuscript
 
 Three export commands turn your working file into a deliverable, all
 derived from the current filename (`draft.txt` → `draft.rtf` /
@@ -348,7 +371,7 @@ derived from the current filename (`draft.txt` → `draft.rtf` /
 
 All three report the path they wrote to in the status line.
 
-### 12. Where to go next
+### 13. Where to go next
 
 That covers a full single-document session. If you're working on
 something with multiple files — a novel with one file per chapter, a
@@ -489,7 +512,7 @@ outlines together.
 
 ## Part 4 — Command Reference
 
-Chords are grouped by prefix, matching OStar's own `F1` palette (97
+Chords are grouped by prefix, matching OStar's own `F1` palette (98
 entries) and the `^O`-menu help boxes. `^X` means hold Ctrl and press X;
 `^K X` means press `^K` then, after releasing Ctrl, press X (X is
 case-insensitive).
@@ -589,6 +612,7 @@ case-insensitive).
 | `^O F` | Toggle focus mode |
 | `^O K` | Open/switch focus to the other window (Esc closes it) |
 | `^O D` | Toggle reveal codes (markdown markers shown in inverse video) |
+| `^O Y` | Look up the word under the cursor (dictionary/thesaurus popup) |
 
 ### `^P` — Project
 
@@ -661,6 +685,12 @@ case-insensitive).
 | Enter | Jump the cursor to that line in the current document (no-op with a status message on a `-` line, which only exists in the snapshot) |
 | Esc | Close and return to the snapshot browser |
 
+### Lookup popup keys (active after `^O Y`)
+
+| Key | Action |
+|---|---|
+| Any key | Close the popup and return to editing |
+
 ### Other window keys
 
 | Chord | Action |
@@ -713,10 +743,11 @@ case-insensitive).
 | `<file>.synopsis` | The document's one-line blurb, set with `^P I` |
 | `<file>.notes` | The document's free-form notes, opened in the other window with `^P O` |
 | `~/.config/ostar/personal.txt` | Your persisted spell-check personal dictionary |
+| `~/.config/ostar/thesaurus.txt` (or `./ostar-thesaurus.txt`) | Word list read by `^O Y` (see §10 for the tab-separated format) |
 | `$TMPDIR` (or `/tmp`) | Scratch files used while shelling out to `hunspell` |
 
 ---
 
 *This manual documents the behavior implemented in `examples/ostar.mod` as
 of the commits tagged `feat(ostar)`/`fix(ostar)`/`refactor(ostar)` through
-"add numbered bookmarks and revision diff."*
+"add dictionary/thesaurus lookup."*

@@ -15,7 +15,8 @@ MODULE OStar;
  *              ^Q0-9 jump to bookmark.
  * Prefix ^O  — Onscreen: ^OB cycle theme, ^OH cycle help, ^OW wrap,
  *              ^OS spellcheck, ^OT typewriter scroll, ^OC word count,
- *              ^OF focus mode, ^OL style check.
+ *              ^OF focus mode, ^OL style check, ^OY dictionary/thesaurus
+ *              lookup of the word under the cursor.
  * ^QI — next style issue (adverb/filler/passive/long sentence).
  * Prefix ^P  — Project: ^PN new, ^PP open, ^PA add, ^PR remove,
  *              ^PE prev doc, ^PX next doc, ^PL list.
@@ -56,6 +57,7 @@ CONST
   ModeOutline = 7;   (* outline panel           *)
   ModeRevisions = 8; (* snapshot browser (^KO)  *)
   ModeDiff      = 9; (* revision diff view (D from the snapshot browser) *)
+  ModeLookup    = 10; (* dictionary/thesaurus popup (^O Y)  *)
 
   (* Prefix keys *)
   PrefNone = 0;  PrefK = 1;  PrefQ = 2;  PrefO = 3;  PrefP = 4;
@@ -232,6 +234,14 @@ VAR
   misspelled   : Dict.Table;   (* words hunspell flagged as wrong  *)
   personalDict : Dict.Table;   (* personal word list (always OK)   *)
   personalPath : ARRAY 512 OF CHAR;
+
+  (* Dictionary/thesaurus lookup (^O Y) *)
+  thesSyn, thesDef : Dict.Table;   (* word -> synonym CSV / definition *)
+  thesReady        : BOOLEAN;
+  thesPath         : ARRAY 512 OF CHAR;
+  lookupWord       : ARRAY 256 OF CHAR;  (* word the popup is showing *)
+  lookupSyn        : ARRAY 256 OF CHAR;
+  lookupDef        : ARRAY 256 OF CHAR;
 
   (* Previous position (^QP) *)
   prevRow, prevCol : INTEGER;
@@ -2351,12 +2361,13 @@ BEGIN
   | 94: COPY("^PG",  chord); COPY("project: compile EPUB",    desc)
   | 95: COPY("^K0-9", chord); COPY("set bookmark",             desc)
   | 96: COPY("^Q0-9", chord); COPY("jump to bookmark",         desc)
+  | 97: COPY("^OY",   chord); COPY("look up word (dictionary/thesaurus)", desc)
   ELSE (* end *)
   END
 END PaletteEntry;
 
 PROCEDURE PaletteCount(): INTEGER;
-BEGIN RETURN 97 END PaletteCount;
+BEGIN RETURN 98 END PaletteCount;
 
 (* ── Splash Screen ───────────────────────────────────────────────── *)
 
@@ -2769,6 +2780,66 @@ BEGIN
   END;
   Files.Close(f)
 END LoadPersonalDict;
+
+PROCEDURE LoadThesaurus;
+(* Loads the ^O Y lookup resource: ~/.config/ostar/thesaurus.txt if present,
+   else the bundled starter list in the current directory
+   (ostar-thesaurus.txt) — same tab-separated "word / synonyms / definition"
+   format as PerfectStar 2k's bundled thesaurus, ported by hand since this
+   runtime has no compile-time string embedding to bundle it the way pstar
+   does (ADR-016). A missing/empty resource just leaves thesReady FALSE;
+   ^O Y reports that rather than doing anything unexpected. *)
+VAR f: Files.File; r: Files.Rider; line, head, synCol, defCol: LineBuf; n: INTEGER;
+BEGIN
+  Dict.Init(thesSyn); Dict.Init(thesDef);
+  n := 0;
+  f := Files.Old(thesPath);
+  IF f = NIL THEN f := Files.Old("ostar-thesaurus.txt") END;
+  IF f # NIL THEN
+    Files.Set(r, f, 0);
+    WHILE ~r.eof DO
+      Files.ReadLine(r, line);
+      IF (line[0] # 0X) & (line[0] # '#') THEN
+        IF Strings.Split(line, CHR(9), 0, head) & (head[0] # 0X) THEN
+          Strings.ToLower(head);
+          IF ~Strings.Split(line, CHR(9), 1, synCol) THEN synCol[0] := 0X END;
+          IF ~Strings.Split(line, CHR(9), 2, defCol) THEN defCol[0] := 0X END;
+          Strings.ToLower(synCol);
+          Dict.Put(thesSyn, head, synCol);
+          Dict.Put(thesDef, head, defCol);
+          INC(n)
+        END
+      END
+    END;
+    Files.Close(f)
+  END;
+  thesReady := n > 0
+END LoadThesaurus;
+
+PROCEDURE LookupWord;
+(* ^O Y — look up the word under the cursor in the loaded thesaurus/
+   dictionary resource and, on a hit, open the popup (ModeLookup). A miss
+   or an unavailable resource is just a status message, same as any other
+   "nothing to do" command (^QN with spellcheck off, etc.). *)
+VAR word, lword: ARRAY 256 OF CHAR; found: BOOLEAN;
+BEGIN
+  WordUnderCursor(word);
+  IF word[0] = 0X THEN SetStatus("No word under cursor"); RETURN END;
+  IF ~thesReady THEN
+    SetStatus("Thesaurus unavailable (no ~/.config/ostar/thesaurus.txt or ./ostar-thesaurus.txt)");
+    RETURN
+  END;
+  COPY(word, lword); Strings.ToLower(lword);
+  found := Dict.Get(thesSyn, lword, lookupSyn);
+  IF ~Dict.Get(thesDef, lword, lookupDef) THEN lookupDef[0] := 0X END;
+  IF ~found & (lookupDef[0] = 0X) THEN
+    COPY("No dictionary entry for '", statusMsg);
+    Strings.Append(word, statusMsg); Strings.Append("'", statusMsg);
+    RETURN
+  END;
+  COPY(word, lookupWord);
+  mode := ModeLookup; needRedraw := TRUE
+END LookupWord;
 
 (* Batch-check every word in the document via `hunspell -l`.
    Results land in `misspelled`; highlights appear on the next redraw. *)
@@ -3347,6 +3418,38 @@ BEGIN
   END
 END DrawDiff;
 
+PROCEDURE DrawLookup;
+(* Popup: synonyms + definition for lookupWord (^O Y). Any key closes it —
+   there's nothing to navigate, just one word's entry. *)
+CONST LW = 56; LH = 6;
+VAR px, py: INTEGER; fg, bg: INTEGER; title, line: ARRAY (LW + 1) OF CHAR;
+BEGIN
+  fg := ThFg(); bg := ThBg();
+  px := (TUI.Cols - LW) DIV 2 + 1;
+  py := (TUI.Rows - LH) DIV 2;
+  IF py < 1 THEN py := 1 END;
+  TUI.DrawBox(px - 1, py - 1, LW + 2, LH + 2, ThStFg(), ThStBg());
+  COPY(" Lookup: ", title); Strings.Append(lookupWord, title);
+  Strings.Append("  (any key closes) ", title);
+  IF Strings.Length(title) > LW THEN title[LW] := 0X END;
+  TUI.PutStr(px, py - 1, title, ThStFg(), ThStBg());
+  TUI.FillRect(px, py, LW, LH, ' ', fg, bg);
+  IF lookupSyn[0] # 0X THEN
+    COPY("Synonyms: ", line); Strings.Append(lookupSyn, line)
+  ELSE
+    COPY("Synonyms: (none recorded)", line)
+  END;
+  IF Strings.Length(line) > LW THEN line[LW] := 0X END;
+  TUI.PutStr(px, py + 1, line, fg, bg);
+  IF lookupDef[0] # 0X THEN
+    COPY("Definition: ", line); Strings.Append(lookupDef, line)
+  ELSE
+    COPY("Definition: (none recorded)", line)
+  END;
+  IF Strings.Length(line) > LW THEN line[LW] := 0X END;
+  TUI.PutStr(px, py + 3, line, fg, bg)
+END DrawLookup;
+
 PROCEDURE DrawOutline;
 (* Draw overlay showing all # headings; navigable with Up/Down/Enter *)
 CONST OW = 50; OH = 20;
@@ -3512,9 +3615,11 @@ BEGIN
   IF mode = ModeBinder THEN DrawBinder END;
   IF mode = ModeRevisions THEN DrawRevisions END;
   IF mode = ModeDiff THEN DrawDiff END;
+  IF mode = ModeLookup THEN DrawLookup END;
   TUI.Flush;
   (* Place hardware cursor *)
-  IF (mode = ModeBinder) OR (mode = ModeOutline) OR (mode = ModeRevisions) OR (mode = ModeDiff) THEN
+  IF (mode = ModeBinder) OR (mode = ModeOutline) OR (mode = ModeRevisions)
+   OR (mode = ModeDiff) OR (mode = ModeLookup) THEN
     TUI.SetCursor(1, TUI.Rows)
   ELSIF mode = ModeSearch THEN
     TUI.SetCursor(Min(7 + Strings.Length(searchStr), TUI.Cols), TUI.Rows)
@@ -3888,6 +3993,7 @@ BEGIN
   | 'd', 'D':
       revealCodes := ~revealCodes;
       IF revealCodes THEN SetStatus("Reveal codes ON") ELSE SetStatus("Reveal codes OFF") END
+  | 'y', 'Y': LookupWord
   ELSE SetStatus("Unknown ^O command")
   END;
   needRedraw := TRUE
@@ -4786,6 +4892,11 @@ BEGIN
   needRedraw := TRUE
 END HandleDiffKey;
 
+PROCEDURE HandleLookupKey(k: CHAR);
+BEGIN
+  mode := ModeNormal; needRedraw := TRUE
+END HandleLookupKey;
+
 PROCEDURE HandleKey(k: CHAR);
 BEGIN
   CASE mode OF
@@ -4826,6 +4937,7 @@ BEGIN
   | ModeOutline: HandleOutlineKey(k)
   | ModeRevisions: HandleRevisionsKey(k)
   | ModeDiff: HandleDiffKey(k)
+  | ModeLookup: HandleLookupKey(k)
   ELSE HandleNormalKey(k)
   END;
   needRedraw := TRUE
@@ -4906,6 +5018,15 @@ BEGIN
     Strings.Append("/.config/ostar/personal.txt", personalPath)
   END;
   LoadPersonalDict;
+
+  (* Dictionary/thesaurus lookup: ~/.config/ostar/thesaurus.txt, falling
+     back to ./ostar-thesaurus.txt (see LoadThesaurus) *)
+  Env.Get("HOME", thesPath);
+  IF thesPath[0] # 0X THEN
+    Strings.Append("/.config/ostar/thesaurus.txt", thesPath)
+  END;
+  lookupWord[0] := 0X; lookupSyn[0] := 0X; lookupDef[0] := 0X;
+  LoadThesaurus;
 
   (* Open file from command line if provided *)
   IF Args.Count() >= 1 THEN
