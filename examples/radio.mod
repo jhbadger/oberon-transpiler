@@ -15,9 +15,10 @@ MODULE Radio;
  *   Enter       – search (search focus) / play selected station (list focus)
  *   Up / Down   – navigate station list
  *   Tab         – toggle focus between search box and station list
- *   S           – stop playback
+ *   Ctrl-S      – stop playback
+ *   + / -       – volume up / down
  *   Esc         – exit to prompt  (music keeps playing)
- *   Q           – stop music and quit
+ *   Ctrl-Q      – stop music and quit
  *)
 
 IMPORT TUI, Strings, Files, OS, Env;
@@ -40,9 +41,11 @@ TYPE
 VAR
   PidFile    : ARRAY 128 OF CHAR;
   StateFile  : ARRAY 128 OF CHAR;
+  SockFile   : ARRAY 128 OF CHAR;
   RawFile    : ARRAY 128 OF CHAR;
   ResultFile : ARRAY 128 OF CHAR;
   ParsePy    : ARRAY 128 OF CHAR;
+  VolPy      : ARRAY 128 OF CHAR;
   stations   : ARRAY MaxStations OF Station;
   stCount   : INTEGER;
   selIdx    : INTEGER;
@@ -62,9 +65,11 @@ BEGIN
   IF ~Env.Get('TMPDIR', tmp) OR (tmp[0] = 0X) THEN tmp := '/tmp' END;
   PidFile    := tmp; Strings.Append('/radio.pid',          PidFile);
   StateFile  := tmp; Strings.Append('/radio.state',        StateFile);
+  SockFile   := tmp; Strings.Append('/radio.sock',         SockFile);
   RawFile    := tmp; Strings.Append('/radio_raw.json',     RawFile);
   ResultFile := tmp; Strings.Append('/radio_results.txt',  ResultFile);
-  ParsePy    := tmp; Strings.Append('/radio_parse.py',     ParsePy)
+  ParsePy    := tmp; Strings.Append('/radio_parse.py',     ParsePy);
+  VolPy      := tmp; Strings.Append('/radio_vol.py',       VolPy)
 END InitPaths;
 
 (* ── I/O helpers ─────────────────────────────────────────────────────── *)
@@ -146,6 +151,24 @@ BEGIN
   Files.WriteLine(r, '        print(name+"|"+url+"|"+codec+"|"+bitrate+"|"+country)');
   Files.Close(f)
 END WriteParser;
+
+PROCEDURE WriteVolumeScript;
+VAR f: Files.File; r: Files.Rider;
+BEGIN
+  f := Files.New(VolPy);
+  IF f = NIL THEN RETURN END;
+  Files.Set(r, f, 0);
+  Files.WriteLine(r, 'import socket,json,sys');
+  Files.WriteLine(r, 'delta=int(sys.argv[1])');
+  Files.WriteLine(r, 'sock=sys.argv[2]');
+  Files.WriteLine(r, 's=socket.socket(socket.AF_UNIX)');
+  Files.WriteLine(r, 'try:');
+  Files.WriteLine(r, '    s.connect(sock)');
+  Files.WriteLine(r, '    s.send(json.dumps({"command":["add","volume",delta]}).encode()+b"\n")');
+  Files.WriteLine(r, '    s.close()');
+  Files.WriteLine(r, 'except: pass');
+  Files.Close(f)
+END WriteVolumeScript;
 
 PROCEDURE URLEncode(src: ARRAY OF CHAR; VAR dst: ARRAY OF CHAR);
 VAR i, j: INTEGER; c: CHAR;
@@ -233,10 +256,10 @@ BEGIN
   IF statusMsg[0] # 0X THEN
     TUI.PutStr(2, TUI.Rows, statusMsg, TUI.Black, TUI.White)
   ELSIF focusMode = MODE_SEARCH THEN
-    TUI.PutStr(2, TUI.Rows, 'Enter:Search  Tab:List  S:Stop  Esc:Exit(keep playing)  Q:Stop+Quit',
+    TUI.PutStr(2, TUI.Rows, 'Enter:Search  Tab:List  +/-:Vol  ^S:Stop  Esc:Exit(keep playing)  ^Q:Stop+Quit',
                TUI.Black, TUI.White)
   ELSE
-    TUI.PutStr(2, TUI.Rows, 'Enter:Play  Tab:Search  S:Stop  Esc:Exit(keep playing)  Q:Stop+Quit',
+    TUI.PutStr(2, TUI.Rows, 'Enter:Play  Tab:Search  +/-:Vol  ^S:Stop  Esc:Exit(keep playing)  ^Q:Stop+Quit',
                TUI.Black, TUI.White)
   END;
 
@@ -291,7 +314,9 @@ VAR cmd: ARRAY 768 OF CHAR; f: Files.File; r: Files.Rider;
 BEGIN
   IF isPlaying THEN StopPlay END;
   (* Start mpv in background; capture its PID for later control. *)
-  cmd := 'mpv --no-video --really-quiet "';
+  cmd := 'mpv --no-video --really-quiet --input-ipc-server=';
+  Strings.Append(SockFile, cmd);
+  Strings.Append(' "', cmd);
   Strings.Append(stations[idx].url, cmd);
   Strings.Append('" >/dev/null 2>&1 & echo $! > ', cmd);
   Strings.Append(PidFile, cmd);
@@ -309,6 +334,18 @@ BEGIN
     statusMsg := 'mpv failed to start. Install with: pkg install mpv'
   END
 END Play;
+
+PROCEDURE VolumeAdj(delta: INTEGER);
+VAR cmd: ARRAY 512 OF CHAR; d: ARRAY 8 OF CHAR;
+BEGIN
+  IF ~isPlaying THEN statusMsg := 'Nothing is playing.'; RETURN END;
+  Strings.IntToStr(delta, d);
+  cmd := 'python3 ';
+  Strings.Append(VolPy, cmd); Strings.Append(' ', cmd);
+  Strings.Append(d, cmd); Strings.Append(' ', cmd);
+  Strings.Append(SockFile, cmd);
+  OS.Exec(cmd)
+END VolumeAdj;
 
 PROCEDURE Search;
 VAR cmd: ARRAY 512 OF CHAR; enc: ARRAY 128 OF CHAR;
@@ -339,6 +376,7 @@ BEGIN
   InitPaths;
   TUI.Init;
   WriteParser;
+  WriteVolumeScript;
   LoadState;
   stCount := 0; selIdx := 0; scrollOff := 0;
   searchBuf[0] := 0X; searchLen := 0;
@@ -347,7 +385,7 @@ BEGIN
   done := FALSE;
 
   IF isPlaying THEN
-    statusMsg := 'Music is playing. Search to change, S to stop, Esc to exit to prompt.'
+    statusMsg := 'Music is playing. Search to change, Ctrl-S to stop, Esc to exit to prompt.'
   END;
 
   REPEAT
@@ -358,13 +396,16 @@ BEGIN
       IF ev.key = TUI.KEsc THEN
         (* Exit but leave mpv running *)
         done := TRUE
-      ELSIF (ev.key = "Q") OR (ev.key = 17) THEN
-        (* Stop music and quit *)
+      ELSIF ev.key = 17 THEN  (* Ctrl-Q: stop and quit *)
         IF isPlaying THEN StopPlay END;
         done := TRUE
-      ELSIF (ev.key = "s") OR (ev.key = "S") THEN
+      ELSIF ev.key = 19 THEN  (* Ctrl-S: stop playback *)
         IF isPlaying THEN StopPlay
         ELSE statusMsg := 'Nothing is playing.' END
+      ELSIF ev.key = "+" THEN
+        VolumeAdj(5)
+      ELSIF ev.key = "-" THEN
+        VolumeAdj(-5)
       ELSIF ev.key = TUI.KTab THEN
         IF focusMode = MODE_SEARCH THEN
           IF stCount > 0 THEN focusMode := MODE_RESULTS
