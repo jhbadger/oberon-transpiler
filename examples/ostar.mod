@@ -3118,32 +3118,23 @@ BEGIN
   END
 END DrawStatus;
 
+PROCEDURE PrefixMatches(pref: INTEGER; chord: ARRAY OF CHAR): BOOLEAN;
+BEGIN
+  RETURN (chord[0] = '^')
+    & (((pref = PrefK) & (chord[1] = 'K')) OR ((pref = PrefQ) & (chord[1] = 'Q'))
+     OR ((pref = PrefO) & (chord[1] = 'O')) OR ((pref = PrefP) & (chord[1] = 'P')))
+END PrefixMatches;
+
 PROCEDURE DrawPrefixMenu(pref: INTEGER);
-(* Draw the prefix menu box when a prefix key was pressed *)
-CONST MenuW = 28;
+(* Draw the prefix menu box when a prefix key was pressed. Sized to the
+   widest "^Kx  description" line this prefix actually has, rather than a
+   fixed width — a fixed 28 columns overflowed badly once entries like
+   "^OY  look up word (dictionary/thesaurus)" (41 columns) existed. *)
 VAR chord: ARRAY 8 OF CHAR; desc: ARRAY 64 OF CHAR;
-    i, n, x, y, mh: INTEGER; title: ARRAY 32 OF CHAR; line: ARRAY 48 OF CHAR;
+    i, n, x, y, mh, menuW, lineLen, maxLine: INTEGER;
+    title: ARRAY 32 OF CHAR; line: ARRAY 96 OF CHAR;
     fg, bg, mfg, mbg: INTEGER;
 BEGIN
-  (* Collect entries for this prefix *)
-  n := 0;
-  i := 0;
-  LOOP
-    PaletteEntry(i, chord, desc);
-    IF chord[0] = 0X THEN EXIT END;
-    IF (pref = PrefK) & (chord[0] = '^') & (chord[1] = 'K') THEN INC(n)
-    ELSIF (pref = PrefQ) & (chord[0] = '^') & (chord[1] = 'Q') THEN INC(n)
-    ELSIF (pref = PrefO) & (chord[0] = '^') & (chord[1] = 'O') THEN INC(n)
-    ELSIF (pref = PrefP) & (chord[0] = '^') & (chord[1] = 'P') THEN INC(n)
-    END;
-    INC(i)
-  END;
-  mh := n + 2;  (* border rows *)
-  x := 2; y := TUI.Rows - mh - 2;  (* bottom-left corner *)
-  IF y < 1 THEN y := 1 END;
-  fg := ThStFg(); bg := ThStBg();
-  mfg := ThFg(); mbg := ThBg();
-  TUI.DrawBox(x, y, MenuW, mh, fg, bg);
   CASE pref OF
     PrefK: COPY("^K Block & File", title)
   | PrefQ: COPY("^Q Quick",        title)
@@ -3151,24 +3142,42 @@ BEGIN
   | PrefP: COPY("^P Project",      title)
   ELSE     COPY("",                title)
   END;
+  (* Collect entries for this prefix and the widest formatted line *)
+  n := 0; i := 0; maxLine := Strings.Length(title);
+  LOOP
+    PaletteEntry(i, chord, desc);
+    IF chord[0] = 0X THEN EXIT END;
+    IF PrefixMatches(pref, chord) THEN
+      INC(n);
+      lineLen := 1 + Strings.Length(chord) + 2 + Strings.Length(desc);
+      IF lineLen > maxLine THEN maxLine := lineLen END
+    END;
+    INC(i)
+  END;
+  menuW := maxLine + 2;
+  IF menuW > TUI.Cols - 4 THEN menuW := TUI.Cols - 4 END;
+  mh := n + 2;  (* border rows *)
+  x := 2; y := TUI.Rows - mh - 2;  (* bottom-left corner *)
+  IF y < 1 THEN y := 1 END;
+  fg := ThStFg(); bg := ThStBg();
+  mfg := ThFg(); mbg := ThBg();
+  TUI.DrawBox(x, y, menuW, mh, fg, bg);
   TUI.PutStr(x + 1, y, title, fg, bg);
   (* Fill entries *)
   n := 0; i := 0;
   LOOP
     PaletteEntry(i, chord, desc);
     IF chord[0] = 0X THEN EXIT END;
-    IF ((pref = PrefK) & (chord[0] = '^') & (chord[1] = 'K'))
-    OR ((pref = PrefQ) & (chord[0] = '^') & (chord[1] = 'Q'))
-    OR ((pref = PrefO) & (chord[0] = '^') & (chord[1] = 'O'))
-    OR ((pref = PrefP) & (chord[0] = '^') & (chord[1] = 'P')) THEN
+    IF PrefixMatches(pref, chord) THEN
       (* Format: "^Kx  description" *)
       line[0] := ' '; line[1] := 0X;
       Strings.Append(chord, line); Strings.Append("  ", line);
       Strings.Append(desc, line);
+      IF Strings.Length(line) > menuW - 2 THEN line[menuW - 2] := 0X END;
       TUI.PutStr(x + 1, y + 1 + n, line, mfg, mbg);
       (* Pad to menu width *)
       TUI.FillRect(x + 1 + Strings.Length(line), y + 1 + n,
-                   MenuW - Strings.Length(line) - 2, 1, ' ', mfg, mbg);
+                   menuW - Strings.Length(line) - 2, 1, ' ', mfg, mbg);
       INC(n)
     END;
     INC(i)
@@ -3176,18 +3185,30 @@ BEGIN
 END DrawPrefixMenu;
 
 PROCEDURE DrawPalette;
-(* F1 — draw scrollable key list overlay *)
-CONST PalW = 40; PalH = 20;
+(* F1 — draw scrollable key list overlay. Width is sized once to the
+   widest "chord  description" line across the *whole* palette (not just
+   the visible page), so the box doesn't resize as you scroll and entries
+   never overflow it. *)
+CONST PalH = 20; TitleLen = 30;  (* len("Key Reference  (Esc to close)") *)
 VAR chord: ARRAY 8 OF CHAR; desc: ARRAY 64 OF CHAR;
-    i, n, px, py, maxScroll, vis: INTEGER; line: ARRAY 56 OF CHAR;
+    i, n, px, py, maxScroll, palW, lineLen, maxLine: INTEGER;
+    line: ARRAY 96 OF CHAR;
     fg, bg, hfg, hbg: INTEGER;
 BEGIN
   n := PaletteCount();
-  px := (TUI.Cols - PalW) DIV 2 + 1;
+  maxLine := TitleLen;
+  FOR i := 0 TO n - 1 DO
+    PaletteEntry(i, chord, desc);
+    lineLen := Strings.Length(chord) + 2 + Strings.Length(desc);
+    IF lineLen > maxLine THEN maxLine := lineLen END
+  END;
+  palW := maxLine;
+  IF palW > TUI.Cols - 4 THEN palW := TUI.Cols - 4 END;
+  px := (TUI.Cols - palW) DIV 2 + 1;
   py := (TUI.Rows - PalH) DIV 2;
   IF py < 1 THEN py := 1 END;
   fg := ThFg(); bg := ThBg();
-  TUI.DrawBox(px - 1, py - 1, PalW + 2, PalH + 2, ThStFg(), ThStBg());
+  TUI.DrawBox(px - 1, py - 1, palW + 2, PalH + 2, ThStFg(), ThStBg());
   TUI.PutStr(px, py - 1, "Key Reference  (Esc to close)", ThStFg(), ThStBg());
   maxScroll := n - PalH;
   IF maxScroll < 0 THEN maxScroll := 0 END;
@@ -3198,11 +3219,12 @@ BEGIN
       line[0] := 0X;
       Strings.Append(chord, line); Strings.Append("  ", line);
       Strings.Append(desc, line);
+      IF Strings.Length(line) > palW THEN line[palW] := 0X END;
       TUI.PutStr(px, py + i, line, ThDimFg(), bg);
       TUI.FillRect(px + Strings.Length(line), py + i,
-                   PalW - Strings.Length(line), 1, ' ', fg, bg)
+                   palW - Strings.Length(line), 1, ' ', fg, bg)
     ELSE
-      TUI.FillRect(px, py + i, PalW, 1, ' ', fg, bg)
+      TUI.FillRect(px, py + i, palW, 1, ' ', fg, bg)
     END
   END
 END DrawPalette;
