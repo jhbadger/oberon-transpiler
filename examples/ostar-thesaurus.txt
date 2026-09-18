@@ -187,3 +187,1808 @@ wise	sage,prudent,sensible,judicious	Having experience, knowledge, and good judg
 wonderful	marvelous,splendid,superb,fabulous	Inspiring delight, pleasure, or admiration.
 worry	fret,agonize,brood,stress	To give way to anxiety or unease.
 wrong	incorrect,mistaken,erroneous,false	Not correct or true; mistaken.
+
+# --- Extended vocabulary (~2000 additional entries) ---
+
+# A
+absorb	soak,assimilate,take in,imbibe	To take in or soak up a substance or information.
+abstract	theoretical,conceptual,notional,intangible	Existing in thought rather than having concrete existence.
+abuse	mistreat,misuse,exploit,harm	To treat with cruelty or violence; to use improperly.
+accept	receive,take,acknowledge,admit	To receive willingly or agree to something offered.
+acclaim	praise,applaud,celebrate,honor	To praise enthusiastically and publicly.
+accomplish	achieve,complete,fulfill,execute	To succeed in doing or achieving something.
+accumulate	amass,gather,stockpile,collect	To gather together or acquire an increasing amount.
+ache	pain,throb,hurt,smart	A continuous dull pain; to suffer a persistent pain.
+acquire	obtain,gain,secure,procure	To come to possess or have something.
+active	energetic,dynamic,vigorous,busy	Engaging in action; characterized by movement.
+adapt	adjust,accommodate,modify,conform	To become adjusted to new conditions.
+adequate	sufficient,enough,acceptable,satisfactory	Good enough for a particular purpose.
+admirable	praiseworthy,laudable,commendable,estimable	Deserving respect and approval.
+adore	worship,revere,idolize,cherish	To love and respect deeply; to be very fond of.
+advance	progress,proceed,move forward,promote	To move or go forward; to develop or improve.
+adversity	hardship,misfortune,difficulty,trouble	A difficult or unpleasant situation.
+aerial	airborne,atmospheric,elevated,lofty	Of or existing in the air; high up.
+affect	influence,impact,touch,alter	To have an effect on; to touch emotionally.
+affirm	confirm,assert,declare,state	To state something positively; to confirm as true.
+agile	nimble,lithe,spry,supple	Able to move quickly and easily.
+agitate	disturb,upset,unsettle,stir	To make troubled or nervous; to stir up vigorously.
+alleviate	ease,relieve,lessen,reduce	To make suffering or a problem less severe.
+allocate	assign,distribute,apportion,allot	To distribute resources for a particular purpose.
+allure	attract,entice,tempt,charm	To attract or tempt by something desirable.
+amend	revise,correct,alter,modify	To make changes to improve or correct.
+amplify	increase,enlarge,expand,boost	To make larger, louder, or stronger.
+analyze	examine,study,investigate,assess	To examine something methodically and in detail.
+annoy	irritate,vex,bother,pester	To make slightly angry; to cause minor disturbance.
+anticipate	expect,foresee,predict,await	To regard something as likely to happen.
+apologize	express regret,make amends,atone	To admit fault and express regret for wrongdoing.
+appreciate	value,prize,esteem,recognize	To recognize the full worth of something.
+approach	method,way,technique,strategy	The way something is dealt with; to come near.
+approve	sanction,endorse,support,accept	To officially agree to or accept something.
+arouse	awaken,stir,excite,provoke	To evoke a feeling or response; to awaken.
+arrange	organize,plan,order,prepare	To put things in a neat or required order.
+articulate	eloquent,fluent,expressive,clear	Having or showing the ability to speak clearly.
+ascend	rise,climb,go up,mount	To go up or climb.
+aspire	aim,strive,seek,yearn	To direct one's hopes toward achieving something.
+assemble	gather,collect,convene,meet	To come or bring together in one place.
+assert	state,declare,maintain,insist	To state a fact or belief confidently.
+assess	evaluate,judge,appraise,measure	To evaluate or estimate the nature of something.
+assign	allocate,designate,task,give	To allocate a task or duty to someone.
+assist	help,aid,support,enable	To help someone do something.
+attain	achieve,reach,gain,obtain	To succeed in achieving something.
+attract	draw,pull,entice,lure	To cause to come to a place or person.
+audacious	daring,bold,fearless,reckless	Showing a willingness to take surprising risks.
+authentic	genuine,real,true,original	Of undisputed origin or authorship.
+authority	power,control,command,jurisdiction	The right to give orders or make decisions.
+avoid	evade,shun,escape,sidestep	To keep away from or stop oneself from doing.
+awaken	rouse,stir,wake,arouse	To cause to wake from sleep; to make aware of.
+awareness	consciousness,perception,knowledge,recognition	Knowledge or perception of a fact or situation.
+
+# B
+balance	equilibrium,stability,poise,harmony	An even distribution of weight or quantity.
+banish	exile,expel,drive out,cast out	To send someone away permanently.
+bargain	deal,agreement,negotiate,trade	An agreement made to exchange goods; to negotiate.
+battle	fight,struggle,conflict,contest	A fight between armed forces; a prolonged struggle.
+behave	act,conduct,perform,comport	To act in a specified way; to conduct oneself.
+behavior	conduct,manner,actions,deportment	The way a person or animal acts.
+bind	tie,fasten,secure,attach	To tie or fasten something tightly.
+blend	mix,merge,combine,fuse	To mix together smoothly.
+bloom	flourish,thrive,blossom,flower	To produce flowers; to develop healthily.
+boast	brag,crow,gloat,vaunt	To talk with excessive pride about oneself.
+boost	increase,raise,lift,enhance	To help something to increase or improve.
+borrow	take on loan,obtain,use temporarily	To take and use something temporarily.
+boundary	border,limit,edge,frontier	A line marking the limits of an area.
+break	shatter,smash,fracture,crack	To separate into pieces by force.
+bridge	connect,link,span,join	To make a connection between two things.
+broaden	widen,expand,extend,enlarge	To make or become larger in scope.
+burden	load,weight,strain,hardship	A heavy load; something causing hardship.
+burst	explode,rupture,break,erupt	To break or cause to break suddenly.
+
+# C
+calamity	disaster,catastrophe,tragedy,misfortune	An event causing great damage or distress.
+calm down	settle,soothe,pacify,relax	To make or become less agitated or excited.
+candid	frank,honest,open,forthright	Truthful and straightforward.
+captivate	fascinate,enchant,enthrall,charm	To attract and hold the attention of.
+capable	able,competent,skilled,proficient	Having the ability or capacity to do something.
+capture	catch,seize,apprehend,trap	To take hold of and keep.
+caution	care,wariness,prudence,heed	Care taken to avoid danger or mistakes.
+celebrate	commemorate,mark,honor,observe	To acknowledge a significant event with festivity.
+challenge	test,dare,defy,confront	To invite someone to do something difficult.
+characterize	describe,define,distinguish,portray	To describe the distinctive qualities of.
+charitable	generous,philanthropic,benevolent,giving	Generous in giving to the needy.
+cherish	treasure,value,prize,hold dear	To protect and care for lovingly.
+clarify	explain,illuminate,elucidate,simplify	To make a statement or situation less confused.
+collaborate	cooperate,work together,partner,team up	To work jointly with others.
+collect	gather,accumulate,compile,assemble	To bring together from different places.
+comfort	solace,ease,soothe,console	A state of ease; to give emotional support.
+commit	pledge,dedicate,devote,promise	To be dedicated or obligated to something.
+communicate	convey,express,share,transmit	To share or exchange information.
+competent	capable,proficient,skilled,qualified	Having the necessary ability to do something.
+complex	complicated,intricate,involved,elaborate	Consisting of many connected parts.
+comprehend	understand,grasp,fathom,perceive	To understand fully.
+concede	admit,acknowledge,yield,grant	To admit that something is true; to surrender.
+concise	brief,succinct,terse,compact	Giving a lot of information clearly and in few words.
+condone	overlook,excuse,tolerate,forgive	To accept and allow behavior that is wrong.
+confident	assured,self-assured,bold,certain	Feeling or showing certainty about something.
+confront	face,challenge,meet,tackle	To face up to and deal with something difficult.
+connect	link,join,attach,unite	To bring together or establish communication.
+consider	think about,contemplate,ponder,weigh	To think carefully about something.
+consistent	steady,uniform,regular,constant	Acting in the same way over time.
+construct	build,erect,assemble,create	To build or make something.
+contemplate	consider,ponder,reflect on,think about	To think carefully about something.
+contrast	difference,distinction,divergence,compare	To compare in such a way as to show differences.
+contribute	give,donate,add,offer	To give something in order to help achieve a goal.
+convince	persuade,win over,talk into,sway	To cause someone to believe something.
+cope	manage,deal with,handle,endure	To deal effectively with something difficult.
+correct	fix,rectify,amend,adjust	Free from error; to put something right.
+creative	imaginative,inventive,original,innovative	Relating to the use of the imagination to create.
+critical	crucial,important,decisive,vital	Expressing adverse judgment; of great importance.
+cultivate	develop,nurture,foster,grow	To prepare and use land for crops; to develop.
+curb	restrain,restrict,limit,control	To keep under control; to restrain.
+curious	inquisitive,interested,nosy,wondering	Eager to know or learn something.
+
+# D
+daring	bold,brave,audacious,venturesome	Adventurously brave; willing to take risks.
+debate	discuss,argue,deliberate,dispute	A formal discussion of opposing viewpoints.
+deceive	mislead,delude,trick,dupe	To cause someone to believe something untrue.
+dedicate	commit,devote,consecrate,pledge	To give all one's time or resources to a cause.
+defeat	beat,overcome,conquer,vanquish	To win a victory over; to cause to fail.
+defend	protect,guard,shield,uphold	To protect from attack or harm.
+define	explain,describe,characterize,specify	To state the exact meaning of a word or concept.
+delightful	charming,enchanting,lovely,pleasing	Causing delight; highly pleasing.
+demonstrate	show,prove,illustrate,exhibit	To clearly show the existence or truth of something.
+descend	drop,fall,go down,sink	To move or fall downward.
+describe	depict,portray,characterize,explain	To give an account of something in words.
+determined	resolute,steadfast,unwavering,tenacious	Having a firm decision to do something.
+develop	grow,evolve,advance,improve	To grow or cause to grow more advanced.
+differentiate	distinguish,separate,discriminate,contrast	To recognize what makes something different.
+diligent	hardworking,industrious,assiduous,thorough	Careful and persistent in work or effort.
+diminish	reduce,decrease,lessen,shrink	To make or become less; to cause to seem less.
+discreet	careful,tactful,prudent,judicious	Careful not to cause offence or embarrassment.
+dismiss	discard,reject,discharge,ignore	To treat as unworthy of serious consideration.
+dispute	argue,contest,challenge,oppose	A disagreement or argument; to question the truth of.
+distinct	clear,definite,separate,different	Recognizably different in nature from something else.
+diverse	varied,mixed,assorted,heterogeneous	Showing a great deal of variety.
+doubt	uncertainty,skepticism,mistrust,question	A feeling of uncertainty or lack of conviction.
+dramatic	striking,vivid,impressive,theatrical	Sudden and striking; related to drama.
+drive	motivate,impel,urge,propel	To urge or force; to operate a vehicle.
+durable	lasting,sturdy,long-lasting,resilient	Able to withstand wear and last a long time.
+dwell	reside,live,inhabit,abide	To live somewhere; to think at length about.
+
+# E
+earnest	sincere,serious,heartfelt,genuine	Resulting from or showing sincere conviction.
+effective	successful,productive,efficient,potent	Producing the desired result.
+efficient	productive,effective,capable,organized	Performing a task with minimum wasted effort.
+elaborate	detailed,complex,intricate,developed	Involving many carefully arranged parts.
+elegant	graceful,stylish,refined,sophisticated	Pleasingly graceful or stylish.
+elevate	raise,lift,promote,uplift	To raise to a higher position or level.
+eliminate	remove,get rid of,eradicate,expunge	To completely remove or get rid of.
+eloquent	articulate,fluent,expressive,persuasive	Fluent and persuasive in speaking or writing.
+empower	enable,authorize,equip,strengthen	To give power or authority to someone.
+enable	allow,permit,authorize,facilitate	To make something possible.
+encourage	motivate,inspire,support,urge	To give support, confidence, or hope.
+endure	bear,tolerate,withstand,persist	To suffer patiently; to last over time.
+enhance	improve,boost,increase,strengthen	To intensify or improve the quality of.
+enthusiasm	passion,eagerness,zeal,fervor	Intense enjoyment, interest, or approval.
+envision	imagine,picture,foresee,conceive	To imagine something as a future possibility.
+ethical	moral,principled,righteous,virtuous	Morally correct or acceptable.
+evaluate	assess,judge,appraise,measure	To form an idea of the amount or value of something.
+evident	obvious,clear,apparent,plain	Plain or obvious; clearly seen or understood.
+evolve	develop,advance,progress,transform	To develop gradually over time.
+exceptional	outstanding,remarkable,extraordinary,superior	Unusually good; not typical.
+explicit	clear,direct,unambiguous,precise	Stated clearly and in detail, leaving no confusion.
+extensive	wide,broad,large,comprehensive	Covering a large area; great in amount.
+
+# F
+facilitate	enable,help,assist,ease	To make an action easier.
+failure	defeat,collapse,breakdown,loss	Lack of success; an unsuccessful person or thing.
+faithful	loyal,devoted,true,steadfast	Remaining loyal and steadfast.
+fascinate	captivate,enthrall,enchant,absorb	To attract and interest greatly.
+fervent	passionate,intense,ardent,zealous	Having or showing great intensity of feeling.
+fierce (existing - fierce is already there)
+flexible	adaptable,pliable,versatile,pliant	Able to bend without breaking; adaptable.
+flourish	thrive,prosper,bloom,grow	To grow or develop in a healthy way.
+focus	concentrate,center,direct,hone	To pay particular attention to.
+forceful	powerful,strong,compelling,assertive	Vigorously effective or assertive.
+formal	official,conventional,proper,ceremonial	Following established convention; official.
+foundation	base,basis,groundwork,bedrock	The underlying basis or structure.
+fragile (already exists)
+fulfill	satisfy,achieve,complete,accomplish	To carry out a task or desire; to satisfy.
+fundamental	basic,essential,primary,core	Forming a necessary base; central.
+
+# G
+genuine	authentic,real,sincere,honest	Truly what it claims to be; sincere.
+gracious	courteous,kind,polite,considerate	Courteous, kind, and pleasant.
+gradual	slow,progressive,step-by-step,incremental	Taking place slowly over time.
+gratitude	thankfulness,appreciation,recognition	The quality of being thankful.
+ground	foundation,base,basis,soil	The solid surface of the earth; basis.
+growth	development,expansion,increase,progress	The process of developing or increasing.
+guard	protect,defend,watch over,shield	To watch over in order to protect or control.
+guidance	direction,advice,counsel,instruction	Advice or information aimed at solving a problem.
+
+# H
+habitual	customary,routine,regular,usual	Done regularly or as a habit.
+handle	manage,deal with,control,operate	To manage or deal with a situation.
+harbor	shelter,protect,conceal,hold	To keep or shelter; to entertain in one's mind.
+harsh	severe,rough,strict,cruel	Unpleasantly rough or jarring.
+heal	cure,mend,restore,remedy	To make healthy, whole, or sound again.
+heed	attention,care,notice,regard	Careful attention; to pay attention to.
+highlight	emphasize,stress,underline,feature	To draw attention to something important.
+hinder	obstruct,impede,block,hamper	To make it difficult to act or progress.
+hollow	empty,void,vacant,shallow	Having an empty space inside; not solid.
+honor	respect,esteem,dignity,integrity	High respect; to hold in respect.
+hope	optimism,expectation,wish,aspiration	A feeling that events will turn out well.
+humble	modest,unassuming,meek,unpretentious	Having a modest opinion of oneself.
+
+# I
+identity	character,self,individuality,persona	The fact of being who one is; distinctive character.
+ignorant	unaware,uninformed,unknowing,oblivious	Lacking knowledge or awareness.
+illustrate	demonstrate,show,depict,explain	To explain by using examples or pictures.
+imagine	envision,picture,conceive,dream	To form a mental image of something not present.
+impact	effect,influence,consequence,result	A marked effect or influence.
+improve	better,enhance,upgrade,refine	To make or become better.
+inclusive	comprehensive,broad,wide,embracing	Not excluding any person or group.
+indicate	show,signal,suggest,point	To point out or show something.
+influence	affect,shape,sway,impact	The capacity to have an effect on others.
+initiate	start,begin,launch,trigger	To cause a process to begin.
+innovative	original,creative,inventive,novel	Featuring new methods or ideas.
+inspire	motivate,encourage,stimulate,uplift	To fill someone with the urge to do something.
+integrate	combine,merge,incorporate,unite	To combine parts into a whole.
+integrity	honesty,honor,principle,uprightness	The quality of being honest and having moral principles.
+interact	communicate,engage,connect,relate	To act in a way that has an effect on another.
+intuition	instinct,hunch,insight,sixth sense	The ability to understand something immediately.
+investigate	examine,probe,explore,research	To carry out a systematic inquiry.
+involve	include,encompass,entail,engage	To include or affect as part of something.
+
+# J
+jealous	envious,covetous,resentful,possessive	Feeling resentment of another's advantages.
+journey	trip,voyage,travel,expedition	An act of traveling; a long process.
+judge	assess,evaluate,decide,determine	To form an opinion about; to decide a case.
+just	fair,equitable,impartial,righteous	Based on right and reason; morally right.
+
+# K
+keen	eager,sharp,intense,enthusiastic	Having great interest or enthusiasm.
+knowledge	understanding,learning,expertise,wisdom	Facts, information, and skills acquired through experience.
+
+# L
+lasting	enduring,permanent,durable,long-lived	Continuing for a long time.
+launch	start,begin,initiate,introduce	To start a new project or activity.
+leadership	command,direction,guidance,authority	The action of leading a group.
+learn	acquire,study,absorb,grasp	To gain knowledge or skill by study.
+liberate	free,release,emancipate,deliver	To set free from imprisonment or oppression.
+limit	restrict,confine,constrain,cap	A point beyond which something cannot go.
+listen	hear,attend,heed,pay attention	To give attention to a sound; to take heed.
+logical	rational,reasoned,sound,coherent	Of or according to the rules of logic.
+loyal	faithful,devoted,steadfast,true	Giving or showing constant support.
+
+# M
+maintain	keep,preserve,sustain,uphold	To cause to continue; to keep in good condition.
+manage	handle,control,direct,supervise	To be in charge of; to succeed in doing.
+meaningful	significant,purposeful,relevant,important	Having meaning or purpose.
+measure	gauge,assess,quantify,evaluate	To determine the size or amount of something.
+meticulous	careful,precise,thorough,painstaking	Showing great attention to detail.
+mindful	aware,conscious,attentive,heedful	Conscious and aware of the present moment.
+modest	humble,unassuming,reserved,simple	Not boasting about one's abilities.
+motivate	inspire,encourage,drive,stimulate	To provide a reason for doing something.
+mundane	ordinary,routine,everyday,commonplace	Lacking interest or excitement.
+mutual	shared,common,reciprocal,joint	Experienced or done by both parties equally.
+
+# N
+navigate	steer,guide,direct,chart	To plan and direct a route; to find one's way.
+negotiate	bargain,deal,mediate,discuss	To try to reach an agreement by discussion.
+notable	remarkable,distinguished,outstanding,significant	Worthy of attention; remarkable.
+notice	observe,detect,perceive,see	To become aware of something.
+nourish	feed,sustain,nurture,support	To provide with food or other things necessary for life.
+nurture	raise,foster,develop,cultivate	To care for and encourage the development of.
+
+# O
+objective	goal,aim,target,purpose	Something aimed at or striven for; impartial.
+observe	watch,note,notice,perceive	To notice or regard carefully.
+obtain	get,acquire,gain,secure	To come into possession of.
+obvious	clear,evident,apparent,plain	Easily perceived or understood.
+opportunity	chance,opening,prospect,occasion	A set of circumstances making something possible.
+optimistic	hopeful,positive,confident,cheerful	Hopeful and confident about the future.
+organize	arrange,order,structure,systematize	To arrange in a systematic way.
+original	unique,novel,new,inventive	Present from the beginning; not a copy.
+outcome	result,consequence,effect,product	The way something turns out.
+overcome	conquer,surmount,defeat,prevail	To succeed in dealing with something.
+
+# P
+participate	take part,engage,join,contribute	To take part in an activity.
+patient	tolerant,calm,enduring,stoic	Able to wait without becoming annoyed.
+perceive	see,observe,notice,detect	To become aware through the senses.
+persist	continue,endure,persevere,carry on	To continue firmly in a course of action.
+perspective	viewpoint,outlook,view,standpoint	A particular attitude toward something.
+persuade	convince,sway,influence,win over	To cause someone to do something through reasoning.
+phenomenon	event,occurrence,marvel,wonder	A fact or situation that is observed to exist.
+potential	possibility,capability,capacity,ability	Having latent qualities that may be developed.
+precise	exact,accurate,specific,correct	Marked by exactness and accuracy.
+prevent	stop,hinder,block,avoid	To keep from happening.
+principle	rule,standard,guideline,tenet	A fundamental truth or proposition.
+priority	precedence,importance,urgency,preference	The fact of being more important than others.
+problem	issue,difficulty,challenge,obstacle	A matter or situation regarded as unwelcome.
+progress	advance,improvement,development,growth	Forward or onward movement toward a goal.
+protect	shield,guard,defend,safeguard	To keep safe from harm.
+pursue	follow,chase,seek,go after	To follow or chase; to strive to achieve.
+purpose	aim,goal,intention,objective	The reason for which something is done.
+persistent	tenacious,stubborn,determined,unyielding	Continuing firmly despite difficulty.
+profound	deep,intense,thorough,far-reaching	Very great or intense; having deep insight.
+pragmatic	practical,realistic,sensible,down-to-earth	Dealing with things practically.
+promote	advance,further,support,advertise	To advance in position; to encourage.
+proactive	anticipatory,forward-looking,enterprising,initiative	Creating or controlling a situation rather than responding.
+productive	efficient,fruitful,fertile,effective	Achieving a significant amount of results.
+
+# Q
+qualify	certify,entitle,fit,meet requirements	To meet the required standard; to modify a statement.
+question	query,doubt,challenge,interrogate	A sentence worded to elicit information.
+
+# R
+rational	logical,reasonable,sensible,sound	Based on or agreeable to reason.
+realistic	practical,pragmatic,sensible,grounded	Having realistic views; based on facts.
+rebuild	reconstruct,restore,renovate,repair	To build again after destruction.
+recognize	identify,acknowledge,notice,recall	To identify from previous experience.
+recommend	suggest,advise,endorse,advocate	To put forward with approval.
+reduce	decrease,lessen,diminish,cut	To make smaller or less in amount.
+reflect	ponder,think,contemplate,muse	To think deeply; to cast back light.
+reinforce	strengthen,support,bolster,fortify	To strengthen or support.
+relate	connect,link,associate,tell	To make a connection between; to narrate.
+release	free,let go,liberate,discharge	To allow something to move freely.
+reliability	dependability,trustworthiness,consistency	The quality of being dependable.
+reliable	dependable,trustworthy,consistent,steady	Consistently good in quality or performance.
+relieve	ease,alleviate,reduce,comfort	To make less severe; to free from pain.
+reluctant	unwilling,hesitant,loath,disinclined	Unwilling and hesitant.
+remind	prompt,recall,jog memory,notify	To cause someone to remember.
+renew	restore,revive,refresh,rejuvenate	To resume after an interruption; to make new.
+repair	fix,mend,restore,patch	To restore to good condition after damage.
+resilient	tough,hardy,flexible,adaptable	Able to recover quickly from difficult conditions.
+resolve	decide,determine,settle,conclude	To settle or find a solution to.
+responsibility	duty,obligation,accountability,charge	A duty or obligation to perform satisfactorily.
+restore	repair,reinstate,revive,rebuild	To bring back to original condition.
+reveal	show,disclose,expose,uncover	To make previously unknown information known.
+review	examine,assess,study,evaluate	To examine or assess something formally.
+revise	change,alter,update,amend	To reconsider and alter in light of new facts.
+robust	strong,sturdy,vigorous,healthy	Strong and healthy; sturdy.
+routine	regular,standard,customary,ordinary	A sequence of actions regularly followed.
+
+# S
+secure	safe,protected,stable,certain	Fixed or fastened so as not to give way.
+seek	search,look for,pursue,hunt	To attempt to find or obtain.
+sensitive	perceptive,aware,delicate,responsive	Quick to detect or respond to.
+significant	important,notable,meaningful,major	Sufficiently great to be noteworthy.
+simplify	make easier,clarify,streamline,reduce	To make simpler.
+sincere	genuine,honest,heartfelt,real	Free from pretense or deceit.
+solution	answer,fix,resolution,remedy	A means of solving a problem.
+specific	particular,exact,precise,definite	Clearly defined or identified.
+spontaneous	impulsive,unplanned,natural,instinctive	Performed without premeditation.
+stable	steady,firm,secure,balanced	Not likely to change or move.
+stimulate	excite,arouse,encourage,spur	To raise levels of physiological or nervous activity.
+strategy	plan,approach,method,scheme	A plan of action to achieve a long-term aim.
+strengthen	fortify,reinforce,bolster,enhance	To make or become stronger.
+strive	try hard,endeavor,aim,work toward	To make great efforts to achieve something.
+structure	framework,organization,arrangement,form	The way in which parts are arranged.
+stubborn	obstinate,headstrong,unyielding,tenacious	Unwilling to change one's opinion or action.
+substantial	considerable,significant,large,real	Of considerable importance or size.
+subtle	delicate,slight,nuanced,refined	So delicate or precise as to be difficult to analyze.
+succeed	thrive,prosper,achieve,accomplish	To achieve the desired aim.
+sufficient	enough,adequate,ample,satisfactory	As much as needed.
+suggest	propose,recommend,advise,put forward	To put forward for consideration.
+summarize	outline,recap,condense,abridge	To give a brief statement of the main points.
+support	back,uphold,sustain,assist	To bear all or part of the weight of; to assist.
+sustain	maintain,support,continue,uphold	To strengthen or support; to keep going.
+systematic	organized,methodical,orderly,structured	Done in a methodical way.
+
+# T
+tactful	diplomatic,sensitive,discreet,considerate	Having skill in dealing with delicate matters.
+tenacious	persistent,determined,resolute,stubborn	Tending to hold firmly to a purpose.
+thoughtful	considerate,reflective,attentive,pensive	Showing careful consideration.
+thorough	comprehensive,exhaustive,complete,detailed	Done completely with attention to detail.
+tolerate	endure,bear,accept,put up with	To allow the existence of something one dislikes.
+transform	change,convert,alter,reshape	To make a complete change in form or appearance.
+transparent	clear,open,honest,frank	Allowing light to pass; easy to perceive.
+trust	confidence,faith,reliance,belief	Firm belief in the reliability of someone.
+
+# U
+uniform	consistent,regular,constant,even	Not varying; the same in all cases.
+unite	join,combine,merge,link	To come or bring together for a common purpose.
+uphold	support,maintain,defend,sustain	To confirm or support something that has been questioned.
+urgent	pressing,immediate,critical,important	Requiring immediate action or attention.
+
+# V
+validate	confirm,verify,substantiate,prove	To demonstrate or support the truth of.
+valor	bravery,courage,heroism,gallantry	Great courage in the face of danger.
+venture	undertaking,endeavor,enterprise,project	A risky or daring journey or undertaking.
+verify	confirm,check,prove,substantiate	To make sure or demonstrate that something is true.
+versatile	adaptable,flexible,multi-talented,resourceful	Able to adapt or be adapted to many functions.
+vibrant	lively,energetic,vivid,spirited	Full of energy and enthusiasm.
+vigilant	alert,watchful,attentive,observant	Keeping careful watch for possible danger.
+vision	sight,view,dream,foresight	The ability to think about the future with imagination.
+vivid	bright,colorful,striking,intense	Producing powerful feelings; clear and detailed.
+volunteer	offer,serve,give freely,contribute	To offer to do something of one's own free will.
+
+# W
+wary	cautious,careful,guarded,alert	Feeling or showing caution about possible dangers.
+withdraw	retreat,pull back,remove,back out	To remove or take away; to move back.
+withstand	endure,resist,bear,tolerate	To remain undamaged or to hold out against.
+
+# X-Z
+yearn	long,desire,crave,pine	To have an intense feeling of longing.
+yield	produce,generate,give,surrender	To produce or provide; to give way.
+zealous	passionate,fervent,enthusiastic,ardent	Having great energy in pursuit of a cause.
+zeal	passion,enthusiasm,fervor,dedication	Great energy or enthusiasm in pursuit of a cause.
+
+# --- Additional nouns and descriptors ---
+
+# Abstract concepts
+ability	skill,talent,capacity,capability	Power or skill to do something.
+abstraction	concept,idea,theory,generalization	The quality of dealing with ideas rather than events.
+achievement	accomplishment,attainment,feat,triumph	A thing done successfully by effort.
+advantage	benefit,asset,plus,gain	A condition giving a better position.
+ambition	aspiration,drive,goal,desire	A strong desire to achieve something.
+analysis	examination,study,investigation,assessment	Detailed examination of the elements of something.
+anxiety	worry,nervousness,unease,apprehension	A feeling of worry or unease.
+appreciation	gratitude,recognition,understanding,value	Recognition of the quality of something.
+argument	debate,dispute,discussion,quarrel	An exchange of diverging views; a reason given.
+aspiration	ambition,goal,dream,hope	A hope or ambition of achieving something.
+attitude	outlook,mindset,disposition,stance	A settled way of thinking or feeling.
+awareness	consciousness,understanding,knowledge,recognition	Ability to know and perceive.
+
+# B nouns
+balance	equilibrium,stability,proportion,harmony	An even distribution; a state of stability.
+basis	foundation,ground,reason,core	The underlying support or justification.
+benefit	advantage,gain,reward,asset	An advantage or profit gained.
+boundary	border,limit,edge,margin	A line that marks the limits of an area.
+
+# C nouns
+capability	ability,capacity,power,skill	The ability to do something.
+capacity	ability,potential,room,scope	The ability or power to do something.
+challenge	difficulty,test,obstacle,problem	Something that tests abilities.
+character	nature,personality,quality,integrity	The mental and moral qualities of a person.
+clarity	clearness,precision,lucidity,simplicity	The quality of being clear and easy to understand.
+collaboration	cooperation,teamwork,partnership,joint effort	The action of working with someone.
+commitment	dedication,devotion,loyalty,pledge	The state of being dedicated to a cause.
+complexity	complication,intricacy,difficulty,nuance	The state of being complicated.
+concept	idea,notion,thought,principle	An abstract idea.
+conflict	disagreement,clash,struggle,opposition	A serious incompatibility between parties.
+consequence	result,outcome,effect,aftermath	A result or effect of an action.
+context	background,setting,circumstances,framework	The circumstances forming the background.
+contribution	addition,input,offering,donation	Something given to help achieve or provide something.
+
+# D nouns
+decision	choice,resolution,verdict,conclusion	A conclusion reached after consideration.
+dedication	commitment,devotion,loyalty,perseverance	The quality of being devoted to a task.
+development	growth,progress,advancement,evolution	The process of developing.
+dignity	self-respect,honor,pride,nobility	The state of being worthy of respect.
+discipline	control,order,training,rigor	The practice of training people to obey rules.
+diversity	variety,range,mixture,difference	A range of different things.
+
+# E nouns
+effort	work,exertion,endeavor,attempt	A vigorous or determined attempt.
+engagement	involvement,participation,commitment,connection	The act of engaging with something.
+evaluation	assessment,appraisal,judgment,review	A systematic determination of merit.
+evidence	proof,indication,sign,data	Available facts indicating whether something is true.
+excellence	superiority,quality,mastery,distinction	The quality of being outstanding.
+experience	knowledge,skill,practice,background	Practical contact with events.
+expertise	skill,knowledge,mastery,proficiency	Expert skill or knowledge.
+
+# F nouns
+factor	element,component,aspect,consideration	A circumstance contributing to a result.
+failure	defeat,collapse,shortcoming,breakdown	Lack of success.
+flexibility	adaptability,versatility,openness,pliancy	The quality of bending without breaking.
+focus	concentration,attention,emphasis,priority	The center of interest or attention.
+foundation	base,basis,groundwork,support	The basis on which something stands.
+framework	structure,system,plan,outline	A basic structure underlying a system.
+
+# G nouns
+goal	aim,objective,target,purpose	The object of a person's ambition or effort.
+
+# H nouns
+habit	custom,practice,routine,tendency	A settled tendency or practice.
+harmony	agreement,accord,unity,peace	A pleasing arrangement of parts.
+
+# I nouns
+identity	character,self,individuality,distinctiveness	Who or what a person or thing is.
+impact	effect,influence,consequence,result	A marked effect or influence.
+improvement	advance,progress,enhancement,refinement	The act of making something better.
+initiative	enterprise,drive,ambition,effort	The ability to assess and take action.
+innovation	invention,novelty,change,creativity	A new method or product.
+insight	understanding,perception,awareness,wisdom	A deep understanding.
+integrity	honesty,honor,morality,principle	The quality of being honest and moral.
+interaction	communication,engagement,connection,exchange	Mutual or reciprocal action.
+interpretation	understanding,reading,analysis,explanation	The action of explaining the meaning of something.
+
+# J nouns
+judgment	assessment,opinion,decision,evaluation	The ability to make considered decisions.
+
+# K nouns
+knowledge	understanding,expertise,learning,wisdom	Facts or skills acquired through experience.
+
+# L nouns
+leadership	command,guidance,direction,authority	The action of leading a group.
+learning	education,study,knowledge,training	The acquisition of knowledge or skills.
+limitation	restriction,constraint,boundary,cap	A restriction placed on someone or something.
+
+# M nouns
+mastery	expertise,skill,command,proficiency	Comprehensive knowledge or skill.
+meaning	significance,sense,purpose,importance	What is meant by a word or action.
+mechanism	system,process,means,method	A system of parts working together.
+method	way,approach,technique,procedure	A particular procedure for accomplishing something.
+mindset	attitude,outlook,perspective,mentality	An established set of attitudes held by someone.
+momentum	impetus,drive,force,energy	The quantity of motion of a moving body.
+motivation	drive,incentive,reason,inspiration	The desire or willingness to do something.
+
+# N nouns
+narrative	story,account,tale,description	A spoken or written account of events.
+network	system,web,grid,connection	A group of interconnected people or things.
+
+# O nouns
+obstacle	barrier,hindrance,impediment,challenge	A thing that blocks progress.
+opportunity	chance,opening,prospect,occasion	A set of circumstances making something possible.
+outcome	result,consequence,effect,product	The way something turns out.
+
+# P nouns
+passion	enthusiasm,zeal,love,devotion	Strong and barely controllable emotion.
+patience	tolerance,forbearance,endurance,calmness	The ability to wait without becoming annoyed.
+pattern	design,arrangement,model,template	A repeated arrangement.
+perception	awareness,understanding,view,insight	The ability to see or understand.
+perseverance	persistence,determination,tenacity,endurance	Continued effort despite difficulty.
+potential	possibility,capability,ability,promise	Latent qualities not yet developed.
+principle	rule,value,standard,belief	A fundamental truth or standard.
+process	procedure,method,system,operation	A series of actions producing a result.
+progress	development,advancement,improvement,growth	Forward movement toward a goal.
+
+# Q nouns
+quality	excellence,standard,caliber,worth	The standard of something as measured against similar things.
+
+# R nouns
+reality	truth,fact,actuality,existence	The world as it actually exists.
+reason	cause,rationale,logic,explanation	A cause or explanation for an action.
+reflection	thought,contemplation,consideration,image	Serious thought or consideration.
+relationship	connection,bond,association,link	The way two or more people are connected.
+resilience	toughness,adaptability,recovery,durability	The capacity to recover quickly from difficulties.
+responsibility	duty,obligation,accountability,burden	The state of having a duty to deal with something.
+result	outcome,effect,consequence,product	A thing that is caused or produced by something.
+
+# S nouns
+skill	ability,talent,expertise,proficiency	The ability to do something well.
+solution	answer,resolution,fix,remedy	A means of solving a problem.
+strategy	plan,approach,method,tactics	A plan of action designed to achieve a goal.
+strength	power,force,robustness,vigor	The quality of being strong.
+structure	framework,organization,arrangement,system	The way parts are organized.
+success	achievement,triumph,accomplishment,victory	The accomplishment of an aim.
+support	assistance,help,backing,aid	Something that holds something else in place.
+system	method,structure,organization,network	A set of connected things forming a whole.
+
+# T nouns
+talent	gift,ability,skill,aptitude	A natural aptitude or skill.
+tension	stress,strain,anxiety,conflict	Mental or emotional strain.
+theory	hypothesis,idea,concept,framework	A set of principles explaining a phenomenon.
+transformation	change,conversion,metamorphosis,shift	A thorough or dramatic change.
+
+# U nouns
+understanding	comprehension,insight,grasp,knowledge	The ability to understand something.
+
+# V nouns
+value	worth,importance,benefit,merit	The importance or usefulness of something.
+vision	sight,dream,foresight,imagination	The ability to think about the future.
+
+# W nouns
+wisdom	knowledge,insight,judgment,experience	The quality of having experience and good judgment.
+
+# --- Additional adjectives ---
+
+abrupt	sudden,sharp,unexpected,curt	Sudden and unexpected; rudely brief.
+abstract	theoretical,conceptual,notional	Existing in thought rather than concretely.
+accessible	available,reachable,attainable,approachable	Able to be reached or obtained.
+accomplished	skilled,talented,proficient,expert	Highly trained or skilled.
+adamant	firm,resolute,unyielding,insistent	Refusing to be persuaded; resolute.
+affectionate	loving,warm,tender,fond	Readily feeling or showing fondness.
+aggressive	hostile,forceful,assertive,combative	Ready or likely to attack; forceful.
+alert	watchful,attentive,vigilant,awake	Quick to notice and act.
+aloof	distant,detached,reserved,cold	Not friendly; not showing interest.
+ambitious	driven,aspiring,determined,eager	Having a strong desire to succeed.
+ample	plentiful,abundant,generous,spacious	Enough or more than enough.
+analytical	logical,systematic,methodical,critical	Relating to analysis; good at logical thinking.
+apparent	obvious,clear,evident,visible	Clearly visible or understood.
+appropriate	suitable,fitting,proper,correct	Suitable or proper in the circumstances.
+ardent	passionate,fervent,zealous,enthusiastic	Enthusiastic or passionate.
+assertive	confident,direct,self-assured,decisive	Confident and direct in claiming one's rights.
+astute	shrewd,clever,perceptive,intelligent	Having good judgment or insight.
+attentive	alert,mindful,careful,observant	Paying close attention.
+austere	severe,plain,strict,stern	Severe or strict in manner; without luxury.
+
+# Ba-Bi adjectives
+beneficial	helpful,useful,favorable,advantageous	Having a positive effect.
+benevolent	kind,charitable,generous,good-willed	Well-meaning and kindly.
+blatant	obvious,flagrant,glaring,overt	Done openly without shame.
+brief	short,concise,quick,succinct	Of short duration; concise.
+broken	damaged,fractured,shattered,impaired	Having been fractured; not functioning.
+brutal	savage,violent,cruel,harsh	Savagely violent; mercilessly harsh.
+
+# Ca-Cy adjectives
+cautious	careful,wary,guarded,prudent	Careful to avoid danger.
+cheerful	happy,bright,merry,buoyant	Noticeably happy and optimistic.
+coarse	rough,crude,harsh,unrefined	Rough or loose in texture; crude.
+coherent	logical,consistent,clear,rational	Logical and well-organized.
+compelling	fascinating,gripping,interesting,convincing	Evoking interest, attention, or admiration.
+comprehensive	complete,thorough,exhaustive,full	Including all elements; complete.
+concise	brief,succinct,pithy,compact	Giving much information in few words.
+concrete	real,actual,tangible,solid	Existing in material form; specific.
+conservative	traditional,conventional,cautious,moderate	Averse to change; holding traditional values.
+constructive	helpful,positive,productive,useful	Serving a useful purpose.
+contemplative	thoughtful,reflective,meditative,pensive	Expressing or involving calm extended thought.
+contentious	controversial,disputed,debatable,argumentative	Causing disagreement or argument.
+convincing	persuasive,compelling,believable,credible	Able to persuade.
+cooperative	helpful,willing,accommodating,collaborative	Willing to work together.
+courageous	brave,bold,valiant,fearless	Not deterred by danger.
+critical	important,essential,vital,decisive	Expressing adverse judgment; crucial.
+cultural	social,traditional,artistic,ethnic	Relating to culture or civilization.
+cunning	crafty,clever,shrewd,artful	Having skill in achieving goals by deceit.
+
+# Da-Dy adjectives
+decisive	determined,resolute,firm,definitive	Settling an issue; showing firmness.
+dedicated	committed,devoted,loyal,steadfast	Devoted to a task or purpose.
+defensive	protective,guarded,resistant,cautious	Used or intended to defend.
+deliberate	intentional,planned,calculated,purposeful	Done consciously and intentionally.
+demanding	challenging,exacting,rigorous,tough	Requiring effort or skill.
+dependable	reliable,trustworthy,steady,responsible	Trustworthy and reliable.
+detailed	thorough,comprehensive,precise,elaborate	Having many details.
+determined	resolute,steadfast,persistent,tenacious	Firm in purpose.
+dignified	stately,noble,respectable,honorable	Having dignity; worthy of respect.
+diligent	hard-working,thorough,assiduous,industrious	Hardworking and careful.
+distinctive	unique,characteristic,notable,special	Characteristic of a person or thing.
+
+# E adjectives
+earnest	serious,sincere,heartfelt,genuine	Intensely serious.
+efficient	productive,effective,organized,capable	Achieving maximum output with minimum effort.
+elegant	graceful,refined,stylish,sophisticated	Pleasingly graceful.
+elusive	evasive,hard to catch,slippery,fleeting	Difficult to find or achieve.
+empathetic	understanding,compassionate,sensitive,sympathetic	Showing empathy.
+energetic	lively,vigorous,dynamic,active	Showing great energy.
+engaging	interesting,captivating,charming,appealing	Attractive or interesting.
+enlightened	informed,educated,aware,progressive	Having or showing awareness.
+equal	same,equivalent,identical,balanced	Being the same in quantity or degree.
+essential	necessary,vital,crucial,fundamental	Absolutely necessary.
+ethical	moral,principled,righteous,honorable	Morally correct.
+evident	obvious,apparent,clear,plain	Clearly visible; obvious.
+exact	precise,accurate,specific,correct	Not approximated.
+exceptional	outstanding,remarkable,extraordinary,excellent	Unusually good.
+
+# F adjectives
+fair	just,impartial,unbiased,equitable	Treating people equally.
+familiar	well-known,common,recognizable,acquainted	Well known; common.
+fascinating	interesting,captivating,enthralling,absorbing	Extremely interesting.
+firm	solid,resolute,hard,steady	Not yielding to pressure; resolute.
+focused	concentrated,attentive,determined,purposeful	Directing attention at a specific point.
+forthright	direct,frank,honest,candid	Direct and outspoken.
+frugal	economical,thrifty,careful,sparing	Sparing or economical in use of resources.
+full	complete,filled,packed,whole	Containing all possible; complete.
+
+# G adjectives
+generous	giving,liberal,bountiful,unselfish	Showing readiness to give more than necessary.
+genuine	authentic,real,sincere,true	Truly what something is said to be.
+glorious	magnificent,splendid,superb,grand	Having a striking beauty or splendor.
+graceful	elegant,fluid,poised,agile	Having elegance of movement.
+
+# H adjectives
+harmonious	agreeable,compatible,peaceful,unified	Forming a pleasing or consistent whole.
+helpful	useful,supportive,cooperative,obliging	Giving or ready to give help.
+heroic	brave,courageous,valiant,bold	Having qualities of a hero.
+
+# I adjectives
+ideal	perfect,best,optimal,model	Satisfying one's idea of what is perfect.
+impartial	unbiased,neutral,objective,fair	Treating all parties equally.
+impressive	remarkable,striking,notable,admirable	Evoking admiration through size or excellence.
+independent	self-sufficient,autonomous,free,self-reliant	Free from outside control.
+innovative	creative,original,inventive,novel	Featuring new methods or ideas.
+insightful	perceptive,wise,astute,penetrating	Having insight; showing deep understanding.
+intellectual	learned,academic,scholarly,thoughtful	Of or relating to the intellect.
+intentional	deliberate,purposeful,planned,conscious	Done on purpose.
+intricate	complex,detailed,elaborate,involved	Very complicated or detailed.
+inventive	creative,original,imaginative,ingenious	Having the ability to create new things.
+
+# J adjectives
+just	fair,equitable,moral,righteous	Based on justice; morally right.
+
+# K adjectives
+knowledgeable	informed,educated,learned,expert	Well-informed; intelligent.
+
+# L adjectives
+lively	energetic,animated,vibrant,spirited	Full of life and energy.
+lucid	clear,coherent,intelligible,transparent	Expressed clearly; easy to understand.
+
+# M adjectives
+meaningful	significant,purposeful,important,deep	Having meaning or significance.
+meticulous	careful,precise,thorough,detailed	Giving attention to detail.
+methodical	systematic,organized,orderly,careful	Done in an orderly way.
+modest	humble,unassuming,simple,reserved	Unpretentious; not boastful.
+
+# N adjectives
+notable	remarkable,distinguished,noteworthy,significant	Worthy of attention.
+nuanced	subtle,refined,delicate,complex	Characterized by subtle distinctions.
+
+# O adjectives
+observant	attentive,perceptive,alert,watchful	Quick to notice things.
+optimal	best,ideal,perfect,most favorable	Best or most favorable.
+orderly	neat,organized,methodical,systematic	Neatly arranged; well-organized.
+
+# P adjectives
+particular	specific,special,individual,distinct	Used to single out a person or thing.
+passionate	fervent,enthusiastic,ardent,intense	Having strong feelings.
+peaceful	calm,tranquil,serene,quiet	Free from disturbance; calm.
+perceptive	insightful,astute,shrewd,observant	Having a good understanding of things.
+persuasive	convincing,compelling,influential,effective	Good at persuading.
+precise	exact,accurate,correct,specific	Marked by exactness.
+principled	ethical,moral,honorable,upright	Acting in accordance with morality.
+progressive	forward-thinking,advanced,liberal,modern	Favoring change and new ideas.
+prominent	important,distinguished,notable,eminent	Important; famous.
+punctual	timely,on time,prompt,reliable	Happening at the agreed time.
+
+# Q adjectives
+qualified	capable,competent,certified,eligible	Officially recognized as meeting requirements.
+
+# R adjectives
+rational	logical,reasonable,sensible,balanced	Based on reason.
+reasonable	fair,sensible,rational,moderate	Having sound judgment.
+reliable	dependable,trustworthy,consistent,steady	Consistently good and dependable.
+remarkable	extraordinary,notable,impressive,outstanding	Worthy of attention.
+resilient	tough,adaptable,hardy,flexible	Able to recover from difficulty.
+resourceful	clever,inventive,adaptable,capable	Able to find solutions to problems.
+respectable	admirable,worthy,decent,honorable	Regarded as good.
+responsible	accountable,reliable,dependable,trustworthy	Having an obligation to do something.
+robust	strong,sturdy,vigorous,durable	Strong and healthy.
+
+# S adjectives
+sensible	practical,reasonable,sound,logical	Done with wisdom.
+skilled	expert,proficient,capable,accomplished	Having skills.
+sincere	genuine,honest,heartfelt,authentic	Not pretending; honest.
+sophisticated	refined,cultured,complex,advanced	Having a refined understanding.
+stable	steady,secure,firm,constant	Not likely to change.
+steadfast	resolute,firm,determined,unwavering	Resolutely firm.
+steadfast	loyal,constant,devoted,dependable	Firm and unwavering.
+stimulating	interesting,exciting,challenging,thought-provoking	Making one feel enthusiastic.
+strategic	planned,calculated,deliberate,tactical	Forming part of a strategy.
+structured	organized,systematic,orderly,planned	Arranged in a definite pattern.
+subtle	delicate,faint,slight,understated	So delicate as to be difficult to analyze.
+
+# T adjectives
+talented	gifted,skilled,capable,accomplished	Having a natural aptitude.
+thorough	complete,comprehensive,exhaustive,detailed	Carried out with great care.
+tolerant	open-minded,accepting,fair,patient	Showing willingness to accept differences.
+transparent	clear,honest,open,frank	Easy to see through; without pretense.
+trustworthy	reliable,dependable,honest,loyal	Able to be relied on.
+
+# U adjectives
+unbiased	impartial,fair,objective,neutral	Showing no prejudice.
+unique	distinctive,one-of-a-kind,original,singular	Being the only one of its kind.
+
+# V adjectives
+valid	sound,justifiable,legitimate,reasonable	Having a sound basis in fact.
+valuable	worthwhile,precious,important,useful	Worth a lot; of great use.
+versatile	adaptable,flexible,all-around,multifaceted	Able to adapt to many uses.
+vigilant	alert,watchful,attentive,wary	Keeping careful watch.
+
+# W adjectives
+well-rounded	balanced,versatile,complete,comprehensive	Having a wide range of abilities.
+
+# Z adjectives
+zealous	passionate,fervent,ardent,enthusiastic	Having great zeal.
+
+# --- Additional verbs not yet listed ---
+
+accommodate	adapt,adjust,fit,house	To fit in with the needs of; to provide lodging.
+advocate	support,champion,promote,recommend	To publicly support a cause.
+alleviate	ease,relieve,lessen,mitigate	To make pain or difficulty less severe.
+annex	add,attach,acquire,incorporate	To attach or add to something larger.
+appoint	designate,assign,name,select	To assign a job or role to someone.
+archive	store,file,preserve,record	To place in an archive for safekeeping.
+articulate	express,state,say,convey	To express an idea clearly.
+aspire	aim,strive,hope,seek	To direct one's hopes toward a goal.
+attract	draw,pull,entice,lure	To cause to come toward.
+authenticate	verify,confirm,validate,prove	To prove or confirm as genuine.
+authorize	permit,allow,sanction,approve	To give official permission.
+
+boost	raise,increase,lift,enhance	To increase or improve.
+breach	break,violate,rupture,gap	To break or fail to observe a rule or agreement.
+
+challenge	dispute,question,contest,dare	To dispute or call into question.
+chart	map,plan,plot,record	To make a map of; to record.
+clarify	clear up,explain,illuminate,simplify	To make less confused.
+cluster	group,gather,bunch,collect	To form a tight group.
+collaborate	work together,cooperate,team,partner	To work jointly on something.
+compile	gather,collect,assemble,put together	To assemble information into a list.
+comprehend	understand,grasp,fathom,get	To understand fully.
+conceive	imagine,think up,devise,create	To form or devise in the mind.
+condense	compress,shorten,summarize,reduce	To make more concise.
+confer	discuss,consult,bestow,give	To discuss something with others; to grant.
+configure	set up,arrange,adjust,customize	To set up for a particular purpose.
+consult	ask,seek advice,discuss,confer	To seek information or advice from.
+contain	hold,include,enclose,comprise	To have or hold within.
+convey	communicate,express,transmit,deliver	To communicate a message.
+convince	persuade,win over,sway,satisfy	To cause to believe or do something.
+correlate	relate,connect,link,associate	To have a mutual relationship.
+cultivate	grow,develop,foster,nurture	To develop.
+
+declare	announce,state,proclaim,assert	To make known formally.
+decompose	break down,decay,disintegrate,rot	To break down into components.
+deduce	conclude,infer,derive,gather	To reach a conclusion by reasoning.
+delegate	assign,entrust,hand over,transfer	To entrust a task to another person.
+depict	portray,show,represent,describe	To show or represent in a picture or words.
+derive	obtain,get,extract,deduce	To obtain from a source.
+detect	find,discover,identify,notice	To discover the existence of.
+determine	decide,resolve,establish,ascertain	To cause or decide.
+devise	design,plan,create,invent	To plan or invent a procedure.
+diagnose	identify,determine,detect,assess	To identify the nature of a problem.
+differentiate	distinguish,separate,contrast,tell apart	To recognize what makes things different.
+direct	guide,steer,lead,manage	To manage and control; to give instructions.
+distribute	spread,allocate,share,deliver	To supply to multiple recipients.
+
+embed	insert,place,incorporate,include	To fix firmly in a surrounding mass.
+emphasize	stress,highlight,underline,focus on	To give special importance to.
+emulate	imitate,copy,follow,mirror	To try to match or surpass.
+encourage	support,motivate,inspire,promote	To give support or confidence.
+ensure	make sure,guarantee,secure,confirm	To make certain something will happen.
+establish	found,create,set up,build	To set up on a firm basis.
+exhibit	display,show,demonstrate,present	To publicly display.
+explain	clarify,describe,illustrate,elucidate	To make plain or clear.
+express	convey,show,communicate,voice	To put into words or gestures.
+
+foster	encourage,promote,nurture,support	To encourage the development of.
+frame	structure,present,articulate,position	To put together or define.
+fulfill	satisfy,carry out,meet,complete	To bring to completion.
+
+generate	produce,create,make,yield	To cause something to arise.
+govern	rule,control,manage,direct	To conduct the policy and affairs of.
+ground	base,root,anchor,establish	To give a firm basis to.
+
+harness	use,control,exploit,channel	To control and make use of.
+highlight	emphasize,stress,draw attention to,feature	To pick out and emphasize.
+
+identify	recognize,distinguish,name,spot	To establish or indicate the identity of.
+implement	carry out,execute,put into practice,apply	To put a plan into action.
+incorporate	include,integrate,add,embed	To take in or contain as part of a whole.
+indicate	show,point to,suggest,signal	To point out or show.
+inspire	motivate,energize,stimulate,encourage	To fill with the urge to do something.
+
+justify	defend,explain,rationalize,support	To show to be right or reasonable.
+
+maintain	keep,preserve,uphold,sustain	To cause to continue; to keep in repair.
+mitigate	lessen,reduce,alleviate,ease	To make less severe or serious.
+
+navigate	direct,steer,guide,chart	To find the way through.
+notify	inform,tell,alert,advise	To inform someone of something.
+
+overcome	surmount,conquer,defeat,prevail	To succeed in dealing with difficulty.
+
+persist	continue,carry on,keep going,endure	To continue steadfastly.
+predict	forecast,foresee,anticipate,project	To say what will happen in the future.
+preserve	protect,maintain,keep,conserve	To maintain in its original state.
+process	handle,deal with,treat,manage	To perform a series of actions on.
+promote	advance,support,encourage,back	To raise to a higher position.
+propose	suggest,put forward,recommend,offer	To put forward for consideration.
+protect	shield,guard,defend,secure	To keep safe.
+
+recognize	identify,acknowledge,know,spot	To identify as previously seen.
+refine	improve,perfect,polish,enhance	To remove imperfections; to improve.
+reinstate	restore,return,bring back,reestablish	To put back in a previous position.
+require	need,demand,necessitate,call for	To need for a purpose.
+
+simplify	make easier,reduce,clarify,streamline	To make less complex.
+solve	resolve,answer,work out,fix	To find a solution.
+specify	state,define,describe,detail	To identify clearly and definitely.
+strengthen	reinforce,fortify,bolster,enhance	To make stronger.
+structure	organize,arrange,plan,order	To give structure to.
+
+trace	track,follow,find,outline	To find the origin of; to follow a path.
+translate	convert,interpret,render,change	To express in another language or form.
+
+unite	join,combine,link,merge	To come together for a purpose.
+
+visualize	imagine,picture,envision,conceive	To form a mental image of.
+
+
+# --- Extended batch 2: more verbs, adjectives, nouns, adverbs ---
+
+# More verbs
+accelerate	speed up,hasten,quicken,increase	To increase speed or rate of development.
+acknowledge	recognize,admit,accept,confess	To accept or admit the existence of something.
+activate	start,trigger,initiate,switch on	To make active or operative.
+administer	manage,run,oversee,supervise	To manage and be responsible for.
+affirm	confirm,assert,uphold,declare	To state positively; to uphold a decision.
+aggravate	worsen,intensify,inflame,exacerbate	To make worse or more serious.
+aggregate	combine,total,collect,accumulate	To collect or group together.
+agitate	disturb,stir,upset,trouble	To make anxious or nervous; to stir vigorously.
+aid	help,assist,support,abet	To provide assistance to.
+alert	warn,notify,signal,inform	To warn of danger; to make aware.
+amaze	astonish,astound,stun,dumbfound	To fill with wonder or surprise.
+amiable	friendly,pleasant,agreeable,likable	Having a friendly and pleasant manner.
+animate	enliven,invigorate,stimulate,activate	To bring to life; to make lively.
+annotate	comment,note,mark,explain	To add notes to a text.
+apply	use,employ,put to use,administer	To put something into practical use.
+arbitrate	mediate,judge,settle,decide	To settle a dispute between parties.
+articulate	express,voice,state,communicate	To state clearly.
+aspire	yearn,aim,strive,long	To have ambition.
+attend	go to,be present,participate,watch	To be present at an event.
+balance	equalize,offset,even out,stabilize	To bring to a state of equilibrium.
+block	obstruct,hinder,stop,impede	To make impossible to pass.
+calm	soothe,pacify,settle,quiet	To make tranquil.
+cancel	call off,annul,revoke,abort	To decide not to proceed with something.
+categorize	classify,sort,group,organize	To place in a category.
+challenge	dispute,contest,question,dare	To dispute the truth of.
+channel	direct,guide,focus,funnel	To direct toward a particular end.
+circulate	distribute,spread,pass around,flow	To move or cause to move in a circle.
+cite	quote,reference,mention,name	To quote as evidence.
+classify	categorize,sort,group,arrange	To arrange in classes.
+coexist	live together,cohabitate,share,tolerate	To exist at the same time or in the same place.
+collaborate	cooperate,team,join forces,work together	To work with others.
+command	order,direct,instruct,lead	To give authoritative instructions.
+commence	begin,start,initiate,open	To start or begin.
+compare	contrast,evaluate,assess,examine	To estimate similarities and differences.
+compel	force,oblige,require,drive	To force or oblige to do something.
+compete	contend,vie,rival,contest	To strive against others.
+complain	grumble,protest,moan,object	To express dissatisfaction.
+complete	finish,accomplish,conclude,finalize	To bring to an end.
+condense	compress,shorten,reduce,abridge	To make shorter or denser.
+conduct	carry out,perform,direct,manage	To organize and carry out.
+conquer	overcome,defeat,vanquish,subdue	To overcome by force.
+consult	seek advice,ask,discuss,refer to	To ask advice from.
+contact	reach,communicate with,get in touch,connect	To communicate with.
+contemplate	think about,ponder,consider,reflect	To think carefully about.
+contrast	compare,differ,distinguish,juxtapose	To show differences.
+control	manage,direct,regulate,govern	To determine behavior or supervise.
+coordinate	organize,arrange,synchronize,manage	To organize different elements together.
+correspond	match,agree,relate,communicate	To be in agreement or similarity.
+counsel	advise,guide,recommend,suggest	To give professional advice.
+counter	oppose,respond,reply,rebut	To respond to; to contradict.
+critique	analyze,evaluate,assess,review	To evaluate in an analytical way.
+customize	adapt,tailor,modify,personalize	To make suitable for individual requirements.
+debug	fix,troubleshoot,correct,repair	To find and remove errors from.
+decide	resolve,determine,conclude,choose	To reach a conclusion after consideration.
+dedicate	devote,commit,assign,consecrate	To devote time or effort to.
+delay	postpone,defer,put off,suspend	To make late; to postpone.
+deliberate	consider,weigh,ponder,discuss	To engage in long careful consideration.
+deliver	bring,hand over,supply,present	To bring to a destination.
+demonstrate	show,prove,exhibit,illustrate	To show evidence of.
+deploy	use,employ,position,station	To bring into use.
+derive	obtain,get,deduce,infer	To obtain from a source.
+design	plan,create,devise,invent	To plan and make.
+determine	decide,establish,ascertain,figure out	To cause or control.
+develop	grow,build,evolve,improve	To grow more elaborate.
+differentiate	distinguish,separate,tell apart,discriminate	To recognize differences.
+direct	guide,lead,manage,point	To control the operations of.
+discuss	talk about,debate,consider,review	To talk at length about.
+display	show,exhibit,present,demonstrate	To show prominently.
+dissolve	melt,break up,liquefy,disperse	To become incorporated into a liquid.
+distribute	share,give out,allocate,divide	To give shares of something out.
+document	record,note,register,log	To record in written form.
+draft	write,compose,outline,draw up	To prepare a preliminary version.
+draw	attract,pull,sketch,depict	To produce a picture; to attract.
+earn	deserve,gain,receive,merit	To obtain in return for work.
+educate	teach,instruct,train,enlighten	To give intellectual or moral instruction.
+elaborate	expand,develop,explain in detail,add	To give more detail about.
+encode	convert,translate,encrypt,represent	To convert into a coded form.
+engage	involve,occupy,attract,participate	To participate in; to attract attention.
+enhance	improve,increase,elevate,boost	To intensify or add to.
+examine	inspect,study,investigate,review	To inspect or scrutinize carefully.
+exceed	surpass,outstrip,go beyond,top	To be greater than; to go beyond.
+execute	carry out,perform,implement,do	To carry out or put into effect.
+expand	grow,extend,enlarge,increase	To become or make larger.
+explain	clarify,describe,expound,elaborate	To make plain or understandable.
+export	send out,ship,transfer,extract	To send goods to another country or system.
+facilitate	make easy,help,assist,enable	To make an action or process easier.
+filter	sift,strain,select,screen	To pass through a filter; to select.
+focus	concentrate,direct,center,aim	To direct attention on.
+follow	pursue,track,come after,obey	To come after; to comply with.
+formulate	develop,devise,create,frame	To create or prepare methodically.
+function	work,operate,serve,act	To work or operate in a specific way.
+gather	collect,assemble,accumulate,amass	To collect or bring together.
+generate	produce,create,yield,make	To produce or create.
+govern	rule,control,manage,regulate	To control policy and affairs.
+grant	give,allow,award,provide	To agree to give or allow.
+guide	lead,direct,steer,advise	To show the way; to advise.
+handle	manage,deal with,control,treat	To deal with.
+host	entertain,manage,organize,welcome	To act as host of.
+identify	recognize,determine,name,spot	To establish who or what something is.
+illustrate	demonstrate,show,depict,exemplify	To explain by use of examples.
+implement	execute,apply,carry out,perform	To put into effect.
+improve	better,enhance,upgrade,advance	To make or become better.
+include	contain,involve,incorporate,comprise	To contain as part of a whole.
+indicate	show,point to,signal,suggest	To be a sign or symptom of.
+innovate	create,invent,devise,pioneer	To make changes; to introduce new ideas.
+inspect	examine,check,review,assess	To look at closely.
+integrate	combine,merge,incorporate,blend	To combine into a whole.
+interpret	explain,translate,understand,analyze	To explain the meaning of.
+interview	question,query,examine,talk to	To ask formal questions of.
+introduce	present,bring in,add,start	To bring into use for the first time.
+investigate	probe,study,examine,research	To carry out research.
+judge	assess,evaluate,decide,determine	To form an opinion about.
+justify	explain,defend,rationalize,vindicate	To show to be right.
+launch	start,begin,send,release	To start a new project.
+locate	find,spot,identify,detect	To discover the exact place of.
+log	record,note,document,register	To make a record of.
+maintain	keep,uphold,preserve,continue	To cause to continue; to keep in repair.
+manage	control,run,handle,direct	To be in charge of.
+map	chart,plan,outline,show	To make a map of; to represent.
+measure	gauge,assess,calculate,determine	To ascertain the size or extent of.
+merge	combine,join,fuse,integrate	To combine into a whole.
+model	represent,demonstrate,show,exemplify	To represent as a model.
+monitor	watch,observe,track,check	To observe and check the progress of.
+motivate	encourage,inspire,drive,incentivize	To provide a reason for doing.
+navigate	steer,guide,find the way,direct	To plan and direct a route.
+negotiate	discuss,arrange,bargain,mediate	To reach an agreement through discussion.
+notify	inform,tell,advise,alert	To inform someone of something.
+observe	watch,notice,see,study	To notice or perceive.
+obtain	get,acquire,secure,gain	To come into possession of.
+organize	arrange,structure,order,plan	To arrange in an orderly way.
+overcome	conquer,surmount,prevail,defeat	To succeed in dealing with.
+perform	do,execute,carry out,accomplish	To carry out an action.
+plan	organize,prepare,devise,arrange	To make a plan for.
+present	show,display,introduce,offer	To show or offer for consideration.
+prioritize	rank,order,focus,emphasize	To rank in order of importance.
+process	handle,deal with,treat,manage	To perform operations on.
+produce	create,make,generate,yield	To make or manufacture.
+promote	advance,support,further,back	To raise to a higher position; to support.
+provide	supply,give,offer,deliver	To make available.
+qualify	certify,meet requirements,be eligible	To be entitled to.
+question	ask,query,challenge,doubt	To ask questions; to doubt.
+receive	get,obtain,accept,take	To be given something.
+recommend	suggest,advise,advocate,endorse	To put forward as suitable.
+refine	improve,perfect,polish,hone	To remove impurities; to improve.
+reinforce	strengthen,support,bolster,fortify	To strengthen or support.
+relate	connect,associate,narrate,tell	To make a connection; to narrate.
+report	inform,describe,announce,state	To give a spoken or written account.
+represent	stand for,portray,depict,act for	To act or speak on behalf of.
+research	investigate,study,explore,examine	To investigate systematically.
+resolve	settle,decide,solve,conclude	To settle a dispute; to find a solution.
+respond	reply,answer,react,retort	To say something in reply.
+restore	repair,renew,revive,rehabilitate	To bring back to original condition.
+review	assess,examine,evaluate,reconsider	To examine or assess formally.
+revise	amend,update,edit,change	To reconsider and alter.
+satisfy	fulfill,meet,content,please	To meet the expectations of.
+select	choose,pick,opt for,prefer	To carefully choose.
+share	distribute,divide,give,exchange	To have or give a portion.
+signal	indicate,show,warn,communicate	To transmit a signal.
+simplify	streamline,clarify,make easier,reduce	To make simpler.
+simulate	model,represent,imitate,replicate	To imitate the appearance or character of.
+sort	arrange,organize,classify,order	To arrange in a particular order.
+specify	define,state,detail,describe	To state clearly and definitely.
+stabilize	steady,secure,fix,balance	To make or become stable.
+standardize	normalize,regularize,unify,regulate	To cause to conform to a standard.
+study	examine,research,investigate,learn	To give attention to learning.
+support	back,assist,uphold,maintain	To give assistance to.
+synthesize	combine,integrate,merge,blend	To combine elements to form something new.
+tackle	deal with,address,handle,confront	To take on a difficult task.
+target	aim at,focus on,direct at,select	To direct at a target.
+teach	instruct,educate,train,inform	To show someone how to do something.
+test	try,check,examine,assess	To assess the qualities of.
+track	follow,monitor,trace,record	To follow the course of.
+transfer	move,shift,convey,carry	To move from one place to another.
+update	revise,upgrade,refresh,edit	To bring up to date.
+validate	confirm,verify,substantiate,prove	To demonstrate the truth of.
+verify	check,confirm,prove,substantiate	To make sure something is true.
+visualize	imagine,picture,envision,see	To form a mental image of.
+yield	produce,give,generate,surrender	To produce; to give way.
+
+# More adjectives
+accurate	correct,precise,exact,faithful	Free from errors.
+affordable	cheap,inexpensive,reasonable,accessible	Not expensive.
+aggressive	combative,hostile,assertive,forceful	Ready to attack; forceful.
+alert	watchful,attentive,aware,sharp	Vigilant.
+altruistic	selfless,generous,unselfish,charitable	Showing selfless concern for others.
+amicable	friendly,cordial,harmonious,agreeable	Having a friendly nature.
+analytical	logical,systematic,methodical	Good at analyzing.
+appealing	attractive,charming,pleasing,desirable	Attractive or interesting.
+apt	fitting,appropriate,suitable,relevant	Appropriate; having a tendency.
+articulate	fluent,eloquent,expressive,clear	Able to express ideas clearly.
+aspirational	ambitious,inspiring,goal-oriented	Relating to aspirations.
+assertive	self-confident,direct,bold,forceful	Confident in stating one's views.
+astute	clever,perceptive,shrewd,intelligent	Able to accurately assess situations.
+aware	conscious,informed,alert,cognizant	Knowing or perceiving.
+baffling	confusing,puzzling,mystifying,bewildering	Causing confusion.
+balanced	equal,proportionate,stable,fair	Having equal amounts on each side.
+candid	honest,frank,open,truthful	Truthful and straightforward.
+capable	able,competent,proficient,skilled	Having the ability to do something.
+careful	cautious,meticulous,thorough,attentive	Attentive to avoiding errors.
+cheerful	happy,jolly,joyful,merry	Noticeably happy and optimistic.
+coherent	logical,consistent,clear,unified	Logical and orderly.
+committed	dedicated,devoted,loyal,steadfast	Devoted to a cause.
+comparable	similar,equivalent,like,matching	Able to be compared.
+compassionate	sympathetic,kind,caring,empathetic	Feeling or showing compassion.
+compelling	convincing,absorbing,gripping,powerful	Evoking strong interest.
+comprehensive	thorough,complete,inclusive,exhaustive	Including everything.
+concerned	worried,troubled,anxious,caring	Worried about something; caring.
+concrete	tangible,real,specific,solid	Definite and clear.
+confident	assured,self-assured,certain,bold	Feeling or showing confidence.
+considerate	thoughtful,attentive,kind,caring	Careful about the feelings of others.
+consistent	reliable,regular,steady,constant	The same over time.
+constructive	helpful,positive,productive,useful	Having a useful and positive effect.
+content	satisfied,happy,pleased,at ease	In a state of satisfaction.
+controversial	disputed,debatable,contentious,contested	Causing disagreement.
+cooperative	helpful,collaborative,accommodating	Willing to work with others.
+courageous	brave,bold,valiant,fearless	Not deterred by danger.
+crisp	clear,sharp,fresh,precise	Cool and fresh; clear and neat.
+crucial	critical,vital,essential,key	Decisive or critical.
+curious	inquisitive,questioning,eager,interested	Eager to know or learn.
+decisive	determined,resolute,firm,definitive	Able to make decisions quickly.
+dedicated	committed,devoted,loyal,faithful	Devoted to a task.
+dependable	reliable,trustworthy,steady,constant	Able to be relied on.
+detailed	thorough,comprehensive,precise,specific	Involving many details.
+diplomatic	tactful,discreet,sensitive,judicious	Having skill in dealing with situations.
+distinct	clear,separate,different,noticeable	Recognizably different.
+diverse	varied,mixed,different,assorted	Showing variety.
+dynamic	energetic,active,vibrant,vigorous	Positive in attitude; characterized by change.
+eager	keen,enthusiastic,avid,ready	Wanting very much to do something.
+earnest	sincere,serious,determined,heartfelt	Serious in intention.
+effective	successful,efficient,productive,capable	Having the desired result.
+efficient	productive,capable,effective,organized	Achieving with minimum waste.
+eloquent	well-spoken,articulate,expressive,fluent	Fluent in speech or writing.
+empathetic	compassionate,understanding,sensitive,caring	Showing empathy.
+energetic	active,vigorous,lively,dynamic	Having great energy.
+engaged	involved,interested,committed,active	Occupied; committed.
+enthusiastic	eager,keen,passionate,excited	Showing enthusiasm.
+equitable	fair,just,impartial,reasonable	Fair and reasonable.
+ethical	moral,principled,righteous,honest	Morally correct.
+exact	precise,accurate,specific,correct	Not approximated.
+fair	just,impartial,unbiased,equitable	Treating people equally.
+flexible	adaptable,adjustable,pliant,elastic	Able to bend; adaptable.
+focused	concentrated,determined,goal-oriented	Directing attention at a point.
+forthright	frank,direct,honest,candid	Direct and outspoken.
+friendly	amicable,warm,sociable,pleasant	Showing kindness and goodwill.
+frugal	thrifty,economical,sparing,careful	Sparing with resources.
+genuine	authentic,real,sincere,true	Truly what it claims to be.
+gracious	courteous,kind,civil,polite	Courteous and pleasant.
+grounded	stable,balanced,sensible,practical	Well-balanced and sensible.
+helpful	useful,supportive,cooperative,kind	Ready to help.
+humble	modest,meek,unassuming,unpretentious	Having a low opinion of one's importance.
+imaginative	creative,inventive,original,innovative	Having or showing creativity.
+impartial	neutral,objective,unbiased,fair	Not biased; treating all equally.
+impressive	remarkable,notable,striking,admirable	Evoking admiration.
+inclusive	broad,comprehensive,all-embracing,welcoming	Not excluding anyone.
+independent	self-sufficient,autonomous,free,unbiased	Not depending on others.
+industrious	hardworking,diligent,productive,busy	Diligent and hardworking.
+innovative	creative,original,inventive,groundbreaking	Introducing new ideas.
+insightful	perceptive,astute,wise,observant	Showing deep understanding.
+inspiring	motivating,encouraging,uplifting,stirring	Having an animating effect.
+intellectual	learned,academic,thoughtful,scholarly	Of or relating to the intellect.
+intuitive	instinctive,spontaneous,natural,immediate	Using intuition.
+inventive	creative,original,resourceful,innovative	Having the ability to invent.
+knowledgeable	informed,educated,expert,learned	Having much knowledge.
+lively	animated,energetic,vivid,active	Full of life and energy.
+logical	rational,reasoned,coherent,sound	Based on logic.
+loyal	faithful,devoted,true,dedicated	Giving constant support.
+mature	adult,grown,developed,sophisticated	Having reached full development.
+methodical	systematic,ordered,organized,careful	Organized and systematic.
+mindful	aware,conscious,attentive,careful	Conscious of the present.
+modest	humble,unassuming,simple,restrained	Not boastful; moderate.
+motivated	driven,inspired,energized,enthusiastic	Having motivation.
+nuanced	subtle,refined,complex,delicate	Having subtle distinctions.
+objective	unbiased,impartial,fair,neutral	Not influenced by personal feelings.
+open-minded	receptive,tolerant,flexible,liberal	Willing to consider new ideas.
+optimistic	positive,hopeful,confident,upbeat	Expecting good things.
+organized	methodical,orderly,structured,systematic	Arranged in an orderly way.
+outspoken	frank,direct,vocal,candid	Tending to speak frankly.
+passionate	fervent,enthusiastic,ardent,intense	Having strong feelings.
+patient	tolerant,calm,enduring,composed	Able to wait calmly.
+perceptive	insightful,astute,observant,sharp	Showing good perception.
+persistent	determined,tenacious,steadfast,stubborn	Continuing despite difficulty.
+positive	optimistic,affirmative,constructive,favorable	Expressing certainty or agreement.
+pragmatic	practical,sensible,realistic,down-to-earth	Dealing with things practically.
+precise	exact,accurate,specific,definite	Marked by precision.
+principled	ethical,moral,honorable,virtuous	Acting on moral principles.
+proactive	anticipatory,forward-thinking,initiative-taking	Taking action before required.
+productive	fruitful,efficient,effective,fertile	Achieving good results.
+professional	skilled,expert,competent,qualified	Relating to a profession.
+progressive	forward-thinking,liberal,advanced,modern	Favoring social reform.
+prudent	wise,sensible,careful,judicious	Acting with care and thought.
+purposeful	determined,deliberate,intentional,motivated	Having a clear purpose.
+rational	logical,reasonable,sensible,sound	Based on reason.
+realistic	practical,sensible,down-to-earth,pragmatic	Having realistic views.
+reliable	dependable,trustworthy,steady,consistent	Consistently dependable.
+remarkable	extraordinary,notable,impressive,exceptional	Worthy of attention.
+resilient	tough,adaptable,hardy,robust	Recovering quickly from difficulty.
+resourceful	capable,inventive,creative,clever	Finding solutions to problems.
+responsible	accountable,reliable,trustworthy,dependable	Having responsibility.
+rigorous	strict,thorough,demanding,exacting	Extremely thorough.
+robust	strong,sturdy,healthy,vigorous	Strong and sturdy.
+sensible	practical,reasonable,wise,sound	Having common sense.
+sensitive	perceptive,responsive,tender,delicate	Quick to detect changes.
+shrewd	astute,clever,crafty,perceptive	Having good judgment.
+sincere	genuine,honest,heartfelt,real	Honest and genuine.
+skilled	expert,proficient,capable,accomplished	Having skills.
+sociable	friendly,outgoing,gregarious,convivial	Willing to talk with others.
+sophisticated	refined,complex,advanced,cultured	Having refined understanding.
+steadfast	loyal,resolute,firm,unwavering	Firmly loyal.
+strategic	planned,deliberate,tactical,calculated	Part of a strategy.
+structured	organized,orderly,systematic,planned	Arranged in a definite structure.
+supportive	helpful,encouraging,caring,constructive	Providing support.
+talented	gifted,able,skilled,accomplished	Having natural talent.
+tenacious	persistent,stubborn,determined,relentless	Holding firm to a purpose.
+thoughtful	considerate,reflective,attentive,caring	Showing careful thought.
+thorough	complete,comprehensive,exhaustive,detailed	Carried out with great care.
+tolerant	accepting,fair,patient,open-minded	Willing to tolerate differences.
+transparent	open,honest,clear,candid	Open and honest.
+trustworthy	reliable,honest,dependable,loyal	Worthy of trust.
+unique	original,distinctive,special,singular	Unlike anything else.
+upbeat	positive,optimistic,cheerful,buoyant	Optimistic and cheerful.
+versatile	adaptable,flexible,all-around,skilled	Able to adapt to many uses.
+vigilant	alert,watchful,attentive,careful	Keeping watch for danger.
+visionary	innovative,forward-thinking,creative,pioneering	Thinking about the future.
+witty	clever,humorous,amusing,quick	Showing quick intelligence.
+
+# More nouns
+accomplishment	achievement,feat,success,attainment	Something done successfully.
+accountability	responsibility,answerability,reliability	The fact of being responsible.
+accuracy	precision,correctness,exactness,faithfulness	The quality of being accurate.
+adaptability	flexibility,versatility,adjustability	The ability to adapt.
+advancement	progress,improvement,development,promotion	The process of promoting.
+agenda	plan,schedule,program,list	A list of items to be discussed.
+ambiguity	vagueness,uncertainty,obscurity,doubt	Uncertainty in meaning.
+analogy	comparison,parallel,similarity,likeness	A comparison showing similarity.
+anomaly	irregularity,deviation,exception,oddity	Something different from what is expected.
+approach	method,way,technique,strategy	A way of dealing with something.
+aptitude	talent,ability,skill,gift	A natural ability to learn.
+archetype	model,prototype,standard,original	A typical example.
+assertion	claim,statement,declaration,contention	A confident statement of fact.
+assumption	presumption,premise,hypothesis,belief	Something accepted as true without proof.
+atmosphere	air,environment,mood,climate	The surrounding conditions.
+attribute	quality,characteristic,feature,trait	A quality or feature.
+axiom	principle,truth,maxim,rule	A statement accepted as true.
+backdrop	background,setting,context,scene	The setting against which events occur.
+benchmark	standard,reference point,criterion,measure	A point of reference.
+bias	prejudice,partiality,inclination,slant	Unfair preference for one thing.
+breakthrough	discovery,advance,development,leap	A sudden important development.
+catalog	list,inventory,record,index	A complete list.
+category	class,group,type,kind	A class of things with shared characteristics.
+challenge	difficulty,obstacle,test,problem	A task that tests ability.
+clarity	clearness,precision,transparency,lucidity	The quality of being clear.
+cohesion	unity,togetherness,solidarity,connection	The action of forming a whole.
+commitment	dedication,devotion,pledge,obligation	Dedication to a cause.
+competence	ability,skill,capability,proficiency	The ability to do something well.
+component	part,element,piece,unit	A part or element of a larger whole.
+concept	idea,notion,principle,theory	An abstract idea.
+concern	worry,issue,problem,interest	A matter causing worry; a feeling of worry.
+consensus	agreement,accord,unity,harmony	General agreement.
+context	background,circumstances,setting,framework	The circumstances surrounding something.
+criterion	standard,measure,rule,test	A principle by which to judge.
+culture	tradition,society,customs,heritage	The ideas and customs of a group.
+cycle	pattern,sequence,loop,rotation	A series of events regularly repeated.
+data	information,facts,figures,evidence	Facts and statistics collected.
+definition	meaning,explanation,description,interpretation	A statement of the exact meaning.
+detail	particulars,specifics,element,feature	An individual part or element.
+dilemma	problem,difficulty,quandary,predicament	A difficult situation or problem.
+dimension	aspect,element,feature,scope	A measurable extent of some kind.
+direction	course,path,guidance,instruction	The path along which something moves.
+discovery	finding,revelation,breakthrough,uncovering	The action of finding something new.
+distinction	difference,contrast,excellence,uniqueness	A difference between things.
+domain	field,area,sphere,territory	A field of action or thought.
+dynamic	force,energy,interaction,change	Forces or properties that stimulate change.
+element	component,part,factor,constituent	A component or feature.
+emphasis	stress,focus,importance,priority	Special importance given to something.
+environment	surroundings,setting,context,conditions	The surroundings in which something operates.
+equilibrium	balance,stability,steadiness,equality	A state of rest or balance.
+essence	core,nature,substance,heart	The intrinsic nature of something.
+evaluation	assessment,appraisal,review,analysis	The act of assessing.
+evolution	development,progress,advancement,change	The gradual development of something.
+example	instance,illustration,case,sample	A thing used to clarify.
+exchange	trade,swap,substitution,interaction	The act of giving and receiving.
+execution	performance,implementation,carrying out	The carrying out of a plan.
+expectation	anticipation,hope,belief,assumption	A belief that something will happen.
+expertise	skill,knowledge,mastery,proficiency	Expert skill or knowledge.
+explanation	description,account,clarification,reason	A statement explaining something.
+factor	element,aspect,component,consideration	Something contributing to a result.
+feedback	response,reaction,comment,evaluation	Information about an action.
+flexibility	adaptability,pliancy,versatility,openness	The ability to adapt.
+focus	concentration,attention,emphasis,priority	The center of interest.
+format	structure,arrangement,layout,form	The way in which something is arranged.
+framework	structure,system,outline,plan	A basic structure.
+function	purpose,role,use,operation	The purpose something is designed for.
+guideline	rule,instruction,direction,principle	A general rule or piece of advice.
+habit	custom,practice,routine,tendency	A regular practice.
+impact	effect,influence,consequence,result	A marked effect.
+improvement	advance,progress,enhancement,development	A change for the better.
+incentive	motivation,reason,reward,stimulus	Something encouraging a person to act.
+inference	conclusion,deduction,implication,reading	A conclusion drawn from evidence.
+influence	effect,power,impact,control	Capacity to have an effect on others.
+information	data,knowledge,facts,details	Facts provided or learned.
+initiative	enterprise,drive,plan,scheme	The ability to take action independently.
+insight	understanding,perception,wisdom,awareness	Accurate and deep understanding.
+integrity	honesty,honor,character,virtue	Firmness of moral principles.
+intention	aim,goal,purpose,plan	What one intends to do.
+interest	curiosity,concern,stake,benefit	The state of wanting to know about something.
+interpretation	understanding,explanation,reading,analysis	The act of explaining the meaning.
+intuition	instinct,feeling,sense,perception	The ability to understand without reasoning.
+investigation	inquiry,study,examination,research	The formal examination of something.
+judgment	assessment,opinion,view,decision	The ability to judge wisely.
+key	answer,solution,guide,essential factor	Something that provides access or understanding.
+leadership	command,guidance,direction,management	The action of leading.
+lesson	teaching,instruction,example,moral	Something learned from experience.
+limitation	restriction,constraint,boundary,cap	A restrictive condition.
+logic	reasoning,rationale,sense,argument	Reasoning conducted systematically.
+meaning	significance,purpose,sense,import	What is meant; importance.
+mechanism	process,system,means,device	A system of parts working together.
+method	approach,technique,procedure,system	A way of doing something.
+model	example,prototype,representation,plan	A simplified description of a system.
+momentum	impetus,energy,drive,force	The force gained by movement.
+motivation	incentive,drive,reason,inspiration	The desire to do something.
+nature	character,essence,kind,type	The basic qualities of a person or thing.
+need	requirement,necessity,demand,want	Something required.
+network	system,grid,web,connection	An interconnected group.
+norm	standard,rule,expectation,convention	Something that is usual or typical.
+objective	goal,aim,target,purpose	Something aimed at; unbiased.
+obstacle	barrier,hindrance,challenge,impediment	Something that blocks progress.
+operation	action,process,procedure,task	The action of functioning.
+opportunity	chance,opening,possibility,prospect	Favorable conditions for doing something.
+outcome	result,consequence,product,effect	The way something turns out.
+output	result,production,yield,product	Something produced.
+overview	summary,synopsis,survey,outline	A general review.
+paradigm	model,pattern,example,standard	A typical example of something.
+parameter	limit,boundary,constraint,variable	A characteristic that defines a system.
+pattern	design,model,template,sequence	A regular arrangement.
+perspective	viewpoint,outlook,view,angle	A particular attitude.
+philosophy	belief,principle,thought,worldview	The study of knowledge and existence.
+plan	strategy,scheme,program,design	A detailed proposal for doing something.
+potential	capability,possibility,capacity,promise	Qualities not yet developed.
+practice	habit,custom,exercise,method	The actual application of an idea.
+precision	accuracy,exactness,care,detail	The quality of being precise.
+preference	choice,liking,favorite,inclination	A greater liking for one thing.
+principle	rule,standard,belief,tenet	A fundamental truth.
+priority	urgency,importance,precedence,preference	The most important item.
+procedure	method,process,routine,practice	A series of actions.
+process	method,procedure,system,operation	A series of steps.
+progress	advancement,development,growth,improvement	Forward movement.
+property	quality,attribute,characteristic,trait	A characteristic of something.
+proposal	suggestion,plan,offer,recommendation	Something put forward for consideration.
+purpose	aim,goal,intention,objective	The reason for doing something.
+quality	standard,excellence,characteristic,value	The standard of something.
+rationale	reason,justification,basis,logic	A set of reasons justifying something.
+reality	truth,fact,actuality,existence	The world or the state of things as they are.
+reason	cause,basis,rationale,explanation	A cause or justification.
+recognition	acknowledgment,identification,appreciation,credit	Identification of worth.
+reflection	thought,consideration,contemplation,image	Serious thought.
+relevance	importance,pertinence,significance,bearing	The quality of being relevant.
+reliability	dependability,consistency,trustworthiness	The quality of being reliable.
+requirement	need,demand,necessity,condition	Something required.
+responsibility	duty,obligation,accountability,role	The state of being responsible.
+result	outcome,effect,consequence,product	A thing caused by an action.
+role	part,function,position,duty	The function someone has.
+scope	extent,range,scale,breadth	The extent of something.
+significance	importance,meaning,weight,consequence	The quality of being significant.
+situation	circumstances,position,scenario,state	The set of circumstances.
+skill	ability,talent,expertise,technique	The ability to do something well.
+solution	answer,fix,resolution,remedy	A means of solving a problem.
+source	origin,cause,root,basis	The place from which something comes.
+standard	criterion,norm,benchmark,level	A level of quality.
+strategy	plan,approach,method,scheme	A plan to achieve a goal.
+strength	power,capability,advantage,asset	A quality viewed as positive.
+structure	framework,organization,arrangement,form	The way parts are arranged.
+success	achievement,triumph,victory,accomplishment	The achievement of a goal.
+support	assistance,help,backing,encouragement	The act of supporting.
+system	structure,method,network,framework	A set of connected things.
+task	job,assignment,duty,activity	A piece of work to be done.
+technique	method,approach,skill,procedure	A way of carrying out a particular task.
+theme	topic,subject,idea,thread	The subject of a talk or work.
+theory	hypothesis,concept,idea,model	A set of principles explaining something.
+tool	instrument,device,implement,resource	Something used to perform a task.
+transformation	change,conversion,shift,metamorphosis	A thorough change.
+trend	pattern,direction,tendency,movement	A general direction of change.
+understanding	comprehension,grasp,insight,awareness	The ability to understand.
+unity	oneness,solidarity,harmony,agreement	The state of being united.
+value	worth,merit,importance,benefit	The importance of something.
+variable	factor,element,parameter,quantity	Something that can change.
+viewpoint	perspective,opinion,view,stance	A particular attitude.
+vision	goal,dream,plan,aspiration	A mental image of the future.
+weakness	flaw,shortcoming,limitation,fault	A weak point.
+wisdom	knowledge,insight,judgment,experience	The quality of having good judgment.
+work	effort,labor,task,activity	Activity involving effort.
+
+# Adverbs
+accurately	precisely,correctly,exactly,faithfully	In an accurate manner.
+actively	energetically,dynamically,vigorously	In an active manner.
+boldly	bravely,daringly,confidently,fearlessly	In a bold manner.
+carefully	cautiously,meticulously,thoroughly,warily	With care.
+clearly	plainly,obviously,evidently,distinctly	In a clear manner.
+completely	fully,totally,entirely,wholly	In a complete manner.
+consistently	regularly,steadily,constantly,reliably	In a consistent manner.
+creatively	imaginatively,inventively,originally	In a creative manner.
+effectively	successfully,efficiently,productively	In an effective manner.
+efficiently	productively,competently,smoothly	In an efficient manner.
+elegantly	gracefully,stylishly,simply,neatly	In an elegant manner.
+enthusiastically	eagerly,keenly,zealously,passionately	In an enthusiastic manner.
+explicitly	clearly,directly,specifically,precisely	In an explicit manner.
+fairly	justly,equitably,impartially,reasonably	In a fair manner.
+firmly	solidly,resolutely,steadfastly,confidently	In a firm manner.
+fluently	smoothly,easily,readily,eloquently	In a fluent manner.
+formally	officially,properly,conventionally	In a formal manner.
+freely	openly,unreservedly,generously,readily	Without restriction.
+gradually	slowly,step by step,progressively,incrementally	In a gradual manner.
+honestly	truthfully,sincerely,openly,candidly	In an honest manner.
+independently	autonomously,freely,separately,self-sufficiently	Without outside help.
+intensely	strongly,powerfully,deeply,vigorously	In an intense manner.
+methodically	systematically,orderly,carefully,thoroughly	In a methodical manner.
+naturally	spontaneously,instinctively,normally,organically	In a natural manner.
+objectively	impartially,fairly,neutrally,dispassionately	Without bias.
+openly	honestly,frankly,candidly,transparently	Without concealment.
+originally	initially,at first,creatively,uniquely	At first; in an original manner.
+passionately	fervently,enthusiastically,intensely,ardently	With strong feeling.
+precisely	exactly,accurately,carefully,correctly	In a precise manner.
+quickly	rapidly,swiftly,speedily,fast	At great speed.
+quietly	silently,softly,gently,calmly	In a quiet manner.
+readily	willingly,easily,quickly,promptly	Without hesitation.
+regularly	consistently,frequently,routinely,steadily	At regular intervals.
+remarkably	notably,strikingly,impressively,surprisingly	In a remarkable manner.
+seriously	gravely,earnestly,solemnly,severely	In a serious manner.
+significantly	considerably,notably,substantially,markedly	In a significant manner.
+simply	plainly,easily,naturally,basically	In a simple manner.
+sincerely	genuinely,honestly,earnestly,truly	In a sincere manner.
+skillfully	expertly,capably,proficiently,adeptly	With skill.
+smoothly	easily,fluently,evenly,effortlessly	Without difficulty.
+specifically	particularly,precisely,explicitly,distinctly	In a specific manner.
+strongly	powerfully,firmly,intensely,forcefully	In a strong manner.
+swiftly	quickly,rapidly,speedily,briskly	At great speed.
+systematically	methodically,orderly,logically,consistently	In a systematic way.
+thoroughly	completely,exhaustively,carefully,fully	In a thorough manner.
+thoughtfully	carefully,considerately,reflectively,attentively	In a thoughtful manner.
+truly	genuinely,actually,really,sincerely	In a true manner.
+ultimately	finally,eventually,in the end,fundamentally	At the most basic level.
+vividly	clearly,brightly,dramatically,powerfully	In a vivid manner.
+willingly	readily,gladly,eagerly,voluntarily	Without reluctance.
+wisely	sensibly,prudently,judiciously,carefully	In a wise manner.
+
+
+# --- Extended batch 3: domain vocabulary and additional words ---
+
+# Nature and environment
+arid	dry,parched,barren,desert	Having little or no rain; very dry.
+barren	empty,bare,desolate,infertile	Too poor to produce vegetation.
+blizzard	snowstorm,squall,gale,tempest	A severe snowstorm with strong winds.
+canopy	covering,roof,shelter,shade	A covering; the uppermost layer of trees.
+cascade	waterfall,rush,flow,pour	A waterfall; to pour down rapidly.
+cavern	cave,grotto,hollow,chamber	A large underground cave.
+celestial	heavenly,astronomical,cosmic,divine	Positioned in the sky; relating to heaven.
+cliff	bluff,precipice,escarpment,crag	A steep rock face.
+climate	weather,atmosphere,conditions,environment	The weather conditions of a region.
+cloud	mist,vapor,haze,fog	A mass of condensed water vapor.
+coast	shore,beach,seaside,shoreline	The land near the sea.
+current	flow,stream,tide,movement	A flowing movement of water or air.
+dawn	sunrise,daybreak,morning,daylight	The first light of day.
+delta	mouth,estuary,outlet,plain	An area of flat land where a river meets the sea.
+drought	dryness,aridity,water shortage,parching	A prolonged period of low rainfall.
+dune	sandhill,mound,ridge,heap	A hill of sand formed by wind.
+dusk	twilight,sunset,evening,nightfall	The darker stage of twilight.
+ecology	environment,ecosystem,habitat,biosphere	The study of relationships between organisms.
+erosion	wearing away,degradation,corrosion,weathering	Wearing away by wind or water.
+fauna	animals,wildlife,creatures,beasts	The animals of a particular region.
+flora	plants,vegetation,greenery,botany	The plants of a particular region.
+frost	ice,freeze,rime,chill	Ice crystals formed on surfaces.
+glacier	ice sheet,icefield,snowfield,floe	A slowly moving mass of ice.
+grove	wood,copse,thicket,orchard	A small group of trees.
+habitat	home,environment,territory,ecosystem	The natural home of an organism.
+haze	mist,fog,smog,vapor	A slight obscuring of the air.
+horizon	skyline,distance,vista,outlook	The line where the earth meets the sky.
+humid	damp,moist,muggy,sultry	Having high moisture in the air.
+hurricane	cyclone,typhoon,storm,tempest	A tropical storm with violent winds.
+island	isle,atoll,landmass,peninsula	A piece of land surrounded by water.
+lagoon	pool,bay,inlet,lake	A body of water separated from the sea.
+landscape	scenery,terrain,vista,countryside	All features of an area of land.
+lush	verdant,green,abundant,fertile	Growing vigorously; richly abundant.
+meadow	field,pasture,grassland,clearing	A piece of land covered with grass.
+mesa	plateau,tableland,butte,highland	A flat-topped hill with steep sides.
+mineral	ore,compound,substance,element	A solid inorganic substance.
+mist	fog,haze,vapor,drizzle	Water droplets suspended in the air.
+mountain	peak,summit,ridge,highland	A large natural elevation.
+ocean	sea,water,deep,main	A vast body of salt water.
+peninsula	headland,promontory,cape,spit	A piece of land almost surrounded by water.
+plain	flat land,prairie,steppe,savanna	A large flat area of land.
+plateau	highland,mesa,tableland,upland	An area of relatively level high ground.
+prairie	grassland,plain,steppe,meadow	A large open area of grassland.
+reef	shoal,rock,bar,ridge	A ridge of rock below the sea surface.
+ridge	crest,spine,line,chain	A long narrow raised strip.
+ripple	wave,undulation,tremor,vibration	A small wave on the surface of water.
+river	stream,waterway,brook,current	A large natural stream of water.
+rock	stone,boulder,crag,mineral	A large mass of stone.
+savanna	grassland,plain,prairie,steppe	A grassy plain in tropical regions.
+sediment	deposit,residue,silt,mud	Matter that settles at the bottom.
+spring	fountain,source,wellspring,stream	A place where water emerges from the ground.
+storm	tempest,gale,squall,blizzard	A violent disturbance of weather.
+summit	peak,top,apex,crest	The highest point.
+swamp	marsh,bog,fen,wetland	A low-lying area of waterlogged ground.
+terrain	land,ground,topography,landscape	The features of the landscape.
+tide	current,ebb,flow,surge	The rise and fall of the sea.
+torrent	flood,rush,stream,deluge	A strong fast-moving stream.
+valley	dale,glen,gorge,hollow	A low area between hills.
+volcano	crater,vent,cone,eruption	A mountain with an opening in the crust.
+waterfall	cascade,falls,cataract,torrent	Water falling from a height.
+wilderness	wild,outback,bush,natural area	A wild uncultivated region.
+
+# Science and technology
+algorithm	procedure,method,process,formula	A set of rules for solving a problem.
+analysis	examination,study,review,assessment	Detailed examination of something.
+apparatus	device,equipment,instrument,mechanism	Equipment for a specific purpose.
+circuit	loop,path,route,connection	A complete electrical path.
+code	program,instructions,cipher,system	A system of signals; a computer program.
+component	part,element,unit,piece	A part of a larger whole.
+compute	calculate,reckon,process,figure	To calculate; to use a computer.
+construct	build,create,assemble,make	To build by putting parts together.
+database	repository,store,archive,records	An organized collection of data.
+design	plan,blueprint,layout,scheme	A plan or drawing.
+device	instrument,tool,gadget,apparatus	An item made for a purpose.
+diagnose	identify,determine,detect,analyze	To identify a disease or problem.
+digital	electronic,virtual,binary,computational	Relating to digital technology.
+element	component,part,factor,substance	A component; a basic substance.
+energy	power,force,strength,fuel	The capacity for activity; power.
+equation	formula,expression,relation,statement	A mathematical statement of equality.
+experiment	test,trial,study,investigation	A scientific procedure.
+formula	equation,method,recipe,rule	A rule expressed in symbols.
+frequency	rate,occurrence,regularity,incidence	The rate at which something occurs.
+function	purpose,role,operation,use	The action something is designed to perform.
+gravity	weight,mass,attraction,pull	The force attracting bodies toward earth.
+hypothesis	theory,assumption,proposition,conjecture	A proposed explanation for testing.
+interface	boundary,connection,link,interaction	A point where systems meet.
+logic	reasoning,rationale,analysis,inference	Reasoned thinking.
+mass	weight,bulk,volume,body	The quantity of matter in a body.
+network	grid,system,web,structure	An interconnected system.
+observation	watching,notice,finding,remark	The act of observing.
+orbit	path,revolution,circuit,course	The path of one body around another.
+particle	fragment,piece,bit,atom	A small piece of matter.
+pattern	arrangement,design,structure,sequence	A repeated design or behavior.
+procedure	method,process,routine,protocol	A series of steps.
+property	quality,attribute,characteristic,feature	A characteristic of a substance.
+reaction	response,answer,reply,outcome	A response to something.
+resource	asset,supply,material,tool	A stock available for use.
+sample	specimen,example,piece,subset	A small part representing the whole.
+simulation	model,representation,imitation,replica	An imitation of a real-world process.
+signal	indicator,cue,sign,message	Something conveying information.
+solution	answer,resolution,mixture,fix	A means of solving a problem.
+spectrum	range,scale,gamut,array	A broad range of something.
+symbol	sign,mark,emblem,representation	Something used to represent something else.
+technology	tools,techniques,systems,machinery	The application of scientific knowledge.
+theory	hypothesis,concept,idea,explanation	A set of principles explaining observations.
+velocity	speed,rate,pace,swiftness	The speed of something in a given direction.
+variable	factor,element,quantity,parameter	A quantity that can change.
+
+# Social and communication
+address	speak to,talk to,refer to,greet	To speak or write to; a formal speech.
+agreement	accord,settlement,deal,pact	An arrangement between parties.
+announce	declare,proclaim,state,report	To make a public declaration.
+appeal	request,plea,petition,attract	To make an earnest request.
+attitude	outlook,stance,mindset,disposition	A settled way of thinking.
+audience	listeners,viewers,crowd,public	The people gathered to hear.
+authority	power,control,rule,command	The right to give orders.
+communication	exchange,dialogue,conversation,message	The act of sharing information.
+community	society,group,neighborhood,public	A group sharing common characteristics.
+conflict	disagreement,struggle,dispute,clash	Serious incompatibility between parties.
+conversation	dialogue,talk,discussion,exchange	An informal talk.
+culture	society,tradition,heritage,customs	The arts and customs of a civilization.
+debate	argument,discussion,dispute,forum	A formal discussion.
+dialogue	conversation,talk,discussion,exchange	A conversation between people.
+diplomacy	tact,negotiation,finesse,skill	The art of managing relations.
+etiquette	manners,protocol,custom,courtesy	The conventional code of behavior.
+group	team,community,crowd,assembly	A number of people together.
+impression	effect,image,influence,sense	An effect produced on the mind.
+interaction	communication,exchange,engagement,connection	Reciprocal action.
+language	speech,tongue,words,dialect	Communication using speech or writing.
+leadership	guidance,command,direction,authority	The action of leading.
+meeting	gathering,assembly,conference,session	People coming together.
+narrative	story,account,tale,description	A spoken or written account.
+negotiation	discussion,bargaining,diplomacy,mediation	A formal discussion to reach agreement.
+network	connections,contacts,web,community	A group of interconnected people.
+presentation	display,talk,lecture,show	The act of presenting something.
+public	community,society,people,population	People in general.
+relationship	connection,bond,tie,link	The way people or things are connected.
+reputation	standing,name,esteem,image	Beliefs held about someone.
+society	community,culture,civilization,people	People living together in a community.
+speech	talk,address,lecture,words	A formal address.
+tradition	custom,practice,convention,heritage	A long-established custom.
+trust	confidence,faith,belief,reliance	Firm belief in reliability.
+
+# Art and creativity
+composition	arrangement,structure,piece,work	The way parts are arranged; a musical work.
+craft	skill,art,trade,technique	Skill in making things; an activity.
+creativity	imagination,innovation,originality,artistry	The ability to create.
+design	pattern,plan,style,artwork	A plan or drawing produced to show something.
+expression	communication,conveyance,portrayal,voice	The process of expressing oneself.
+imagination	creativity,inventiveness,vision,fantasy	The ability to form mental images.
+interpretation	understanding,reading,analysis,rendition	An explanation of the meaning.
+melody	tune,song,air,music	A sequence of musical notes.
+narrative	story,tale,account,plot	An account of events.
+original	unique,novel,first,primary	Present from the beginning; not a copy.
+palette	colors,range,selection,spectrum	A range of colors.
+prose	writing,text,composition	Written language in its ordinary form.
+rhythm	beat,tempo,pattern,cadence	A strong regular repeated pattern.
+style	manner,approach,way,fashion	A distinctive way of doing something.
+theme	subject,topic,motif,idea	The subject of a work.
+tone	quality,sound,mood,manner	The quality of a sound; general character.
+
+# Character and virtue
+compassion	empathy,sympathy,kindness,mercy	Concern for others' suffering.
+courage	bravery,nerve,valor,boldness	The ability to face danger.
+dignity	self-respect,honor,pride,esteem	The quality of being worthy of respect.
+empathy	understanding,compassion,sensitivity	The ability to share another's feelings.
+fairness	justice,equity,impartiality,honesty	The quality of treating people equally.
+fortitude	strength,courage,resilience,endurance	Courage in pain or adversity.
+generosity	liberality,charity,munificence,giving	Willingness to give.
+goodness	virtue,morality,kindness,merit	The quality of being good.
+honor	integrity,dignity,respect,glory	High respect; good moral character.
+humility	modesty,meekness,simplicity,unpretentiousness	The quality of being humble.
+kindness	goodwill,compassion,benevolence,warmth	The quality of being friendly and generous.
+loyalty	fidelity,faithfulness,devotion,allegiance	Giving constant support.
+mercy	compassion,leniency,grace,forgiveness	Compassion shown to offenders.
+patience	tolerance,forbearance,endurance,calmness	The ability to wait without distress.
+perseverance	persistence,determination,tenacity,resolve	Continued effort despite difficulty.
+sincerity	genuineness,honesty,truthfulness,openness	The quality of being sincere.
+temperance	moderation,restraint,self-control,sobriety	Moderation and self-restraint.
+tolerance	acceptance,patience,open-mindedness	Willingness to accept differences.
+valor	bravery,courage,heroism,gallantry	Great courage in the face of danger.
+virtue	goodness,morality,integrity,merit	Behavior showing moral standards.
+
+# Time and change
+aftermath	consequence,result,effect,outcome	The period following an event.
+ancient	old,aged,archaic,antique	Belonging to the very distant past.
+brief	short,fleeting,temporary,transient	Lasting only a short time.
+bygone	past,former,historical,old	Belonging to an earlier time.
+century	era,period,age,100 years	A period of 100 years.
+change	alteration,shift,transition,transformation	The act of making different.
+chronology	timeline,sequence,order,history	The arrangement of events in order.
+contemporary	modern,current,present,recent	Belonging to the present time.
+cycle	pattern,rotation,sequence,repetition	A set of recurring events.
+delay	postponement,wait,pause,deferral	A period of time by which something is late.
+duration	period,length,span,time	The length of time something lasts.
+epoch	era,age,period,time	A period of time in history.
+era	period,age,time,epoch	A long and distinct period.
+eventual	ultimate,final,resulting,inevitable	Happening at some later time.
+fleeting	brief,transient,passing,momentary	Lasting only a short time.
+frequent	regular,common,repeated,constant	Occurring often.
+future	prospect,tomorrow,coming time,days ahead	Time to come.
+heritage	tradition,legacy,inheritance,history	Valued things passed down from the past.
+history	past,record,chronicle,story	The study of past events.
+imminent	impending,approaching,near,coming	About to happen.
+instant	moment,second,flash,split second	A very short time.
+interval	gap,pause,break,period	A space of time between events.
+legacy	heritage,inheritance,bequest,endowment	Something handed down from the past.
+milestone	landmark,marker,achievement,event	A significant point in development.
+modern	contemporary,current,new,recent	Relating to the present time.
+moment	instant,second,point,time	A very brief period of time.
+ongoing	continuing,unfinished,evolving,in progress	Continuing; still in progress.
+outcome	result,consequence,effect,end	The way something turns out.
+pause	break,interval,rest,stop	A temporary stop.
+period	time,era,age,phase	A length of time.
+phase	stage,step,period,cycle	A distinct period in a process.
+preceding	previous,prior,earlier,foregoing	Coming before.
+previous	former,prior,earlier,past	Existing or occurring before.
+recent	new,latest,current,modern	Having happened lately.
+sequence	order,series,progression,chain	A particular order of events.
+simultaneous	concurrent,coinciding,parallel,synchronous	Occurring at the same time.
+temporary	brief,short-lived,transient,provisional	Lasting for only a short time.
+timeline	schedule,sequence,calendar,plan	A graphic representation of a period.
+transition	change,shift,transformation,move	The process of changing from one state to another.
+trend	direction,tendency,drift,movement	A general direction of change.
+
+
+# --- Extended batch 4: final words to reach ~2000 ---
+
+# More verbs
+abolish	eliminate,end,do away with,eradicate	To formally put an end to a system.
+accuse	charge,blame,allege,indict	To say someone has done something wrong.
+act	perform,behave,function,do	To take action; to perform.
+add	include,append,attach,supplement	To put together so as to increase.
+address	speak to,tackle,deal with,handle	To deal with an issue.
+adopt	take on,embrace,accept,follow	To take up and use.
+advocate	champion,promote,support,recommend	To publicly support.
+agree	concur,consent,assent,comply	To have the same opinion; to give consent.
+appraise	assess,evaluate,judge,estimate	To assess the value or quality of.
+choose	select,pick,decide,opt	To pick out from options.
+confer	grant,bestow,give,award	To grant a title or honor.
+consolidate	strengthen,combine,merge,unify	To make or become stronger; to combine.
+embrace	accept,adopt,take up,welcome	To accept willingly; to hold closely.
+estimate	assess,calculate,judge,approximate	To roughly calculate.
+lead	guide,direct,head,conduct	To be in charge; to guide.
+
+# Human body and health
+disease	illness,sickness,condition,ailment	A disorder in a living organism.
+fatigue	weariness,exhaustion,tiredness,lethargy	Extreme tiredness.
+health	wellness,fitness,wellbeing,soundness	The state of being free from illness.
+immune	resistant,protected,unsusceptible,safe	Resistant to a disease or harmful influence.
+injury	wound,harm,damage,trauma	Harm done to the body.
+medicate	treat,dose,prescribe,remedy	To give medicine to.
+mental	psychological,cognitive,intellectual	Relating to the mind.
+nutrition	nourishment,diet,feeding,sustenance	The process of eating and absorbing food.
+physical	bodily,corporeal,material,tangible	Relating to the body.
+recover	heal,mend,improve,bounce back	To return to health.
+remedy	cure,treatment,medicine,solution	A medicine or treatment.
+rest	sleep,relaxation,repose,break	Ceasing work; sleep.
+treatment	care,therapy,remedy,medication	Medical care of an illness.
+vital	essential,critical,crucial,necessary	Absolutely necessary; relating to life.
+wellness	health,wellbeing,fitness,vigor	The state of being in good health.
+
+# Learning and education
+academy	school,institution,college,institute	A place of learning.
+curriculum	syllabus,program,course,subjects	The subjects in an educational program.
+discipline	subject,field,study,control	A branch of knowledge.
+education	learning,schooling,training,instruction	The process of educating.
+examination	test,quiz,assessment,inspection	A formal test.
+exercise	practice,drill,activity,workout	Activity for training or improvement.
+graduate	complete,finish,qualify,pass	To successfully complete a course.
+instruction	teaching,direction,guidance,lesson	Detailed information on how to do something.
+lesson	class,tutorial,session,lecture	A period of learning.
+literacy	reading ability,fluency,skill,competency	The ability to read and write.
+practice	exercise,drill,rehearsal,habit	Repeated exercise to improve skill.
+qualification	credential,certificate,degree,skill	Training or education for a job.
+research	study,investigation,inquiry,analysis	Systematic investigation.
+scholarship	learning,knowledge,study,grant	Academic achievement; a grant for study.
+student	learner,pupil,scholar,trainee	A person who studies.
+teacher	instructor,educator,tutor,mentor	A person who teaches.
+training	education,instruction,preparation,drill	Teaching particular skills.
+
+# Business and work
+assignment	task,job,duty,project	A piece of work given to someone.
+budget	funds,allocation,estimate,plan	A financial plan.
+career	profession,vocation,calling,occupation	An occupation undertaken for a long time.
+colleague	co-worker,associate,partner,peer	A person one works with.
+deadline	due date,cutoff,limit,target	A date by which something must be done.
+delivery	distribution,provision,supply,handing over	The act of delivering.
+department	division,section,unit,branch	A section of an organization.
+employee	worker,staff,team member,personnel	A person employed for wages.
+leader	head,chief,director,manager	A person in charge.
+management	administration,oversight,control,direction	The process of managing.
+performance	execution,output,result,achievement	The action of accomplishing a task.
+policy	rule,procedure,guideline,regulation	A course of action.
+productivity	output,efficiency,performance,yield	The effectiveness of effort.
+project	task,endeavor,scheme,undertaking	An individual or collaborative enterprise.
+revenue	income,earnings,profit,returns	The income of an organization.
+schedule	timetable,plan,agenda,program	A plan of intended events.
+target	goal,aim,objective,mark	An objective to be achieved.
+team	group,crew,unit,squad	A group working together.
+workflow	process,procedure,system,method	The sequence of tasks in a process.
+
+# Feelings and emotions
+admiration	respect,esteem,appreciation,reverence	A feeling of wonder and respect.
+affection	fondness,love,attachment,warmth	A gentle feeling of fondness.
+anguish	agony,pain,torment,distress	Severe mental or physical pain.
+apprehension	anxiety,dread,unease,worry	Anxiety about the future.
+awe	wonder,amazement,reverence,astonishment	A feeling of wonder and respect.
+bliss	happiness,joy,euphoria,delight	Perfect happiness.
+calm	serenity,peace,tranquility,composure	A peaceful state.
+contentment	satisfaction,happiness,peace,fulfillment	A state of satisfaction.
+curiosity	inquisitiveness,interest,wonder,questioning	A desire to know.
+delight	joy,pleasure,happiness,gladness	A feeling of great pleasure.
+despair	hopelessness,despondency,anguish,gloom	Complete loss of hope.
+disgust	revulsion,loathing,distaste,contempt	Strong disapproval or dislike.
+ecstasy	euphoria,rapture,bliss,elation	An overwhelming feeling of happiness.
+elation	joy,happiness,euphoria,delight	Great happiness and exhilaration.
+envy	jealousy,resentment,covetousness,begrudging	Discontent at another's advantages.
+euphoria	elation,ecstasy,joy,bliss	A feeling or state of intense excitement.
+excitement	enthusiasm,eagerness,thrill,exhilaration	A feeling of great enthusiasm.
+fondness	affection,liking,warmth,tenderness	Affection or liking for someone.
+frustration	annoyance,exasperation,dissatisfaction,irritation	The feeling of being upset.
+gladness	happiness,joy,pleasure,delight	Feeling of happiness.
+guilt	remorse,shame,regret,self-reproach	A feeling of having done wrong.
+happiness	joy,contentment,delight,pleasure	The state of being happy.
+hostility	aggression,antagonism,enmity,hatred	Unfriendly behavior.
+indignation	outrage,resentment,anger,displeasure	Anger at perceived unfair treatment.
+inspiration	motivation,encouragement,stimulus,spark	Something that stimulates creativity.
+longing	yearning,desire,craving,wish	A yearning desire.
+melancholy	sadness,gloom,despondency,depression	A deep feeling of sadness.
+misery	wretchedness,suffering,unhappiness,distress	A state of great suffering.
+nostalgia	sentimentality,longing,homesickness,wistfulness	A sentimental longing for the past.
+pride	self-esteem,dignity,satisfaction,honor	A feeling of deep pleasure from achievements.
+regret	remorse,guilt,sorrow,disappointment	A feeling of sadness over something done.
+relief	comfort,ease,consolation,reassurance	The removal of distress.
+resentment	bitterness,animosity,anger,indignation	Bitter feelings about treatment received.
+satisfaction	contentment,fulfillment,pleasure,gratification	Fulfillment of needs or desires.
+serenity	calm,tranquility,peace,stillness	The state of being calm.
+shame	embarrassment,guilt,humiliation,remorse	A feeling of humiliation over wrong actions.
+solace	comfort,consolation,relief,support	Comfort in sadness or disappointment.
+sympathy	compassion,pity,understanding,empathy	Feelings of pity for another.
+wonder	amazement,awe,astonishment,marvel	A feeling of surprise and admiration.
+
+# Miscellaneous useful words
+alternative	option,choice,substitute,other	One of two or more available possibilities.
+array	range,variety,selection,collection	An ordered arrangement; a wide variety.
+aspect	element,feature,dimension,facet	A particular part or feature.
+circumstance	situation,condition,factor,detail	A condition relating to an event.
+clue	hint,sign,indication,lead	A piece of evidence helping to solve.
+collection	group,set,assortment,compilation	A group of things gathered together.
+combination	mixture,blend,merge,union	The joining of two or more things.
+comparison	contrast,parallel,similarity,analogy	The act of comparing.
+condition	state,situation,circumstance,requirement	The state of something; a requirement.
+connection	link,bond,relationship,tie	A relationship in which things are linked.
+consideration	thought,attention,care,factor	Careful thought; a fact taken into account.
+core	center,heart,essence,nucleus	The central part; the most important part.
+degree	level,extent,amount,stage	The amount to which something extends.
+feature	characteristic,quality,attribute,aspect	A distinctive attribute.
+key	essential,crucial,main,central	Most important.
+matter	substance,issue,affair,concern	A subject of concern; physical substance.
+means	method,way,resource,instrument	A way of doing something.
+notion	idea,concept,belief,thought	A conception or belief.
+point	detail,fact,item,aspect	A fact or idea; an exact location.
+range	scope,extent,variety,span	The limits of variation; a variety.
+reference	source,citation,mention,allusion	A mention of something.
+scenario	situation,case,context,picture	A possible sequence of events.
+series	sequence,chain,succession,set	A number of things of the same kind.
+stage	phase,step,period,point	A point in a process.
+step	stage,move,action,procedure	An action in a series.
+subject	topic,theme,matter,issue	A person or thing being discussed.
+term	word,expression,period,condition	A word or phrase; a period.
+topic	subject,theme,issue,matter	A matter being discussed.
+type	kind,sort,variety,category	A category of things.
+variety	range,diversity,assortment,mix	A number of different kinds.
+version	form,variant,edition,copy	A particular form of something.
+
