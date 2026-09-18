@@ -7,7 +7,8 @@ MODULE sheet;
  *   Enter / F2         edit current cell
  *   Delete             clear current cell
  *   Ctrl+O             open a CSV/TSV file
- *   Ctrl+S             save CSV or TSV (by extension; prompts if no filename)
+ *   Ctrl+S             save (prompts for filename if none; CSV/TSV/XLSX by extension)
+ *   Ctrl+W             save as new filename (always prompts; changes current filename)
  *   Ctrl+L             reload from disk
  *   Ctrl+N             new empty sheet
  *   Ctrl+F             freeze/unfreeze top row
@@ -27,7 +28,7 @@ MODULE sheet;
  *   =(A1+B1)/2        parentheses
  *)
 
-IMPORT DataFrame, Terminal, Strings, Files, Args, Out, Math;
+IMPORT DataFrame, Terminal, Strings, Files, Args, Out, Math, ZipWriter;
 
 CONST
   ROWW     = 5;    (* row-number field width *)
@@ -60,6 +61,7 @@ CONST
   KEY_F4    = 8CX;   (* delete column *)
   KEY_CTRL_O = 15;
   KEY_CTRL_S = 19;
+  KEY_CTRL_W = 23;
   KEY_CTRL_L = 12;
   KEY_CTRL_N = 14;
   KEY_CTRL_Q = 17;
@@ -791,6 +793,180 @@ BEGIN
          (fn[n+2] = 's') & (fn[n+3] = 'v')
 END IsTSV;
 
+(* ── true if filename has .xlsx extension ───────────────────────── *)
+PROCEDURE IsXLSX(fn: ARRAY OF CHAR): BOOLEAN;
+VAR n: INTEGER;
+BEGIN
+  n := Strings.Length(fn) - 5;
+  RETURN (n >= 0) & (fn[n] = '.') & (fn[n+1] = 'x') &
+         (fn[n+2] = 'l') & (fn[n+3] = 's') & (fn[n+4] = 'x')
+END IsXLSX;
+
+(* ── save to XLSX ────────────────────────────────────────────────── *)
+PROCEDURE SaveXLSX(fn: ARRAY OF CHAR): BOOLEAN;
+VAR
+  xr       : Files.Rider;
+  f        : Files.File;
+  ok       : BOOLEAN;
+  row, col, nr, nc : INTEGER;
+  cell     : ARRAY DataFrame.CELLLEN OF CHAR;
+  val      : REAL;
+  addr     : ARRAY 8 OF CHAR;
+  rn       : ARRAY 12 OF CHAR;
+  t0, t1, t2, t3, t4, t5 : ARRAY 300 OF CHAR;
+
+  PROCEDURE WL(s: ARRAY OF CHAR);
+  VAR i: INTEGER;
+  BEGIN
+    IF f = NIL THEN RETURN END;
+    i := 0; WHILE s[i] # 0X DO Files.Write(xr, s[i]); INC(i) END
+  END WL;
+
+  PROCEDURE WX(s: ARRAY OF CHAR);  (* XML-escaped write for cell text *)
+  VAR i: INTEGER;
+  BEGIN
+    i := 0;
+    WHILE s[i] # 0X DO
+      IF    s[i] = '&' THEN WL("&amp;")
+      ELSIF s[i] = '<' THEN WL("&lt;")
+      ELSIF s[i] = '>' THEN WL("&gt;")
+      ELSE Files.Write(xr, s[i])
+      END;
+      INC(i)
+    END
+  END WX;
+
+  PROCEDURE OpenTmp(path: ARRAY OF CHAR);
+  BEGIN
+    f := Files.New(path);
+    IF f = NIL THEN ok := FALSE; RETURN END;
+    Files.Set(xr, f, 0)
+  END OpenTmp;
+
+  PROCEDURE CloseTmp;
+  BEGIN
+    IF f # NIL THEN Files.Register(f); Files.Close(f); f := NIL END
+  END CloseTmp;
+
+BEGIN
+  ok := TRUE; f := NIL;
+  COPY(fn, t0); Strings.Append(".ct.tmp",    t0);
+  COPY(fn, t1); Strings.Append(".rels.tmp",  t1);
+  COPY(fn, t2); Strings.Append(".wb.tmp",    t2);
+  COPY(fn, t3); Strings.Append(".wbr.tmp",   t3);
+  COPY(fn, t4); Strings.Append(".sty.tmp",   t4);
+  COPY(fn, t5); Strings.Append(".ws.tmp",    t5);
+
+  (* [Content_Types].xml *)
+  OpenTmp(t0);
+  WL('<?xml version="1.0" encoding="UTF-8"?>');
+  WL('<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">');
+  WL('<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>');
+  WL('<Default Extension="xml" ContentType="application/xml"/>');
+  WL('<Override PartName="/xl/workbook.xml"');
+  WL(' ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>');
+  WL('<Override PartName="/xl/worksheets/sheet1.xml"');
+  WL(' ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>');
+  WL('<Override PartName="/xl/styles.xml"');
+  WL(' ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>');
+  WL('</Types>');
+  CloseTmp;
+
+  (* _rels/.rels *)
+  OpenTmp(t1);
+  WL('<?xml version="1.0" encoding="UTF-8"?>');
+  WL('<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">');
+  WL('<Relationship Id="rId1"');
+  WL(' Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument"');
+  WL(' Target="xl/workbook.xml"/>');
+  WL('</Relationships>');
+  CloseTmp;
+
+  (* xl/workbook.xml *)
+  OpenTmp(t2);
+  WL('<?xml version="1.0" encoding="UTF-8"?>');
+  WL('<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"');
+  WL(' xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">');
+  WL('<sheets><sheet name="Sheet1" sheetId="1" r:id="rId1"/></sheets>');
+  WL('</workbook>');
+  CloseTmp;
+
+  (* xl/_rels/workbook.xml.rels *)
+  OpenTmp(t3);
+  WL('<?xml version="1.0" encoding="UTF-8"?>');
+  WL('<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">');
+  WL('<Relationship Id="rId1"');
+  WL(' Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet"');
+  WL(' Target="worksheets/sheet1.xml"/>');
+  WL('<Relationship Id="rId2"');
+  WL(' Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles"');
+  WL(' Target="styles.xml"/>');
+  WL('</Relationships>');
+  CloseTmp;
+
+  (* xl/styles.xml *)
+  OpenTmp(t4);
+  WL('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>');
+  WL('<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">');
+  WL('<fonts count="1"><font><sz val="11"/><name val="Calibri"/></font></fonts>');
+  WL('<fills count="2">');
+  WL('<fill><patternFill patternType="none"/></fill>');
+  WL('<fill><patternFill patternType="gray125"/></fill>');
+  WL('</fills>');
+  WL('<borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders>');
+  WL('<cellStyleXfs count="1">');
+  WL('<xf numFmtId="0" fontId="0" fillId="0" borderId="0"/>');
+  WL('</cellStyleXfs>');
+  WL('<cellXfs count="1">');
+  WL('<xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>');
+  WL('</cellXfs>');
+  WL('</styleSheet>');
+  CloseTmp;
+
+  (* xl/worksheets/sheet1.xml *)
+  OpenTmp(t5);
+  WL('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>');
+  WL('<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">');
+  WL('<sheetData>');
+  nr := DataFrame.NRows(df);
+  nc := DataFrame.NCols(df);
+  FOR row := 0 TO nr - 1 DO
+    Strings.IntToStr(row + 1, rn);
+    WL('<row r="'); WL(rn); WL('">');
+    FOR col := 0 TO nc - 1 DO
+      CellDisplay(row, col, cell);
+      IF cell[0] # 0X THEN
+        CellAddr(row, col, addr);
+        IF Strings.StrToReal(cell, val) THEN
+          WL('<c r="'); WL(addr); WL('"><v>'); WL(cell); WL('</v></c>')
+        ELSE
+          WL('<c r="'); WL(addr); WL('" t="inlineStr"><is><t>');
+          WX(cell);
+          WL('</t></is></c>')
+        END
+      END
+    END;
+    WL('</row>')
+  END;
+  WL('</sheetData></worksheet>');
+  CloseTmp;
+
+  (* assemble ZIP *)
+  ok := ZipWriter.Begin(fn) & ok;
+  ok := ZipWriter.Add("[Content_Types].xml",         t0) & ok;
+  ok := ZipWriter.Add("_rels/.rels",                 t1) & ok;
+  ok := ZipWriter.Add("xl/workbook.xml",             t2) & ok;
+  ok := ZipWriter.Add("xl/_rels/workbook.xml.rels",  t3) & ok;
+  ok := ZipWriter.Add("xl/styles.xml",               t4) & ok;
+  ok := ZipWriter.Add("xl/worksheets/sheet1.xml",    t5) & ok;
+  ok := ZipWriter.Finish() & ok;
+
+  Files.Delete(t0); Files.Delete(t1); Files.Delete(t2);
+  Files.Delete(t3); Files.Delete(t4); Files.Delete(t5);
+
+  RETURN ok
+END SaveXLSX;
+
 (* ── move cursor, keeping it in sheet bounds ────────────────────── *)
 PROCEDURE MoveTo(r, c: INTEGER);
 BEGIN
@@ -940,7 +1116,7 @@ BEGIN
   HL("  Any printable key      replace and start editing", CLR_NORM, BG_NORM);
   HL("  Delete  Ctrl+C/X/V     clear / copy / cut / paste", CLR_NORM, BG_NORM);
   HL("FILES", CLR_FML, BG_NORM);
-  HL("  Ctrl+O / S / L / N     open / save / reload / new", CLR_NORM, BG_NORM);
+  HL("  Ctrl+O / S / W / L / N open / save / save as / reload / new", CLR_NORM, BG_NORM);
   HL("COLUMNS", CLR_FML, BG_NORM);
   HL("  F3 / F4                insert / delete column", CLR_NORM, BG_NORM);
   HL("  Ctrl+T  Ctrl+F         sort col / freeze top row", CLR_NORM, BG_NORM);
@@ -970,6 +1146,7 @@ END OkToDiscard;
 PROCEDURE HandleNormal(k: INTEGER);
 VAR nr, nc: INTEGER;
     ok: BOOLEAN;
+    newName: ARRAY 256 OF CHAR;
 BEGIN
   nr := DataFrame.NRows(df); nc := DataFrame.NCols(df);
   IF k = KEY_UP    THEN MoveTo(curRow - 1, curCol)
@@ -1004,10 +1181,25 @@ BEGIN
     END;
     IF fname[0] # 0X THEN
       IF IsTSV(fname) THEN ok := SaveTSV(fname)
+      ELSIF IsXLSX(fname) THEN ok := SaveXLSX(fname)
       ELSE ok := SaveCSV(fname)
       END;
       IF ok THEN COPY("Saved.", statusMsg); dirty := FALSE
       ELSE COPY("Save failed!", statusMsg)
+      END
+    END
+  ELSIF k = KEY_CTRL_W THEN
+    newName[0] := 0X;
+    IF Prompt("Save as: ", newName) THEN
+      IF IsTSV(newName) THEN ok := SaveTSV(newName)
+      ELSIF IsXLSX(newName) THEN ok := SaveXLSX(newName)
+      ELSE ok := SaveCSV(newName)
+      END;
+      IF ok THEN
+        COPY(newName, fname); dirty := FALSE;
+        COPY("Saved.", statusMsg)
+      ELSE
+        COPY("Save failed!", statusMsg)
       END
     END
   ELSIF k = KEY_CTRL_L THEN
