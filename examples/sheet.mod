@@ -28,13 +28,15 @@ MODULE sheet;
  *   =(A1+B1)/2        parentheses
  *)
 
-IMPORT DataFrame, Terminal, Strings, Files, Args, Out, Math, ZipWriter;
+IMPORT DataFrame, Terminal, Strings, Files, Args, Out, Math, ZipWriter, Zip, Env;
 
 CONST
   ROWW     = 5;    (* row-number field width *)
   MAXDEPTH = 16;   (* formula recursion depth limit *)
 
   NORMAL = 0;  EDIT = 1;
+
+  MAXSS = 4096;  (* max shared strings in an XLSX file *)
 
   (* 256-colour palette *)
   CLR_TEXT  = 255;
@@ -96,6 +98,8 @@ VAR
   fmErr     : BOOLEAN;
   fmDepth   : INTEGER;
   clipboard : ARRAY DataFrame.CELLLEN OF CHAR;
+  xlsxSS    : ARRAY MAXSS OF ARRAY DataFrame.CELLLEN OF CHAR;
+  xlssSN    : INTEGER;
 
 (* ── column label: 0→"A", 25→"Z", 26→"AA" ─────────────────────── *)
 PROCEDURE ColLabel(c: INTEGER; VAR s: ARRAY OF CHAR);
@@ -967,6 +971,249 @@ BEGIN
   RETURN ok
 END SaveXLSX;
 
+(* ── XLSX loader ─────────────────────────────────────────────────── *)
+
+(* Read next XML event: text before tag, tag content (without <>).
+   Returns FALSE at EOF. *)
+PROCEDURE XmlNext(VAR r: Files.Rider;
+                  VAR text: ARRAY OF CHAR;
+                  VAR tag:  ARRAY OF CHAR): BOOLEAN;
+VAR ch: CHAR; i, mx: INTEGER;
+BEGIN
+  mx := LEN(text) - 1; i := 0;
+  Files.Read(r, ch);
+  WHILE ~r.eof & (ch # '<') DO
+    IF i < mx THEN text[i] := ch; INC(i) END;
+    Files.Read(r, ch)
+  END;
+  text[i] := 0X;
+  IF r.eof THEN tag[0] := 0X; RETURN FALSE END;
+  mx := LEN(tag) - 1; i := 0;
+  Files.Read(r, ch);
+  WHILE ~r.eof & (ch # '>') DO
+    IF i < mx THEN tag[i] := ch; INC(i) END;
+    Files.Read(r, ch)
+  END;
+  tag[i] := 0X;
+  RETURN TRUE
+END XmlNext;
+
+(* Extract XML attribute value: tag='c r="B3" t="s"', attr="r" → "B3" *)
+PROCEDURE XmlAttr(tag, attr: ARRAY OF CHAR; VAR val: ARRAY OF CHAR);
+VAR pos, i, mx: INTEGER; pat: ARRAY 64 OF CHAR;
+BEGIN
+  val[0] := 0X;
+  COPY(attr, pat); Strings.Append('="', pat);
+  pos := Strings.Pos(pat, tag, 0);
+  IF pos < 0 THEN RETURN END;
+  pos := pos + Strings.Length(pat);
+  mx := LEN(val) - 1; i := 0;
+  WHILE (tag[pos] # 0X) & (tag[pos] # '"') & (i < mx) DO
+    val[i] := tag[pos]; INC(i); INC(pos)
+  END;
+  val[i] := 0X
+END XmlAttr;
+
+(* Cell address letters to 0-based column index: "A3"→0, "B1"→1, "AA5"→26 *)
+PROCEDURE XmlColNum(addr: ARRAY OF CHAR): INTEGER;
+VAR col: INTEGER;
+BEGIN
+  IF (addr[0] < 'A') OR (addr[0] > 'Z') THEN RETURN 0 END;
+  col := ORD(addr[0]) - ORD('A');
+  IF (addr[1] >= 'A') & (addr[1] <= 'Z') THEN
+    col := (col + 1) * 26 + ORD(addr[1]) - ORD('A')
+  END;
+  RETURN col
+END XmlColNum;
+
+(* Decode XML entities (&amp; &lt; &gt; &quot; &apos;) in src → dst *)
+PROCEDURE XmlDecode(src: ARRAY OF CHAR; VAR dst: ARRAY OF CHAR);
+VAR i, j, mx: INTEGER;
+BEGIN
+  i := 0; j := 0; mx := LEN(dst) - 1;
+  WHILE (src[i] # 0X) & (j < mx) DO
+    IF src[i] = '&' THEN
+      IF (src[i+1]='a') & (src[i+2]='m') & (src[i+3]='p') & (src[i+4]=';') THEN
+        dst[j] := '&'; INC(j); i := i + 5
+      ELSIF (src[i+1]='l') & (src[i+2]='t') & (src[i+3]=';') THEN
+        dst[j] := '<'; INC(j); i := i + 4
+      ELSIF (src[i+1]='g') & (src[i+2]='t') & (src[i+3]=';') THEN
+        dst[j] := '>'; INC(j); i := i + 4
+      ELSIF (src[i+1]='q') & (src[i+2]='u') & (src[i+3]='o') & (src[i+4]='t') & (src[i+5]=';') THEN
+        dst[j] := '"'; INC(j); i := i + 6
+      ELSIF (src[i+1]='a') & (src[i+2]='p') & (src[i+3]='o') & (src[i+4]='s') & (src[i+5]=';') THEN
+        dst[j] := 27X; INC(j); i := i + 6
+      ELSE
+        dst[j] := '&'; INC(j); INC(i)
+      END
+    ELSE
+      dst[j] := src[i]; INC(j); INC(i)
+    END
+  END;
+  dst[j] := 0X
+END XmlDecode;
+
+(* Grow d to have at least r rows and c+1 cols *)
+PROCEDURE EnsureDF(d: DataFrame.DataFrame; r, c: INTEGER);
+VAR i: INTEGER;
+BEGIN
+  WHILE DataFrame.NCols(d) <= c DO i := DataFrame.AddCol(d, "") END;
+  WHILE DataFrame.NRows(d) <= r DO i := DataFrame.AddRow(d) END
+END EnsureDF;
+
+(* Parse xl/sharedStrings.xml rider into xlsxSS/xlssSN *)
+PROCEDURE ParseSharedStrings(VAR r: Files.Rider);
+VAR
+  text : ARRAY DataFrame.CELLLEN OF CHAR;
+  tag  : ARRAY 256 OF CHAR;
+  cur  : ARRAY DataFrame.CELLLEN OF CHAR;
+  dec  : ARRAY DataFrame.CELLLEN OF CHAR;
+  inSi, inT: BOOLEAN;
+BEGIN
+  xlssSN := 0; inSi := FALSE; inT := FALSE;
+  WHILE XmlNext(r, text, tag) DO
+    IF (tag[0]='s') & (tag[1]='i') & ((tag[2]=0X) OR (tag[2]=' ')) THEN
+      inSi := TRUE; cur[0] := 0X
+    ELSIF (tag[0]='/') & (tag[1]='s') & (tag[2]='i') THEN
+      IF inSi & (xlssSN < MAXSS) THEN
+        COPY(cur, xlsxSS[xlssSN]); INC(xlssSN)
+      END;
+      inSi := FALSE
+    ELSIF (tag[0]='t') & ((tag[1]=0X) OR (tag[1]=' ')) THEN
+      IF inSi THEN inT := TRUE END
+    ELSIF (tag[0]='/') & (tag[1]='t') & ((tag[2]=0X) OR (tag[2]=' ')) THEN
+      IF inSi & inT THEN
+        XmlDecode(text, dec);
+        IF Strings.Length(cur) + Strings.Length(dec) < DataFrame.CELLLEN - 1 THEN
+          Strings.Append(dec, cur)
+        END
+      END;
+      inT := FALSE
+    END
+  END
+END ParseSharedStrings;
+
+(* Parse xl/worksheets/sheet1.xml rider into a new DataFrame *)
+PROCEDURE ParseSheet(VAR r: Files.Rider): DataFrame.DataFrame;
+VAR
+  text, val, dec : ARRAY DataFrame.CELLLEN OF CHAR;
+  tag            : ARRAY 256 OF CHAR;
+  aR, aT         : ARRAY 16 OF CHAR;
+  isVal          : ARRAY DataFrame.CELLLEN OF CHAR;
+  result         : DataFrame.DataFrame;
+  crow, ccol, ssIdx: INTEGER;
+  inV, inIs      : BOOLEAN;
+  ok             : BOOLEAN;
+BEGIN
+  result := DataFrame.Create();
+  crow := -1; ccol := -1;
+  inV := FALSE; inIs := FALSE;
+  aT[0] := 0X;
+  WHILE XmlNext(r, text, tag) DO
+    IF (tag[0] = '?') OR (tag[0] = '!') THEN
+      (* skip processing instructions and comments *)
+    ELSIF (tag[0]='r') & (tag[1]='o') & (tag[2]='w') &
+          ((tag[3]=' ') OR (tag[3]=0X)) THEN
+      XmlAttr(tag, "r", aR);
+      ok := Strings.StrToInt(aR, crow);
+      IF ok THEN DEC(crow) ELSE crow := -1 END
+    ELSIF (tag[0]='/') & (tag[1]='r') & (tag[2]='o') & (tag[3]='w') THEN
+      crow := -1
+    ELSIF (tag[0]='c') & ((tag[1]=' ') OR (tag[1]=0X)) THEN
+      XmlAttr(tag, "r", aR); XmlAttr(tag, "t", aT);
+      IF aR[0] # 0X THEN ccol := XmlColNum(aR) ELSE ccol := -1 END;
+      inV := FALSE; inIs := FALSE
+    ELSIF (tag[0]='v') & (tag[1]=0X) THEN
+      inV := TRUE
+    ELSIF (tag[0]='/') & (tag[1]='v') & (tag[2]=0X) THEN
+      IF inV & (crow >= 0) & (ccol >= 0) THEN
+        IF (aT[0]='s') & (aT[1]=0X) THEN
+          ok := Strings.StrToInt(text, ssIdx);
+          IF ok & (ssIdx >= 0) & (ssIdx < xlssSN) THEN
+            COPY(xlsxSS[ssIdx], val)
+          ELSE val[0] := 0X
+          END
+        ELSIF (aT[0]='b') & (aT[1]=0X) THEN
+          IF text[0] = '1' THEN COPY("TRUE", val) ELSE COPY("FALSE", val) END
+        ELSE
+          COPY(text, val)
+        END;
+        IF val[0] # 0X THEN
+          EnsureDF(result, crow, ccol);
+          DataFrame.SetStr(result, crow, ccol, val)
+        END
+      END;
+      inV := FALSE
+    ELSIF (tag[0]='i') & (tag[1]='s') & (tag[2]=0X) THEN
+      inIs := TRUE; isVal[0] := 0X
+    ELSIF (tag[0]='/') & (tag[1]='i') & (tag[2]='s') THEN
+      IF (crow >= 0) & (ccol >= 0) & (isVal[0] # 0X) THEN
+        EnsureDF(result, crow, ccol);
+        DataFrame.SetStr(result, crow, ccol, isVal)
+      END;
+      inIs := FALSE
+    ELSIF (tag[0]='/') & (tag[1]='t') & ((tag[2]=0X) OR (tag[2]=' ')) THEN
+      IF inIs THEN
+        XmlDecode(text, dec);
+        IF Strings.Length(isVal) + Strings.Length(dec) < DataFrame.CELLLEN - 1 THEN
+          Strings.Append(dec, isVal)
+        END
+      END
+    END
+  END;
+  RETURN result
+END ParseSheet;
+
+PROCEDURE LoadXLSX(fn: ARRAY OF CHAR): DataFrame.DataFrame;
+VAR
+  z      : Zip.Archive;
+  idx    : INTEGER;
+  tmpDir : ARRAY 256 OF CHAR;
+  tmpSS  : ARRAY 256 OF CHAR;
+  tmpWS  : ARRAY 256 OF CHAR;
+  f      : Files.File;
+  r      : Files.Rider;
+  result : DataFrame.DataFrame;
+BEGIN
+  result := NIL;
+  IF ~Env.Get("TMPDIR", tmpDir) OR (tmpDir[0] = 0X) THEN COPY("/tmp", tmpDir) END;
+  COPY(tmpDir, tmpSS); Strings.Append("/obxlss.xml", tmpSS);
+  COPY(tmpDir, tmpWS); Strings.Append("/obxlws.xml", tmpWS);
+
+  z := Zip.Open(fn);
+  IF z = NIL THEN RETURN NIL END;
+
+  xlssSN := 0;
+  idx := Zip.Find(z, "xl/sharedStrings.xml");
+  IF idx >= 0 THEN
+    IF Zip.ExtractFile(z, idx, tmpSS) THEN
+      f := Files.Old(tmpSS);
+      IF f # NIL THEN
+        Files.Set(r, f, 0);
+        ParseSharedStrings(r);
+        Files.Close(f)
+      END
+    END;
+    Files.Delete(tmpSS)
+  END;
+
+  idx := Zip.Find(z, "xl/worksheets/sheet1.xml");
+  IF idx >= 0 THEN
+    IF Zip.ExtractFile(z, idx, tmpWS) THEN
+      f := Files.Old(tmpWS);
+      IF f # NIL THEN
+        Files.Set(r, f, 0);
+        result := ParseSheet(r);
+        Files.Close(f)
+      END
+    END;
+    Files.Delete(tmpWS)
+  END;
+
+  Zip.Close(z);
+  RETURN result
+END LoadXLSX;
+
 (* ── move cursor, keeping it in sheet bounds ────────────────────── *)
 PROCEDURE MoveTo(r, c: INTEGER);
 BEGIN
@@ -1206,6 +1453,8 @@ BEGIN
     IF fname[0] # 0X THEN
       IF IsTSV(fname) THEN
         df := DataFrame.LoadTSV(fname, FALSE, nc)
+      ELSIF IsXLSX(fname) THEN
+        df := LoadXLSX(fname)
       ELSE
         df := DataFrame.LoadCSV(fname, FALSE, nc)
       END;
@@ -1227,6 +1476,8 @@ BEGIN
       IF Prompt("Open: ", fname) THEN
         IF IsTSV(fname) THEN
           df := DataFrame.LoadTSV(fname, FALSE, nc)
+        ELSIF IsXLSX(fname) THEN
+          df := LoadXLSX(fname)
         ELSE
           df := DataFrame.LoadCSV(fname, FALSE, nc)
         END;
@@ -1448,10 +1699,12 @@ BEGIN
     Args.Get(1, fname);
     IF IsTSV(fname) THEN
       df := DataFrame.LoadTSV(fname, FALSE, err)
+    ELSIF IsXLSX(fname) THEN
+      df := LoadXLSX(fname)
     ELSE
       df := DataFrame.LoadCSV(fname, FALSE, err)
     END;
-    IF (df = NIL) OR (err # DataFrame.OK) THEN
+    IF df = NIL THEN
       df := DataFrame.Create();
       statusMsg := "New file."
     END
