@@ -54,6 +54,7 @@ arrow keys, Home/End, Page Up/Down, and the mouse, so you can mix styles.
 | Projects | Group several files into a `.ostarproj` manifest; binder popup with per-doc synopses (`^PI`/`^PY`) and note/manuscript roles (`^PM`), outline panel, project-wide search and replace (`^PS`/`^PW`), and "compile" (concatenate all non-note docs to one RTF, EPUB, DOCX, or text file) |
 | Export | Manuscript-format RTF (`^KM`), plain HTML (`^KJ`), DOCX (`^KI`), a notes-stripped clean `.txt` (`^KE`), and timestamped backup snapshots (`^KN`, browsable with `^KO` and diffable against the live document by pressing `D` there) — RTF/HTML/DOCX rendering all live in the shared `Modules/Markdown.mod` |
 | Other window | A second, independently-scrolled pane (`^OK`) for reference material or a companion file, with block-copy (`^KA`) and jump-to-source (`^QV`) between the two |
+| Accented letters | `^^` compose: a letter straight after it takes a circumflex (`^^c` = ĉ — Esperanto's hats in two keystrokes), or an accent selector first picks another of fourteen accents (`^^:o` = ö, `^^'e` = é, `^^(u` = ŭ) |
 | Look & feel | Three themes (WordPerfect blue, WordStar black, terminal default), three help-verbosity levels, focus mode, typewriter scrolling, reveal codes (`^OD`) |
 
 ### Building and running OStar
@@ -165,6 +166,12 @@ they mark a place in *this* file, not a location in general.
 Made a mistake? `^U` undoes the last edit — up to 400 steps are kept, and
 undo restores both the text and the cursor position at the time of the
 edit.
+
+For letters your keyboard doesn't have, `^^` starts a compose sequence: a
+letter right after it takes a circumflex (`^^c` gives ĉ), and an accent
+selector before the letter picks a different accent (`^^:o` gives ö, `^^'e`
+gives é). A popup lists all fourteen accents while the sequence is pending;
+the full table is in Part 4.
 
 ### 3. Delete, and get it back
 
@@ -678,6 +685,58 @@ case-insensitive).
 | Enter | Split the line at the cursor |
 | Tab | Insert a tab stop |
 | Del | Delete character under cursor (same as `^G`) |
+
+### `^^` — Accented letters (compose)
+
+`^^` (Ctrl-^) opens a compose sequence. Whatever you type next decides what
+happens:
+
+* **A letter** gets a **circumflex**, because that is the accent `^^` names:
+  `^^c` = ĉ, `^^g` = ĝ, `^^h` = ĥ, `^^j` = ĵ, `^^s` = ŝ. Esperanto's five
+  hatted letters therefore cost two keystrokes each, with no accent selector
+  at all. Its sixth special letter, ŭ, takes the breve: `^^(u`.
+* **An accent selector**, then a letter, gets that accent instead: `^^:o` = ö,
+  `^^'e` = é, `^^~n` = ñ, `^^,c` = ç.
+* **`&` is a special case** — "ligature" rather than a diacritic — for the
+  letters that don't compose from a base + accent mark at all: `^^&s` = ß
+  (German eszett, the *ss* convention from X11 Compose; `^^&S` gives the rare
+  capital ẞ), `^^&a` = æ, `^^&o` = œ.
+* **Space** types the accent character itself, so `^^` then space inserts a
+  plain `^`.
+* **Esc** (or Backspace) abandons the sequence.
+
+Compose works anywhere you type: in the document, in the `^QF` find string,
+and at any filename or input prompt.
+
+Ctrl-^ is awkward on some keyboard layouts, so **`^\` (Ctrl-\) is the same
+key** — both open the sequence with the circumflex selected.
+
+While a sequence is pending the status bar shows the chosen accent, and (at
+help level 1 or 2) a popup lists every selector with live samples — the
+sample letters are generated from the same table that does the composing, so
+they always show exactly what you will get.
+
+| Selector | Accent | Examples |
+|---|---|---|
+| `^` (or `>`) | circumflex | ĉ ĝ ĥ ĵ ŝ â ê î ô û ŵ ŷ |
+| `:` (or `"`) | diaeresis / umlaut | ä ë ï ö ü ÿ |
+| `'` | acute | á é í ó ú ý ć ń ś ź ĺ ŕ |
+| `` ` `` | grave | à è ì ò ù |
+| `~` | tilde | ã ñ õ ẽ ĩ ũ |
+| `,` | cedilla | ç ş ţ ģ ķ ļ ņ ŗ |
+| `<` | caron (háček) | č š ž ř ť ď ň ě ǧ |
+| `(` (or `)`) | breve | ŭ ă ğ ĭ ĕ ŏ |
+| `-` (or `_`) | macron | ā ē ī ō ū |
+| `*` | ring above | å ů |
+| `.` | dot above | ż ė ċ ġ |
+| `;` | ogonek | ą ę į ų |
+| `=` | double acute | ő ű |
+| `/` | stroke | ø đ ł ħ ŧ |
+| `&` | ligature | ß ẞ æ Æ œ Œ |
+
+Capital letters work throughout: `^^C` = Ĉ, `^^:O` = Ö. A combination with no
+precomposed Unicode character (`^^q`, say) inserts nothing and says so in the
+status bar.
 
 ### Other
 

@@ -394,7 +394,13 @@ BEGIN
           curBg := back[r][c].bg
         END;
 
-        isBox := (back[r][c].ch >= BoxH) & (back[r][c].ch <= BoxBR);
+        (* The box pseudo-characters share their byte range with the
+           UTF-8 lead bytes 0C0X-0C5X (U+00C0-U+017F: accented Latin
+           letters).  A real multi-byte character always carries its
+           continuation bytes in c2, while PutCell clears c2 for a
+           pseudo-character, so c2 is what tells the two apart. *)
+        isBox := (back[r][c].ch >= BoxH) & (back[r][c].ch <= BoxBR)
+               & (back[r][c].c2 = 0X);
         IF isBox THEN
           EmitBoxChar(back[r][c].ch)
         ELSE

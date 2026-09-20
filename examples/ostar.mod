@@ -21,6 +21,12 @@ MODULE OStar;
  * ^QI — next style issue (adverb/filler/passive/long sentence).
  * Prefix ^P  — Project: ^PN new, ^PP open, ^PA add, ^PR remove,
  *              ^PE prev doc, ^PX next doc, ^PL list, ^PD compile DOCX.
+ * Accents: ^^ opens a compose sequence. A letter straight after it
+ *        takes a circumflex (^^c = ĉ, ^^g = ĝ) — Esperanto's hats
+ *        in two keystrokes; an accent selector first picks a different
+ *        one (^^:o = ö, ^^'e = é, ^^(u = ŭ, ^^~n = ñ, ^^,c = ç,
+ *        ^^&s = ß eszett). ^\ is the same key, for keyboards where
+ *        Ctrl-^ is awkward.
  * Other: ^G delete, ^H backspace, ^T del-word, ^Y del-line,
  *        ^N insert line, ^U undo, ^L find next, ^V overtype toggle,
  *        F1 command palette (shows key list).
@@ -62,6 +68,14 @@ CONST
 
   (* Prefix keys *)
   PrefNone = 0;  PrefK = 1;  PrefQ = 2;  PrefO = 3;  PrefP = 4;
+
+  (* Accent compose — a dead-key layer over the WordStar chords. ^^ (or
+     ^\ on keyboards where Ctrl-^ is awkward) opens a sequence; see the
+     "Accent Compose" section for how the two states are driven. *)
+  AccOff  = 0;   (* not composing                            *)
+  AccWait = 1;   (* accent chosen, waiting for a base letter *)
+  KAcc1   = 1EX; (* Ctrl-^ *)
+  KAcc2   = 1CX; (* Ctrl-\ *)
 
   (* Input-prompt actions *)
   ActSaveAs  = 1;
@@ -198,6 +212,8 @@ VAR
   (* Editor state *)
   mode       : INTEGER;
   prefix     : INTEGER;
+  accState   : INTEGER;    (* AccOff / AccWait — accent compose state *)
+  accChar    : CHAR;       (* pending accent, canonical (see AccentCanon) *)
   theme      : INTEGER;
   helpLevel  : INTEGER;    (* 0=clean 1=menus shown 2=menus+hints *)
   wrap       : BOOLEAN;
@@ -479,6 +495,302 @@ BEGIN
     buf[slen + n] := 0X
   END
 END AppendUTF8;
+
+(* ── Accent Compose (^^ / ^\) ────────────────────────────────────── *)
+(* A dead-key layer: ^^ starts a compose sequence, then either a base
+   letter (circumflex, so ^^c = c-circumflex — Esperanto's hats need no
+   accent selector at all) or an accent selector followed by a base
+   letter (^^:o = o-umlaut).  Every selector is a non-letter, which is
+   what makes "letter straight after ^^" unambiguous. *)
+
+PROCEDURE EncodeUTF8(cp: INTEGER; VAR seq: ARRAY OF CHAR): INTEGER;
+(* Encode one code point as UTF-8 in seq (NUL-terminated); returns the
+   byte count, in the same shape ReadUTF8Seq hands to InsUTF8. *)
+BEGIN
+  IF cp < 80H THEN
+    seq[0] := CHR(cp); seq[1] := 0X; RETURN 1
+  ELSIF cp < 800H THEN
+    seq[0] := CHR(0C0H + cp DIV 40H);
+    seq[1] := CHR(80H + cp MOD 40H);
+    seq[2] := 0X; RETURN 2
+  ELSE
+    seq[0] := CHR(0E0H + cp DIV 1000H);
+    seq[1] := CHR(80H + (cp DIV 40H) MOD 40H);
+    seq[2] := CHR(80H + cp MOD 40H);
+    seq[3] := 0X; RETURN 3
+  END
+END EncodeUTF8;
+
+PROCEDURE AccentCanon(c: CHAR): CHAR;
+(* Fold an accent selector's alias spellings onto the canonical key used
+   by AccentCP, or return 0X if c isn't a selector at all. *)
+BEGIN
+  CASE c OF
+    '^', '>':      RETURN '^'
+  | ':', 22X:      RETURN ':'
+  | 27X:           RETURN 27X
+  | '`':           RETURN '`'
+  | '~':           RETURN '~'
+  | ',':           RETURN ','
+  | '<':           RETURN '<'
+  | '(', ')':      RETURN '('
+  | '-', '_':      RETURN '-'
+  | '*':           RETURN '*'
+  | '.':           RETURN '.'
+  | ';':           RETURN ';'
+  | '=':           RETURN '='
+  | '/':           RETURN '/'
+  | '&':           RETURN '&'
+  ELSE RETURN 0X
+  END;
+  RETURN 0X
+END AccentCanon;
+
+PROCEDURE AccentCP(acc, base: CHAR): INTEGER;
+(* Unicode code point for base letter `base` carrying accent `acc`,
+   or 0 when that combination has no precomposed character. `acc`
+   is already canonical (see AccentCanon). *)
+BEGIN
+  CASE acc OF
+    '^':  (* circumflex *)
+      CASE base OF
+        'a': RETURN 0E2H | 'A': RETURN 0C2H | 'c': RETURN 109H |
+        'C': RETURN 108H | 'e': RETURN 0EAH | 'E': RETURN 0CAH |
+        'g': RETURN 11DH | 'G': RETURN 11CH | 'h': RETURN 125H |
+        'H': RETURN 124H | 'i': RETURN 0EEH | 'I': RETURN 0CEH |
+        'j': RETURN 135H | 'J': RETURN 134H | 'o': RETURN 0F4H |
+        'O': RETURN 0D4H | 's': RETURN 15DH | 'S': RETURN 15CH |
+        'u': RETURN 0FBH | 'U': RETURN 0DBH | 'w': RETURN 175H |
+        'W': RETURN 174H | 'y': RETURN 177H | 'Y': RETURN 176H |
+        'z': RETURN 1E91H | 'Z': RETURN 1E90H
+      ELSE RETURN 0
+      END
+  | ':':  (* diaeresis (umlaut) *)
+      CASE base OF
+        'a': RETURN 0E4H | 'A': RETURN 0C4H | 'e': RETURN 0EBH |
+        'E': RETURN 0CBH | 'h': RETURN 1E27H | 'H': RETURN 1E26H |
+        'i': RETURN 0EFH | 'I': RETURN 0CFH | 'o': RETURN 0F6H |
+        'O': RETURN 0D6H | 't': RETURN 1E97H | 'u': RETURN 0FCH |
+        'U': RETURN 0DCH | 'w': RETURN 1E85H | 'W': RETURN 1E84H |
+        'x': RETURN 1E8DH | 'X': RETURN 1E8CH | 'y': RETURN 0FFH |
+        'Y': RETURN 178H
+      ELSE RETURN 0
+      END
+  | 27X:  (* acute *)
+      CASE base OF
+        'a': RETURN 0E1H | 'A': RETURN 0C1H | 'c': RETURN 107H |
+        'C': RETURN 106H | 'e': RETURN 0E9H | 'E': RETURN 0C9H |
+        'g': RETURN 1F5H | 'G': RETURN 1F4H | 'i': RETURN 0EDH |
+        'I': RETURN 0CDH | 'k': RETURN 1E31H | 'K': RETURN 1E30H |
+        'l': RETURN 13AH | 'L': RETURN 139H | 'm': RETURN 1E3FH |
+        'M': RETURN 1E3EH | 'n': RETURN 144H | 'N': RETURN 143H |
+        'o': RETURN 0F3H | 'O': RETURN 0D3H | 'p': RETURN 1E55H |
+        'P': RETURN 1E54H | 'r': RETURN 155H | 'R': RETURN 154H |
+        's': RETURN 15BH | 'S': RETURN 15AH | 'u': RETURN 0FAH |
+        'U': RETURN 0DAH | 'w': RETURN 1E83H | 'W': RETURN 1E82H |
+        'y': RETURN 0FDH | 'Y': RETURN 0DDH | 'z': RETURN 17AH |
+        'Z': RETURN 179H
+      ELSE RETURN 0
+      END
+  | '`':  (* grave *)
+      CASE base OF
+        'a': RETURN 0E0H | 'A': RETURN 0C0H | 'e': RETURN 0E8H |
+        'E': RETURN 0C8H | 'i': RETURN 0ECH | 'I': RETURN 0CCH |
+        'n': RETURN 1F9H | 'N': RETURN 1F8H | 'o': RETURN 0F2H |
+        'O': RETURN 0D2H | 'u': RETURN 0F9H | 'U': RETURN 0D9H |
+        'w': RETURN 1E81H | 'W': RETURN 1E80H | 'y': RETURN 1EF3H |
+        'Y': RETURN 1EF2H
+      ELSE RETURN 0
+      END
+  | '~':  (* tilde *)
+      CASE base OF
+        'a': RETURN 0E3H | 'A': RETURN 0C3H | 'e': RETURN 1EBDH |
+        'E': RETURN 1EBCH | 'i': RETURN 129H | 'I': RETURN 128H |
+        'n': RETURN 0F1H | 'N': RETURN 0D1H | 'o': RETURN 0F5H |
+        'O': RETURN 0D5H | 'u': RETURN 169H | 'U': RETURN 168H |
+        'v': RETURN 1E7DH | 'V': RETURN 1E7CH | 'y': RETURN 1EF9H |
+        'Y': RETURN 1EF8H
+      ELSE RETURN 0
+      END
+  | ',':  (* cedilla *)
+      CASE base OF
+        'c': RETURN 0E7H | 'C': RETURN 0C7H | 'd': RETURN 1E11H |
+        'D': RETURN 1E10H | 'e': RETURN 229H | 'E': RETURN 228H |
+        'g': RETURN 123H | 'G': RETURN 122H | 'h': RETURN 1E29H |
+        'H': RETURN 1E28H | 'k': RETURN 137H | 'K': RETURN 136H |
+        'l': RETURN 13CH | 'L': RETURN 13BH | 'n': RETURN 146H |
+        'N': RETURN 145H | 'r': RETURN 157H | 'R': RETURN 156H |
+        's': RETURN 15FH | 'S': RETURN 15EH | 't': RETURN 163H |
+        'T': RETURN 162H
+      ELSE RETURN 0
+      END
+  | '<':  (* caron (hacek) *)
+      CASE base OF
+        'a': RETURN 1CEH | 'A': RETURN 1CDH | 'c': RETURN 10DH |
+        'C': RETURN 10CH | 'd': RETURN 10FH | 'D': RETURN 10EH |
+        'e': RETURN 11BH | 'E': RETURN 11AH | 'g': RETURN 1E7H |
+        'G': RETURN 1E6H | 'h': RETURN 21FH | 'H': RETURN 21EH |
+        'i': RETURN 1D0H | 'I': RETURN 1CFH | 'j': RETURN 1F0H |
+        'k': RETURN 1E9H | 'K': RETURN 1E8H | 'l': RETURN 13EH |
+        'L': RETURN 13DH | 'n': RETURN 148H | 'N': RETURN 147H |
+        'o': RETURN 1D2H | 'O': RETURN 1D1H | 'r': RETURN 159H |
+        'R': RETURN 158H | 's': RETURN 161H | 'S': RETURN 160H |
+        't': RETURN 165H | 'T': RETURN 164H | 'u': RETURN 1D4H |
+        'U': RETURN 1D3H | 'z': RETURN 17EH | 'Z': RETURN 17DH
+      ELSE RETURN 0
+      END
+  | '(':  (* breve *)
+      CASE base OF
+        'a': RETURN 103H | 'A': RETURN 102H | 'e': RETURN 115H |
+        'E': RETURN 114H | 'g': RETURN 11FH | 'G': RETURN 11EH |
+        'i': RETURN 12DH | 'I': RETURN 12CH | 'o': RETURN 14FH |
+        'O': RETURN 14EH | 'u': RETURN 16DH | 'U': RETURN 16CH
+      ELSE RETURN 0
+      END
+  | '-':  (* macron *)
+      CASE base OF
+        'a': RETURN 101H | 'A': RETURN 100H | 'e': RETURN 113H |
+        'E': RETURN 112H | 'g': RETURN 1E21H | 'G': RETURN 1E20H |
+        'i': RETURN 12BH | 'I': RETURN 12AH | 'o': RETURN 14DH |
+        'O': RETURN 14CH | 'u': RETURN 16BH | 'U': RETURN 16AH |
+        'y': RETURN 233H | 'Y': RETURN 232H
+      ELSE RETURN 0
+      END
+  | '*':  (* ring above *)
+      CASE base OF
+        'a': RETURN 0E5H | 'A': RETURN 0C5H | 'u': RETURN 16FH |
+        'U': RETURN 16EH | 'w': RETURN 1E98H | 'y': RETURN 1E99H
+      ELSE RETURN 0
+      END
+  | '.':  (* dot above *)
+      CASE base OF
+        'a': RETURN 227H | 'A': RETURN 226H | 'b': RETURN 1E03H |
+        'B': RETURN 1E02H | 'c': RETURN 10BH | 'C': RETURN 10AH |
+        'd': RETURN 1E0BH | 'D': RETURN 1E0AH | 'e': RETURN 117H |
+        'E': RETURN 116H | 'f': RETURN 1E1FH | 'F': RETURN 1E1EH |
+        'g': RETURN 121H | 'G': RETURN 120H | 'h': RETURN 1E23H |
+        'H': RETURN 1E22H | 'I': RETURN 130H | 'm': RETURN 1E41H |
+        'M': RETURN 1E40H | 'n': RETURN 1E45H | 'N': RETURN 1E44H |
+        'o': RETURN 22FH | 'O': RETURN 22EH | 'p': RETURN 1E57H |
+        'P': RETURN 1E56H | 'r': RETURN 1E59H | 'R': RETURN 1E58H |
+        's': RETURN 1E61H | 'S': RETURN 1E60H | 't': RETURN 1E6BH |
+        'T': RETURN 1E6AH | 'w': RETURN 1E87H | 'W': RETURN 1E86H |
+        'x': RETURN 1E8BH | 'X': RETURN 1E8AH | 'y': RETURN 1E8FH |
+        'Y': RETURN 1E8EH | 'z': RETURN 17CH | 'Z': RETURN 17BH
+      ELSE RETURN 0
+      END
+  | ';':  (* ogonek *)
+      CASE base OF
+        'a': RETURN 105H | 'A': RETURN 104H | 'e': RETURN 119H |
+        'E': RETURN 118H | 'i': RETURN 12FH | 'I': RETURN 12EH |
+        'o': RETURN 1EBH | 'O': RETURN 1EAH | 'u': RETURN 173H |
+        'U': RETURN 172H
+      ELSE RETURN 0
+      END
+  | '=':  (* double acute *)
+      CASE base OF
+        'o': RETURN 151H | 'O': RETURN 150H | 'u': RETURN 171H |
+        'U': RETURN 170H
+      ELSE RETURN 0
+      END
+  | '/':  (* stroke / slash *)
+      CASE base OF
+        'o': RETURN 0F8H | 'O': RETURN 0D8H | 'd': RETURN 111H |
+        'D': RETURN 110H | 'l': RETURN 142H | 'L': RETURN 141H |
+        'h': RETURN 127H | 'H': RETURN 126H | 't': RETURN 167H |
+        'T': RETURN 166H
+      ELSE RETURN 0
+      END
+  | '&':  (* ligature: the ss->Ã convention from X11 Compose, plus
+             the two other common Latin ligatures *)
+      CASE base OF
+        's': RETURN 0DFH  (* Ã eszett *) | 'S': RETURN 1E9EH  (* áº capital eszett *)
+      | 'a': RETURN 0E6H  (* Ã¦ *)         | 'A': RETURN 0C6H  (* Ã *)
+      | 'o': RETURN 153H  (* Å *)         | 'O': RETURN 152H  (* Å *)
+      ELSE RETURN 0
+      END
+  ELSE RETURN 0
+  END;
+  RETURN 0
+END AccentCP;
+
+PROCEDURE AccentName(acc: CHAR; VAR s: ARRAY OF CHAR);
+BEGIN
+  CASE acc OF
+    '^': COPY("circumflex",   s)
+  | ':': COPY("diaeresis",    s)
+  | 27X: COPY("acute",        s)
+  | '`': COPY("grave",        s)
+  | '~': COPY("tilde",        s)
+  | ',': COPY("cedilla",      s)
+  | '<': COPY("caron",        s)
+  | '(': COPY("breve",        s)
+  | '-': COPY("macron",       s)
+  | '*': COPY("ring",         s)
+  | '.': COPY("dot above",    s)
+  | ';': COPY("ogonek",       s)
+  | '=': COPY("double acute", s)
+  | '/': COPY("stroke",       s)
+  | '&': COPY("ligature",     s)
+  ELSE   COPY("accent",       s)
+  END
+END AccentName;
+
+PROCEDURE AccentSelector(i: INTEGER): CHAR;
+(* i-th accent selector, in menu order; 0X past the end. *)
+BEGIN
+  CASE i OF
+    0: RETURN '^'  | 1: RETURN ':'  | 2: RETURN 27X
+  | 3: RETURN '`'  | 4: RETURN '~'  | 5: RETURN ','
+  | 6: RETURN '<'  | 7: RETURN '('  | 8: RETURN '-'
+  | 9: RETURN '*'  | 10: RETURN '.' | 11: RETURN ';'
+  | 12: RETURN '=' | 13: RETURN '/'  | 14: RETURN '&'
+  ELSE RETURN 0X
+  END;
+  RETURN 0X
+END AccentSelector;
+
+PROCEDURE AccentSampleBases(acc: CHAR; VAR s: ARRAY OF CHAR);
+(* Base letters whose accented forms make a good one-glance sample for
+   this accent in the ^^ menu. *)
+BEGIN
+  CASE acc OF
+    '^': COPY("cghjsaeiou", s)
+  | ':': COPY("aeiouy",     s)
+  | 27X: COPY("aeiouycnsz", s)
+  | '`': COPY("aeiou",      s)
+  | '~': COPY("anoeiu",     s)
+  | ',': COPY("cstgkln",    s)
+  | '<': COPY("cszrtdnegj", s)
+  | '(': COPY("uagieo",     s)
+  | '-': COPY("aeiou",      s)
+  | '*': COPY("au",         s)
+  | '.': COPY("zecgbo",     s)
+  | ';': COPY("aeiou",      s)
+  | '=': COPY("ou",         s)
+  | '/': COPY("odlht",      s)
+  | '&': COPY("sao",        s)
+  ELSE   COPY("",           s)
+  END
+END AccentSampleBases;
+
+PROCEDURE AccentSample(acc: CHAR; VAR s: ARRAY OF CHAR);
+(* Render the sample letters for `acc` as real accented text. Built at
+   run time from AccentCP so the menu can never drift from the table. *)
+VAR bases: ARRAY 16 OF CHAR; seq: ARRAY 5 OF CHAR;
+    i, cp, n: INTEGER;
+BEGIN
+  AccentSampleBases(acc, bases);
+  s[0] := 0X; i := 0;
+  WHILE bases[i] # 0X DO
+    cp := AccentCP(acc, bases[i]);
+    IF cp > 0 THEN
+      n := EncodeUTF8(cp, seq);
+      AppendUTF8(s, 60, seq, n)
+    END;
+    INC(i)
+  END
+END AccentSample;
 
 PROCEDURE CellCount(row, fromCol, toCol: INTEGER): INTEGER;
 (* Number of screen cells (UTF-8 characters) between byte columns
@@ -2439,12 +2751,14 @@ BEGIN
   | 97: COPY("^OY",   chord); COPY("look up word (dictionary/thesaurus)", desc)
   | 98: COPY("^KI",   chord); COPY("export DOCX",             desc)
   | 99: COPY("^PD",   chord); COPY("project: compile DOCX",   desc)
+  | 100: COPY("^^",   chord); COPY("accent: ^^c, ^^:o, ^^&s (Ã)", desc)
+  | 101: COPY("^\",   chord); COPY("accent compose (same as ^^)",  desc)
   ELSE (* end *)
   END
 END PaletteEntry;
 
 PROCEDURE PaletteCount(): INTEGER;
-BEGIN RETURN 100 END PaletteCount;
+BEGIN RETURN 102 END PaletteCount;
 
 (* ── Splash Screen ───────────────────────────────────────────────── *)
 
@@ -3161,7 +3475,10 @@ BEGIN
   TUI.PutStr(1, TUI.Rows, s, fg, bg);
   (* Right side: mode / prefix indicator *)
   s[0] := 0X;
-  IF prefix = PrefK THEN COPY("^K Block&File", s)
+  IF accState = AccWait THEN
+    COPY("^^ ", s); AccentName(accChar, tmp); Strings.Append(tmp, s);
+    Strings.Append(" + letter", s)
+  ELSIF prefix = PrefK THEN COPY("^K Block&File", s)
   ELSIF prefix = PrefQ THEN COPY("^Q Quick", s)
   ELSIF prefix = PrefO THEN COPY("^O Onscreen", s)
   ELSIF prefix = PrefP THEN COPY("^P Project", s)
@@ -3194,6 +3511,84 @@ BEGIN
     TUI.PutStr(col, TUI.Rows, s, fg, bg)
   END
 END DrawStatus;
+
+PROCEDURE StrCells(s: ARRAY OF CHAR): INTEGER;
+(* Screen width of a UTF-8 string in cells, as opposed to bytes. *)
+VAR i, n: INTEGER;
+BEGIN
+  i := 0; n := 0;
+  WHILE s[i] # 0X DO INC(i, UTF8SeqLen(s[i])); INC(n) END;
+  RETURN n
+END StrCells;
+
+PROCEDURE TruncCells(VAR s: ARRAY OF CHAR; cells: INTEGER);
+(* Cut s to at most `cells` screen cells, never mid-character. *)
+VAR i, n: INTEGER;
+BEGIN
+  i := 0; n := 0;
+  WHILE (s[i] # 0X) & (n < cells) DO INC(i, UTF8SeqLen(s[i])); INC(n) END;
+  s[i] := 0X
+END TruncCells;
+
+PROCEDURE AccentMenuLine(i: INTEGER; VAR line: ARRAY OF CHAR);
+(* One row of the ^^ menu: selector, accent name, live sample. *)
+VAR acc: CHAR; name: ARRAY 32 OF CHAR; samp: ARRAY 64 OF CHAR;
+    ch: ARRAY 2 OF CHAR; j: INTEGER;
+BEGIN
+  line[0] := 0X;
+  acc := AccentSelector(i);
+  IF acc = 0X THEN RETURN END;
+  AccentName(acc, name);
+  AccentSample(acc, samp);
+  ch[0] := acc; ch[1] := 0X;
+  COPY(" ", line); Strings.Append(ch, line); Strings.Append("  ", line);
+  Strings.Append(name, line);
+  FOR j := Strings.Length(name) TO 12 DO Strings.Append(" ", line) END;
+  Strings.Append(samp, line)
+END AccentMenuLine;
+
+PROCEDURE DrawAccentMenu;
+(* Help popup while a ^^ compose is pending, sized and placed like
+   DrawPrefixMenu. The pending accent's row is highlighted, so ^^ alone
+   visibly sits on "circumflex" until another selector is pressed. *)
+CONST AccRows = 15;   (* AccentSelector's 15 accents *)
+VAR line: ARRAY 128 OF CHAR; title: ARRAY 48 OF CHAR;
+    i, x, y, mh, menuW, maxLine: INTEGER;
+    fg, bg, mfg, mbg, rfg, rbg: INTEGER;
+BEGIN
+  COPY("^^ Accent - then a letter", title);
+  maxLine := Strings.Length(title);
+  FOR i := 0 TO AccRows - 1 DO
+    AccentMenuLine(i, line);
+    IF StrCells(line) > maxLine THEN maxLine := StrCells(line) END
+  END;
+  menuW := maxLine + 2;
+  IF menuW > TUI.Cols - 4 THEN menuW := TUI.Cols - 4 END;
+  mh := AccRows + 3;   (* rows + hint row + two border rows *)
+  x := 2; y := TUI.Rows - mh - 2;
+  IF y < 1 THEN y := 1 END;
+  fg := ThStFg(); bg := ThStBg();
+  mfg := ThFg(); mbg := ThBg();
+  TUI.DrawBox(x, y, menuW, mh, fg, bg);
+  TUI.PutStr(x + 1, y, title, fg, bg);
+  FOR i := 0 TO AccRows - 1 DO
+    AccentMenuLine(i, line);
+    TruncCells(line, menuW - 2);
+    IF AccentSelector(i) = accChar THEN
+      rfg := ThHlFg(); rbg := ThHlBg()
+    ELSE
+      rfg := mfg; rbg := mbg
+    END;
+    TUI.PutStr(x + 1, y + 1 + i, line, rfg, rbg);
+    TUI.FillRect(x + 1 + StrCells(line), y + 1 + i,
+                 menuW - StrCells(line) - 2, 1, ' ', rfg, rbg)
+  END;
+  COPY(" spc  the accent character itself", line);
+  TruncCells(line, menuW - 2);
+  TUI.PutStr(x + 1, y + 1 + AccRows, line, ThDimFg(), mbg);
+  TUI.FillRect(x + 1 + StrCells(line), y + 1 + AccRows,
+               menuW - StrCells(line) - 2, 1, ' ', ThDimFg(), mbg)
+END DrawAccentMenu;
 
 PROCEDURE PrefixMatches(pref: INTEGER; chord: ARRAY OF CHAR): BOOLEAN;
 BEGIN
@@ -3724,6 +4119,7 @@ BEGIN
   END;
   DrawStatus;
   IF (helpLevel >= 1) & (prefix # PrefNone) THEN DrawPrefixMenu(prefix) END;
+  IF (helpLevel >= 1) & (accState = AccWait) THEN DrawAccentMenu END;
   IF mode = ModePalette THEN DrawPalette END;
   IF mode = ModeOutline THEN DrawOutline END;
   IF mode = ModeBinder THEN DrawBinder END;
@@ -5102,8 +5498,81 @@ BEGIN
   mode := ModeNormal; needRedraw := TRUE
 END HandleLookupKey;
 
+PROCEDURE InsertSeqByMode(seq: ARRAY OF CHAR; n: INTEGER);
+(* Insert a ready-made UTF-8 character wherever text is being typed —
+   the document, the ^QF find string, or an input prompt. Mirrors what
+   HandleUTF8Key does for a character typed straight at the terminal. *)
+BEGIN
+  IF mode = ModeNormal THEN
+    InsUTF8(seq, n); goalCol := -1
+  ELSIF mode = ModeSearch THEN
+    AppendUTF8(searchStr, 255, seq, n);
+    IF SearchForward(0, 0) THEN curRow := searchRow; curCol := searchCol END
+  ELSIF mode = ModeInput THEN
+    AppendUTF8(inpValue, 511, seq, n);
+    INC(inpCursor, n)
+  END
+END InsertSeqByMode;
+
+PROCEDURE AcceptsTypedText(): BOOLEAN;
+(* The modes a composed character can be delivered into. *)
+BEGIN
+  RETURN (prefix = PrefNone)
+       & ((mode = ModeNormal) OR (mode = ModeSearch) OR (mode = ModeInput))
+END AcceptsTypedText;
+
+PROCEDURE HandleAccentKey(k: CHAR);
+(* Second (and, with an explicit accent selector, third) key of a ^^
+   compose sequence. accChar starts at '^' so that a base letter typed
+   straight after ^^ gets a circumflex — ^^c is ĉ in two keystrokes. *)
+VAR sel: CHAR; cp, n: INTEGER;
+    seq: ARRAY 5 OF CHAR; ch: ARRAY 2 OF CHAR;
+    name: ARRAY 32 OF CHAR; msg: ARRAY 96 OF CHAR;
+BEGIN
+  IF (k = TUI.KEsc) OR (k = TUI.KBackspace) THEN
+    accState := AccOff; SetStatus("Accent cancelled"); RETURN
+  END;
+  IF k = ' ' THEN
+    (* Compose convention: accent then space types the accent itself. *)
+    accState := AccOff;
+    seq[0] := accChar; seq[1] := 0X;
+    InsertSeqByMode(seq, 1);
+    RETURN
+  END;
+  IF (ORD(k) < 32) OR (ORD(k) >= 127) THEN
+    (* A control code or a special key (arrow, PgUp, ...) — not a base
+       letter and not a selector, so abandon the sequence. *)
+    accState := AccOff; SetStatus("Accent cancelled"); RETURN
+  END;
+  sel := AccentCanon(k);
+  IF sel # 0X THEN accChar := sel; RETURN END;   (* still waiting for the letter *)
+  accState := AccOff;
+  cp := AccentCP(accChar, k);
+  IF cp > 0 THEN
+    n := EncodeUTF8(cp, seq);
+    InsertSeqByMode(seq, n)
+  ELSE
+    AccentName(accChar, name);
+    ch[0] := k; ch[1] := 0X;
+    COPY("No ", msg); Strings.Append(name, msg);
+    Strings.Append(" form of '", msg); Strings.Append(ch, msg);
+    Strings.Append("'", msg);
+    SetStatus(msg)
+  END
+END HandleAccentKey;
+
 PROCEDURE HandleKey(k: CHAR);
 BEGIN
+  (* Accent compose runs ahead of the mode table: it is a layer over
+     typing itself, not a mode, so it works in the document, in ^QF's
+     find string and at an input prompt alike. *)
+  IF accState = AccWait THEN
+    HandleAccentKey(k); needRedraw := TRUE; RETURN
+  END;
+  IF ((k = KAcc1) OR (k = KAcc2)) & AcceptsTypedText() THEN
+    accState := AccWait; accChar := '^';
+    statusMsg[0] := 0X; needRedraw := TRUE; RETURN
+  END;
   CASE mode OF
     ModeNormal:  HandleNormalKey(k)
   | ModeSearch:
@@ -5158,6 +5627,11 @@ PROCEDURE HandleUTF8Key(lead: CHAR);
 VAR seq: ARRAY 5 OF CHAR; n: INTEGER;
 BEGIN
   n := ReadUTF8Seq(lead, seq);
+  IF accState = AccWait THEN
+    (* Nothing in the accent table has a multi-byte base, so a typed
+       non-ASCII character abandons the sequence and stands on its own. *)
+    accState := AccOff
+  END;
   IF prefix # PrefNone THEN
     IF prefix = PrefK THEN HandlePrefixK(lead)
     ELSIF prefix = PrefQ THEN HandlePrefixQ(lead)
@@ -5190,6 +5664,7 @@ BEGIN
   killHead := 0; killCount := 0; putIndex := 0;
   undoTop := 0;
   mode := ModeNormal; prefix := PrefNone;
+  accState := AccOff; accChar := '^';
   theme := ThWP;
   helpLevel := 1;
   wrap := TRUE; wrapMargin := 72;
