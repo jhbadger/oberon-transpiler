@@ -46,7 +46,7 @@ arrow keys, Home/End, Page Up/Down, and the mouse, so you can mix styles.
 |---|---|
 | Editing | Insert/overtype, undo (400 levels), word-left/right, transpose char/word, kill ring (8 slots) for cut/copy/paste of lines and blocks |
 | Movement | Diamond keys, word/sentence/paragraph/heading jumps, "previous position" jump (`^QP`), ten numbered bookmarks (`^K0`–`9` set, `^Q0`–`9` jump), screen top/bottom, doc start/end |
-| Search | Incremental find (`^QF`), find & replace with per-match Y/N/A confirmation (`^QA`), find-next (`^L`) |
+| Search | Incremental find (`^QF`), find & replace with per-match Y/N/A confirmation (`^QA`), find-next (`^L`), optional POSIX regex mode (`^OX`) |
 | Word wrap | Soft (visual) wrap at a configurable column, on by default at 72 |
 | Spell check | hunspell-backed; flags misspellings in the theme's error color, jump between them, maintain a personal dictionary |
 | Dictionary & thesaurus | `^OY` looks up the word under the cursor — synonyms and a short definition in a dismissable popup, from an offline, replaceable word list |
@@ -227,6 +227,25 @@ Blocks are how you cut/copy/move more than one line at a time:
   - `A` — replace this **and every remaining match** with no more asking.
   - `Esc` — stop, leaving anything already replaced as-is.
 
+By default search is case-insensitive and matches literal text. Two
+toggles change this:
+
+- `^O X` — switch to **regex mode**. The search string is now interpreted
+  as a POSIX Extended Regular Expression (`\d` digits, `\w` word chars,
+  `\s` whitespace, `(foo|bar)` alternation, `^`/`$` anchors, etc.). The
+  find prompt changes to `FIND/RE:` and a small `RE` indicator appears on
+  the right side of the status bar while the mode is active. Toggle `^O X`
+  again to return to literal matching. Regex mode applies everywhere search
+  does: incremental `^Q F`, find-next `^L`, find-and-replace `^Q A`, and
+  project-wide `^P S`.
+- Case sensitivity is unaffected by regex mode — both modes are
+  case-insensitive by default (OStar lowercases the pattern and each line
+  before matching when case-insensitive).
+
+To jump straight to a known line number, use `^Q L` — you are prompted for
+a 1-based line number and the cursor jumps there; the old position is saved
+for `^Q P`.
+
 ### 6. Structure a manuscript: headings and notes
 
 OStar recognizes two line-leading conventions that several features build
@@ -342,6 +361,13 @@ priority over the other two.
 - `^K Q` quits; if there are unsaved changes you'll be asked
   `Quit without saving? (Y/N)` — answer `Y` to discard them, anything else
   to cancel and stay in the editor.
+
+**Autosave** runs automatically: if you have unsaved changes in a named
+file and 60 seconds pass without a keypress, OStar saves quietly in the
+background and briefly shows `Autosaved` in the status bar. The 60-second
+timer resets each time you save manually too. Autosave does not trigger on
+an unnamed buffer (there is nowhere to write to) — save once with `^K D`
+to give the file a name and autosave takes over from there.
 - `^K N` writes a timestamped backup snapshot alongside the file
   (`draft.20260915-143000.bak`) without altering your normal save.
 - `^K O` opens a scrollable list of every snapshot `^K N` has taken of the
@@ -596,6 +622,7 @@ case-insensitive).
 | `^Q U` | Previous comment/note line |
 | `^Q V` | Jump to the marked block, wherever it is (this pane or the other window) |
 | `^Q H` | Open the outline panel |
+| `^Q L` | Go to line number (prompted; 1-based; saves old position for `^Q P`) |
 | `^Q 0`–`9` | Jump to numbered bookmark 0–9 |
 
 `^L` (no prefix) repeats the last `^Q F` search — "find next."
@@ -645,6 +672,7 @@ case-insensitive).
 | `^O K` | Open/switch focus to the other window (Esc closes it) |
 | `^O D` | Toggle reveal codes (markdown markers shown in inverse video) |
 | `^O Y` | Look up the word under the cursor (dictionary/thesaurus popup) |
+| `^O X` | Toggle regex search mode (POSIX ERE; `RE` shown in status bar while active) |
 
 ### `^P` — Project
 
@@ -837,6 +865,6 @@ status bar.
 
 ---
 
-*This manual documents the behavior implemented in `examples/ostar.mod` as
-of the commits tagged `feat(ostar)`/`fix(ostar)`/`refactor(ostar)` through
-"add DOCX export."*
+*This manual documents the behavior implemented in `examples/ostar.mod`,
+including regex search (`^OX`), autosave (60-second idle), and go-to-line
+(`^QL`).*

@@ -13,11 +13,11 @@ MODULE OStar;
  *              ^QE/QX screen top/bot, ^QB/QK jump block, ^QP prev pos,
  *              ^QF find, ^QA replace, ^Q,/. sentence, ^Q[/] para,
  *              ^QO next heading, ^QG transpose chars, ^QT transpose words,
- *              ^Q0-9 jump to bookmark.
+ *              ^QL go to line, ^Q0-9 jump to bookmark.
  * Prefix ^O  — Onscreen: ^OB cycle theme, ^OH cycle help, ^OW wrap,
  *              ^OS spellcheck, ^OT typewriter scroll, ^OC word count,
  *              ^OF focus mode, ^OL style check, ^OY dictionary/thesaurus
- *              lookup of the word under the cursor.
+ *              lookup of the word under the cursor, ^OX regex search toggle.
  * ^QI — next style issue (adverb/filler/passive/long sentence).
  * Prefix ^P  — Project: ^PN new, ^PP open, ^PA add, ^PR remove,
  *              ^PE prev doc, ^PX next doc, ^PL list, ^PD compile DOCX.
@@ -31,7 +31,7 @@ MODULE OStar;
  *        ^N insert line, ^U undo, ^L find next, ^V overtype toggle,
  *        F1 command palette (shows key list).
  *)
-IMPORT TUI, Terminal, Files, Strings, Args, Dict, OS, Env, Time, Markdown, ZipWriter;
+IMPORT TUI, Terminal, Files, Strings, Args, Dict, OS, Env, Time, Markdown, ZipWriter, Regex;
 
 (* ── Constants ───────────────────────────────────────────────────── *)
 CONST
@@ -90,6 +90,7 @@ CONST
   ActSynopsis     = 10; (* edit a project doc's synopsis      *)
   ActOtherOpen    = 11; (* open a file into the other window  *)
   ActAnnotate     = 12; (* insert a ".." comment line (^PC)   *)
+  ActGotoLine     = 13; (* go to line number (^QG)             *)
 
   (* Undo record kinds *)
   UKLine  = 0;   (* one line's content changed  *)
@@ -232,6 +233,7 @@ VAR
   searchCol  : INTEGER;    (* col of last found match *)
   searchLen  : INTEGER;    (* length of last match    *)
   caseSens   : BOOLEAN;
+  useRegex   : BOOLEAN;    (* ^OX: use POSIX ERE instead of literal match *)
 
   (* Replace state *)
   replSearch : ARRAY 256 OF CHAR;  (* find pattern for replace *)
@@ -266,6 +268,7 @@ VAR
 
   (* Misc *)
   needRedraw  : BOOLEAN;
+  lastAutoSave : LONGINT;  (* Time.Now() at last autosave; 0 = no autosave yet *)
 
   (* Focus mode *)
   focusMode   : BOOLEAN;
@@ -1086,6 +1089,7 @@ BEGIN
   IF numLines = 0 THEN NEW(lines[0]); lines[0].s[0] := 0X; numLines := 1 END;
   COPY(path, filePath);
   dirty := FALSE;
+  searchStr[0] := 0X; searchLen := 0; mode := ModeNormal;
   RETURN TRUE
 END LoadFile;
 
@@ -1105,6 +1109,7 @@ BEGIN
   Files.Register(f);
   Files.Close(f);
   dirty := FALSE;
+  lastAutoSave := Time.Now();
   SetStatus("Saved");
   RETURN TRUE
 END SaveFile;
@@ -2563,28 +2568,60 @@ BEGIN
   RETURN c
 END CaseChar;
 
-(* Search forward from (startRow, startCol). Returns TRUE if found,
-   sets searchRow/searchCol/searchLen. *)
-PROCEDURE SearchForward(startRow, startCol: INTEGER): BOOLEAN;
-VAR slen, llen, r, c, i: INTEGER; match: BOOLEAN;
+(* Lowercase ASCII bytes in s in place — used for case-insensitive regex. *)
+PROCEDURE LowerASCII(VAR s: ARRAY OF CHAR);
+VAR i: INTEGER;
+BEGIN
+  i := 0;
+  WHILE s[i] # 0X DO
+    IF (s[i] >= 'A') & (s[i] <= 'Z') THEN s[i] := CHR(ORD(s[i]) + 32) END;
+    INC(i)
+  END
+END LowerASCII;
+
+(* Search for searchStr in lb starting at startCol.
+   Returns match column or -1; sets searchLen on match. *)
+PROCEDURE MatchLine(lb: LineBuf; startCol: INTEGER): INTEGER;
+VAR slen, llen, c, i, rpos: INTEGER; match: BOOLEAN;
+    pat: ARRAY 256 OF CHAR; work: LineBuf;
 BEGIN
   slen := Strings.Length(searchStr);
-  IF slen = 0 THEN RETURN FALSE END;
-  r := startRow; c := startCol;
-  WHILE r < numLines DO
-    llen := LineLen(r);
+  IF slen = 0 THEN RETURN -1 END;
+  IF useRegex THEN
+    COPY(searchStr, pat);
+    COPY(lb, work);
+    IF ~caseSens THEN LowerASCII(pat); LowerASCII(work) END;
+    rpos := Regex.FindAt(pat, work, startCol);
+    IF rpos >= 0 THEN searchLen := Regex.MatchLen(); RETURN rpos END;
+    RETURN -1
+  ELSE
+    llen := Strings.Length(lb);
+    c := startCol;
     WHILE c <= llen - slen DO
       match := TRUE;
       FOR i := 0 TO slen - 1 DO
-        IF CaseChar(lines[r].s[c + i]) # CaseChar(searchStr[i]) THEN
-          match := FALSE
-        END
+        IF CaseChar(lb[c + i]) # CaseChar(searchStr[i]) THEN match := FALSE END
       END;
-      IF match THEN
-        searchRow := r; searchCol := c; searchLen := slen;
-        RETURN TRUE
-      END;
+      IF match THEN searchLen := slen; RETURN c END;
       INC(c)
+    END;
+    RETURN -1
+  END
+END MatchLine;
+
+(* Search forward from (startRow, startCol). Returns TRUE if found,
+   sets searchRow/searchCol/searchLen. *)
+PROCEDURE SearchForward(startRow, startCol: INTEGER): BOOLEAN;
+VAR r, c, pos: INTEGER; lb: LineBuf;
+BEGIN
+  IF Strings.Length(searchStr) = 0 THEN RETURN FALSE END;
+  r := startRow; c := startCol;
+  WHILE r < numLines DO
+    COPY(lines[r].s, lb);
+    pos := MatchLine(lb, c);
+    IF pos >= 0 THEN
+      searchRow := r; searchCol := pos;
+      RETURN TRUE
     END;
     INC(r); c := 0
   END;
@@ -2753,12 +2790,14 @@ BEGIN
   | 99: COPY("^PD",   chord); COPY("project: compile DOCX",   desc)
   | 100: COPY("^^",   chord); COPY("accent: ^^c, ^^:o, ^^&s (Ã)", desc)
   | 101: COPY("^\",   chord); COPY("accent compose (same as ^^)",  desc)
+  | 102: COPY("^OX",  chord); COPY("regex search toggle",           desc)
+  | 103: COPY("^QL",  chord); COPY("go to line number",             desc)
   ELSE (* end *)
   END
 END PaletteEntry;
 
 PROCEDURE PaletteCount(): INTEGER;
-BEGIN RETURN 102 END PaletteCount;
+BEGIN RETURN 104 END PaletteCount;
 
 (* ── Splash Screen ───────────────────────────────────────────────── *)
 
@@ -3492,12 +3531,14 @@ BEGIN
   ELSIF styleEnabled & (styleCurKind = StPassive) THEN COPY("passive voice", s)
   ELSIF styleEnabled & (styleCurKind = StLong)    THEN COPY("long sentence", s)
   ELSIF statusMsg[0] # 0X THEN COPY(statusMsg, s)
+  ELSIF useRegex THEN COPY("RE", s)
   END;
   (* Search and input prompts are left-aligned so the cursor lands right
      after the typed text (position is computable without measuring the line). *)
   IF mode = ModeSearch THEN
     s[0] := 0X;
-    COPY("FIND: ", s); Strings.Append(searchStr, s);
+    IF useRegex THEN COPY("FIND/RE: ", s) ELSE COPY("FIND: ", s) END;
+    Strings.Append(searchStr, s);
     TUI.FillRect(1, TUI.Rows, TUI.Cols, 1, ' ', fg, bg);  (* the filename status drawn above may be longer *)
     TUI.PutStr(1, TUI.Rows, s, fg, bg)
   ELSIF mode = ModeInput THEN
@@ -4269,6 +4310,14 @@ BEGIN
         curCol := Strings.Length(lines[curRow].s);
         dirty := TRUE
       END
+  | ActGotoLine:
+      IF Strings.StrToInt(inpValue, n) THEN
+        DEC(n);  (* user enters 1-based line number *)
+        IF n < 0 THEN n := 0 END;
+        IF n >= numLines THEN n := numLines - 1 END;
+        SavePrev; curRow := n; curCol := 0
+      ELSE SetStatus("Invalid line number")
+      END
   ELSE
   END;
   needRedraw := TRUE
@@ -4447,6 +4496,7 @@ BEGIN
       WHILE (outlineSel < numLines) & (lines[outlineSel].s[0] # '#') DO INC(outlineSel) END;
       IF outlineSel >= numLines THEN outlineSel := 0 END;
       outlineScroll := 0; mode := ModeOutline
+  | 'l', 'L': StartInput("Go to line", ActGotoLine)
   | '0','1','2','3','4','5','6','7','8','9': JumpBookmark(ORD(k) - ORD('0'))
   ELSE SetStatus("Unknown ^Q command")
   END;
@@ -4505,6 +4555,11 @@ BEGIN
       revealCodes := ~revealCodes;
       IF revealCodes THEN SetStatus("Reveal codes ON") ELSE SetStatus("Reveal codes OFF") END
   | 'y', 'Y': LookupWord
+  | 'x', 'X':
+      useRegex := ~useRegex;
+      IF useRegex THEN SetStatus("Regex search ON  (^OX to toggle)")
+      ELSE SetStatus("Regex search OFF")
+      END
   ELSE SetStatus("Unknown ^O command")
   END;
   needRedraw := TRUE
@@ -5005,11 +5060,11 @@ BEGIN
   row := curRow;
   WHILE (row < numLines) & ~found DO
     IF row = curRow THEN tryCol := curCol + 1 ELSE tryCol := 0 END;
-    Strings.Extract(lines[row].s, tryCol, MaxLineLen, lb);
-    pos := Strings.Pos(searchStr, lb);
+    COPY(lines[row].s, lb);
+    pos := MatchLine(lb, tryCol);
     IF pos >= 0 THEN
-      curRow := row; curCol := tryCol + pos;
-      searchRow := row; searchCol := curCol; searchLen := Strings.Length(searchStr);
+      curRow := row; curCol := pos;
+      searchRow := row; searchCol := pos;
       goalCol := -1; found := TRUE
     END;
     INC(row)
@@ -5025,7 +5080,7 @@ BEGIN
         row := 0;
         WHILE ~sr.eof & ~found DO
           Files.ReadLine(sr, lb);
-          pos := Strings.Pos(searchStr, lb);
+          pos := MatchLine(lb, 0);
           IF (~sr.eof OR (lb[0] # 0X)) & (pos >= 0) THEN
             Files.Close(sf); sf := NIL;
             IF dirty & ~SaveFile() THEN
@@ -5036,7 +5091,6 @@ BEGIN
                 curRow := row; curCol := pos; topLine := 0; undoTop := 0;
                 hasBlkB := FALSE; hasBlkE := FALSE; ClearBookmarks;
                 searchRow := row; searchCol := pos;
-                searchLen := Strings.Length(searchStr);
                 goalCol := -1; found := TRUE
               END
             END
@@ -5723,22 +5777,34 @@ BEGIN
   TUI.WaitEvent(ev);
   showSplash := FALSE;
 
-  (* Main event loop *)
+  lastAutoSave := Time.Now();
+
+  (* Main event loop — polls every 50 ms so autosave can fire on idle *)
   LOOP
     IF needRedraw THEN
       DrawAll;
       needRedraw := FALSE
     END;
-    TUI.WaitEvent(ev);
-    IF ev.kind = TUI.EvResize THEN
-      TUI.InvalidateFront;
-      needRedraw := TRUE
-    ELSIF ev.kind = TUI.EvKey THEN
-      IF UTF8SeqLen(ev.key) > 1 THEN HandleUTF8Key(ev.key)
-      ELSE HandleKey(ev.key)
+    IF TUI.PollEvent(ev) THEN
+      IF ev.kind = TUI.EvResize THEN
+        TUI.InvalidateFront;
+        needRedraw := TRUE
+      ELSIF ev.kind = TUI.EvKey THEN
+        IF UTF8SeqLen(ev.key) > 1 THEN HandleUTF8Key(ev.key)
+        ELSE HandleKey(ev.key)
+        END
+      ELSIF ev.kind = TUI.EvMouse THEN
+        HandleMouse
       END
-    ELSIF ev.kind = TUI.EvMouse THEN
-      HandleMouse
+    ELSE
+      (* Idle tick: autosave if dirty and has a path and 60 s have elapsed *)
+      IF dirty & (filePath[0] # 0X) & (Time.Now() - lastAutoSave >= 60000) THEN
+        IF SaveFile() THEN
+          lastAutoSave := Time.Now();
+          SetStatus("Autosaved"); needRedraw := TRUE
+        END
+      END;
+      Time.Sleep(50)
     END;
     IF ~running THEN EXIT END
   END;
