@@ -2695,10 +2695,10 @@ void codegen(Node *module, FILE *out, int is_main, const char *srcfile) {
         emit(g,"        if (read(STDIN_FILENO,&c2,1)==1 && c2=='[') {\n");
         emit(g,"            if (read(STDIN_FILENO,&c3,1)!=1) c3=0;\n");
         /* Arrow keys */
-        emit(g,"            if (c3=='A') { tcsetattr(STDIN_FILENO,TCSANOW,&t2); return (char)0xa0; }\n");
-        emit(g,"            if (c3=='B') { tcsetattr(STDIN_FILENO,TCSANOW,&t2); return (char)0xa1; }\n");
-        emit(g,"            if (c3=='D') { tcsetattr(STDIN_FILENO,TCSANOW,&t2); return (char)0xa2; }\n");
-        emit(g,"            if (c3=='C') { tcsetattr(STDIN_FILENO,TCSANOW,&t2); return (char)0xa3; }\n");
+        emit(g,"            if (c3=='A') { t2.c_cc[VTIME]=0; tcsetattr(STDIN_FILENO,TCSANOW,&t2); return (char)0xa0; }\n");
+        emit(g,"            if (c3=='B') { t2.c_cc[VTIME]=0; tcsetattr(STDIN_FILENO,TCSANOW,&t2); return (char)0xa1; }\n");
+        emit(g,"            if (c3=='D') { t2.c_cc[VTIME]=0; tcsetattr(STDIN_FILENO,TCSANOW,&t2); return (char)0xa2; }\n");
+        emit(g,"            if (c3=='C') { t2.c_cc[VTIME]=0; tcsetattr(STDIN_FILENO,TCSANOW,&t2); return (char)0xa3; }\n");
         /* SGR mouse: \033[<btn;x;yM or \033[<btn;x;ym */
         emit(g,"            if (c3=='<') {\n");
         emit(g,"                char buf[32]; int bi=0; char last=0;\n");
@@ -2720,12 +2720,12 @@ void codegen(Node *module, FILE *out, int is_main, const char *srcfile) {
         emit(g,"                else if (btn & 64)        _term_mouse_btn=(btn&67);\n");
         emit(g,"                else if (btn & 32)        _term_mouse_btn=32;\n");
         emit(g,"                else                      _term_mouse_btn=(btn&3);\n");
-        emit(g,"                tcsetattr(STDIN_FILENO,TCSANOW,&t2);\n");
+        emit(g,"                t2.c_cc[VTIME]=0; tcsetattr(STDIN_FILENO,TCSANOW,&t2);\n");
         emit(g,"                return (char)0xa4;\n");
         emit(g,"            }\n");
         /* Home / End (ESC [ H / ESC [ F) */
-        emit(g,"            if (c3=='H') { tcsetattr(STDIN_FILENO,TCSANOW,&t2); return (char)130; }\n");
-        emit(g,"            if (c3=='F') { tcsetattr(STDIN_FILENO,TCSANOW,&t2); return (char)131; }\n");
+        emit(g,"            if (c3=='H') { t2.c_cc[VTIME]=0; tcsetattr(STDIN_FILENO,TCSANOW,&t2); return (char)130; }\n");
+        emit(g,"            if (c3=='F') { t2.c_cc[VTIME]=0; tcsetattr(STDIN_FILENO,TCSANOW,&t2); return (char)131; }\n");
         /* ESC [ digit ~ sequences: PgUp=5, PgDn=6, Del=3, Home=1/7, End=4/8
          * Also ESC [ 1 ; 5 D/C/H/F for Ctrl+Left/Right/Home/End */
         emit(g,"            if (c3>='1' && c3<='9') {\n");
@@ -2734,7 +2734,7 @@ void codegen(Node *module, FILE *out, int is_main, const char *srcfile) {
         emit(g,"                    char c5=0,c6=0;\n");
         emit(g,"                    read(STDIN_FILENO,&c5,1);\n");
         emit(g,"                    read(STDIN_FILENO,&c6,1);\n");
-        emit(g,"                    tcsetattr(STDIN_FILENO,TCSANOW,&t2);\n");
+        emit(g,"                    t2.c_cc[VTIME]=0; tcsetattr(STDIN_FILENO,TCSANOW,&t2);\n");
         emit(g,"                    if (c5=='5') {\n");
         emit(g,"                        if (c6=='D') return (char)133;\n");
         emit(g,"                        if (c6=='C') return (char)134;\n");
@@ -2753,7 +2753,7 @@ void codegen(Node *module, FILE *out, int is_main, const char *srcfile) {
         emit(g,"                if (c4>='0' && c4<='9') {\n");
         emit(g,"                    int num=(c3-'0')*10+(c4-'0'); char term=0;\n");
         emit(g,"                    read(STDIN_FILENO,&term,1);\n");
-        emit(g,"                    tcsetattr(STDIN_FILENO,TCSANOW,&t2);\n");
+        emit(g,"                    t2.c_cc[VTIME]=0; tcsetattr(STDIN_FILENO,TCSANOW,&t2);\n");
         emit(g,"                    if (term=='~') {\n");
         emit(g,"                        if (num==11) return (char)137;\n"); /* F1  */
         emit(g,"                        if (num==12) return (char)138;\n"); /* F2  */
@@ -2770,7 +2770,7 @@ void codegen(Node *module, FILE *out, int is_main, const char *srcfile) {
         emit(g,"                    }\n");
         emit(g,"                    return '\\x1B';\n");
         emit(g,"                }\n");
-        emit(g,"                tcsetattr(STDIN_FILENO,TCSANOW,&t2);\n");
+        emit(g,"                t2.c_cc[VTIME]=0; tcsetattr(STDIN_FILENO,TCSANOW,&t2);\n");
         emit(g,"                if (c3=='5') return (char)128;\n");
         emit(g,"                if (c3=='6') return (char)129;\n");
         emit(g,"                if (c3=='3') return (char)132;\n");
@@ -2782,7 +2782,7 @@ void codegen(Node *module, FILE *out, int is_main, const char *srcfile) {
         /* ESC O P/Q/R/S = F1-F4 (xterm application-cursor mode) */
         emit(g,"        if (c2=='O') {\n");
         emit(g,"            char co=0; read(STDIN_FILENO,&co,1);\n");
-        emit(g,"            tcsetattr(STDIN_FILENO,TCSANOW,&t2);\n");
+        emit(g,"            t2.c_cc[VTIME]=0; tcsetattr(STDIN_FILENO,TCSANOW,&t2);\n");
         emit(g,"            if (co=='P') return (char)137;\n"); /* F1 */
         emit(g,"            if (co=='Q') return (char)138;\n"); /* F2 */
         emit(g,"            if (co=='R') return (char)139;\n"); /* F3 */
