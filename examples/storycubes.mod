@@ -25,7 +25,7 @@ IMPORT Terminal, Out, Random;
 
 CONST
   NDice     = 9;
-  NFaces    = 6;
+  NFaces    = 10;
   DieW      = 11;  (* box width including borders *)
   DieH      = 5;   (* box height including borders *)
   ColStride = 13;  (* DieW + 2-col gap *)
@@ -197,46 +197,64 @@ BEGIN
   faces[0][0] := "TREE";    faces[0][1] := "FLOWER";
   faces[0][2] := "BEE";     faces[0][3] := "WAVE";
   faces[0][4] := "LEAF";    faces[0][5] := "BIRD";
-
+  faces[0][6] := "DEER";    faces[0][7] := "MUSHROOM";
+  faces[0][8] := "WORM";    faces[0][9] := "HILL";
   (* Die 2: Sky *)
   faces[1][0] := "STAR";    faces[1][1] := "SUN";
   faces[1][2] := "MOON";    faces[1][3] := "STORM";
   faces[1][4] := "RAINBOW"; faces[1][5] := "CLOUD";
-
+  faces[1][6] := "COMET";   faces[1][7] := "METEOR";
+  faces[1][8] := "UFO";     faces[1][9] := "DRAGON";
+  
   (* Die 3: Places *)
   faces[2][0] := "HOUSE";   faces[2][1] := "CASTLE";
   faces[2][2] := "TENT";    faces[2][3] := "BRIDGE";
   faces[2][4] := "CAVE";    faces[2][5] := "WELL";
+  faces[2][6] := "VILLAGE"; faces[2][7] := "BUNKER";
+  faces[2][8] := "RUINS";   faces[2][9] := "CITY";
 
   (* Die 4: Senses *)
   faces[3][0] := "EYE";     faces[3][1] := "EAR";
   faces[3][2] := "HAND";    faces[3][3] := "NOSE";
   faces[3][4] := "MOUTH";   faces[3][5] := "FOOT";
-
+  faces[3][6] := "COLD";    faces[3][7] := "HEAT";
+  faces[3][8] := "UNEASE";  faces[3][9] := "JOY";
+  
   (* Die 5: Travel *)
   faces[4][0] := "CAR";     faces[4][1] := "BOAT";
   faces[4][2] := "PLANE";   faces[4][3] := "ROCKET";
   faces[4][4] := "BIKE";    faces[4][5] := "GLOBE";
-
+  faces[4][6] := "HORSE";   faces[4][7] := "TRAIN";
+  faces[4][8] := "TELEPORT";faces[4][9] := "ZEPPLIN";
+  
   (* Die 6: Objects *)
   faces[5][0] := "KEY";     faces[5][1] := "BOOK";
   faces[5][2] := "CROWN";   faces[5][3] := "SWORD";
   faces[5][4] := "MAP";     faces[5][5] := "MIRROR";
-
+  faces[5][6] := "BELL";    faces[5][7] := "CANDLE";
+  faces[5][8] := "AMULET";  faces[5][9] := "POTION";
+  
   (* Die 7: Feelings *)
   faces[6][0] := "HAPPY";   faces[6][1] := "SAD";
   faces[6][2] := "ANGRY";   faces[6][3] := "SCARED";
   faces[6][4] := "LAUGH";   faces[6][5] := "CRY";
-
+  faces[6][6] := "CONFUSED";faces[6][7] := "ANNOYED";
+  faces[6][8] := "SERENE";  faces[6][9] := "BORED";
+  
   (* Die 8: Characters *)
   faces[7][0] := "HERO";    faces[7][1] := "WIZARD";
   faces[7][2] := "KING";    faces[7][3] := "GHOST";
   faces[7][4] := "ROBOT";   faces[7][5] := "CHILD";
-
+  faces[7][6] := "MERMAID"; faces[7][7] := "CLOWN";
+  faces[7][8] := "SHEPHARD";faces[7][9] := "BARMAID";
+  
   (* Die 9: Actions *)
   faces[8][0] := "RUN";     faces[8][1] := "SLEEP";
   faces[8][2] := "THINK";   faces[8][3] := "FIND";
   faces[8][4] := "BUILD";   faces[8][5] := "SPEAK";
+  faces[8][6] := "SLAY";    faces[8][7] := "KISS";
+  faces[8][8] := "BURY";    faces[8][9] := "EXPLORE";
+  
 END InitFaces;
 
 (* ── Main ────────────────────────────────────────────────────── *)
@@ -293,3 +311,4 @@ BEGIN
   Terminal.Goto(1, 1);
   Out.String("Thanks for playing Rory's Story Cubes!"); Out.Ln
 END StoryCubes.
+

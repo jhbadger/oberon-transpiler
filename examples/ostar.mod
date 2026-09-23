@@ -17,7 +17,8 @@ MODULE OStar;
  * Prefix ^O  — Onscreen: ^OB cycle theme, ^OH cycle help, ^OW wrap,
  *              ^OS spellcheck, ^OT typewriter scroll, ^OC word count,
  *              ^OF focus mode, ^OL style check, ^OY dictionary/thesaurus
- *              lookup of the word under the cursor, ^OX regex search toggle.
+ *              lookup of the word under the cursor, ^OX regex se
+arch toggle.
  * ^QI — next style issue (adverb/filler/passive/long sentence).
  * Prefix ^P  — Project: ^PN new, ^PP open, ^PA add, ^PR remove,
  *              ^PE prev doc, ^PX next doc, ^PL list, ^PD compile DOCX.
