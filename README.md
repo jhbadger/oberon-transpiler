@@ -223,6 +223,7 @@ Reusable library modules live in `Modules/`. Pass `--mod-path Modules` to use th
 |------|-------------|
 | `examples/adventure.mod` | Two-word text adventure engine |
 | `examples/zmachine.mod` | Z-machine interpreter — runs Infocom/Inform story files (`.z3`–`.z5`) |
+| `examples/zapf.mod` | Z-machine assembler — assembles `.zap` source (as emitted by ZILF) into a story file (`.z3`–`.z8`); needs `--mod-path Modules` |
 | `examples/epub.mod` | Terminal EPUB reader |
 | `examples/sheet.mod` | Terminal spreadsheet backed by `DataFrame` |
 | `examples/ide.mod` | Multi-window full-screen source editor (TUI/Widgets) |
