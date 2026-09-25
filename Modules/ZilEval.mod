@@ -33,7 +33,7 @@ MODULE ZilEval;
   - DECL checking (MaybeCheckDecl in the original) is skipped everywhere.
 *)
 
-IMPORT ZilObj, Strings, Out;
+IMPORT ZilObj, ZilRead, Strings, Out;
 
 CONST
   OValue* = 0;
@@ -67,6 +67,18 @@ VAR
      and find the next real PROG/REPEAT outward, exactly as in the original. *)
   enclosingProgAtom: ZilObj.Zo;
 
+  (* The directory INSERT-FILE resolves a relative filename against —
+     matches the original's Context.CurrentFile / FindIncludeFile in
+     spirit, but much simplified: just "the currently-including file's own
+     directory", no configurable IncludePaths list (this port has no CLI
+     yet to configure one from; add it if/when something needs it). The
+     top-level driver (a test harness, or eventually a real CLI) should
+     call SetCurrentDir once with the initial file's own directory before
+     starting its read-eval loop; INSERT-FILE itself save/restores this
+     around each nested file, so nested INSERT-FILEs resolve relative to
+     whichever file is currently being read, not always the original. *)
+  currentDir: ARRAY 512 OF CHAR;
+
 PROCEDURE MkVal*(z: ZilObj.Zo): ZResult;
 VAR r: ZResult;
 BEGIN r.outcome := OValue; r.value := z; r.activation := NIL; RETURN r END MkVal;
@@ -92,6 +104,31 @@ END ErrAtom;
 
 PROCEDURE ClearErr*;
 BEGIN evalErrFlag := FALSE; evalErrMsg[0] := 0X END ClearErr;
+
+(* See currentDir's own comment above. Call once, before the first
+   top-level ReadOne/Eval, with the directory of the file being read (or
+   "" for the current working directory). *)
+PROCEDURE SetCurrentDir*(dir: ARRAY OF CHAR);
+BEGIN Strings.Copy(dir, currentDir) END SetCurrentDir;
+
+(* Extracts the directory portion of `path` (up to and including the last
+   "/"), or "" if there is none. Doesn't call Eval, so — unlike the actual
+   INSERT-FILE handling — this can be its own procedure. *)
+PROCEDURE DirOf(path: ARRAY OF CHAR; VAR dir: ARRAY OF CHAR);
+VAR i, lastSlash: INTEGER;
+BEGIN
+  lastSlash := -1; i := 0;
+  WHILE path[i] # 0X DO
+    IF path[i] = "/" THEN lastSlash := i END;
+    INC(i)
+  END;
+  IF lastSlash >= 0 THEN
+    FOR i := 0 TO lastSlash DO dir[i] := path[i] END;
+    dir[lastSlash + 1] := 0X
+  ELSE
+    dir[0] := 0X
+  END
+END DirOf;
 
 (* ------------------------------------------------------------------ *)
 (* helpers                                                              *)
@@ -348,6 +385,18 @@ BEGIN
   ELSIF name = "LIST" THEN
     RETURN MkVal(BuildConsChain(ZilObj.KList, args, n))
 
+  ELSIF name = "CONS" THEN
+    (* <CONS first rest>: prepends first onto rest, a LIST — or FALSE
+       (<>), meaning "empty list", to build a 1-element list. *)
+    IF n # 2 THEN RETURN Err("CONS: expected 2 args") END;
+    IF args[1].kind = ZilObj.KFalse THEN
+      RETURN MkVal(ZilObj.Cons(ZilObj.KList, args[0], ZilObj.NewEmpty(ZilObj.KList)))
+    ELSIF args[1].kind = ZilObj.KList THEN
+      RETURN MkVal(ZilObj.Cons(ZilObj.KList, args[0], args[1]))
+    ELSE
+      RETURN Err("CONS: second arg must be a LIST or FALSE")
+    END
+
   ELSIF name = "LENGTH?" THEN
     IF (n # 2) OR (args[1].kind # ZilObj.KFix) THEN
       RETURN Err("LENGTH?: expected a structure and a FIX limit")
@@ -442,6 +491,15 @@ VAR
   fnSpecFirst, fnActivation, fnBP: ZilObj.Zo;
   fnBindAtoms, fnSavedVals: ARRAY MaxBindings OF ZilObj.Zo;
   fnNBind, fnI, fnPhase: INTEGER;
+  (* INSERT-FILE (see the dedicated comment at that branch) *)
+  insRd: ZilRead.Reader;
+  insOk, insDone, insIsTerm, insOpened: BOOLEAN;
+  insTermCh: INTEGER;
+  insZ: ZilObj.Zo;
+  insResult: ZResult;
+  insCand, insSavedDir: ARRAY 1024 OF CHAR;
+  insName: ARRAY 512 OF CHAR;
+  insTry: INTEGER;
 BEGIN
   IF z = NIL THEN RETURN MkVal(NIL) END;
 
@@ -978,7 +1036,60 @@ BEGIN
         IF nargs < MaxArgs THEN args[nargs] := r.value; INC(nargs) END;
         n := n.rest
       END;
-      RETURN ApplySubr(name, args, nargs)
+
+      IF (name = "INSERT-FILE") OR (name = "FLOAD") OR (name = "XFLOAD") THEN
+        (* Ported from Subrs.Meta.cs's INSERT-FILE/PerformLoadFile: finds
+           the named file and recursively runs the same read-eval loop on
+           it in the current context, then continues where the includer
+           left off. This port resolves the name only relative to
+           currentDir, trying it as given, then with .zil/.mud appended —
+           no configurable IncludePaths list (see currentDir's own
+           comment) since nothing has needed one yet. Has to be inlined
+           here rather than an ApplySubr case since it needs to call
+           EvalImpl on each form it reads — same forward-reference reason
+           as PROG and function/macro application. *)
+        IF (nargs < 1) OR (args[0].kind # ZilObj.KString) THEN
+          RETURN Err("INSERT-FILE: expected a STRING filename")
+        END;
+
+        (* Try the name as given, then with .zil/.mud appended, then the
+           same three lowercased — real ZIL source (e.g. zilf's own
+           sample/zork1/zork1.zil) commonly INSERT-FILEs an UPPERCASE name
+           for a lowercase real filename; the original's own
+           GetIncludeFileNameVariants does this same lowercase fallback
+           for the same reason. *)
+        insOpened := FALSE;
+        Strings.Copy(args[0].strBuf^, insName);
+        FOR insTry := 0 TO 5 DO
+          IF ~insOpened THEN
+            Strings.Copy(currentDir, insCand); Strings.Append(insName, insCand);
+            IF insTry MOD 3 = 1 THEN Strings.Append(".zil", insCand)
+            ELSIF insTry MOD 3 = 2 THEN Strings.Append(".mud", insCand) END;
+            IF ZilRead.Open(insRd, insCand) THEN insOpened := TRUE END
+          END;
+          IF insTry = 2 THEN Strings.ToLower(insName) END
+        END;
+        IF ~insOpened THEN RETURN ErrAtom("INSERT-FILE: file not found:", args[0]) END;
+
+        Strings.Copy(currentDir, insSavedDir);
+        DirOf(insCand, currentDir);
+
+        insResult := MkVal(ZilObj.NewString("DONE"));
+        LOOP
+          insZ := ZilRead.ReadOne(insRd, insOk, insDone, insIsTerm, insTermCh);
+          IF ~insOk THEN insResult := Err("INSERT-FILE: read error in included file"); EXIT END;
+          IF insDone THEN EXIT END;
+          IF insIsTerm THEN insResult := Err("INSERT-FILE: stray terminator in included file"); EXIT END;
+          r := EvalImpl(insZ, FALSE);
+          IF r.outcome # OValue THEN insResult := r; EXIT END
+        END;
+        ZilRead.Close(insRd);
+        Strings.Copy(insSavedDir, currentDir);
+        RETURN insResult
+
+      ELSE
+        RETURN ApplySubr(name, args, nargs)
+      END
     END
 
   ELSE
@@ -1025,11 +1136,14 @@ BEGIN
   Register("NOT", FALSE);
   Register("PRINC", FALSE); Register("PRIN1", FALSE); Register("PRINT", FALSE); Register("CRLF", FALSE);
   Register("PRINTN", FALSE); Register("PRINTC", FALSE);
+  Register("INSERT-FILE", FALSE); Register("FLOAD", FALSE); Register("XFLOAD", FALSE);
+  Register("CONS", FALSE);
 
   tAtom := ZilObj.Intern("T");
   tAtom.globalVal := tAtom;  (* T is self-valued *)
 
-  enclosingProgAtom := ZilObj.Intern("LPROG ")
+  enclosingProgAtom := ZilObj.Intern("LPROG ");
+  currentDir[0] := 0X
 END InitBuiltins;
 
 END ZilEval.

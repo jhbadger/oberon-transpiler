@@ -663,6 +663,76 @@ verbatim (counts are *occurrences*, i.e. call sites, not distinct files):
 plus the full transpiler `Modules/*.mod`+`examples/*.mod` regression suite
 (135 files, same pre-existing-only failures as always).
 
+## What's done (phase 2f: INSERT-FILE, and CONS)
+
+Built `INSERT-FILE` exactly as scoped in phase 2e: an evaluated-args SUBR
+case inlined directly into `EvalImpl` (right before the generic
+`ApplySubr` fallback for plain SUBRs), since — same forward-reference
+reason as everything else that needs `Eval` in this port — it has to
+recursively run the read-eval loop (open a new `ZilRead.Reader`, `ReadOne`
++ `EvalImpl` each form, `ZilRead.Close`) on another file, which
+`ApplySubr` deliberately can't do. `ZilEval.mod` now imports `ZilRead`
+(checked beforehand: no circular-import risk, confirmed again while
+building this).
+
+- **New module-level state**: `currentDir` (the directory `INSERT-FILE`
+  resolves a relative filename against) and an exported `SetCurrentDir`
+  for a driver to call once before its first `ReadOne`/`Eval`, mirroring
+  the original's `Context.CurrentFile` in spirit but with no configurable
+  `IncludePaths` list — just "the currently-including file's own
+  directory" — since nothing has needed a real search-path list yet.
+  `INSERT-FILE` itself save/restores `currentDir` around each nested file
+  (via the same save-then-restore-on-a-single-slot pattern used
+  throughout this port), so nested `INSERT-FILE`s correctly resolve
+  relative to whichever file is *currently* being read, not always the
+  original top-level file.
+- **Path resolution**: tries the given name as-is, then with `.zil`/`.mud`
+  appended, then all three again lowercased. The lowercase fallback
+  turned out to matter immediately, not hypothetically: real source
+  (`sample/zork1/zork1.zil`) writes `<INSERT-FILE "GMACROS" T>` for the
+  real file `gmacros.zil` — matching the original's own
+  `GetIncludeFileNameVariants`, which does this exact fallback for this
+  exact reason.
+- **Verified against real multi-file source**: ran the new `evalfile.mod`
+  harness (now calling `ZilEval.SetCurrentDir` first, derived from the
+  input path) against `sample/zork1/zork1.zil` itself. All nine of its
+  `INSERT-FILE`s (`GMACROS`, `GSYNTAX`, `1DUNGEON`, `GGLOBALS`, `GCLOCK`,
+  `GMAIN`, `GPARSER`, `GVERBS`, `1ACTIONS`) correctly opened their
+  real (lowercase) files, evaluated forms in sequence *within* each
+  (accumulating into the same global environment as the includer),
+  and correctly propagated that included file's first real error
+  (invariably `ROUTINE`/`OBJECT`/`SYNTAX`/etc. — phase-3 concepts, exactly
+  as expected) back up as `INSERT-FILE`'s own result, after which the
+  outer driver moved on to the next top-level form. Mechanically, this is
+  exactly right — `INSERT-FILE` is not a leftover gap anymore.
+
+**Then re-ran the full 84-file corpus aggregate** (same command as phase
+2e) now that `INSERT-FILE` can actually follow real include chains. As
+predicted, the shape changed: `ROUTINE`/`OBJECT`/`SYNTAX`/`ROOM` counts
+all rose (more of each file's *actual* content is now reachable through
+its own includes, rather than each of the 84 files being tested in total
+isolation) — and one large *new* entry appeared: **`CONS` (192
+occurrences)**, a basic "prepend an element onto a list" primitive that
+real top-level/library code calls directly far more than expected.
+Verified its exact signature against `Subrs.Types.cs` (`<CONS first
+rest>`, where `rest` is a LIST or `FALSE`/`<>` for "build a 1-element
+list") and added it — a small, safe, obviously-correct primitive
+directly expressible via the existing `ZilObj.Cons` helper, not requiring
+any new machinery. The remaining new/grown entries in the histogram
+(`MOVE`, `REMOVE`, `MAKE-NOUN-PHRASE`, `IFFLAG`, `IF-DEBUGGING-VERBS`) are
+**not** being chased further this session — `MOVE`/`REMOVE` in particular
+are Z-machine object-tree runtime operations that only make sense once a
+compiled game's object tree exists (`ZModel`/phase 3), not
+interpret-time-safe primitives like `CONS`, so implementing them now
+would mean faking behavior with no real object tree behind it rather than
+porting anything genuine.
+
+**Tested**: re-ran all five existing phase test harnesses (byte-for-byte
+identical output before/after the `CONS` addition, confirmed via `diff`)
+plus the full transpiler regression suite (135 files, same
+pre-existing-only failures as always) after both the `INSERT-FILE` and
+`CONS` changes.
+
 ## What's still needed for a complete phase 2 (Interpreter core)
 
 1. **`ObList.cs`** (145 lines, read in phase 2b) confirms the real
@@ -732,44 +802,46 @@ Before starting:
    phase 1's `sample1.zil` (`readtest.mod`), phase 2's `sample2.zil`
    (`evaltest.mod`), phase 2b's `sample3.zil` (`eval3test.mod`), phase 2c's
    `sample4.zil` (`eval4test.mod`), and phase 2d's `sample5.zil`
-   (`eval5test.mod`). Also re-run `readfile.mod` (generic: takes a path via
-   `Args`) over every file in `zillib/` and `sample/` — should still be
-   zero failures out of 84. (All live under the session's scratchpad,
-   which may not survive between machine sessions — if gone, they're small
-   and quick to recreate from this doc's descriptions of what they cover.)
-   Also re-run the transpiler's own full `Modules/*.mod`+`examples/*.mod`
-   regression suite if any transpiler work happened in between sessions.
-2. Phase 2e's full-corpus gap analysis (see that section above — read it
-   in full before picking a next step, it has the complete histogram and
-   categorization) already answered "what does real source need next" far
-   more reliably than another one-file experiment would. Two concrete
-   options it surfaced, in priority order:
-   a. **`INSERT-FILE`** (73 occurrences across the corpus) — implement it
-      as described in phase 2e: an evaluated-args SUBR case inlined into
-      `EvalImpl` (can't be a plain `ApplySubr` case — it needs to call
-      `EvalImpl` on each form it reads, so it has the same
-      forward-reference constraint as `PROG`/function-application), backed
-      by `ZilEval.mod` importing `ZilRead` (no circular-import risk,
-      already checked) and the `Reader` type tracking its own file's
-      directory for relative-path resolution. Likely reduces several of
-      the smaller "missing library macro" error counts for free once
-      real games' full `INSERT-FILE` chains can actually be followed.
-   b. Only after (a): re-run the full-corpus `evalfile.mod` aggregate
-      (the exact command is in phase 2e's own writeup) again — with whole
-      library chains now reachable, the histogram will look different
-      (probably smaller and more accurate) and should drive whatever
-      comes after, rather than guessing further from this session's list.
-3. Otherwise, pick from the "what's still needed" list above — item 4
-   (fixing phase 1's `%`/`#TYPE` stubs, now that `Eval`/quasiquote both
-   exist) is the most likely to matter soon for reading more real source
-   *while* reading it, not just evaluating already-read forms; the rest
-   are genuinely on-demand.
-4. Once phase 2 feels solid (or once real source above exposes what's
-   still missing), move to **phase 3** (Compiler/ZModel/Emit.Zap) — see
-   that section below for where to start reading first, and phase 2e's
-   histogram above for how heavily `ROUTINE`/`OBJECT`/`SYNTAX`/table-family
-   forms dominate everything else real source actually needs. Note that
-   `beer.zil`'s `ROUTINE GO`/`ROUTINE SING` now read fine as inert data
-   (phase 1) but can't be *run* without phase 3, since (confirmed in phase
-   2c) `ROUTINE` bodies are compiled, never interpreted directly.
+   (`eval5test.mod`). Also re-run `readfile.mod` over every file in
+   `zillib/` and `sample/` (zero failures out of 84) and `evalfile.mod`
+   against `sample/zork1/zork1.zil` (now that `INSERT-FILE` works — should
+   still walk into and evaluate forms from all nine of its included files,
+   see phase 2f). (All live under the session's scratchpad, which may not
+   survive between machine sessions — if gone, they're small and quick to
+   recreate from this doc's descriptions of what they cover.) Also re-run
+   the transpiler's own full `Modules/*.mod`+`examples/*.mod` regression
+   suite if any transpiler work happened in between sessions.
+2. Phase 2f's own re-run of the full-corpus aggregate (its own section
+   above has the updated histogram and the exact command) is now the
+   most current signal for "what does real source need next" — read it
+   before picking a next step. `ROUTINE`/`OBJECT`/`SYNTAX`/`ROOM`/table-
+   family forms dominate overwhelmingly and are squarely phase 3's job;
+   nothing else in the current histogram looked like another clean,
+   high-value, phase-2-appropriate primitive the way `INSERT-FILE` and
+   `CONS` did. This is a reasonable signal that **phase 2's interpreter
+   core is essentially sufficient for what real library/game source needs
+   at the definition/top-level-form level**, and that continuing to add
+   one-off builtins from the long tail of the histogram (`MOVE`, `REMOVE`,
+   `MAKE-NOUN-PHRASE`, etc. — several of which are Z-machine runtime
+   object-tree operations that don't make sense without a real object
+   tree, i.e. without phase 3) has hit diminishing returns.
+3. Given #2, **phase 3 (Compiler/ZModel/Emit.Zap) is now the most
+   valuable next slice**, not further phase-2 additions. Before writing
+   any code: read `Zilf/Compiler`'s top-level driver file(s) first (not
+   done yet in any session so far) to understand the real compile
+   pipeline shape, then `Zilf.Emit` root + `Zilf.Emit/Zap` together (see
+   the dedicated phase-3 section below, already written from a
+   directory/size survey — treat it as a starting pointer, not a
+   substitute for actually reading those files). This is a substantially
+   bigger, multi-session undertaking than any phase-2 slice so far
+   (`Compiler`+`ZModel` alone is ~20,500 lines, more than the entire
+   `Interpreter` this port has been building against) — do the reading
+   pass fully before committing to an implementation approach, the same
+   discipline that made each phase-2 slice go smoothly.
+4. If phase 3 feels too large to start cold, the smaller fallback is
+   still on the table: pick from the "what's still needed" list above —
+   item 4 (fixing phase 1's `%`/`#TYPE` stubs, now that `Eval`/quasiquote
+   both exist) is the most likely of the remaining phase-2 items to
+   matter soon; the rest are genuinely on-demand and should stay
+   deprioritized given #2's finding above.
 5. Update this doc's "what's done" section and commit again.
