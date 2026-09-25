@@ -1884,6 +1884,75 @@ constant). `<USE "NOSUCHPACKAGE">` is correctly rejected.
 **Tested**: all seven end-to-end programs; transpiler regression suite, 138
 files, same 3 pre-existing-only failures.
 
+## What's done: compilation flags (`COMPILATION-FLAG`, `IFFLAG`, `IF-<FLAG>`)
+
+The plan's next item, and the corpus's top blocker at the time (7 files,
+`advent.zil` among them, which opens with `<COMPILATION-FLAG-DEFAULT BETA
+<>>`). Ported from `Subrs.Meta.cs` and `Context.DefineCompilationFlag`/
+`InitCompilationFlags`.
+
+Flags get their own small name-to-value table rather than living as atom
+globals. The original keeps them on a dedicated OBLIST so a flag named
+`FOO` can't collide with a global named `FOO` — and with this port's flat
+atom table that isolation is the one thing a separate map still has to
+provide, so this is the one place the package work's "flat is enough"
+argument does *not* apply.
+
+- **`COMPILATION-FLAG name [value]`** defines and redefines (value defaults
+  to T); **`COMPILATION-FLAG-DEFAULT name value`** defines only if the flag
+  isn't already defined — which is how a game states its own defaults
+  without overriding a value set elsewhere. Both accept the name as an ATOM
+  or a STRING and return it.
+- **`COMPILATION-FLAG-VALUE name`** returns the value, or FALSE when the
+  flag is undefined. The undefined-vs-false distinction is kept internally
+  (`FlagValue` returns NIL for undefined) because `IFFLAG` needs it.
+- **`IFFLAG`** is a `COND` over flags, with the original's exact three-way
+  condition matching: a bare ATOM or STRING naming a *defined* flag matches
+  when its value is true; a FORM is evaluated after substituting every flag
+  name appearing in it with that flag's value; anything else always
+  matches, which is what makes a trailing `T`/`ELSE` clause work with no
+  special handling. Note the substitution is deliberately **one level
+  deep** — `form.Select` over the form's own elements — so
+  `<AND DBMAZE VERBOSE>` tests the flags but `<AND DBMAZE <NOT BETA>>`
+  does *not* substitute the nested `BETA`. That's the original's behaviour,
+  not an omission; a test written expecting the nested case to substitute
+  was corrected to match, after checking `SubstituteIfflagForm`.
+- **`IF-<FLAG>` / `IFN-<FLAG>`**: defining a flag also makes these usable.
+  The original synthesizes a pair of `DEFMAC`s (`IF-{0}!-`/`IFN-{0}!-` on
+  the root oblist) that expand to an `IFFLAG`. Building those macro bodies
+  as data here would be a lot of structure for no extra behaviour, so the
+  names are recognized directly in the evaluator instead — and only when
+  the suffix really names a *defined* flag, so an ordinary routine called
+  `IF-SOMETHING` is unaffected. Equivalent to the original's expansion
+  apart from the `BIND` wrapper it puts around a multi-statement body,
+  which isn't needed when the statements are simply evaluated in order.
+- The nine flags the original predefines (`IN-ZILCH`, `COLOR`, `MOUSE`,
+  `UNDO`, `DISPLAY`, `SOUND`, `MENU`, `LONG-WORDS` false;
+  `WORD-FLAGS-IN-TABLE` true) are registered at init.
+
+**Tested end-to-end**: a program covering all of it — a
+`COMPILATION-FLAG-DEFAULT` that must *not* override an earlier default, a
+`COMPILATION-FLAG` that must, `IFFLAG` selecting by flag name and by
+substituted condition form (both the matching and non-matching way), and
+`IF-<FLAG>`/`IFN-<FLAG>` guarding top-level definitions. Compiled,
+assembled and run: all six printed values correct.
+
+**A limitation this exposed, worth knowing before the next codegen slice**:
+`<IF-DEBUG ...>` and any other macro used *inside a routine body* is not
+expanded, because routine bodies are stored raw at registration time and
+`ZilCompile` does no macro expansion at all yet — it reports "unrecognized
+builtin". The original expands macros in routine bodies as part of
+compilation. Top-level use (guarding a `CONSTANT`, `ROUTINE` or `OBJECT`
+definition) works, since that really is evaluated. **Macro expansion of
+routine bodies is now a prerequisite for compiling any real game**, whose
+routines are full of library `DEFMAC`s — `TELL` chief among them.
+
+**Measured effect on the corpus**: `COMPILATION-FLAG-DEFAULT` is gone from
+the failure list. The new top blocker is `MOBLIST` (7 files).
+
+**Tested**: all eight end-to-end programs; transpiler regression suite, 138
+files, same 3 pre-existing-only failures.
+
 ## Corpus gap analysis: exactly what blocks compiling a real game
 
 Running the new driver over all 52 corpus files makes the remaining gap
@@ -1928,14 +1997,28 @@ qualified-OBLIST investigation and should stay one task.
    (compile → `zapf` → `zmachine.mod`, checking the printed values). Also
    re-run the transpiler's own full `Modules/*.mod`+`examples/*.mod`
    regression suite (138 files, 3 pre-existing failures).
-2. **`COMPILATION-FLAG-DEFAULT`/`COMPILATION-FLAG`/`COMPILATION-FLAG-VALUE`/
-   `IFFLAG`** (`Subrs.Meta.cs`) is now the top blocker at 7 files,
-   `advent.zil` among them, and the library's `IF-DEBUG`/
-   `IF-DEBUGGING-VERBS` are `DEFMAC`s built on `IFFLAG`, so they should
-   fall out too. The original keeps the flags on their own oblist; with
-   this port's flat table they are just a name-to-value map, so this
-   should be another small, well-scoped registration.
-3. Then the remaining phase-3b codegen widenings, roughly in value order:
+2. **Macro expansion of routine bodies**, in `ZilCompile`. Routine bodies
+   are stored raw at registration time and the compiler does no expansion,
+   so any `DEFMAC` used inside a routine — `TELL` above all, and every
+   `IF-<FLAG>` — is reported as an unrecognized builtin. The interpreter
+   already expands macros (phase 2c); what's missing is calling it from
+   the compiler on each body form before compiling it. This is now a
+   prerequisite for compiling any real game, and it is a small change to a
+   part of the code that already exists on both sides.
+3. **`MOBLIST`/`LOOKUP`/`INSERT`/`SPNAME`, i.e. OBLISTs as first-class
+   data** — the current top blocker at 7 files, and a genuinely different
+   problem from the package work. `zillib/libmsg.zil` doesn't use oblists
+   for name *resolution* (which the flat table handles fine); it uses them
+   as **hash maps built at compile time**: `<SETG LIBMSG-OL <MOBLIST
+   LIBRARY-MESSAGES>>`, then `LOOKUP`/`INSERT` to intern per-category
+   message atoms. **A promising shape for this port**: give an OBLIST value
+   just a name, and have `INSERT`/`LOOKUP` intern `NAME!-<oblistname>` in
+   the one flat table — which reproduces the original's own qualified
+   spelling (`SUCCESS!-TAKE!-LIBRARY-MESSAGES`) exactly, using the table
+   that already exists. Note it also drags in `MAPF`/`FUNCTION`/`TYPE?`/
+   `LENGTH?`/`REST`/`ERROR`/indirect `SETG`; check which of those the
+   interpreter already has before scoping it.
+4. Then the remaining phase-3b codegen widenings, roughly in value order:
    a. **`AND`/`OR` and the loop constructs**: read `Compilation.Loops.cs`
       (896 lines, still not read). `COND`'s condition fallback already
       handles a bare value tested for truthiness, but `AND`/`OR`'s
@@ -1957,9 +2040,4 @@ qualified-OBLIST investigation and should stay one task.
       dictionary is emitted today.
    e. More `ZBuiltins.cs` builtins on demand, same methodology as always,
       each tested compile → `zapf` → run → check the actual result.
-4. The `PACKAGE`/`USE`/`ADD-TELL-TOKENS`/qualified-OBLIST cluster remains
-   its own self-contained investigation (see phase 3a's own section for
-   what's already known) — 11 corpus files are blocked on it, so it has to
-   happen eventually, but it is not a quick slice and shouldn't be
-   attempted as one.
 5. Update this doc's "what's done" section and commit again.

@@ -38,6 +38,7 @@ IMPORT ZilObj, ZilRead, ZilModel, Strings, Out;
 CONST
   MaxIncludePaths = 16;
   MaxPackages = 128;
+  MaxFlags = 256;
   OValue* = 0;
   OReturn* = 1;
   OAgain*  = 2;
@@ -92,6 +93,15 @@ VAR
      does and doesn't need. *)
   packages: ARRAY MaxPackages OF ARRAY 64 OF CHAR;
   nPackages: INTEGER;
+
+  (* Compilation flags (COMPILATION-FLAG and friends). The original keeps
+     these on their own OBLIST so a flag named FOO can't collide with a
+     global named FOO; with this port's flat atom table that isolation is
+     the one thing a separate map still has to provide, so they live in
+     their own little name-to-value table rather than as atom globals. *)
+  flagNames: ARRAY MaxFlags OF ARRAY 64 OF CHAR;
+  flagValues: ARRAY MaxFlags OF ZilObj.Zo;
+  nFlags: INTEGER;
 
 PROCEDURE MkVal*(z: ZilObj.Zo): ZResult;
 VAR r: ZResult;
@@ -179,6 +189,48 @@ BEGIN
   RETURN (pname = "QQ") OR (pname = "READER-MACROS") OR (pname = "NEWSTRUC")
          OR (pname = "ZILCH") OR (pname = "ZIL")
 END BuiltinPackage;
+
+PROCEDURE FlagIdx(name: ARRAY OF CHAR): INTEGER;
+VAR i: INTEGER;
+BEGIN
+  i := 0;
+  WHILE i < nFlags DO
+    IF flagNames[i] = name THEN RETURN i END;
+    INC(i)
+  END;
+  RETURN -1
+END FlagIdx;
+
+(* The original's DefineCompilationFlag: defines the flag if it isn't
+   already defined, or overwrites it when `redefine` is set (COMPILATION-FLAG
+   redefines, COMPILATION-FLAG-DEFAULT doesn't). Defining a flag also makes
+   the IF-<NAME>/IFN-<NAME> conditional forms usable — the original builds
+   them as a pair of DEFMACs named IF-<NAME>!-/IFN-<NAME>!- on the root
+   oblist; see EvalImpl's own handling for why this port recognizes the
+   names directly instead of synthesizing macro bodies. *)
+PROCEDURE DefineFlag(name: ARRAY OF CHAR; value: ZilObj.Zo; redefine: BOOLEAN);
+VAR k: INTEGER;
+BEGIN
+  k := FlagIdx(name);
+  IF k >= 0 THEN
+    IF redefine THEN flagValues[k] := value END
+  ELSIF nFlags < MaxFlags THEN
+    Strings.Copy(name, flagNames[nFlags]);
+    flagValues[nFlags] := value;
+    INC(nFlags)
+  END
+END DefineFlag;
+
+(* The flag's value, or NIL if it isn't defined at all — the original
+   distinguishes "undefined" from "defined as false", and IFFLAG needs the
+   difference (an undefined name in a clause condition is not a flag test). *)
+PROCEDURE FlagValue(name: ARRAY OF CHAR): ZilObj.Zo;
+VAR k: INTEGER;
+BEGIN
+  k := FlagIdx(name);
+  IF k < 0 THEN RETURN NIL END;
+  RETURN flagValues[k]
+END FlagValue;
 
 (* Extracts the directory portion of `path` (up to and including the last
    "/"), or "" if there is none. Doesn't call Eval, so — unlike the actual
@@ -702,6 +754,36 @@ BEGIN
     END;
     RETURN MkVal(TrueVal())
 
+  ELSIF (name = "COMPILATION-FLAG") OR (name = "COMPILATION-FLAG-DEFAULT") THEN
+    (* <COMPILATION-FLAG NAME [value]> defines (and redefines) a flag,
+       defaulting to T; <COMPILATION-FLAG-DEFAULT NAME value> defines it
+       only if it isn't defined already, which is how a game states its own
+       defaults without overriding a value set on the command line. Both
+       take the name as an ATOM or a STRING (the original's
+       AtomParams.StringOrAtom) and return it. *)
+    IF n < 1 THEN RETURN Err("COMPILATION-FLAG: expected a name") END;
+    IF args[0].kind = ZilObj.KAtom THEN Strings.Copy(args[0].atomText, s)
+    ELSIF args[0].kind = ZilObj.KString THEN Strings.Copy(args[0].strBuf^, s)
+    ELSE RETURN Err("COMPILATION-FLAG: name must be an ATOM or a STRING")
+    END;
+    IF name = "COMPILATION-FLAG" THEN
+      IF n >= 2 THEN DefineFlag(s, args[1], TRUE) ELSE DefineFlag(s, TrueVal(), TRUE) END
+    ELSE
+      IF n < 2 THEN RETURN Err("COMPILATION-FLAG-DEFAULT: expected a name and a value") END;
+      DefineFlag(s, args[1], FALSE)
+    END;
+    RETURN MkVal(ZilObj.Intern(s))
+
+  ELSIF name = "COMPILATION-FLAG-VALUE" THEN
+    IF n < 1 THEN RETURN Err("COMPILATION-FLAG-VALUE: expected a name") END;
+    IF args[0].kind = ZilObj.KAtom THEN Strings.Copy(args[0].atomText, s)
+    ELSIF args[0].kind = ZilObj.KString THEN Strings.Copy(args[0].strBuf^, s)
+    ELSE RETURN Err("COMPILATION-FLAG-VALUE: name must be an ATOM or a STRING")
+    END;
+    ind := FlagValue(s);
+    IF ind = NIL THEN RETURN MkVal(FalseVal()) END;
+    RETURN MkVal(ind)
+
   ELSIF (name = "PACKAGE") OR (name = "ZPACKAGE") OR (name = "ZZPACKAGE")
         OR (name = "DEFINITIONS") OR (name = "ZSECTION") OR (name = "ZZSECTION") THEN
     (* Ported from Subrs.Packages.cs, reduced to what a SINGLE FLAT OBLIST
@@ -1015,8 +1097,9 @@ VAR
   nargs, i: INTEGER;
   name: ARRAY 64 OF CHAR;
   isFSubr: BOOLEAN;
-  (* VERSION? *)
-  cond: ZilObj.Zo; matched: BOOLEAN; ver: INTEGER;
+  (* VERSION? / IFFLAG *)
+  cond, flagVal: ZilObj.Zo; matched: BOOLEAN; ver: INTEGER;
+  ifFlagName: ARRAY 64 OF CHAR; ifFlagNeg: BOOLEAN;
   (* QUASIQUOTE walk mode (see the dedicated comment below) *)
   qqResult, qqTail, qqElem, qqInner, qqCell, qqSpliceP, qqVec: ZilObj.Zo;
   qqStop: BOOLEAN;
@@ -1177,7 +1260,42 @@ BEGIN
     IF zFirst.kind = ZilObj.KAtom THEN
       head := zFirst.globalVal;
       IF head = NIL THEN head := zFirst.localVal END;
-      IF head = NIL THEN RETURN ErrAtom("calling unassigned atom:", zFirst) END
+      IF head = NIL THEN
+        (* Defining a compilation flag also makes <IF-NAME body...> and
+           <IFN-NAME body...> usable. The original builds them as a pair of
+           DEFMACs (IF-{0}!- / IFN-{0}!- on the root oblist) that expand to
+           an IFFLAG; synthesizing those macro bodies as data here would be
+           a lot of structure-building for no extra behaviour, so the names
+           are recognized directly instead — matched only when the suffix
+           really names a DEFINED flag, so an ordinary routine called
+           IF-SOMETHING is unaffected. Equivalent to the original's
+           expansion apart from the BIND wrapper it puts around a
+           multi-statement body, which this port doesn't need since the
+           statements are simply evaluated in order. *)
+        ifFlagNeg := FALSE;
+        Strings.Copy(zFirst.atomText, ifFlagName);
+        IF (ifFlagName[0] = "I") & (ifFlagName[1] = "F") & (ifFlagName[2] = "-") THEN
+          Strings.Delete(ifFlagName, 0, 3)
+        ELSIF (ifFlagName[0] = "I") & (ifFlagName[1] = "F") & (ifFlagName[2] = "N")
+              & (ifFlagName[3] = "-") THEN
+          Strings.Delete(ifFlagName, 0, 4); ifFlagNeg := TRUE
+        ELSE
+          ifFlagName[0] := 0X
+        END;
+        flagVal := NIL;
+        IF ifFlagName[0] # 0X THEN flagVal := FlagValue(ifFlagName) END;
+        IF flagVal = NIL THEN RETURN ErrAtom("calling unassigned atom:", zFirst) END;
+
+        IF IsTrue(flagVal) = ifFlagNeg THEN RETURN MkVal(FalseVal()) END;
+        r := MkVal(FalseVal());
+        body := z.rest;
+        WHILE (body # NIL) & (body.first # NIL) DO
+          r := EvalImpl(body.first, FALSE);
+          IF ShouldPass(r) THEN RETURN r END;
+          body := body.rest
+        END;
+        RETURN r
+      END
     ELSE
       r := EvalImpl(zFirst, FALSE);
       IF ShouldPass(r) THEN RETURN r END;
@@ -1443,6 +1561,66 @@ BEGIN
           END;
           matched := ver = ZilModel.zversion
         END;
+        IF matched THEN
+          r := MkVal(cond);
+          body := clause.rest;
+          WHILE (body # NIL) & (body.first # NIL) DO
+            r := EvalImpl(body.first, FALSE);
+            IF ShouldPass(r) THEN RETURN r END;
+            body := body.rest
+          END;
+          RETURN r
+        END;
+        n := n.rest
+      END;
+      RETURN r
+
+    ELSIF isFSubr & (name = "IFFLAG") THEN
+      (* COND over compilation flags (Subrs.Meta.cs's IFFLAG). A clause's
+         condition is matched, not evaluated, in three ways, exactly as in
+         the original: a bare ATOM or STRING naming a DEFINED flag matches
+         when that flag's value is true; a FORM is evaluated after
+         substituting every flag name appearing in it with that flag's value
+         (SubstituteIfflagForm — so <AND DEBUG COLOR> tests the flags, not
+         globals of the same names); anything else always matches, which is
+         what makes a trailing T or ELSE clause work without special
+         handling. The result is the matching clause's last body value, or
+         the condition itself if the clause has no body, or FALSE. *)
+      r := MkVal(FalseVal());
+      n := z.rest;
+      WHILE (n # NIL) & (n.first # NIL) DO
+        clause := n.first;
+        IF (clause.kind # ZilObj.KList) OR ZilObj.IsEmpty(clause) THEN
+          RETURN Err("IFFLAG: each clause must be a non-empty list")
+        END;
+        cond := clause.first;
+        flagVal := NIL;
+        IF cond.kind = ZilObj.KAtom THEN flagVal := FlagValue(cond.atomText)
+        ELSIF cond.kind = ZilObj.KString THEN flagVal := FlagValue(cond.strBuf^)
+        END;
+
+        IF flagVal # NIL THEN
+          matched := IsTrue(flagVal)
+        ELSIF cond.kind = ZilObj.KForm THEN
+          (* substitute flag names for their values, then evaluate *)
+          resultHead := NIL; resultTail := NIL;
+          nFirst := cond;
+          WHILE (nFirst # NIL) & (nFirst.first # NIL) DO
+            flagVal := NIL;
+            IF nFirst.first.kind = ZilObj.KAtom THEN flagVal := FlagValue(nFirst.first.atomText) END;
+            IF flagVal = NIL THEN cell := ZilObj.Cons(ZilObj.KForm, nFirst.first, NIL)
+            ELSE cell := ZilObj.Cons(ZilObj.KForm, flagVal, NIL) END;
+            IF resultHead = NIL THEN resultHead := cell ELSE resultTail.rest := cell END;
+            resultTail := cell;
+            nFirst := nFirst.rest
+          END;
+          cr := EvalImpl(resultHead, FALSE);
+          IF ShouldPass(cr) THEN RETURN cr END;
+          matched := IsTrue(cr.value)
+        ELSE
+          matched := TRUE
+        END;
+
         IF matched THEN
           r := MkVal(cond);
           body := clause.rest;
@@ -1927,7 +2105,19 @@ BEGIN
   DefConst("PS?DIRECTION", 16);
   DefConst("PS?ADJECTIVE", 32);
   DefConst("PS?VERB", 64);
-  DefConst("PS?OBJECT", 128)
+  DefConst("PS?OBJECT", 128);
+
+  (* the compilation flags the original predefines in InitCompilationFlags *)
+  nFlags := 0;
+  DefineFlag("IN-ZILCH", FalseVal(), TRUE);
+  DefineFlag("COLOR", FalseVal(), TRUE);
+  DefineFlag("MOUSE", FalseVal(), TRUE);
+  DefineFlag("UNDO", FalseVal(), TRUE);
+  DefineFlag("DISPLAY", FalseVal(), TRUE);
+  DefineFlag("SOUND", FalseVal(), TRUE);
+  DefineFlag("MENU", FalseVal(), TRUE);
+  DefineFlag("LONG-WORDS", FalseVal(), TRUE);
+  DefineFlag("WORD-FLAGS-IN-TABLE", TrueVal(), TRUE)
 END InitPredefined;
 
 PROCEDURE InitBuiltins*;
@@ -1974,6 +2164,8 @@ BEGIN
   Register("ENTRY", FALSE); Register("RENTRY", FALSE); Register("COMPILING?", FALSE);
   Register("USE", FALSE); Register("INCLUDE", FALSE);
   Register("USE-WHEN", FALSE); Register("INCLUDE-WHEN", FALSE);
+  Register("COMPILATION-FLAG", FALSE); Register("COMPILATION-FLAG-DEFAULT", FALSE);
+  Register("COMPILATION-FLAG-VALUE", FALSE); Register("IFFLAG", TRUE);
   Register("VERSION?", TRUE); Register("GDECL", TRUE);
 
   tAtom := ZilObj.Intern("T");
