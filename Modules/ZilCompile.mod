@@ -48,6 +48,19 @@ BEGIN errFlag := FALSE; errMsg[0] := 0X END ClearErr;
 PROCEDURE FixText(v: INTEGER; VAR s: ARRAY OF CHAR);
 BEGIN Strings.IntToStr(v, s) END FixText;
 
+VAR labelCounter: INTEGER;
+
+(* Generates a fresh local label name, "?L1", "?L2", ... — matches the
+   real compiler's own naming convention exactly (confirmed against
+   ~/cloak_plus.zap's own "?L11:"-style labels). *)
+PROCEDURE NewLabel(VAR s: ARRAY OF CHAR);
+VAR n: ARRAY 16 OF CHAR;
+BEGIN
+  INC(labelCounter);
+  Strings.IntToStr(labelCounter, n);
+  Strings.Copy("?L", s); Strings.Append(n, s)
+END NewLabel;
+
 (* Compiles `z` as a value-producing expression, emitting whatever
    instructions are needed and returning the ZAP operand text that holds
    the result (a literal number, a local variable's bare name, or
@@ -102,6 +115,96 @@ BEGIN
   END
 END CompileOperand;
 
+(* Emits an unconditional branch to `label` — matches the original's
+   `rb.Branch(label)`. *)
+PROCEDURE EmitBranch(label: ARRAY OF CHAR);
+BEGIN Out.String("	JUMP "); Out.String(label); Out.Ln END EmitBranch;
+
+(* Emits a predicate instruction (op1[,op2]) branching to `label` when the
+   condition holds and `polarity` is TRUE, or when it does NOT hold and
+   `polarity` is FALSE — i.e. always: "go to label iff (condition-holds) =
+   polarity". Matches zapf's own branch-marker convention confirmed
+   earlier from ZapfParser.mod: "/label" branches on true, "\label" on
+   false. Pass an empty `op2` for a 1-operand predicate like ZERO?. *)
+PROCEDURE EmitPredInstr(opcode, op1, op2, label: ARRAY OF CHAR; polarity: BOOLEAN);
+BEGIN
+  Out.String("	"); Out.String(opcode); Out.String(" "); Out.String(op1);
+  IF op2[0] # 0X THEN Out.String(","); Out.String(op2) END;
+  IF polarity THEN Out.String(" /") ELSE Out.String(" \") END;
+  Out.String(label); Out.Ln
+END EmitPredInstr;
+
+(* Compiles `z` as a CONDITION: emits whatever instructions are needed so
+   that control reaches `label` exactly when z's truth value equals
+   `polarity` (matches the original's own CompileCondition contract
+   exactly — same name, same two-argument label+polarity shape). Ported
+   the common real-source predicate builtins directly to their ZAP
+   mnemonics (confirmed against ~/cloak_plus.zap's own usage): ZIL
+   "ZERO?"/"EQUAL?"("=?"/"==?")/"L?"/"G?" are ZAP's own "ZERO?"/"EQUAL?"/
+   "LESS?"/"GRTR?" — note L?/G? really do rename to LESS?/GRTR? in ZAP,
+   they aren't the same spelling. EQUAL? here only supports exactly 2 args
+   (the real EQUAL? accepts 2-4, matching the first against any of the
+   rest) — pragmatic subset, widen on demand. Anything else (a bare LVAL,
+   or a builtin without special predicate handling) falls back to
+   compiling it as a plain VALUE and testing it against zero, matching the
+   original's own generic `BranchIfNonZero` fallback path. Only calls
+   CompileOperand, never CompileStmt, so — unlike CompileStmt below — this
+   has no forward-reference concern and doesn't need to be self-recursive
+   itself (though it does recurse into CompileOperand, which is already
+   self-recursive on its own). *)
+PROCEDURE CompileCondition(z: ZilObj.Zo; label: ARRAY OF CHAR; polarity: BOOLEAN): BOOLEAN;
+VAR headName: ARRAY 64 OF CHAR; leftText, rightText, opText, empty: ARRAY 64 OF CHAR; ok: BOOLEAN;
+BEGIN
+  empty[0] := 0X;
+  IF z = NIL THEN Err("CompileCondition: NIL condition"); RETURN FALSE END;
+
+  IF (z.kind = ZilObj.KAtom) & ((z.atomText = "T") OR (z.atomText = "ELSE")) THEN
+    IF polarity THEN EmitBranch(label) END; RETURN TRUE
+
+  ELSIF z.kind = ZilObj.KFalse THEN
+    IF ~polarity THEN EmitBranch(label) END; RETURN TRUE
+
+  ELSIF z.kind = ZilObj.KFix THEN
+    IF (z.fixVal # 0) = polarity THEN EmitBranch(label) END; RETURN TRUE
+
+  ELSIF (z.kind = ZilObj.KForm) & (z.first # NIL) & (z.first.kind = ZilObj.KAtom) THEN
+    Strings.Copy(z.first.atomText, headName);
+
+    IF headName = "ZERO?" THEN
+      IF (z.rest = NIL) OR (z.rest.first = NIL) THEN
+        Err("CompileCondition: ZERO? expects 1 arg"); RETURN FALSE
+      END;
+      ok := CompileOperand(z.rest.first, opText);
+      IF ~ok THEN RETURN FALSE END;
+      EmitPredInstr("ZERO?", opText, empty, label, polarity); RETURN TRUE
+
+    ELSIF (headName = "EQUAL?") OR (headName = "=?") OR (headName = "==?") OR (headName = "L?") OR (headName = "G?") THEN
+      IF (z.rest = NIL) OR (z.rest.first = NIL) OR (z.rest.rest = NIL) OR (z.rest.rest.first = NIL) THEN
+        Err("CompileCondition: comparison expects 2 args"); RETURN FALSE
+      END;
+      ok := CompileOperand(z.rest.first, leftText);
+      IF ~ok THEN RETURN FALSE END;
+      ok := CompileOperand(z.rest.rest.first, rightText);
+      IF ~ok THEN RETURN FALSE END;
+      IF headName = "L?" THEN EmitPredInstr("LESS?", leftText, rightText, label, polarity)
+      ELSIF headName = "G?" THEN EmitPredInstr("GRTR?", leftText, rightText, label, polarity)
+      ELSE EmitPredInstr("EQUAL?", leftText, rightText, label, polarity)
+      END;
+      RETURN TRUE
+
+    ELSE
+      ok := CompileOperand(z, opText);
+      IF ~ok THEN RETURN FALSE END;
+      EmitPredInstr("ZERO?", opText, empty, label, ~polarity); RETURN TRUE
+    END
+
+  ELSE
+    ok := CompileOperand(z, opText);
+    IF ~ok THEN RETURN FALSE END;
+    EmitPredInstr("ZERO?", opText, empty, label, ~polarity); RETURN TRUE
+  END
+END CompileCondition;
+
 (* ZAP strings double an embedded '"' rather than backslash-escaping it
    (confirmed against zapf's own ZapfTok.ReadString, which has no
    backslash handling at all) — re-encode a ZIL string's already-decoded
@@ -128,18 +231,39 @@ END CompileZapString;
    operand in the same way arithmetic does, so they don't belong in
    CompileOperand); anything else falls back to CompileOperand, so a bare
    value expression used as a statement (e.g. the trivial `<+ .X 1>` test
-   case) still works. Always calls CompileOperand, never the other way
-   around, so — unlike CompileOperand — this doesn't need to be
-   self-recursive or declared before it; it's simply declared after,
-   fully defined, with no forward-reference issue. `resultText` is only
-   meaningful when `wantResult` is set (the routine's final statement);
-   the void-only builtins (PRINTI/PRINTN/CRLF) return `"1"` — a safe stand-
-   in for T, since none of them produce a real ZIL value but the calling
-   convention still needs *something* returnable when one of them happens
-   to be a routine's last statement. *)
+   case) still works. `resultText` is only meaningful when `wantResult` is
+   set (the routine's final statement, or a COND clause's final
+   statement); the void-only builtins (PRINTI/PRINTN/CRLF) return `"1"` —
+   a safe stand-in for T, since none of them produce a real ZIL value but
+   the calling convention still needs *something* returnable when one of
+   them happens to be in that position.
+
+   COND is inlined directly here (its own clause bodies need to compile
+   arbitrary statements, including nested CONDs) rather than factored into
+   a separate procedure — same forward-reference reason as everywhere else
+   in this port that ended up as one self-recursive procedure (ZilRead.
+   ReadOne, ZilEval.EvalImpl): CompileStmt calling a separate CompileCOND
+   which itself calls back into CompileStmt would be mutual recursion,
+   which this transpiler's lack of FORWARD declarations can't express.
+   CompileCondition, by contrast, only ever calls CompileOperand — never
+   CompileStmt — so it has no such issue and stays its own procedure.
+
+   COND's result (when wanted) is always left on the Z-machine stack,
+   matching the original's own default (`resultStorage ??= rb.Stack`):
+   each matching clause's final value is pushed (via PUSH, unless it's
+   already sitting on the stack from its own last instruction, in which
+   case pushing again would double it), and since at most one clause's
+   branch is ever taken, exactly one value ends up on the stack by the
+   time control reaches the end label, regardless of which clause matched
+   or whether none did (a bare 0 is pushed as the "no clause matched, no
+   ELSE" default, matching the original's `EmitStore(resultStorage,
+   Game.Zero)`). *)
 PROCEDURE CompileStmt(z: ZilObj.Zo; wantResult: BOOLEAN; VAR resultText: ARRAY OF CHAR): BOOLEAN;
 VAR headName: ARRAY 64 OF CHAR; opText: ARRAY 64 OF CHAR; strText: ARRAY 4096 OF CHAR;
     targetAtom: ZilObj.Zo; ok: BOOLEAN;
+    (* COND *)
+    nextLabel, endLabel: ARRAY 16 OF CHAR; elsePart, isLastClauseStmt, hasMoreClauses: BOOLEAN;
+    c, cond, body, bp: ZilObj.Zo; clauseResult: ARRAY 64 OF CHAR;
 BEGIN
   IF z = NIL THEN Err("CompileStmt: NIL statement"); RETURN FALSE END;
 
@@ -180,6 +304,58 @@ BEGIN
       IF ~ok THEN RETURN FALSE END;
       Out.String("	PRINTN "); Out.String(opText); Out.Ln;
       Strings.Copy("1", resultText);
+      RETURN TRUE
+
+    ELSIF headName = "COND" THEN
+      NewLabel(nextLabel); NewLabel(endLabel);
+      elsePart := FALSE;
+      c := z.rest;
+
+      WHILE (c # NIL) & (c.first # NIL) & ~elsePart DO
+        IF (c.first.kind # ZilObj.KList) OR (c.first.first = NIL) THEN
+          Err("CompileStmt: each COND clause must be a non-empty list"); RETURN FALSE
+        END;
+        cond := c.first.first;
+        body := c.first.rest;
+
+        IF (cond.kind = ZilObj.KAtom) & ((cond.atomText = "T") OR (cond.atomText = "ELSE")) THEN
+          elsePart := TRUE
+        ELSE
+          ok := CompileCondition(cond, nextLabel, FALSE);
+          IF ~ok THEN RETURN FALSE END
+        END;
+
+        IF (body = NIL) OR (body.first = NIL) THEN
+          Strings.Copy("1", clauseResult)
+        ELSE
+          bp := body;
+          WHILE (bp # NIL) & (bp.first # NIL) DO
+            isLastClauseStmt := (bp.rest = NIL) OR (bp.rest.first = NIL);
+            ok := CompileStmt(bp.first, wantResult & isLastClauseStmt, clauseResult);
+            IF ~ok THEN RETURN FALSE END;
+            bp := bp.rest
+          END
+        END;
+
+        IF wantResult & (clauseResult # "STACK") THEN
+          Out.String("	PUSH "); Out.String(clauseResult); Out.Ln
+        END;
+
+        hasMoreClauses := (c.rest # NIL) & (c.rest.first # NIL);
+        IF hasMoreClauses OR (wantResult & ~elsePart) THEN
+          EmitBranch(endLabel)
+        END;
+
+        Out.String(nextLabel); Out.String(":"); Out.Ln;
+        IF ~elsePart THEN NewLabel(nextLabel) END;
+        c := c.rest
+      END;
+
+      IF wantResult & ~elsePart THEN
+        Out.String("	PUSH 0"); Out.Ln
+      END;
+      Out.String(endLabel); Out.String(":"); Out.Ln;
+      IF wantResult THEN Strings.Copy("STACK", resultText) END;
       RETURN TRUE
 
     ELSE

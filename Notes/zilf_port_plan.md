@@ -1370,6 +1370,73 @@ widening — a true extension, not a rewrite that happened to still work.
 identical output) plus the full transpiler regression suite (137 files,
 same 3 pre-existing-only failures) — no regressions.
 
+## What's done (phase 3b continued: COND as a real branch tree)
+
+Read `Compilation.Conditions.cs` (663 lines) in full, as scoped. This is
+where the VALUE/VOID/PRED/VALUE-PRED calling convention from the phase 3
+architecture reading pass actually gets exercised — `CompileCondition`
+picks predicate builtins first (branch directly), then value builtins
+(compile, then branch on nonzero), then value+predicate builtins (a
+harder hybrid case), then void builtins (always branch true, since a
+void call "succeeds"), with a generic "compile as a value and test
+against zero" fallback at the very end. `CompileCOND` walks clauses,
+compiling each clause's *condition* via `CompileCondition` (branching past
+it, i.e. polarity `false`, when the clause doesn't match) and each
+clause's *body* via the ordinary statement compiler, defaulting
+`resultStorage` to the Z-machine stack.
+
+Ported a **pragmatic subset** of this rather than the full generality:
+`CompileCondition`/`CompileCOND` handle the four comparison predicates
+that show up overwhelmingly in real source (`ZERO?`, `EQUAL?`/`=?`/`==?`,
+`L?`, `G?` — confirmed the ZAP mnemonics for `L?`/`G?` really do rename to
+`LESS?`/`GRTR?`, not keep their ZIL spelling, by checking real usage in
+`~/cloak_plus.zap`), `T`/`ELSE`/`FALSE`/FIX-literal conditions, and a
+generic "compile as a value, branch on nonzero" fallback for anything
+else (a bare `LVAL`, or a builtin with no special predicate handling) —
+not the full `PredCall`/`ValueCall`/`ValuePredCall`/`VoidCall` builtin
+classification system (`ZBuiltins.cs`'s 237 registrations), and
+`EQUAL?` only supports exactly 2 args here (the real one accepts 2-4,
+matching the first against any of the rest). `AND`/`OR`/loops
+(`Compilation.Loops.cs`) are not touched by this slice.
+
+**`COND` had to be inlined directly into `CompileStmt` itself** (making it
+self-recursive), not factored into a separate `CompileCOND` procedure the
+way the plan first framed it — a clause's body can contain an arbitrary
+statement, including another `COND`, so `CompileStmt` calling a separate
+`CompileCOND` that calls back into `CompileStmt` would be exactly the
+mutual recursion this transpiler's lack of `FORWARD` declarations can't
+express, the same reasoning behind every other self-recursive procedure in
+this whole port (`ZilRead.ReadOne`, `ZilEval.EvalImpl`). `CompileCondition`
+was kept as its own separate procedure since it only ever calls
+`CompileOperand`, never `CompileStmt` — no such issue there.
+
+**`COND`'s result, when wanted, is always left on the Z-machine stack**
+(matching the original's own `resultStorage ??= rb.Stack` default): each
+matching clause's final value is `PUSH`ed (skipped if it's already sitting
+on the stack from its own last instruction, to avoid double-pushing), and
+since at most one clause's branch is ever taken, exactly one value is on
+the stack by the time control reaches the end label — including the
+"no clause matched, no `ELSE`" case, which pushes a bare `0`, matching the
+original's `EmitStore(resultStorage, Game.Zero)`.
+
+**Tested end-to-end**, three cases, each compiled → assembled with `zapf`
+→ run in `examples/zmachine.mod` → checked against the actual printed
+result: a value-producing `COND` with an `ELSE` clause (`<G? .X 100> 111`
+/ `<L? .X 10> 222` / `ELSE 333`, correctly returned `333` for `X=41`); the
+same shape with the `ELSE` clause *removed* (correctly returned `0`,
+confirming the no-match default); and a `COND` used as a **void**
+statement purely for its `PRINTI` side effects, followed by a separate
+`CRLF` and `.X` return (correctly printed `"medium"` then returned `41`,
+confirming `COND` composes correctly with both calling conventions). All
+three matched expectations exactly. Also re-ran the two earlier `ZilCompile`
+milestone tests (`ADD1`'s trivial arithmetic and the `SET`/`PRINTI`
+multi-statement one) and confirmed byte-identical `.zap` output — a true
+extension, not a rewrite that happened to still pass.
+
+**Tested**: re-ran all five existing phase-2 test harnesses (byte-
+identical output) plus the full transpiler regression suite (137 files,
+same 3 pre-existing-only failures) — no regressions.
+
 ## Suggested order for the next session
 
 1. Re-run all five existing phase-2 test harnesses to confirm nothing
@@ -1418,36 +1485,39 @@ same 3 pre-existing-only failures) — no regressions.
    separate, larger investigation or squarely phase 3b's job, not another
    quick SUBR to add. This is a natural point to stop registration-only
    work and move to actual code generation.
-4. **Phase 3b is under way** (see the "Milestone: phase 3b begins" and
-   "phase 3b continued" sections above) — `ZilCompile.mod` now compiles a
+4. **Phase 3b is under way** (see the three "phase 3b" milestone/
+   continuation sections above) — `ZilCompile.mod` now compiles a
    required-args-only `ROUTINE` with a multi-statement body, FIX literals,
-   `LVAL` parameter references, `+`/`-`/`*`//`, and `SET`/`PRINTI`/
-   `PRINTN`/`CRLF`, all verified assembling and running correctly
-   end-to-end (including `SET`'s value read back from the variable
-   afterward, and ZAP's actual `""`-doubling string-escaping convention,
-   confirmed against `ZapfTok.ReadString` rather than assumed). Remaining
-   natural next widening steps, roughly in order of value:
+   `LVAL` parameter references, `+`/`-`/`*`//`, `SET`/`PRINTI`/`PRINTN`/
+   `CRLF`, and now **`COND` as a real compiled branch tree** (comparison
+   predicates `ZERO?`/`EQUAL?`/`L?`/`G?`, `ELSE`, both value-producing and
+   void-statement use), all verified assembling and running correctly
+   end-to-end. Remaining natural next widening steps, roughly in order of
+   value:
    a. **`SETG`/globals**: needs `Compilation.Globals.cs` (463 lines, not
       yet read) for real storage allocation — `SET` alone (locals only)
       was enough for the tests so far, but most real routines read/write
-      globals too.
-   b. **More `ZBuiltins.cs` VoidCall/ValueCall builtins** on demand, same
-      methodology as always: `MOVE`/`FSET`/`FCLEAR` (once object
-      compilation exists, see (d)), and whatever a next real test routine
-      turns out to need. Test each the same way `ADD1` was: compile,
-      assemble, run, check the actual printed/observable result.
-   c. **`COND`** compiled as a real branch tree (not interpreted) — read
-      `Compilation.Conditions.cs` (663 lines, not yet read) first; this is
-      where the VALUE/VOID/PRED/VALUE-PRED calling convention from the
-      phase 3 architecture reading pass actually gets exercised, so expect
-      to need `PredCall`-shaped builtins (`EQUAL?`, `G?`, `L?`, etc.)
-      alongside it. Likely the single highest-value next slice, since
-      real ZIL routines lean on `COND` constantly and nothing with real
-      control flow can be compiled without it.
+      globals too. Likely the next highest-value slice now that `COND`
+      exists, since real conditional logic constantly branches on global
+      state.
+   b. **`AND`/`OR`/loops**: read `Compilation.Loops.cs` (896 lines, not yet
+      read) — `COND`'s own `CompileCondition` fallback already handles a
+      bare value tested for truthiness, but `AND`/`OR`'s short-circuit
+      *sequencing* (and the loop constructs — `REPEAT`, `PROG`'s
+      `AGAIN`-as-loop sense, not to be confused with this port's own
+      interpreter-level `PROG`/`REPEAT` from phase 2b, which is a
+      completely different piece of code) aren't implemented in the
+      compiler at all yet.
+   c. **More `ZBuiltins.cs` VoidCall/ValueCall/PredCall builtins** on
+      demand, same methodology as always: `MOVE`/`FSET`/`FCLEAR`/`FSET?`/
+      `IN?` (once object compilation exists, see (d)), and whatever a next
+      real test routine turns out to need. Test each the same way `ADD1`
+      was: compile, assemble, run, check the actual printed/observable
+      result.
    d. **Object/property/flag table emission**: read `Compilation.Objects.cs`
       (762 lines, not yet read) — needed before `MOVE`/`FSET?`/`GETP`/etc.
       mean anything, and before a compiled game can do much besides pure
-      arithmetic.
+      arithmetic and conditionals.
    Keep testing each addition the same end-to-end way (compile → `zapf` →
    `zmachine.mod`, checking the actual result) rather than trusting the
    `.zap` text looks right by inspection alone — that discipline is what
