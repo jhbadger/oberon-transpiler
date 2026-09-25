@@ -923,68 +923,129 @@ understood.
   table/encoder, already built and tested, is the more directly useful
   reference than the C# source).
 
+## What's done (phase 3a: ROUTINE/OBJECT/ROOM registration) — files, and what's tested
+
+Implemented exactly the slice scoped at the end of the reading pass above.
+Added a new module, **`Modules/ZilModel.mod`** — the Oberon equivalent of
+`ZEnvironment`: plain fixed-size arrays (`routines`/`objects`/`globals`/
+`constants`, each with an `n*` count and an `Add*` procedure) holding
+whatever `ROUTINE`/`OBJECT`/`ROOM`/`GLOBAL`/`CONSTANT` registrations have
+been seen so far. Pure data capture, no compilation — matches
+`ZilModelObject`/`ZilGlobal`'s own confirmed-cheap shape from the reading
+pass exactly, with **zero new parsing needed**: an `OBJECT`'s property
+lists are stored as the raw cons-chain the reader already produced.
+
+Added to **`ZilEval.mod`**: `ApplyRoutine` and `ApplyObject` (standalone
+procedures alongside `ApplyDefine`, for the same reason — they don't call
+`Eval`, only capture raw unevaluated arguments, so they aren't subject to
+the forward-reference restriction), dispatched as new FSUBR cases
+(`ROUTINE`, `OBJECT`, `ROOM`) in `EvalImpl`. Also upgraded the existing
+`GLOBAL`/`CONSTANT` SUBR case to *additionally* call
+`ZilModel.AddGlobal`/`AddConstant` after doing what it already did
+(setting `globalVal`) — this doesn't change that SUBR's own observable
+behavior at all, it just also records the registration for a future
+compilation pass. `ZilEval.mod` now imports `ZilModel` (no circular-import
+concern — `ZilModel.mod` only imports `ZilObj`).
+
+**Tested exactly like `INSERT-FILE` was** (phase 2f): re-ran `evalfile.mod`
+against `sample/zork1/zork1.zil`. Confirmed real, direct improvement —
+`INSERT-FILE "GMACROS"`, `"GGLOBALS"`, and `"GMAIN"` now each process
+their **entire** file successfully (returning `"DONE"` — every top-level
+form in each of those three files evaluates without error now), and the
+other six `INSERT-FILE`s advance further into their files before hitting
+a genuinely different, not-yet-registered construct (`SYNTAX`, `LTABLE`,
+`ITABLE`, `PROPDEF`) instead of stopping at `ROUTINE`/`OBJECT` immediately.
+
+**Then re-ran the full 84-file corpus aggregate** (same command as phases
+2e/2f) to confirm at scale, not just on one file. Result: **`ROUTINE`
+(was 1624 occurrences), `OBJECT` (was 481), and `ROOM` (was 229) are now
+completely absent from the histogram** — every single occurrence across
+all 84 real files now registers successfully. The histogram's new shape
+is dominated by `SYNTAX` (451, unchanged — its own subsystem, not touched
+this slice), `EVAL` (269, up from 46 — now that more code past the
+`ROUTINE`/`OBJECT` gate is reachable, more real `<EVAL ...>` calls are
+exposed; still not implemented — needs to be inlined into `EvalImpl` like
+`INSERT-FILE`, since `ApplySubr` can't call `Eval`, so this is a natural
+next small slice), and the `ITABLE`/`TABLE`/`LTABLE`/`PTABLE` table family
+(111+32+28+8 = 179, up from before for the same reachability reason).
+`MOVE`/`REMOVE`/`FCLEAR` (17+5+3) remain deliberately unimplemented, same
+reasoning as phase 2f: real Z-machine object-tree runtime operations that
+don't make sense without an actual object tree existing (phase 3b).
+
+**Tested**: re-ran all five existing phase-2 test harnesses (byte-for-byte
+identical output, confirmed via `diff`) plus the full transpiler
+regression suite (136 files now, counting the new `ZilModel.mod` itself —
+same 3 pre-existing-only failures as always) — no regressions.
+
 ## Suggested order for the next session
 
-1. Re-run all five existing test harnesses to confirm nothing regressed:
-   phase 1's `sample1.zil` (`readtest.mod`), phase 2's `sample2.zil`
-   (`evaltest.mod`), phase 2b's `sample3.zil` (`eval3test.mod`), phase 2c's
-   `sample4.zil` (`eval4test.mod`), and phase 2d's `sample5.zil`
-   (`eval5test.mod`). Also re-run `readfile.mod` over every file in
-   `zillib/` and `sample/` (zero failures out of 84) and `evalfile.mod`
-   against `sample/zork1/zork1.zil` (now that `INSERT-FILE` works — should
-   still walk into and evaluate forms from all nine of its included files,
-   see phase 2f). (All live under the session's scratchpad, which may not
-   survive between machine sessions — if gone, they're small and quick to
-   recreate from this doc's descriptions of what they cover.) Also re-run
-   the transpiler's own full `Modules/*.mod`+`examples/*.mod` regression
-   suite if any transpiler work happened in between sessions.
-2. Phase 2f's own re-run of the full-corpus aggregate (its own section
-   above has the updated histogram and the exact command) is now the
-   most current signal for "what does real source need next" — read it
-   before picking a next step. `ROUTINE`/`OBJECT`/`SYNTAX`/`ROOM`/table-
-   family forms dominate overwhelmingly and are squarely phase 3's job;
-   nothing else in the current histogram looked like another clean,
-   high-value, phase-2-appropriate primitive the way `INSERT-FILE` and
-   `CONS` did. This is a reasonable signal that **phase 2's interpreter
-   core is essentially sufficient for what real library/game source needs
-   at the definition/top-level-form level**, and that continuing to add
-   one-off builtins from the long tail of the histogram (`MOVE`, `REMOVE`,
-   `MAKE-NOUN-PHRASE`, etc. — several of which are Z-machine runtime
-   object-tree operations that don't make sense without a real object
-   tree, i.e. without phase 3) has hit diminishing returns.
-3. Phase 3's *architecture* reading pass is done (see "Phase 3 reading
-   pass #1" above — read it in full first). Concrete, scoped next step:
-   **phase 3a, the registration side.** Add `ROUTINE`, `OBJECT`/`ROOM`,
-   and (upgrading the existing `GLOBAL`/`CONSTANT` SUBR case) real
-   `ZEnvironment`-equivalent list-appending, as new FSUBR cases in
-   `ZilEval.mod` — each one just captures its raw, unevaluated arguments
-   into a small Oberon record (name atom, flags, raw property/body-list —
-   confirmed cheap for `ZilModelObject`/`ZilGlobal`, and already proven
-   cheap for `ZilRoutine` back in phase 2c) and appends it to a new
-   module's global list. This is *not* compiling anything yet — it only
-   makes real game source's own top-level forms stop erroring out. Test
-   it exactly the way `INSERT-FILE` was tested: run `evalfile.mod` against
-   `sample/zork1/zork1.zil` again and confirm the "calling unassigned
-   atom: ROUTINE/OBJECT" errors are gone (replaced by silently succeeding
-   registrations), then re-run the full 84-file aggregate once more to see
-   how much of the remaining histogram shrinks for free.
-4. Only after 3a works and is tested: **phase 3b, actual code
-   generation** — read `Compilation.Objects.cs` (object/property/flag
-   table layout) and `Compilation.Routines.cs`+`ZBuiltins.cs` (routine
-   body → `.zap` text, starting with the simplest VoidCall/ValueCall
-   builtins) next, since those weren't read this session (see "what's
-   still not read" above for the full list and reasoning per file). Get
-   one trivial routine (`<ROUTINE ADD1 (X) <+ .X 1>>`, similar to phase
-   2b/2c's own "get a trivial case working first" discipline) compiling
-   to correct `.zap` text, assembling with the existing `zapf`, and
-   running in `examples/zmachine.mod` before widening to more builtins —
-   this mirrors exactly how `zapf` itself and each phase-2 slice were
-   validated end-to-end.
-5. If phase 3 feels too large to start cold even at the 3a scope, the
-   smaller fallback is still on the table: pick from phase 2's "what's
-   still needed" list — item 4 (fixing phase 1's `%`/`#TYPE` stubs, now
-   that `Eval`/quasiquote both exist) is the most likely of the remaining
-   phase-2 items to matter soon; the rest are genuinely on-demand and
-   should stay deprioritized given phase 2f's finding that phase 2's
-   interpreter core is already essentially sufficient.
+1. Re-run all five existing phase-2 test harnesses to confirm nothing
+   regressed: phase 1's `sample1.zil` (`readtest.mod`), phase 2's
+   `sample2.zil` (`evaltest.mod`), phase 2b's `sample3.zil`
+   (`eval3test.mod`), phase 2c's `sample4.zil` (`eval4test.mod`), and
+   phase 2d's `sample5.zil` (`eval5test.mod`). Also re-run `readfile.mod`
+   over every file in `zillib/` and `sample/` (zero failures out of 84)
+   and `evalfile.mod` against `sample/zork1/zork1.zil` — with phase 3a's
+   `ROUTINE`/`OBJECT`/`ROOM` registration now in place, `INSERT-FILE
+   "GMACROS"`/`"GGLOBALS"`/`"GMAIN"` should each still process their
+   entire file and return `"DONE"` (see phase 3a's own section above for
+   why). (All live under the session's scratchpad, which may not survive
+   between machine sessions — if gone, they're small and quick to recreate
+   from this doc's descriptions of what they cover.) Also re-run the
+   transpiler's own full `Modules/*.mod`+`examples/*.mod` regression suite
+   (136 files — includes the new `ZilModel.mod`) if any transpiler work
+   happened in between sessions.
+2. Phase 3a's own re-run of the full-corpus aggregate (its own section
+   above has the updated histogram and the exact command) is the current
+   signal for what to register next. Two clean, well-scoped candidates it
+   surfaced, in priority order:
+   a. **`EVAL`** (269 occurrences, the *SUBR* form `<EVAL expr
+      [environment]>` — distinct from this port's own internal
+      `EvalImpl`): real usage is overwhelmingly `<EVAL .SOME-FORM>` with
+      no explicit environment argument — just "evaluate this value (which
+      is itself a FORM) one more time, in the current environment". Since
+      this port has no first-class environment objects (the `LocalEnvironment`
+      concept was deliberately flattened away back in phase 2), a
+      pragmatic first cut can just implement the 1-arg case (call
+      `EvalImpl` again on the already-evaluated argument) and ignore an
+      explicit environment argument if given, documenting that as a known
+      gap. Same forward-reference constraint as `INSERT-FILE`/`PROG`/
+      function-application — has to be inlined into `EvalImpl`, not a
+      plain `ApplySubr` case, since it needs to call `EvalImpl` itself.
+   b. **The table family** (`ITABLE`/`TABLE`/`LTABLE`/`PTABLE`, 111+32+28+8
+      = 179 occurrences): register-only, the same shape as `ROUTINE`/
+      `OBJECT` — capture the raw arguments (size/flags/raw element list)
+      into a new `ZilModel.mod` table list, no compilation yet. Read
+      `ZilTable.cs` (790 lines, not yet read) first to confirm the exact
+      shape before implementing, the same discipline used for
+      `ZilModelObject`/`ZilGlobal` this session.
+   After either (or both): re-run the full 84-file aggregate again to see
+   how much further the histogram shrinks, the same way phase 3a's own
+   effect was measured.
+3. `SYNTAX`/vocabulary (451 occurrences, unchanged by phase 3a) is its own
+   large, self-contained subsystem (`Syntax.cs`, `SyntaxMatcher.cs`, the
+   whole `ZModel/Vocab/` subtree) — worth its own dedicated reading pass
+   when picked up, same as this session's phase 3 architecture read was
+   for `Compiler`/`Emit`/the rest of `ZModel`. Lower priority than (2)
+   since a lot of real routine/object/global/table content is reachable
+   and testable without it.
+4. Once registration (3a and its natural continuations above) feels
+   sufficiently broad, move to **phase 3b: actual code generation** — read
+   `Compilation.Objects.cs` (object/property/flag table layout) and
+   `Compilation.Routines.cs`+`ZBuiltins.cs` (routine body → `.zap` text,
+   starting with the simplest VoidCall/ValueCall builtins) next, since
+   those weren't read yet (see the reading-pass section's "what's still
+   not read" for the full list and reasoning per file). Get one trivial
+   routine (`<ROUTINE ADD1 (X) <+ .X 1>>`) compiling to correct `.zap`
+   text, assembling with the existing `zapf`, and running in
+   `examples/zmachine.mod` before widening to more builtins — this
+   mirrors exactly how `zapf` itself and each phase-2 slice were validated
+   end-to-end.
+5. If phase 3 feels too large to continue cold, the smaller fallback is
+   still on the table: pick from phase 2's "what's still needed" list —
+   item 4 (fixing phase 1's `%`/`#TYPE` stubs, now that `Eval`/quasiquote
+   both exist) is the most likely of the remaining phase-2 items to matter
+   soon; the rest are genuinely on-demand and should stay deprioritized
+   given phase 2f's finding that phase 2's interpreter core is already
+   essentially sufficient.
 6. Update this doc's "what's done" section and commit again.

@@ -33,7 +33,7 @@ MODULE ZilEval;
   - DECL checking (MaybeCheckDecl in the original) is skipped everywhere.
 *)
 
-IMPORT ZilObj, ZilRead, Strings, Out;
+IMPORT ZilObj, ZilRead, ZilModel, Strings, Out;
 
 CONST
   OValue* = 0;
@@ -240,6 +240,13 @@ BEGIN
     IF n < 2 THEN RETURN Err("SET/SETG/GLOBAL/CONSTANT: expected 2 args") END;
     IF args[0].kind # ZilObj.KAtom THEN RETURN Err("SET/SETG/GLOBAL/CONSTANT: first arg must be an ATOM") END;
     IF name = "SET" THEN args[0].localVal := args[1] ELSE args[0].globalVal := args[1] END;
+    (* Also register into ZilModel — phase 3a — so a later compilation
+       pass can allocate real Z-machine storage and emit a default value.
+       Registering doesn't affect this SUBR's own observable behavior at
+       all (SETG isn't registered, matching the original: only GLOBAL and
+       CONSTANT go into ZEnvironment). *)
+    IF name = "GLOBAL" THEN ZilModel.AddGlobal(args[0], args[1])
+    ELSIF name = "CONSTANT" THEN ZilModel.AddConstant(args[0], args[1]) END;
     RETURN MkVal(args[1])
 
   ELSIF name = "LVAL" THEN
@@ -445,6 +452,65 @@ BEGIN
   ELSE nameAtom.globalVal := funcVal END;
   RETURN MkVal(nameAtom)
 END ApplyDefine;
+
+(* ROUTINE: <ROUTINE name [act] (argspec...) body...>. Ported from
+   ZilRoutine's own constructor (already read in phase 2c) — confirmed
+   there that ROUTINE has no interpret-time Apply/Eval at all (it's
+   compiled, never run directly), so this only needs to capture the raw,
+   unevaluated pieces for a later compilation pass (phase 3b, not yet
+   built) — same shape as ApplyDefine, and for the same reason (no Eval
+   calls needed) this can be its own procedure. *)
+PROCEDURE ApplyRoutine(restArgs: ZilObj.Zo): ZResult;
+VAR nameAtom, actAtom, argSpecList, bodyList, rest: ZilObj.Zo;
+BEGIN
+  IF (restArgs = NIL) OR (restArgs.first = NIL) OR (restArgs.first.kind # ZilObj.KAtom) THEN
+    RETURN Err("ROUTINE: expected a name atom")
+  END;
+  nameAtom := restArgs.first;
+  rest := restArgs.rest;
+
+  actAtom := NIL;
+  IF (rest # NIL) & (rest.first # NIL) & (rest.first.kind = ZilObj.KAtom) THEN
+    actAtom := rest.first; rest := rest.rest
+  END;
+
+  IF (rest = NIL) OR (rest.first = NIL) OR (rest.first.kind # ZilObj.KList) THEN
+    RETURN Err("ROUTINE: expected an argument list")
+  END;
+  argSpecList := rest.first;
+  bodyList := rest.rest;
+  IF (bodyList = NIL) OR (bodyList.first = NIL) THEN
+    RETURN Err("ROUTINE: empty body")
+  END;
+
+  ZilModel.AddRoutine(nameAtom, actAtom, argSpecList, bodyList);
+  RETURN MkVal(nameAtom)
+END ApplyRoutine;
+
+(* OBJECT/ROOM: <[OBJECT|ROOM] name (prop...) (prop...) ...>. Ported from
+   ZilModelObject's own constructor (read this phase) — confirmed there
+   that a property list's real meaning (a flag list vs an ordinary
+   property vs IN/LOC, etc.) is only interpreted later during compilation,
+   not at registration time, so — like ROUTINE — this just captures the
+   name, the ROOM-vs-OBJECT flag, and the raw chain of property lists
+   as-is, with no Eval calls needed. *)
+PROCEDURE ApplyObject(isRoom: BOOLEAN; restArgs: ZilObj.Zo): ZResult;
+VAR nameAtom, p: ZilObj.Zo;
+BEGIN
+  IF (restArgs = NIL) OR (restArgs.first = NIL) OR (restArgs.first.kind # ZilObj.KAtom) THEN
+    RETURN Err("OBJECT/ROOM: expected a name atom")
+  END;
+  nameAtom := restArgs.first;
+
+  p := restArgs.rest;
+  WHILE (p # NIL) & (p.first # NIL) DO
+    IF p.first.kind # ZilObj.KList THEN RETURN Err("OBJECT/ROOM: each property must be a list") END;
+    p := p.rest
+  END;
+
+  ZilModel.AddObject(nameAtom, isRoom, restArgs.rest);
+  RETURN MkVal(nameAtom)
+END ApplyObject;
 
 (* ------------------------------------------------------------------ *)
 (* Eval — one self-recursive procedure (FORM/LIST handling, and the      *)
@@ -1023,6 +1089,15 @@ BEGIN
     ELSIF isFSubr & ((name = "DEFINE") OR (name = "DEFINE20")) THEN
       RETURN ApplyDefine(FALSE, z.rest)
 
+    ELSIF isFSubr & (name = "ROUTINE") THEN
+      RETURN ApplyRoutine(z.rest)
+
+    ELSIF isFSubr & (name = "OBJECT") THEN
+      RETURN ApplyObject(FALSE, z.rest)
+
+    ELSIF isFSubr & (name = "ROOM") THEN
+      RETURN ApplyObject(TRUE, z.rest)
+
     ELSIF isFSubr THEN
       RETURN Err("unrecognized or not-yet-implemented FSUBR")
 
@@ -1123,6 +1198,7 @@ BEGIN
   Register("PROG", TRUE); Register("REPEAT", TRUE); Register("BIND", TRUE);
   Register("RETURN", FALSE); Register("AGAIN", FALSE);
   Register("DEFINE", TRUE); Register("DEFINE20", TRUE); Register("DEFMAC", TRUE);
+  Register("ROUTINE", TRUE); Register("OBJECT", TRUE); Register("ROOM", TRUE);
   Register("FORM", FALSE); Register("LIST", FALSE); Register("LENGTH?", FALSE);
   Register("SET", FALSE); Register("SETG", FALSE); Register("GLOBAL", FALSE); Register("CONSTANT", FALSE);
   Register("LVAL", FALSE); Register("GVAL", FALSE);
@@ -1143,7 +1219,8 @@ BEGIN
   tAtom.globalVal := tAtom;  (* T is self-valued *)
 
   enclosingProgAtom := ZilObj.Intern("LPROG ");
-  currentDir[0] := 0X
+  currentDir[0] := 0X;
+  ZilModel.Reset
 END InitBuiltins;
 
 END ZilEval.
