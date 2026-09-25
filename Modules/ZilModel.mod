@@ -22,7 +22,7 @@ MODULE ZilModel;
   emit .zap text for each — see the plan doc's phase 3b.
 *)
 
-IMPORT ZilObj;
+IMPORT ZilObj, Strings;
 
 CONST
   MaxRoutines* = 4096;
@@ -37,6 +37,21 @@ CONST
   MaxPropDefaults* = 512;
   MaxPropDefSpecs* = 128;
   MaxTellPatterns* = 128;
+  MaxVocab* = 2048;
+
+  (* PartOfSpeech bits, copied from the original's own enum. The low two
+     bits are the "First" mask, which says which part of speech a word's
+     FIRST data byte describes when it has more than one. *)
+  PsFirstMask*    = 3;
+  PsVerbFirst*    = 1;
+  PsAdjFirst*     = 2;
+  PsDirFirst*     = 3;
+  PsBuzzword*     = 4;
+  PsPreposition*  = 8;
+  PsDirection*    = 16;
+  PsAdjective*    = 32;
+  PsVerb*         = 64;
+  PsObject*       = 128;
 
   (* SynonymRec.kind values *)
   SynPlain* = 0; SynVerb* = 1; SynPrep* = 2; SynAdj* = 3; SynDir* = 4;
@@ -68,8 +83,27 @@ TYPE
      transparent, same reasoning as GLOBAL/CONSTANT/TABLE) exactly as
      given, the same "register now, really interpret later" pattern used
      for ROUTINE/OBJECT's raw property lists. *)
+  (* A decomposed <SYNTAX VERB [prep] OBJECT [(FIND flag)] [(scope opts)]
+     [prep OBJECT ...] = ACTION [PREACTION]> line. The raw arguments are
+     kept too, for diagnostics. Scope option bits are the original's
+     ScopeFlags.Original values; `opts` defaults to OnGround+InRoom+
+     Carried+Held (240) when the line names none, as it does there. *)
   SyntaxRec* = RECORD
-    rawArgs*: ZilObj.Zo   (* raw chain of the SYNTAX call's own arguments *)
+    rawArgs*: ZilObj.Zo;
+    verb*: ARRAY 64 OF CHAR;
+    (* NOTE: this field is `numObjects`, not `nObjects`, because this
+       module already exports a VAR called nObjects (the object count).
+       An exported top-level VAR becomes a bare, unscoped C #define in the
+       generated code, so a RECORD FIELD of the same name is rewritten too
+       and stops existing — `s.nObjects` compiles to `s.ZilModel_nObjects`.
+       Record field names are safe in general; they are not safe when they
+       collide with an exported VAR in the same module. *)
+    numObjects*: INTEGER;
+    prep1*, prep2*: ARRAY 64 OF CHAR;
+    find1*, find2*: ARRAY 64 OF CHAR;
+    opts1*, opts2*: INTEGER;
+    action*, preAction*: ARRAY 64 OF CHAR;
+    actionIdx*: INTEGER      (* index into the action table *)
   END;
 
   (* SYNONYM/VERB-SYNONYM/PREP-SYNONYM/ADJ-SYNONYM/DIR-SYNONYM all share
@@ -113,6 +147,17 @@ TYPE
   TellPatternRec* = RECORD
     tokens*: ZilObj.Zo;
     output*: ZilObj.Zo
+  END;
+
+TYPE
+  (* One dictionary word. `pos` is the set of PartOfSpeech bits it has, and
+     the per-part values are the numbers the parser matches on — assigned
+     counting DOWN from 255 in its own sequence per part of speech, exactly
+     as the original's OldParserVocabFormat does. *)
+  VocabRec* = RECORD
+    text*: ARRAY 64 OF CHAR;
+    pos*: INTEGER;
+    verbVal*, prepVal*, adjVal*, dirVal*, buzzVal*: INTEGER
   END;
 
 VAR
@@ -168,6 +213,10 @@ VAR
   tellPatterns*: ARRAY MaxTellPatterns OF TellPatternRec;
   nTellPatterns*: INTEGER;
 
+  vocab*: ARRAY MaxVocab OF VocabRec;
+  nVocab*: INTEGER;
+  nextVerb*, nextPrep*, nextAdj*, nextBuzz*: INTEGER;
+
 PROCEDURE AddRoutine*(name, act, argSpec, body: ZilObj.Zo);
 BEGIN
   IF nRoutines < MaxRoutines THEN
@@ -215,12 +264,19 @@ BEGIN
   END
 END AddTable;
 
-PROCEDURE AddSyntax*(rawArgs: ZilObj.Zo);
+PROCEDURE AddSyntax*(rawArgs: ZilObj.Zo): INTEGER;
 BEGIN
-  IF nSyntaxes < MaxSyntaxes THEN
-    syntaxes[nSyntaxes].rawArgs := rawArgs;
-    INC(nSyntaxes)
-  END
+  IF nSyntaxes >= MaxSyntaxes THEN RETURN -1 END;
+  syntaxes[nSyntaxes].rawArgs := rawArgs;
+  syntaxes[nSyntaxes].verb[0] := 0X;
+  syntaxes[nSyntaxes].numObjects := 0;
+  syntaxes[nSyntaxes].prep1[0] := 0X; syntaxes[nSyntaxes].prep2[0] := 0X;
+  syntaxes[nSyntaxes].find1[0] := 0X; syntaxes[nSyntaxes].find2[0] := 0X;
+  syntaxes[nSyntaxes].opts1 := 240; syntaxes[nSyntaxes].opts2 := 240;
+  syntaxes[nSyntaxes].action[0] := 0X; syntaxes[nSyntaxes].preAction[0] := 0X;
+  syntaxes[nSyntaxes].actionIdx := -1;
+  INC(nSyntaxes);
+  RETURN nSyntaxes - 1
 END AddSyntax;
 
 PROCEDURE AddSynonym*(kind: INTEGER; original, synonym: ZilObj.Zo);
@@ -276,12 +332,84 @@ BEGIN
   END
 END AddTellPattern;
 
+(* Bitwise OR over a byte. This dialect has no BITS/SET conversion for
+   INTEGERs, and the part-of-speech field really is a byte of flags. *)
+PROCEDURE BitOr*(a, b: INTEGER): INTEGER;
+VAR r, bit: INTEGER;
+BEGIN
+  r := 0; bit := 1;
+  WHILE bit <= 128 DO
+    IF ((a DIV bit) MOD 2 = 1) OR ((b DIV bit) MOD 2 = 1) THEN r := r + bit END;
+    bit := bit * 2
+  END;
+  RETURN r
+END BitOr;
+
+(* Finds a dictionary word by its text, or -1. *)
+PROCEDURE FindVocab*(text: ARRAY OF CHAR): INTEGER;
+VAR i: INTEGER;
+BEGIN
+  i := 0;
+  WHILE i < nVocab DO
+    IF vocab[i].text = text THEN RETURN i END;
+    INC(i)
+  END;
+  RETURN -1
+END FindVocab;
+
+(* Adds `posBits` to the word's parts of speech, creating the word if it is
+   new, and assigns it a number for that part if it doesn't have one yet.
+   Returns its index. A word legitimately has several parts of speech at
+   once — "north" is both a direction and a verb — which is why the parts
+   accumulate rather than replace. *)
+PROCEDURE AddVocab*(text: ARRAY OF CHAR; posBits: INTEGER): INTEGER;
+VAR i: INTEGER;
+BEGIN
+  i := FindVocab(text);
+  IF i < 0 THEN
+    IF nVocab >= MaxVocab THEN RETURN -1 END;
+    i := nVocab; INC(nVocab);
+    Strings.Copy(text, vocab[i].text);
+    vocab[i].pos := 0;
+    vocab[i].verbVal := 0; vocab[i].prepVal := 0; vocab[i].adjVal := 0;
+    vocab[i].dirVal := 0; vocab[i].buzzVal := 0
+  END;
+
+  IF (posBits DIV PsVerb) MOD 2 = 1 THEN
+    IF (vocab[i].pos DIV PsVerb) MOD 2 = 0 THEN
+      vocab[i].verbVal := nextVerb; DEC(nextVerb)
+    END
+  END;
+  IF (posBits DIV PsPreposition) MOD 2 = 1 THEN
+    IF (vocab[i].pos DIV PsPreposition) MOD 2 = 0 THEN
+      vocab[i].prepVal := nextPrep; DEC(nextPrep)
+    END
+  END;
+  IF (posBits DIV PsAdjective) MOD 2 = 1 THEN
+    IF (vocab[i].pos DIV PsAdjective) MOD 2 = 0 THEN
+      vocab[i].adjVal := nextAdj; DEC(nextAdj)
+    END
+  END;
+  IF (posBits DIV PsBuzzword) MOD 2 = 1 THEN
+    IF (vocab[i].pos DIV PsBuzzword) MOD 2 = 0 THEN
+      vocab[i].buzzVal := nextBuzz; DEC(nextBuzz)
+    END
+  END;
+
+  (* the parts of speech are a bit set, so adding one is a union; the
+     part-of-speech field is a single byte, hence bits 0..7 *)
+  vocab[i].pos := BitOr(vocab[i].pos, posBits);
+  RETURN i
+END AddVocab;
+
 PROCEDURE Reset*;
 BEGIN
   zversion := 3; timeStatusLine := FALSE;
   nRoutines := 0; nObjects := 0; nGlobals := 0; nConstants := 0; nTables := 0;
   nSyntaxes := 0; nSynonyms := 0; nDirections := 0; nBuzzwords := 0;
-  nPropDefaults := 0; nPropDefSpecs := 0; nTellPatterns := 0
+  nPropDefaults := 0; nPropDefSpecs := 0; nTellPatterns := 0;
+  nVocab := 0;
+  nextVerb := 255; nextPrep := 255; nextAdj := 255; nextBuzz := 255
 END Reset;
 
 BEGIN

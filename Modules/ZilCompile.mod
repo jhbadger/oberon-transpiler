@@ -70,6 +70,8 @@ CONST
   MaxFlagNames = 64;
   MaxPropNames = 96;
   MaxRenames = 64;
+  MaxStrings = 4096;
+  MaxActions = 512;
 
 TYPE
   LineText = POINTER TO ARRAY OF CHAR;
@@ -114,6 +116,23 @@ VAR
      name and stops doing so afterwards. *)
   renZil, renZap: ARRAY MaxRenames OF ARRAY 64 OF CHAR;
   nRenames: INTEGER;
+
+  (* The packed-string pool. A STRING used as a VALUE (in a table, as an
+     operand, as TELL's packed-string fallback) needs an address to point
+     at, which means the string has to be emitted separately and referred
+     to by a symbol. zapf's .GSTR directive does exactly that: it encodes
+     the text and defines the symbol as its packed address. *)
+  strPool: ARRAY MaxStrings OF LineText;
+  nStrings: INTEGER;
+
+  (* Actions, numbered by CompileSyntax. An action has two names: the
+     ROUTINE that implements it (V-TELL) and the CONSTANT that identifies
+     it (V?TELL). The original derives the second from the first by turning
+     a leading "V-" into "V?", or prefixing "V?" otherwise, and keys
+     everything by the constant. *)
+  actionRoutine: ARRAY MaxActions OF ARRAY 64 OF CHAR;
+  actionConst: ARRAY MaxActions OF ARRAY 64 OF CHAR;
+  nActions: INTEGER;
 
   (* object flags and properties, registered by CompileObjects *)
   flagNameTab: ARRAY MaxFlagNames OF ARRAY 64 OF CHAR;
@@ -283,6 +302,34 @@ END FindConstantIdx;
    values could legitimately appear in two different tables. The original
    does the same thing (a Dictionary<ZilTable, ITableBuilder> keyed by
    reference). *)
+(* Interns a string into the packed-string pool and yields the symbol that
+   will stand for its address. Identical texts share one entry — the
+   original pools strings the same way, and a game repeats short strings a
+   lot. *)
+PROCEDURE InternString(text: ARRAY OF CHAR; VAR sym: ARRAY OF CHAR): BOOLEAN;
+VAR i: INTEGER; n: ARRAY 16 OF CHAR; t: LineText;
+BEGIN
+  i := 0;
+  WHILE i < nStrings DO
+    IF strPool[i]^ = text THEN
+      Strings.IntToStr(i, n);
+      Strings.Copy("STR?", sym); Strings.Append(n, sym);
+      RETURN TRUE
+    END;
+    INC(i)
+  END;
+  IF nStrings >= MaxStrings THEN
+    Err("too many distinct strings"); RETURN FALSE
+  END;
+  NEW(t, Strings.Length(text) + 1);
+  Strings.Copy(text, t^);
+  strPool[nStrings] := t;
+  Strings.IntToStr(nStrings, n);
+  Strings.Copy("STR?", sym); Strings.Append(n, sym);
+  INC(nStrings);
+  RETURN TRUE
+END InternString;
+
 PROCEDURE FindTableIdx*(t: ZilObj.Zo): INTEGER;
 VAR i: INTEGER;
 BEGIN
@@ -378,7 +425,7 @@ END VarName;
    would just move the error later. STRING values need a .GSTR/.STR
    definition to point at and are left for the strings slice. *)
 PROCEDURE ConstantText(z: ZilObj.Zo; VAR s: ARRAY OF CHAR): BOOLEAN;
-VAR name, propNm: ARRAY 64 OF CHAR; i: INTEGER;
+VAR name, propNm: ARRAY 64 OF CHAR; strTmp: ARRAY 4096 OF CHAR; i: INTEGER;
 BEGIN
   (* <GVAL X> in a constant position is just X — unwrap and retry, matching
      the original's own `form.IsGVAL(...) -> expr = globalAtom; continue`
@@ -396,7 +443,15 @@ BEGIN
     i := FindTableIdx(z);
     IF i < 0 THEN RETURN FALSE END;   (* a TEMP-TABLE: never emitted *)
     TableLabel(i, s); RETURN TRUE
-  ELSIF z.kind = ZilObj.KFalse THEN Strings.Copy("0", s); RETURN TRUE
+  ELSIF (z.kind = ZilObj.KFalse) OR ((z.kind = ZilObj.KForm) & ZilObj.IsEmpty(z)) THEN
+    (* `<>` is FALSE, and an object's property list and a table's contents
+       are raw and never evaluated, so the literal really does arrive here
+       shaped as an empty FORM — the same case CompileOperand handles for
+       routine bodies. *)
+    Strings.Copy("0", s); RETURN TRUE
+  ELSIF z.kind = ZilObj.KString THEN
+    TranslateZilString(z.strBuf^, strTmp);
+    RETURN InternString(strTmp, s)
   ELSIF z.kind = ZilObj.KAtom THEN
     Strings.Copy(z.atomText, name);
     IF name = "T" THEN Strings.Copy("1", s); RETURN TRUE END;
@@ -409,9 +464,31 @@ BEGIN
        original reaches these the same way: DefineFlag/DefineProperty each
        add a Constants entry. *)
     IF FindFlagIdx(name) >= 0 THEN Strings.Copy(name, s); RETURN TRUE END;
+    (* a dictionary word is referenced by its W?NAME symbol, which the
+       vocabulary table defines *)
+    IF ZilModel.FindVocab(name) >= 0 THEN
+      Strings.Copy("W?", s); Strings.Append(name, s); RETURN TRUE
+    END;
     IF (name[0] = "P") & (name[1] = "?") THEN
       Strings.Copy(name, propNm); Strings.Delete(propNm, 0, 2);
       IF FindPropIdx(propNm) >= 0 THEN Strings.Copy(name, s); RETURN TRUE END
+    END;
+    (* the symbols the syntax and vocabulary tables define: V?ACTION is an
+       action number, PR?WORD a preposition number, A?WORD an adjective
+       number, W?WORD a dictionary word's address *)
+    IF (name[0] = "V") & (name[1] = "?") THEN
+      i := 0;
+      WHILE i < nActions DO
+        IF actionConst[i] = name THEN Strings.Copy(name, s); RETURN TRUE END;
+        INC(i)
+      END
+    END;
+    IF ((name[0] = "P") & (name[1] = "R") & (name[2] = "?"))
+       OR ((name[0] = "A") & (name[1] = "?"))
+       OR ((name[0] = "W") & (name[1] = "?")) THEN
+      Strings.Copy(name, propNm);
+      IF name[1] = "R" THEN Strings.Delete(propNm, 0, 3) ELSE Strings.Delete(propNm, 0, 2) END;
+      IF ZilModel.FindVocab(propNm) >= 0 THEN Strings.Copy(name, s); RETURN TRUE END
     END;
     RETURN FALSE
   END;
@@ -440,8 +517,10 @@ PROCEDURE SimpleBuiltin(name: ARRAY OF CHAR; VAR zap: ARRAY OF CHAR;
 BEGIN
   store := TRUE;
   (* value-producing *)
-  IF (name = "GET") OR (name = "NTH") THEN Strings.Copy("GET", zap); nargs := 2
-  ELSIF name = "GETB" THEN Strings.Copy("GETB", zap); nargs := 2
+  (* ZGET/ZPUT are the word-indexed table accessors DEFSTRUCT generates for
+     a TABLE-based record; they are GET/PUT under another name. *)
+  IF (name = "GET") OR (name = "NTH") OR (name = "ZGET") THEN Strings.Copy("GET", zap); nargs := 2
+  ELSIF (name = "GETB") OR (name = "ZGETB") THEN Strings.Copy("GETB", zap); nargs := 2
   ELSIF name = "GETP" THEN Strings.Copy("GETP", zap); nargs := 2
   ELSIF name = "GETPT" THEN Strings.Copy("GETPT", zap); nargs := 2
   ELSIF name = "NEXTP" THEN Strings.Copy("NEXTP", zap); nargs := 2
@@ -457,8 +536,8 @@ BEGIN
   (* void *)
   ELSE
     store := FALSE;
-    IF name = "PUT" THEN Strings.Copy("PUT", zap); nargs := 3
-    ELSIF name = "PUTB" THEN Strings.Copy("PUTB", zap); nargs := 3
+    IF (name = "PUT") OR (name = "ZPUT") THEN Strings.Copy("PUT", zap); nargs := 3
+    ELSIF (name = "PUTB") OR (name = "ZPUTB") THEN Strings.Copy("PUTB", zap); nargs := 3
     ELSIF name = "PUTP" THEN Strings.Copy("PUTP", zap); nargs := 3
     ELSIF name = "MOVE" THEN Strings.Copy("MOVE", zap); nargs := 2
     ELSIF name = "REMOVE" THEN Strings.Copy("REMOVE", zap); nargs := 1
@@ -618,6 +697,41 @@ BEGIN
   RETURN TRUE
 END SpillToTemp;
 
+(* The builtins CompileStmt handles itself. CompileOperand delegates these
+   to it rather than duplicating them, because they are perfectly usable as
+   VALUES too — <SET X <COND ...>> and <+ <PROG () ...> 1> are ordinary ZIL
+   — and CompileStmt already knows how to leave a result behind. The two
+   procedures are mutually recursive as a result; the recursion terminates
+   because CompileStmt only falls back to CompileOperand for heads that are
+   NOT in this list. *)
+(* The builtins that are BRANCH instructions — they answer a question and
+   have no value of their own. Used as a value (`<SET X <FSET? .O ,BIT>>`),
+   the branch has to be turned into a 1 or a 0, which is what
+   CompileOperand does with them; used as a condition they compile to the
+   branch directly, which is what CompileCondition does. The original draws
+   the same distinction, as its PredCall vs ValueCall builtin classes. *)
+PROCEDURE IsPredicateBuiltin(name: ARRAY OF CHAR): BOOLEAN;
+BEGIN
+  RETURN (name = "ZERO?") OR (name = "0?") OR (name = "1?")
+      OR (name = "EQUAL?") OR (name = "=?") OR (name = "==?")
+      OR (name = "N==?") OR (name = "N=?")
+      OR (name = "L?") OR (name = "G?") OR (name = "L=?") OR (name = "G=?")
+      OR (name = "FSET?") OR (name = "IN?") OR (name = "BTST")
+      OR (name = "IGRTR?") OR (name = "DLESS?")
+      OR (name = "NOT") OR (name = "F?") OR (name = "T?")
+END IsPredicateBuiltin;
+
+PROCEDURE IsStatementBuiltin(name: ARRAY OF CHAR): BOOLEAN;
+BEGIN
+  RETURN (name = "COND") OR (name = "PROG") OR (name = "REPEAT") OR (name = "BIND")
+      OR (name = "DO")
+      OR (name = "TELL") OR (name = "SET") OR (name = "SETG")
+      OR (name = "RETURN") OR (name = "AGAIN") OR (name = "QUIT")
+      OR (name = "RTRUE") OR (name = "RFALSE")
+      OR (name = "PRINTI") OR (name = "PRINTR") OR (name = "PRINTN")
+      OR (name = "PRINTC") OR (name = "CRLF")
+END IsStatementBuiltin;
+
 (* Compiles `z` as a value-producing expression, emitting whatever
    instructions are needed and returning the ZAP operand text that holds
    the result (a literal number, a local variable's bare name, or
@@ -684,7 +798,9 @@ BEGIN
     Strings.Copy(z.rest.first.atomText, headName);
     IF FindGlobalIdx(headName) >= 0 THEN Strings.Copy(headName, opText); RETURN TRUE END;
     IF ConstantText(z.rest.first, opText) THEN RETURN TRUE END;
-    Err("CompileOperand: GVAL of an undefined global/constant/routine/object"); RETURN FALSE
+    Strings.Copy("CompileOperand: GVAL of an undefined global/constant/routine/object: ", errBuf);
+    Strings.Append(headName, errBuf);
+    Err(errBuf); RETURN FALSE
 
   ELSIF z.kind = ZilObj.KForm THEN
     IF (z.first = NIL) OR (z.first.kind # ZilObj.KAtom) THEN
@@ -695,7 +811,28 @@ BEGIN
     END;
     Strings.Copy(z.first.atomText, headName);
 
-    IF (headName = "+") OR (headName = "-") OR (headName = "*") OR (headName = "/")
+    IF IsStatementBuiltin(headName) THEN
+      RETURN CompileStmt(z, TRUE, opText)
+
+    ELSIF IsPredicateBuiltin(headName) THEN
+      (* materialise the branch as a value: assume true, and clear it on
+         the path where the condition doesn't hold *)
+      AllocTemp(andTmp);
+      IF tempMax > MaxLocals THEN
+        Err("CompileOperand: a predicate used as a value needs more temporaries than a routine has locals");
+        RETURN FALSE
+      END;
+      NewLabel(andEnd);
+      W("	SET '"); W(andTmp); W(",1"); WLn;
+      ok := CompileCondition(z, andEnd, TRUE);
+      IF ~ok THEN RETURN FALSE END;
+      W("	SET '"); W(andTmp); W(",0"); WLn;
+      W(andEnd); W(":"); WLn;
+      FreeTemp;
+      Strings.Copy(andTmp, opText);
+      RETURN TRUE
+
+    ELSIF (headName = "+") OR (headName = "-") OR (headName = "*") OR (headName = "/")
        OR (headName = "MOD") THEN
       IF (z.rest = NIL) OR (z.rest.first = NIL) OR (z.rest.rest = NIL) OR (z.rest.rest.first = NIL) THEN
         Err("CompileOperand: arithmetic op expects 2 args"); RETURN FALSE
@@ -936,13 +1073,32 @@ BEGIN
   ELSIF (z.kind = ZilObj.KForm) & (z.first # NIL) & (z.first.kind = ZilObj.KAtom) THEN
     Strings.Copy(z.first.atomText, headName);
 
-    IF headName = "ZERO?" THEN
+    IF (headName = "ZERO?") OR (headName = "0?") THEN
       IF (z.rest = NIL) OR (z.rest.first = NIL) THEN
         Err("CompileCondition: ZERO? expects 1 arg"); RETURN FALSE
       END;
       ok := CompileOperand(z.rest.first, opText);
       IF ~ok THEN RETURN FALSE END;
       EmitPredInstr("ZERO?", opText, empty, label, polarity); RETURN TRUE
+
+    ELSIF headName = "BTST" THEN
+      (* <BTST value mask> — "are all the mask's bits set in value". A
+         branch instruction, like the comparisons. *)
+      IF (z.rest = NIL) OR (z.rest.first = NIL) OR (z.rest.rest = NIL) OR (z.rest.rest.first = NIL) THEN
+        Err("CompileCondition: BTST expects 2 args"); RETURN FALSE
+      END;
+      ok := CompileOperand(z.rest.first, leftText);
+      IF ~ok THEN RETURN FALSE END;
+      spilled := (leftText = "STACK") & ~IsSimpleOperand(z.rest.rest.first);
+      IF spilled THEN
+        ok := SpillToTemp(leftText);
+        IF ~ok THEN RETURN FALSE END
+      END;
+      ok := CompileOperand(z.rest.rest.first, rightText);
+      IF ~ok THEN RETURN FALSE END;
+      IF spilled THEN FreeTemp END;
+      EmitPredInstr("BTST", leftText, rightText, label, polarity);
+      RETURN TRUE
 
     ELSIF (headName = "FSET?") OR (headName = "IN?") THEN
       (* object predicates: "does this object have this flag set" and "is
@@ -997,6 +1153,16 @@ BEGIN
       IF headName = "G=?" THEN EmitPredInstr("LESS?", leftText, rightText, label, ~polarity)
       ELSE EmitPredInstr("GRTR?", leftText, rightText, label, ~polarity)
       END;
+      RETURN TRUE
+
+    ELSIF headName = "1?" THEN
+      (* <1? x> is "does x equal 1" — one EQUAL? against a literal *)
+      IF (z.rest = NIL) OR (z.rest.first = NIL) THEN
+        Err("CompileCondition: 1? expects 1 arg"); RETURN FALSE
+      END;
+      ok := CompileOperand(z.rest.first, leftText);
+      IF ~ok THEN RETURN FALSE END;
+      EmitPredInstr("EQUAL?", leftText, "1", label, polarity);
       RETURN TRUE
 
     ELSIF (headName = "N==?") OR (headName = "N=?") THEN
@@ -1424,6 +1590,8 @@ VAR headName: ARRAY 64 OF CHAR; opText, targetName: ARRAY 64 OF CHAR;
     againLabel, retLabel: ARRAY 16 OF CHAR; progResult: ARRAY 64 OF CHAR;
     progRepeat, progTerm: BOOLEAN; progArgs, item: ZilObj.Zo;
     blkIdx, nProgBinds: INTEGER;
+    (* DO *)
+    doStart, doEnd, doStep: ZilObj.Zo; doDown, doPre: BOOLEAN;
     (* simple one-instruction builtins *)
     sbOpcode: ARRAY 16 OF CHAR; sbArgs: ARRAY 7, 64 OF CHAR; sbErr: ARRAY 256 OF CHAR;
     sbStore, sbSpilled: BOOLEAN; sbN, sbCount, sbI, sbSpills: INTEGER; ap, ap2: ZilObj.Zo;
@@ -1574,6 +1742,114 @@ BEGIN
         IF progRepeat THEN termFlag := TRUE ELSE termFlag := progTerm END
       END;
       IF wantResult THEN Strings.Copy("STACK", resultText) END;
+      RETURN TRUE
+
+    ELSIF headName = "DO" THEN
+      (* <DO (VAR start end [step]) body...> — a counted loop. Ported from
+         Compilation.Loops.cs's DoLoop: the counter is an inner local; when
+         `end` is a FORM it is a PREDICATE tested before the body, and
+         otherwise it is a value the counter is compared against after the
+         increment. The direction is taken from the step when there is one,
+         and otherwise from whether a constant `end` is below a constant
+         `start` — which is what makes <DO (I 10 1)> count down. *)
+      IF (z.rest = NIL) OR (z.rest.first = NIL) OR (z.rest.first.kind # ZilObj.KList)
+         OR (z.rest.first.first = NIL) OR (z.rest.first.first.kind # ZilObj.KAtom) THEN
+        Err("CompileStmt: DO expects (VAR start end [step])"); RETURN FALSE
+      END;
+      progArgs := z.rest.first;          (* the spec list *)
+      doStart := progArgs.rest;
+      IF (doStart = NIL) OR (doStart.first = NIL) OR (doStart.rest = NIL)
+         OR (doStart.rest.first = NIL) THEN
+        Err("CompileStmt: DO expects a start and an end"); RETURN FALSE
+      END;
+      doEnd := doStart.rest.first;
+      doStep := NIL;
+      IF (doStart.rest.rest # NIL) & (doStart.rest.rest.first # NIL) THEN
+        doStep := doStart.rest.rest.first
+      END;
+
+      (* the counter's initial value is computed BEFORE the binding exists *)
+      ok := CompileOperand(doStart.first, opText);
+      IF ~ok THEN RETURN FALSE END;
+      IF ~AllocInnerLocal(progArgs.first.atomText) THEN RETURN FALSE END;
+      ResolveLocal(progArgs.first.atomText, targetName);
+      W("	SET '"); W(targetName); W(","); W(opText); WLn;
+
+      (* counting down when the step says so, or when a constant end is
+         below a constant start *)
+      doDown := FALSE;
+      IF doStep # NIL THEN
+        doDown := (doStep.kind = ZilObj.KFix) & (doStep.fixVal < 0)
+      ELSE
+        doDown := (doStart.first.kind = ZilObj.KFix) & (doEnd.kind = ZilObj.KFix)
+                  & (doEnd.fixVal < doStart.first.fixVal)
+      END;
+
+      IF nBlocks >= MaxBlocks THEN
+        Err("CompileStmt: DO nested too deeply"); RETURN FALSE
+      END;
+      NewLabel(againLabel); NewLabel(retLabel);
+      Strings.Copy(againLabel, blockAgain[nBlocks]);
+      Strings.Copy(retLabel, blockReturn[nBlocks]);
+      blockNames[nBlocks][0] := 0X;
+      blockWantResult[nBlocks] := wantResult;
+      blockReturned[nBlocks] := FALSE;
+      blockHasReturn[nBlocks] := TRUE;
+      INC(nBlocks);
+
+      W(againLabel); W(":"); WLn;
+
+      (* a FORM end is a predicate, tested before the body *)
+      doPre := doEnd.kind = ZilObj.KForm;
+      IF doPre THEN
+        ok := CompileCondition(doEnd, retLabel, TRUE);
+        IF ~ok THEN DEC(nBlocks); PopInnerLocals(1); RETURN FALSE END
+      END;
+
+      bp := progArgs.rest.rest;
+      IF doStep # NIL THEN bp := bp.rest END;
+      bp := z.rest.rest;
+      WHILE (bp # NIL) & (bp.first # NIL) DO
+        ok := CompileStmt(bp.first, FALSE, progResult);
+        IF ~ok THEN DEC(nBlocks); PopInnerLocals(1); RETURN FALSE END;
+        bp := bp.rest
+      END;
+
+      (* the increment *)
+      IF doStep # NIL THEN
+        ok := CompileOperand(doStep, opText);
+        IF ~ok THEN DEC(nBlocks); PopInnerLocals(1); RETURN FALSE END;
+        IF doDown & (doStep.kind = ZilObj.KFix) THEN
+          FixText(-doStep.fixVal, opText);
+          W("	SUB "); W(targetName); W(","); W(opText);
+          W(" >"); W(targetName); WLn
+        ELSE
+          W("	ADD "); W(targetName); W(","); W(opText);
+          W(" >"); W(targetName); WLn
+        END
+      ELSIF doDown THEN
+        W("	DEC '"); W(targetName); WLn
+      ELSE
+        W("	INC '"); W(targetName); WLn
+      END;
+
+      (* a value end is compared after the increment *)
+      IF ~doPre THEN
+        ok := CompileOperand(doEnd, opText);
+        IF ~ok THEN DEC(nBlocks); PopInnerLocals(1); RETURN FALSE END;
+        IF doDown THEN EmitPredInstr("LESS?", targetName, opText, retLabel, TRUE)
+        ELSE EmitPredInstr("GRTR?", targetName, opText, retLabel, TRUE) END
+      END;
+      EmitBranch(againLabel);
+
+      DEC(nBlocks);
+      PopInnerLocals(1);
+      W(retLabel); W(":"); WLn;
+      IF wantResult THEN
+        W("	PUSH 0"); WLn;
+        Strings.Copy("STACK", resultText)
+      END;
+      termFlag := FALSE;
       RETURN TRUE
 
     ELSIF headName = "AGAIN" THEN
@@ -2088,6 +2364,15 @@ BEGIN
     W("="); W(text); WLn;
     INC(j)
   END;
+  (* The parser tables are reached through four globals that the COMPILER
+     defines, not the source — the original creates them on demand with
+     GetGlobal(...).DefaultValue = table. *)
+  IF ZilModel.nSyntaxes > 0 THEN
+    W("	.GVAR VERBS=VTBL"); WLn;
+    W("	.GVAR ACTIONS=ATBL"); WLn;
+    W("	.GVAR PREACTIONS=PATBL"); WLn;
+    W("	.GVAR PREPOSITIONS=PRTBL"); WLn
+  END;
   W("	.ENDT"); WLn; WLn;
   RETURN TRUE
 END CompileGlobals;
@@ -2212,10 +2497,15 @@ BEGIN
   RETURN (name = "DESC") OR (name = "IN") OR (name = "LOC") OR (name = "FLAGS")
 END IsPseudoProperty;
 
+(* SYNONYM and ADJECTIVE are real properties, but their values are
+   DICTIONARY WORDS rather than ordinary constants, so they are emitted by
+   their own code below. PSEUDO (a list of word/routine pairs for scenery)
+   still needs machinery this port doesn't have. *)
+PROCEDURE IsWordProperty(name: ARRAY OF CHAR): BOOLEAN;
+BEGIN RETURN (name = "SYNONYM") OR (name = "ADJECTIVE") END IsWordProperty;
+
 PROCEDURE IsUnsupportedProperty(name: ARRAY OF CHAR): BOOLEAN;
-BEGIN
-  RETURN (name = "SYNONYM") OR (name = "ADJECTIVE") OR (name = "PSEUDO")
-END IsUnsupportedProperty;
+BEGIN RETURN name = "PSEUDO" END IsUnsupportedProperty;
 
 (* A direction property like (NORTH TO CELLAR) is a complex PROPDEF pattern,
    recognised here by the TO/PER/SORRY keywords real source uses. *)
@@ -2268,6 +2558,22 @@ BEGIN
             IF body.first.kind = ZilObj.KAtom THEN
               k := RegisterFlag(body.first.atomText);
               IF k < 0 THEN Err("CompileObjects: too many flags"); RETURN FALSE END
+            END;
+            body := body.rest
+          END
+        ELSIF IsWordProperty(nm) THEN
+          (* an object's nouns and adjectives are dictionary words *)
+          k := RegisterProp(nm);
+          IF k < 0 THEN Err("CompileObjects: too many properties"); RETURN FALSE END;
+          body := p.first.rest;
+          WHILE (body # NIL) & (body.first # NIL) DO
+            IF body.first.kind = ZilObj.KAtom THEN
+              IF nm = "SYNONYM" THEN
+                j := ZilModel.AddVocab(body.first.atomText, ZilModel.PsObject)
+              ELSE
+                j := ZilModel.AddVocab(body.first.atomText, ZilModel.PsAdjective)
+              END;
+              IF j < 0 THEN Err("CompileObjects: too many vocabulary words"); RETURN FALSE END
             END;
             body := body.rest
           END
@@ -2459,6 +2765,35 @@ BEGIN
             Strings.Append(propNameTab[k], errBuf);
             Err(errBuf); RETURN FALSE
           END;
+          IF IsWordProperty(propNameTab[k]) THEN
+            (* SYNONYM holds word addresses (two bytes each). ADJECTIVE
+               holds the adjective NUMBER in V1-3 — one byte, via the
+               A?NAME constant — and the word address in V4+, which is the
+               original's own version split. *)
+            IF (propNameTab[k] = "ADJECTIVE") & (ZilModel.zversion < 4) THEN
+              FixText(nOwnProps, text);
+              W("	.PROP "); W(text); W(",P?"); W(propNameTab[k]); WLn;
+              v := body;
+              WHILE (v # NIL) & (v.first # NIL) DO
+                IF v.first.kind # ZilObj.KAtom THEN
+                  Err("CompileObjects: ADJECTIVE values must be atoms"); RETURN FALSE
+                END;
+                W("	.BYTE A?"); W(v.first.atomText); WLn;
+                v := v.rest
+              END
+            ELSE
+              FixText(nOwnProps * 2, text);
+              W("	.PROP "); W(text); W(",P?"); W(propNameTab[k]); WLn;
+              v := body;
+              WHILE (v # NIL) & (v.first # NIL) DO
+                IF v.first.kind # ZilObj.KAtom THEN
+                  Err("CompileObjects: SYNONYM values must be atoms"); RETURN FALSE
+                END;
+                W("	.WORD W?"); W(v.first.atomText); WLn;
+                v := v.rest
+              END
+            END
+          ELSE
           FixText(nOwnProps * 2, text);
           W("	.PROP "); W(text); W(",P?"); W(propNameTab[k]); WLn;
           v := body;
@@ -2468,10 +2803,13 @@ BEGIN
               Strings.Append(propNameTab[k], errBuf);
               Strings.Append(" of object ", errBuf);
               Strings.Append(o.name.atomText, errBuf);
+              Strings.Append(": ", errBuf);
+              ZilObj.PrintTo(v.first, nm); Strings.Append(nm, errBuf);
               Err(errBuf); RETURN FALSE
             END;
             W("	.WORD "); W(text); WLn;
             v := v.rest
+          END
           END
         END;
         p := p.rest
@@ -2513,6 +2851,346 @@ END CompileObjects;
    original's Compilation.Objects.cs and Compilation.Syntax.cs); until then
    this keeps the header's OBJECT and VOCAB pointers valid rather than
    aiming them at whatever byte happens to follow. *)
+(* ---------------- syntax, action and verb tables ----------------
+   Ported from Compilation.Syntax.cs. Four tables, all read directly by the
+   library's parser at run time (see zillib/parser.zil):
+
+     VTBL   one word per possible verb value, indexed <- 255 verbValue>,
+            pointing at that verb's syntax table
+     ST?V   a verb's syntax table: a count byte, then one 8-byte line each
+     ATBL   one word per action: the action routine
+     PATBL  one word per action: the pre-action routine, or 0
+     PRTBL  a count word, then (word address, PR? number) per preposition
+
+   The 8-byte line is the original's "ZILF 1.1 extended syntax line
+   format": nobj, prep1, prep2, find1, find2, opts1, opts2, action — where
+   nobj's low two bits are the object count. Lines are emitted in REVERSE
+   definition order within a verb, as the original does, because the parser
+   matches them from the end. *)
+PROCEDURE CompileSyntax(): BOOLEAN;
+VAR i, j, k, n, act: INTEGER;
+    verbDone: ARRAY ZilModel.MaxSyntaxes OF BOOLEAN;
+    num, text: ARRAY 64 OF CHAR;
+
+  (* V-TELL -> V?TELL; anything else gets a V? prefix *)
+  PROCEDURE ConstNameOf(routine: ARRAY OF CHAR; VAR out: ARRAY OF CHAR);
+  BEGIN
+    Strings.Copy(routine, out);
+    IF (Strings.Length(out) > 2) & (out[0] = "V") & (out[1] = "-") THEN
+      out[1] := "?"
+    ELSE
+      Strings.Copy("V?", out); Strings.Append(routine, out)
+    END
+  END ConstNameOf;
+
+  PROCEDURE ActionIdx(cname: ARRAY OF CHAR): INTEGER;
+  VAR a: INTEGER;
+  BEGIN
+    a := 0;
+    WHILE a < nActions DO
+      IF actionConst[a] = cname THEN RETURN a END;
+      INC(a)
+    END;
+    RETURN -1
+  END ActionIdx;
+
+BEGIN
+  IF ZilModel.nSyntaxes = 0 THEN RETURN TRUE END;
+
+  (* --- action numbering, in definition order --- *)
+  nActions := 0;
+  FOR i := 0 TO ZilModel.nSyntaxes - 1 DO
+    IF ZilModel.syntaxes[i].action[0] # 0X THEN
+      ConstNameOf(ZilModel.syntaxes[i].action, text);
+      act := ActionIdx(text);
+      IF act < 0 THEN
+        IF nActions >= MaxActions THEN
+          Err("CompileSyntax: too many actions"); RETURN FALSE
+        END;
+        act := nActions;
+        Strings.Copy(ZilModel.syntaxes[i].action, actionRoutine[nActions]);
+        Strings.Copy(text, actionConst[nActions]);
+        INC(nActions)
+      END;
+      ZilModel.syntaxes[i].actionIdx := act
+    END
+  END;
+
+  (* --- V?NAME action constants --- *)
+  W("	; actions"); WLn;
+  FOR i := 0 TO nActions - 1 DO
+    Strings.IntToStr(i, num);
+    W("	"); W(actionConst[i]); W("="); W(num); WLn
+  END;
+  WLn;
+
+  (* --- PR?NAME preposition constants --- *)
+  W("	; prepositions"); WLn;
+  FOR i := 0 TO ZilModel.nVocab - 1 DO
+    IF (ZilModel.vocab[i].pos DIV ZilModel.PsPreposition) MOD 2 = 1 THEN
+      Strings.IntToStr(ZilModel.vocab[i].prepVal, num);
+      W("	PR?"); W(ZilModel.vocab[i].text); W("="); W(num); WLn
+    END
+  END;
+  WLn;
+
+  (* --- one syntax table per verb --- *)
+  FOR i := 0 TO ZilModel.nSyntaxes - 1 DO verbDone[i] := FALSE END;
+  FOR i := 0 TO ZilModel.nSyntaxes - 1 DO
+    IF ~verbDone[i] THEN
+      (* count this verb's lines *)
+      n := 0;
+      FOR j := i TO ZilModel.nSyntaxes - 1 DO
+        IF ZilModel.syntaxes[j].verb = ZilModel.syntaxes[i].verb THEN
+          verbDone[j] := TRUE; INC(n)
+        END
+      END;
+
+      W("ST?"); W(ZilModel.syntaxes[i].verb); W(":: .TABLE"); WLn;
+      Strings.IntToStr(n, num);
+      W("	.BYTE "); W(num); WLn;
+
+      (* reverse definition order, as the original emits them *)
+      FOR j := ZilModel.nSyntaxes - 1 TO i BY -1 DO
+        IF ZilModel.syntaxes[j].verb = ZilModel.syntaxes[i].verb THEN
+          Strings.IntToStr(ZilModel.syntaxes[j].numObjects, num);
+          W("	.BYTE "); W(num); WLn;
+
+          IF ZilModel.syntaxes[j].prep1[0] # 0X THEN
+            W("	.BYTE PR?"); W(ZilModel.syntaxes[j].prep1); WLn
+          ELSE W("	.BYTE 0"); WLn END;
+          IF ZilModel.syntaxes[j].prep2[0] # 0X THEN
+            W("	.BYTE PR?"); W(ZilModel.syntaxes[j].prep2); WLn
+          ELSE W("	.BYTE 0"); WLn END;
+
+          IF ZilModel.syntaxes[j].find1[0] # 0X THEN
+            W("	.BYTE "); W(ZilModel.syntaxes[j].find1); WLn
+          ELSE W("	.BYTE 0"); WLn END;
+          IF ZilModel.syntaxes[j].find2[0] # 0X THEN
+            W("	.BYTE "); W(ZilModel.syntaxes[j].find2); WLn
+          ELSE W("	.BYTE 0"); WLn END;
+
+          Strings.IntToStr(ZilModel.syntaxes[j].opts1, num);
+          W("	.BYTE "); W(num); WLn;
+          Strings.IntToStr(ZilModel.syntaxes[j].opts2, num);
+          W("	.BYTE "); W(num); WLn;
+
+          IF ZilModel.syntaxes[j].actionIdx >= 0 THEN
+            W("	.BYTE "); W(actionConst[ZilModel.syntaxes[j].actionIdx]); WLn
+          ELSE W("	.BYTE 0"); WLn END
+        END
+      END;
+      W("	.ENDT"); WLn; WLn
+    END
+  END;
+
+  (* --- VTBL: one word per possible verb value, indexed 255-verbValue --- *)
+  W("VTBL:: .TABLE"); WLn;
+  FOR k := 255 TO 1 BY -1 DO
+    (* find a verb whose value is k *)
+    Strings.Copy("0", text);
+    FOR i := 0 TO ZilModel.nSyntaxes - 1 DO
+      j := ZilModel.FindVocab(ZilModel.syntaxes[i].verb);
+      IF (j >= 0) & (ZilModel.vocab[j].verbVal = k) THEN
+        Strings.Copy("ST?", text); Strings.Append(ZilModel.syntaxes[i].verb, text)
+      END
+    END;
+    W("	.WORD "); W(text); WLn
+  END;
+  W("	.ENDT"); WLn; WLn;
+
+  (* --- action and pre-action routine tables --- *)
+  W("ATBL:: .TABLE"); WLn;
+  FOR i := 0 TO nActions - 1 DO
+    IF FindRoutineIdx(actionRoutine[i]) >= 0 THEN
+      W("	.WORD "); W(actionRoutine[i]); WLn
+    ELSE
+      W("	.WORD 0"); WLn
+    END
+  END;
+  W("	.ENDT"); WLn; WLn;
+
+  W("PATBL:: .TABLE"); WLn;
+  FOR i := 0 TO nActions - 1 DO
+    Strings.Copy("0", text);
+    FOR j := 0 TO ZilModel.nSyntaxes - 1 DO
+      IF (ZilModel.syntaxes[j].actionIdx = i)
+         & (ZilModel.syntaxes[j].preAction[0] # 0X)
+         & (FindRoutineIdx(ZilModel.syntaxes[j].preAction) >= 0) THEN
+        Strings.Copy(ZilModel.syntaxes[j].preAction, text)
+      END
+    END;
+    W("	.WORD "); W(text); WLn
+  END;
+  W("	.ENDT"); WLn; WLn;
+
+  (* --- preposition table: a count, then (word, number) pairs --- *)
+  n := 0;
+  FOR i := 0 TO ZilModel.nVocab - 1 DO
+    IF (ZilModel.vocab[i].pos DIV ZilModel.PsPreposition) MOD 2 = 1 THEN INC(n) END
+  END;
+  W("PRTBL:: .TABLE"); WLn;
+  Strings.IntToStr(n, num);
+  W("	.WORD "); W(num); WLn;
+  FOR i := 0 TO ZilModel.nVocab - 1 DO
+    IF (ZilModel.vocab[i].pos DIV ZilModel.PsPreposition) MOD 2 = 1 THEN
+      W("	.WORD W?"); W(ZilModel.vocab[i].text); WLn;
+      W("	.WORD PR?"); W(ZilModel.vocab[i].text); WLn
+    END
+  END;
+  W("	.ENDT"); WLn; WLn;
+  RETURN TRUE
+END CompileSyntax;
+
+(* Emits the dictionary. Ported from GameBuilder.FinishSyntax plus
+   OldParserWord.WriteToBuilder, which together define the V1-3 layout:
+
+     VOCAB:: .TABLE
+         .BYTE <count of self-inserting break characters>
+         .BYTE <each break character>
+         .BYTE <entry length>        ; z-word bytes + data bytes
+         .WORD <word count>
+         .VOCBEG <entry length>,<z-word bytes>
+         W?FOO:: .ZWORD "foo"
+         .BYTE <part-of-speech flags>,<value 1>,<value 2>
+         ...
+         .VOCEND
+         .ENDT
+
+   The Z-character encoding — by far the hardest part of a dictionary — is
+   not done here at all: `zapf` already implements it and exposes it as the
+   .ZWORD directive, so this only has to emit the structure around it.
+
+   Two things that are not free choices. **Words must be sorted**, because
+   dictionary lookup at run time is a binary search (the original sorts by
+   ordinal string comparison, same here). And **each word carries two value
+   bytes** chosen from its parts of speech in a fixed priority order, with
+   the "First" flags able to promote one of them — that order is
+   WriteToBuilder's, copied rather than reinvented. *)
+PROCEDURE EmitVocabTable;
+VAR i, j, k, entryLen, zwordBytes, pos, v1, v2, nParts: INTEGER;
+    order: ARRAY ZilModel.MaxVocab OF INTEGER;
+    parts: ARRAY 4 OF INTEGER;
+    text: ARRAY 64 OF CHAR; num: ARRAY 16 OF CHAR;
+
+  (* the value byte a given part of speech contributes *)
+  PROCEDURE PartValue(w, part: INTEGER): INTEGER;
+  BEGIN
+    IF part = ZilModel.PsVerb THEN RETURN ZilModel.vocab[w].verbVal END;
+    IF part = ZilModel.PsPreposition THEN RETURN ZilModel.vocab[w].prepVal END;
+    IF part = ZilModel.PsAdjective THEN RETURN ZilModel.vocab[w].adjVal END;
+    IF part = ZilModel.PsBuzzword THEN RETURN ZilModel.vocab[w].buzzVal END;
+    IF part = ZilModel.PsDirection THEN RETURN ZilModel.vocab[w].dirVal END;
+    RETURN 0
+  END PartValue;
+
+  PROCEDURE Has(w, bit: INTEGER): BOOLEAN;
+  BEGIN RETURN (ZilModel.vocab[w].pos DIV bit) MOD 2 = 1 END Has;
+
+BEGIN
+  IF ZilModel.zversion < 4 THEN zwordBytes := 4 ELSE zwordBytes := 6 END;
+  entryLen := zwordBytes + 3;
+
+  (* sort the word indices by text: run-time lookup is a binary search *)
+  FOR i := 0 TO ZilModel.nVocab - 1 DO order[i] := i END;
+  FOR i := 1 TO ZilModel.nVocab - 1 DO
+    k := order[i]; j := i - 1;
+    WHILE (j >= 0) & (ZilModel.vocab[order[j]].text > ZilModel.vocab[k].text) DO
+      order[j + 1] := order[j]; DEC(j)
+    END;
+    order[j + 1] := k
+  END;
+
+  (* V1-3 refers to an adjective by NUMBER rather than by word address, via
+     an A?NAME constant — see the ADJECTIVE property in CompileObjects *)
+  IF ZilModel.zversion < 4 THEN
+    FOR i := 0 TO ZilModel.nVocab - 1 DO
+      IF (ZilModel.vocab[i].pos DIV ZilModel.PsAdjective) MOD 2 = 1 THEN
+        Strings.IntToStr(ZilModel.vocab[i].adjVal, num);
+        W("	A?"); W(ZilModel.vocab[i].text); W("="); W(num); WLn
+      END
+    END;
+    WLn
+  END;
+
+  W("VOCAB:: .TABLE"); WLn;
+  W("	.BYTE 3"); WLn;        (* the SIBREAKS this port declares: , . " *)
+  W("	.BYTE 44"); WLn;
+  W("	.BYTE 46"); WLn;
+  W("	.BYTE 34"); WLn;
+  Strings.IntToStr(entryLen, num);
+  W("	.BYTE "); W(num); WLn;
+  Strings.IntToStr(ZilModel.nVocab, num);
+  W("	.WORD "); W(num); WLn;
+
+  IF ZilModel.nVocab > 0 THEN
+    Strings.IntToStr(entryLen, num);
+    W("	.VOCBEG "); W(num); W(",");
+    Strings.IntToStr(zwordBytes, num); W(num); WLn;
+
+    FOR i := 0 TO ZilModel.nVocab - 1 DO
+      k := order[i];
+      Strings.Copy(ZilModel.vocab[k].text, text);
+      W("W?"); W(text); W(":: .ZWORD ");
+      Strings.ToLower(text);
+      W('"'); W(text); W('"'); WLn;
+
+      (* the parts of speech that contribute a value byte, in the
+         original's priority order, with the First flags promoting one *)
+      pos := ZilModel.vocab[k].pos;
+      nParts := 0;
+      IF Has(k, ZilModel.PsAdjective) & (ZilModel.zversion < 4) THEN
+        IF pos MOD 4 = ZilModel.PsAdjFirst THEN
+          FOR j := nParts TO 1 BY -1 DO parts[j] := parts[j - 1] END;
+          parts[0] := ZilModel.PsAdjective
+        ELSE parts[nParts] := ZilModel.PsAdjective END;
+        INC(nParts)
+      END;
+      IF Has(k, ZilModel.PsDirection) THEN
+        IF pos MOD 4 = ZilModel.PsDirFirst THEN
+          FOR j := nParts TO 1 BY -1 DO parts[j] := parts[j - 1] END;
+          parts[0] := ZilModel.PsDirection
+        ELSE parts[nParts] := ZilModel.PsDirection END;
+        INC(nParts)
+      END;
+      IF Has(k, ZilModel.PsVerb) THEN
+        IF pos MOD 4 = ZilModel.PsVerbFirst THEN
+          FOR j := nParts TO 1 BY -1 DO parts[j] := parts[j - 1] END;
+          parts[0] := ZilModel.PsVerb
+        ELSE parts[nParts] := ZilModel.PsVerb END;
+        INC(nParts)
+      END;
+      IF Has(k, ZilModel.PsObject) THEN
+        (* there is no ObjectFirst, so it stays first only when no other
+           First flag is set *)
+        IF pos MOD 4 = 0 THEN
+          FOR j := nParts TO 1 BY -1 DO parts[j] := parts[j - 1] END;
+          parts[0] := ZilModel.PsObject
+        ELSE parts[nParts] := ZilModel.PsObject END;
+        INC(nParts)
+      END;
+      IF Has(k, ZilModel.PsBuzzword) THEN
+        FOR j := nParts TO 1 BY -1 DO parts[j] := parts[j - 1] END;
+        parts[0] := ZilModel.PsBuzzword; INC(nParts)
+      END;
+      IF Has(k, ZilModel.PsPreposition) THEN
+        FOR j := nParts TO 1 BY -1 DO parts[j] := parts[j - 1] END;
+        parts[0] := ZilModel.PsPreposition; INC(nParts)
+      END;
+
+      v1 := 0; v2 := 0;
+      IF nParts > 0 THEN v1 := PartValue(k, parts[0]) END;
+      IF nParts > 1 THEN v2 := PartValue(k, parts[1]) END;
+
+      Strings.IntToStr(pos, num);       W("	.BYTE "); W(num);
+      Strings.IntToStr(v1, num);        W(","); W(num);
+      Strings.IntToStr(v2, num);        W(","); W(num); WLn
+    END;
+    W("	.VOCEND"); WLn
+  END;
+  W("	.ENDT"); WLn; WLn
+END EmitVocabTable;
+
 PROCEDURE EmitVocab;
 VAR entryLen: INTEGER; n: ARRAY 16 OF CHAR;
 BEGIN
@@ -2525,12 +3203,7 @@ BEGIN
 
   W("IMPURE::"); WLn; WLn;
 
-  W("VOCAB:: .TABLE"); WLn;
-  W("	.BYTE 0"); WLn;      (* no self-inserting break characters *)
-  Strings.IntToStr(entryLen, n);
-  W("	.BYTE "); W(n); WLn; (* entry length *)
-  W("	.WORD 0"); WLn;      (* entry count *)
-  W("	.ENDT"); WLn; WLn;
+  EmitVocabTable;
 
   W("WORDS::"); WLn; WLn;
   W("ENDLOD::"); WLn; WLn
@@ -2543,9 +3216,11 @@ END EmitVocab;
    START:: label goes on — pass "GO" for the ZIL default. *)
 PROCEDURE CompileProgram*(entryName: ARRAY OF CHAR): BOOLEAN;
 VAR i, entryIdx: INTEGER; ok: BOOLEAN; verText: ARRAY 16 OF CHAR;
+    strBuf: ARRAY 4096 OF CHAR;
 BEGIN
   ClearErr;
   labelCounter := 0;
+  nStrings := 0; nActions := 0;
 
   entryIdx := FindRoutineIdx(entryName);
   IF entryIdx < 0 THEN
@@ -2573,6 +3248,8 @@ BEGIN
   IF ~ok THEN RETURN FALSE END;
   ok := CompileObjects();
   IF ~ok THEN RETURN FALSE END;
+  ok := CompileSyntax();
+  IF ~ok THEN RETURN FALSE END;
   EmitVocab;
 
   (* the entry routine first, so START:: is the lowest code address *)
@@ -2586,6 +3263,21 @@ BEGIN
       IF ~ok THEN RETURN FALSE END
     END;
     INC(i)
+  END;
+
+  (* the packed strings, in high memory alongside the routines *)
+  IF nStrings > 0 THEN
+    WLn;
+    W("	; packed strings"); WLn;
+    i := 0;
+    WHILE i < nStrings DO
+      Strings.IntToStr(i, verText);
+      W("	.GSTR STR?"); W(verText); W(",");
+      CompileZapString(strPool[i]^, strBuf);
+      W(strBuf); WLn;
+      INC(i)
+    END;
+    WLn
   END;
 
   W("	.END"); WLn;

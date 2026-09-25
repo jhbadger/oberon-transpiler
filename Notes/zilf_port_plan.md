@@ -2480,6 +2480,111 @@ same 3 pre-existing-only failures.
 **Corpus**: `cloak` reaches code generation and stops on a table element it
 can't render; `advent` stops at `BIT-SYNONYM`.
 
+## What's done: the dictionary, the syntax/action tables, and packed strings
+
+The vocabulary layer the plan scoped as its own session. `cloak` now gets
+through object, vocabulary, syntax and most routine compilation; it is not
+yet running (see the end of this section for exactly what is left).
+
+### Vocabulary (`ZilModel` + `ZilEval` + `ZilCompile.EmitVocabTable`)
+
+- A **word registry** in `ZilModel`: text, the set of PartOfSpeech bits, and
+  a number per part of speech. Numbers count **down from 255** in a separate
+  sequence per part, as `OldParserVocabFormat` does.
+- **Registration** from `VOC` (with its optional part-of-speech argument),
+  `DIRECTIONS`, `BUZZ`, `SYNTAX` (the verb and every preposition), and
+  objects' `SYNONYM`/`ADJECTIVE` properties.
+- **The dictionary**, emitted in the V1-3 layout from
+  `GameBuilder.FinishSyntax` plus `OldParserWord.WriteToBuilder`: break
+  characters, entry length, count, then `W?FOO:: .ZWORD "foo"` and three
+  data bytes per word. Two things there are not free choices — words must
+  be **sorted**, because run-time lookup is a binary search; and each word's
+  two value bytes are chosen from its parts of speech in a **fixed priority
+  order** that the "First" flags can promote within, copied from
+  `WriteToBuilder` rather than reinvented.
+- **The Z-character encoding is not done here at all.** `zapf` already
+  implements it and exposes it as `.ZWORD`, so this only emits the
+  structure around it — which is what made the whole slice tractable.
+
+### Syntax, action and verb tables (`Compilation.Syntax.cs`)
+
+`SYNTAX` is now decomposed rather than stored raw: verb, up to two objects
+with their prepositions, `(FIND flag)` clauses, scope-option lists (the
+original's `ScopeFlags.Original` bits, defaulting to 240 when a line names
+none), the action and an optional pre-action.
+
+Emitted: `ST?VERB` per verb (a count byte then one 8-byte line each, in
+**reverse** definition order as the original does), `VTBL` with one word per
+possible verb value indexed `255 - verbValue`, `ATBL`/`PATBL` for the action
+and pre-action routines, and `PRTBL` as a count plus (word, number) pairs.
+The four globals the parser reaches them through — `VERBS`, `ACTIONS`,
+`PREACTIONS`, `PREPOSITIONS` — are defined by the **compiler**, not the
+source, matching the original's `GetGlobal(...).DefaultValue = table`.
+
+**An action has two names** and they are not interchangeable: the routine
+that implements it (`V-TELL`) and the constant that identifies it
+(`V?TELL`), derived by turning a leading `V-` into `V?`. Getting that wrong
+is silent — the constant simply never resolves.
+
+### Objects' word properties
+
+`SYNONYM` and `ADJECTIVE` are no longer skipped. Their values are dictionary
+words rather than ordinary constants, so they have their own emission:
+`SYNONYM` holds word addresses, and `ADJECTIVE` holds the adjective
+**number** in V1-3 (one byte, via an `A?NAME` constant) and the word address
+in V4+ — the original's own version split.
+
+### Packed strings
+
+A STRING used as a *value* — in a table, as an operand, as `TELL`'s
+packed-string fallback — needs an address, so strings are pooled and emitted
+as `.GSTR STR?n,"..."` with identical texts shared. `ConstantText` returns
+the symbol.
+
+### Compiler generalisations this needed
+
+- **`CompileOperand` and `CompileStmt` are now mutually recursive.** A
+  statement-shaped builtin is perfectly usable as a value (`<SET X <COND
+  ...>>`), so `CompileOperand` delegates those to `CompileStmt` rather than
+  duplicating them. The recursion terminates because `CompileStmt` only
+  falls back the other way for heads that are *not* in that list.
+- **Predicates used as values.** `<SET X <FSET? .O ,BIT>>` compiles the
+  branch and materialises a 1 or 0 through a temporary — the original's own
+  PredCall-vs-ValueCall distinction. This fixed every predicate at once
+  rather than just the one that surfaced.
+- **`DO`** (`Compilation.Loops.cs`'s bounded loop): counter as an inner
+  local, a FORM `end` treated as a predicate tested *before* the body and a
+  value `end` compared *after* the increment, direction from the step or
+  from constant start/end.
+- **`VERSION?` and `IFFLAG` inside a routine body** are resolved during
+  macro expansion, since they select *source* at compile time — the same
+  treatment `IF-<FLAG>` already had.
+- `BTST`, `0?`, `1?`, `ZGET`/`ZPUT`/`ZGETB`/`ZPUTB` aliases, and an empty
+  FORM `<>` compiling as 0 in constant position as well as operand
+  position (object property lists are raw too).
+
+### A transpiler gotcha worth recording
+
+`nObjects` was both an exported VAR in `ZilModel` and a new field in
+`SyntaxRec`. An exported top-level VAR becomes a bare, unscoped C `#define`,
+so `s.nObjects` compiled to `s.ZilModel_nObjects` and the field "did not
+exist". Record field names are safe in general; they are **not** safe when
+they collide with an exported VAR in the same module. The field is now
+`numObjects`, with a comment saying why.
+
+### What is still between `cloak` and running
+
+It stops on a LIST reaching `CompileOperand` — a library message expansion
+that should be **spliced** into its enclosing `TELL`. So: SEGMENT splicing
+inside a routine body (the compiler side; the interpreter side is done),
+then `LIBRARY-MESSAGE`, then `MAP-CONTENTS`/`MAP-DIRECTIONS`, `PSEUDO`
+properties and complex-PROPDEF direction properties.
+
+**Tested**: sixteen end-to-end programs, all passing; `beer`, `mandelbrot`
+and `name` all still compile, assemble and run, `name` re-checked
+interactively; transpiler regression suite, 138 files, same 3
+pre-existing-only failures.
+
 ## Corpus gap analysis: exactly what blocks compiling a real game
 
 Running the new driver over all 52 corpus files makes the remaining gap

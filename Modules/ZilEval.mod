@@ -543,6 +543,34 @@ BEGIN
   RETURN -1
 END FindStruct;
 
+(* The scope-search bit a SYNTAX option name selects — the original's
+   ScopeFlags.Original values. A line that names any options replaces the
+   default set (ON-GROUND+IN-ROOM+CARRIED+HELD) rather than adding to it. *)
+PROCEDURE ScopeFlagBits(name: ARRAY OF CHAR): INTEGER;
+BEGIN
+  IF name = "HAVE" THEN RETURN 2 END;
+  IF name = "MANY" THEN RETURN 4 END;
+  IF name = "TAKE" THEN RETURN 8 END;
+  IF name = "ON-GROUND" THEN RETURN 16 END;
+  IF name = "IN-ROOM" THEN RETURN 32 END;
+  IF name = "CARRIED" THEN RETURN 64 END;
+  IF name = "HELD" THEN RETURN 128 END;
+  RETURN 0
+END ScopeFlagBits;
+
+(* The PartOfSpeech bit a <VOC "x" TYPE> type name selects. The names come
+   in pairs (ADJ/ADJECTIVE, NOUN/OBJECT) because real source uses both. *)
+PROCEDURE PartOfSpeechBits(name: ARRAY OF CHAR): INTEGER;
+BEGIN
+  IF (name = "ADJ") OR (name = "ADJECTIVE") THEN RETURN ZilModel.PsAdjective END;
+  IF (name = "NOUN") OR (name = "OBJECT") THEN RETURN ZilModel.PsObject END;
+  IF name = "VERB" THEN RETURN ZilModel.PsVerb END;
+  IF (name = "PREP") OR (name = "PREPOSITION") THEN RETURN ZilModel.PsPreposition END;
+  IF (name = "DIR") OR (name = "DIRECTION") THEN RETURN ZilModel.PsDirection END;
+  IF name = "BUZZ" THEN RETURN ZilModel.PsBuzzword END;
+  RETURN 0
+END PartOfSpeechBits;
+
 (* ---------------- OBLISTs as compile-time data ----------------
    Name RESOLUTION in this port uses one flat atom table (phase 1's
    simplification, and the package work confirmed it is enough). But
@@ -929,14 +957,79 @@ BEGIN
     RETURN PerformITable(args, n)
 
   ELSIF name = "SYNTAX" THEN
-    (* Full semantic decomposition (verb/prep/object/scope-flags/action)
-       deferred to phase 3b — see ZilModel.mod's SyntaxRec comment. Args
-       arrive already-evaluated (SYNTAX is a plain SUBR in the original),
-       but every element is self-evaluating (atoms and lists of atoms),
-       so capturing them is transparent — same reasoning as GLOBAL/
-       CONSTANT/TABLE. *)
+    (* <SYNTAX VERB [prep] OBJECT [(FIND flag)] [(scope opts)]
+               [prep OBJECT ...] = ACTION [PREACTION]>
+
+       Every element is self-evaluating (atoms and lists of atoms), so the
+       already-evaluated arguments a SUBR receives are exactly the source
+       syntax — which is why this can be decomposed here rather than
+       needing an FSUBR. A preposition is any atom before an OBJECT that
+       isn't OBJECT or "="; it belongs to the object that follows it. *)
     IF n < 3 THEN RETURN Err("SYNTAX: expected at least 3 args") END;
-    ZilModel.AddSyntax(BuildConsChain(ZilObj.KList, args, n));
+    IF args[0].kind # ZilObj.KAtom THEN RETURN Err("SYNTAX: expected a verb atom") END;
+    synKind := ZilModel.AddSyntax(BuildConsChain(ZilObj.KList, args, n));
+    IF synKind < 0 THEN RETURN Err("SYNTAX: too many syntax lines") END;
+
+    Strings.Copy(args[0].atomText, ZilModel.syntaxes[synKind].verb);
+    len := ZilModel.AddVocab(args[0].atomText, ZilModel.PsVerb);
+
+    s[0] := 0X;          (* the preposition awaiting its object *)
+    i := 1;
+    WHILE (i < n) & ~((args[i].kind = ZilObj.KAtom) & (args[i].atomText = "=")) DO
+      IF (args[i].kind = ZilObj.KAtom) & (args[i].atomText = "OBJECT") THEN
+        INC(ZilModel.syntaxes[synKind].numObjects);
+        IF ZilModel.syntaxes[synKind].numObjects = 1 THEN
+          Strings.Copy(s, ZilModel.syntaxes[synKind].prep1)
+        ELSE
+          Strings.Copy(s, ZilModel.syntaxes[synKind].prep2)
+        END;
+        s[0] := 0X
+
+      ELSIF args[i].kind = ZilObj.KList THEN
+        IF ZilObj.IsAtomNamed(args[i].first, "FIND") THEN
+          IF (args[i].rest # NIL) & (args[i].rest.first # NIL)
+             & (args[i].rest.first.kind = ZilObj.KAtom) THEN
+            IF ZilModel.syntaxes[synKind].numObjects <= 1 THEN
+              Strings.Copy(args[i].rest.first.atomText, ZilModel.syntaxes[synKind].find1)
+            ELSE
+              Strings.Copy(args[i].rest.first.atomText, ZilModel.syntaxes[synKind].find2)
+            END
+          END
+        ELSE
+          (* a scope-option list replaces the default set entirely *)
+          sum := 0; ind := args[i];
+          WHILE (ind # NIL) & (ind.first # NIL) DO
+            IF ind.first.kind = ZilObj.KAtom THEN
+              sum := ZilModel.BitOr(sum, ScopeFlagBits(ind.first.atomText))
+            END;
+            ind := ind.rest
+          END;
+          IF ZilModel.syntaxes[synKind].numObjects <= 1 THEN
+            ZilModel.syntaxes[synKind].opts1 := sum
+          ELSE
+            ZilModel.syntaxes[synKind].opts2 := sum
+          END
+        END
+
+      ELSIF args[i].kind = ZilObj.KAtom THEN
+        (* a preposition, belonging to the object that follows it *)
+        Strings.Copy(args[i].atomText, s);
+        len := ZilModel.AddVocab(s, ZilModel.PsPreposition)
+      END;
+      INC(i)
+    END;
+
+    (* past the "=": the action, then an optional pre-action *)
+    INC(i);
+    IF (i < n) & (args[i].kind = ZilObj.KAtom) THEN
+      Strings.Copy(args[i].atomText, ZilModel.syntaxes[synKind].action);
+      INC(i);
+      IF (i < n) & (args[i].kind = ZilObj.KAtom) THEN
+        Strings.Copy(args[i].atomText, ZilModel.syntaxes[synKind].preAction)
+      END
+    ELSE
+      RETURN Err("SYNTAX: expected an action routine name after '='")
+    END;
     RETURN MkVal(args[0])
 
   ELSIF (name = "SYNONYM") OR (name = "VERB-SYNONYM") OR (name = "PREP-SYNONYM")
@@ -951,11 +1044,21 @@ BEGIN
     RETURN MkVal(args[0])
 
   ELSIF name = "DIRECTIONS" THEN
-    FOR i := 0 TO n - 1 DO ZilModel.AddDirection(args[i]) END;
+    FOR i := 0 TO n - 1 DO
+      ZilModel.AddDirection(args[i]);
+      IF args[i].kind = ZilObj.KAtom THEN
+        len := ZilModel.AddVocab(args[i].atomText, ZilModel.PsDirection)
+      END
+    END;
     RETURN MkVal(TrueVal())
 
   ELSIF name = "BUZZ" THEN
-    FOR i := 0 TO n - 1 DO ZilModel.AddBuzzword(args[i]) END;
+    FOR i := 0 TO n - 1 DO
+      ZilModel.AddBuzzword(args[i]);
+      IF args[i].kind = ZilObj.KAtom THEN
+        len := ZilModel.AddVocab(args[i].atomText, ZilModel.PsBuzzword)
+      END
+    END;
     RETURN MkVal(TrueVal())
 
   ELSIF name = "VERSION" THEN
@@ -1356,17 +1459,21 @@ BEGIN
     RETURN MkVal(args[0])
 
   ELSIF name = "VOC" THEN
-    (* Pragmatic subset: the original CHTYPEs the interned atom to a VOC
-       pseudo-type and also registers it (by part-of-speech, an optional
-       2nd arg) into ZEnvironment's vocabulary dictionary for later
-       dictionary-table encoding (phase 3b). This just interns and returns
-       the plain atom, ignoring the part-of-speech argument — VOC's main
-       real-source use is as a self-evaluating-atom-producing building
-       block inside other expressions, which this preserves. *)
+    (* <VOC "text" [part-of-speech]> interns the word into the dictionary
+       and returns the atom naming it. The original CHTYPEs that atom to a
+       VOC pseudo-type; there is no type system here, so the plain atom is
+       returned — which is what real source uses it as, a building block
+       inside larger expressions. *)
     IF (n < 1) OR (args[0].kind # ZilObj.KString) THEN
       RETURN Err("VOC: expected a STRING")
     END;
-    RETURN MkVal(ZilObj.Intern(args[0].strBuf^))
+    Strings.Copy(args[0].strBuf^, s);
+    Strings.ToUpper(s);
+    i := 0;
+    IF (n >= 2) & (args[1].kind = ZilObj.KAtom) THEN i := PartOfSpeechBits(args[1].atomText) END;
+    len := ZilModel.AddVocab(s, i);
+    IF len < 0 THEN RETURN Err("VOC: too many vocabulary words") END;
+    RETURN MkVal(ZilObj.Intern(s))
 
   ELSIF name = "CONS" THEN
     (* <CONS first rest>: prepends first onto rest, a LIST — or FALSE
@@ -2261,8 +2368,13 @@ BEGIN
           matched := ver = ZilModel.zversion
         END;
         IF matched THEN
-          r := MkVal(cond);
           body := clause.rest;
+          IF myExpandOnly THEN
+            cell := ClauseBodyValue(body);
+            IF cell = NIL THEN RETURN MkVal(FalseVal()) END;
+            RETURN MkVal(cell)
+          END;
+          r := MkVal(cond);
           WHILE (body # NIL) & (body.first # NIL) DO
             r := EvalImpl(body.first, FALSE);
             IF ShouldPass(r) THEN RETURN r END;
@@ -2321,8 +2433,13 @@ BEGIN
         END;
 
         IF matched THEN
-          r := MkVal(cond);
           body := clause.rest;
+          IF myExpandOnly THEN
+            cell := ClauseBodyValue(body);
+            IF cell = NIL THEN RETURN MkVal(FalseVal()) END;
+            RETURN MkVal(cell)
+          END;
+          r := MkVal(cond);
           WHILE (body # NIL) & (body.first # NIL) DO
             r := EvalImpl(body.first, FALSE);
             IF ShouldPass(r) THEN RETURN r END;
@@ -3076,6 +3193,20 @@ END EvalImpl;
    expandOnlyPending for exactly one EvalImpl call, which makes the macro
    branch hand back its result instead of re-evaluating it. *)
 
+(* In expand-only mode a conditional that selects source (VERSION?, IFFLAG,
+   IF-<FLAG>) must yield the SELECTED CODE, not run it — a routine body is
+   being prepared for compilation, not evaluated. The original's own
+   generated macros expand to <1 .A> for a single statement and
+   <BIND () !.A> for several; same here. *)
+PROCEDURE ClauseBodyValue(body: ZilObj.Zo): ZilObj.Zo;
+VAR cell: ZilObj.Zo;
+BEGIN
+  IF (body = NIL) OR (body.first = NIL) THEN RETURN NIL END;
+  IF (body.rest = NIL) OR (body.rest.first = NIL) THEN RETURN body.first END;
+  cell := ZilObj.Cons(ZilObj.KForm, ZilObj.NewEmpty(ZilObj.KList), body);
+  RETURN ZilObj.Cons(ZilObj.KForm, ZilObj.Intern("BIND"), cell)
+END ClauseBodyValue;
+
 PROCEDURE ExpandOnce(z: ZilObj.Zo): ZResult;
 BEGIN
   expandOnlyPending := TRUE;
@@ -3093,6 +3224,12 @@ BEGIN
      OR (z.first.kind # ZilObj.KAtom) THEN RETURN FALSE END;
   head := z.first.globalVal;
   IF (head # NIL) & (head.kind = ZilObj.KMacro) THEN RETURN TRUE END;
+  (* VERSION? and IFFLAG choose SOURCE at compile time, so a routine body
+     containing one has to have it resolved before compilation, exactly
+     like a macro call *)
+  IF ZilObj.IsAtomNamed(z.first, "VERSION?") OR ZilObj.IsAtomNamed(z.first, "IFFLAG") THEN
+    RETURN TRUE
+  END;
   IF head # NIL THEN RETURN FALSE END;
   Strings.Copy(z.first.atomText, nm);
   IF (nm[0] = "I") & (nm[1] = "F") & (nm[2] = "-") THEN Strings.Delete(nm, 0, 3)
