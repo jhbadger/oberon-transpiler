@@ -223,27 +223,98 @@ Implemented and working:
   field access through more than one pointer**, don't wait to hit the C
   compile error.
 
+## What's done (phase 2b: PROG/REPEAT/BIND) — files, and what's tested
+
+Read `Zilf/Interpreter/Context.cs` in full (all 1,457 lines — confirms
+`LocalEnvironment` is a real per-call lexical-chain structure, not a
+single global slot, but since lookups only ever walk the *dynamic* call
+chain (each `PushEnvironment` chains onto whatever environment is
+currently active, not a captured lexical closure), it's externally
+equivalent to dynamic/shallow binding on a single slot per atom — this
+confirms phase 2's `localVal`-on-the-atom simplification was sound and
+didn't need revisiting) and `Subrs.Loops.cs` (`PROG`/`REPEAT`/`BIND`/
+`RETURN`/`AGAIN`, ~150 lines) in full.
+
+Added to **`ZilObj.mod`**: a `KActivation` kind (`NewActivation`) — an
+activation's identity is just its pointer, matching the original's C#
+reference-equality use of `ZilActivation`; the atom's own `atomText`
+field is reused to hold its display name (same trick as `KSubr`/`KFSubr`).
+
+Added to **`ZilEval.mod`**: `PROG`, `REPEAT`, `BIND` (inlined FSUBRs in
+`Eval`, same forward-reference reason as `QUOTE`/`COND`/`AND`/`OR`), and
+`RETURN`/`AGAIN` (ordinary SUBRs in `ApplySubr`, factored into a small
+`ApplyReturnOrAgain` helper since — unlike the FSUBRs — they don't call
+`Eval` and so aren't subject to the forward-reference restriction).
+
+**Key implementation points, all verified against the original before
+coding:**
+- A named activation (`<PROG FOO (X) ...>`) needs **no special-case
+  machinery at all**: `FOO`'s `localVal` is simply bound to the
+  `KActivation` value like any other PROG binding, so `<RETURN val .FOO>`
+  (an ordinary `LVAL`) fetches it naturally, and `RETURN`'s SUBR
+  implementation just checks the fetched arg's kind. This mirrors the
+  original exactly (`ZilActivation` flows through as an ordinary
+  already-evaluated SUBR argument).
+- The **default (unnamed) enclosing-PROG lookup** uses one internal,
+  non-user-visible atom (`ZilObj.Intern("LPROG ")` — note the trailing
+  space, copied deliberately from the original's own
+  `EnclosingProgActivationAtom` naming trick, since a real ZIL atom name
+  can't contain a space) whose `localVal` is rebound by `PROG`/`REPEAT`
+  (not `BIND` — this is the original's `catchy` flag) using the exact
+  same save/restore-on-the-atom's-own-slot mechanism as every other
+  binding. This is what makes a bare `RETURN`/`AGAIN` skip over an
+  enclosing `BIND` and find the next real `PROG`/`REPEAT` outward,
+  exactly like the original.
+- **No `try`/`finally` in Oberon**: every bound atom's previous `localVal`
+  (params, the optional name, and — for `PROG`/`REPEAT` —
+  `enclosingProgAtom` itself) is recorded in one flat array as bindings
+  are established, and restored in a single pass immediately before the
+  branch's one `RETURN r` at the very end — every internal exit path
+  (`RETURN`/`AGAIN` targeting this activation, an escaping signal
+  targeting an outer one, normal fall-through) sets a `progStop`/loop-exit
+  flag and falls through to that same shared restore-then-return tail
+  rather than returning early. The one exception is genuinely malformed
+  input (missing bindings list, non-atom binding target, too many
+  bindings) — those `RETURN Err(...)` immediately without restoring
+  bindings established so far, matching this port's existing philosophy
+  elsewhere that parse-shape errors are fatal-ish, not designed for clean
+  continuation.
+- **`AGAIN` mid-body does not short-circuit the rest of that body pass** —
+  verified against `PerformProg`'s C# (`if (result.IsAgain(...)) { again =
+  true; }` has no `continue`/`break`, so remaining top-level body forms in
+  the *same* pass still evaluate before the loop actually restarts) and
+  replicated exactly: the Oberon `WHILE` only sets `progAgain := TRUE` and
+  falls through to the next body form, never `EXIT`s for that case.
+
+**Tested**: `/private/tmp/.../scratchpad/sample3.zil` + `eval3test.mod` —
+7 forms covering: a plain `PROG` with sequential `SET`s (`=> 6`); a
+binding-list initializer (`=> 15`); a bare `RETURN` short-circuiting the
+rest of a `PROG` body (`=> 99`); `REPEAT` + `RETURN` as a counting loop
+(`=> 5`); a nested `PROG` where the inner `RETURN` unwinds only the inner
+activation (`=> 43`); a **named activation** where `RETURN .Y .FOO` inside
+a `BIND` skips the `BIND` and unwinds straight to the outer `PROG FOO`,
+never reaching the `SET X 999` after it (`=> 2`); and `AGAIN` restarting a
+`REPEAT` (`=> 3`). **All 7 produced exactly the expected result.** Re-ran
+phase 1's `sample1.zil` and phase 2's `sample2.zil` too — no regressions.
+
 ## What's still needed for a complete phase 2 (Interpreter core)
 
-Read `Zilf/Interpreter/Context.cs` in full before starting (not done yet —
-this session worked from `ZilResult.cs`, `LocalEnvironment.cs`,
-`ObList.cs`, and targeted greps into `Context.cs`/`Subrs.Atoms.cs`/
-`Subrs.Functions.cs`/`Subrs.Conditionals.cs`/`Subrs.Math.cs`, not a full
-read of `Context.cs`'s 1,457 lines — there is certainly more in there than
-what got surfaced by grepping for specific method names).
-
-1. **PROG/routine application** — the biggest remaining piece. Needs:
-   argument binding (evaluate call args, bind them to the callee's
-   parameter atoms), the shallow-binding **push/pop** machinery this
-   session deliberately deferred (see `ZilEval.mod`'s header comment) —
-   entering a `PROG`/routine call must save each bound atom's current
-   `localVal`, set the new one, and restore the saved value on exit (even
-   if exiting via a `RETURN`/`AGAIN` signal, i.e. push/pop must happen in
-   a `finally`-equivalent, not just on normal fall-through) — and `OReturn`/
-   `OAgain` actually being produced and consumed (a `RETURN` inside a PROG
-   should unwind exactly to that PROG's activation and no further; this
-   needs each PROG activation to have an identity a `ZResult.activation`
-   can reference and compare against, `ZilActivation` in the original).
+1. **Routine (function) application** — the other half of "PROG/routine
+   application": a `ZilRoutine`'s parameter list has to be bound the same
+   way `PROG`'s bindings are (in fact a routine body is essentially an
+   implicit `PROG`-like activation around the parameter bindings — reuse
+   the same save/restore-array pattern from `PROG`/`REPEAT`/`BIND` above
+   rather than re-deriving it), plus **optional (`"OPT"`) and auxiliary
+   (`"AUX"`) parameter groups** and **`"ARGS"`/`"TUPLE"` rest-parameter
+   capture** (all real ZIL argument-list syntax, not yet touched). Also
+   still unresolved from last session: whether interpret-time routine
+   *application* is a real original behavior worth replicating at all, or
+   whether phase 2's evaluator only ever needs to run macros/FSUBRs/SUBRs/
+   `PROG`, with `ROUTINE` bodies handed to the *compiler* (phase 3)
+   macro-expanded-but-uncompiled instead of ever being `Eval`'d directly —
+   check `Zilf/Interpreter/Values/ZilRoutine.cs` and how/whether
+   `Subrs.Programming.cs`-equivalent code ever calls `.Eval` on a routine
+   body outside of the compiler.
 2. **`ObList.cs`** (145 lines, read this session) confirms the real
    package/OBLIST hierarchy this port's `ZilObj.Intern` flattens away is
    just a name→atom hash table per oblist, same shape as the flat one
@@ -307,29 +378,26 @@ Before starting:
 
 ## Suggested order for the next session
 
-1. Re-run phase 1's reader test (`sample1.zil`) and phase 2's eval test
-   (`sample2.zil` + `evaltest.mod`) to confirm nothing regressed. (Both
+1. Re-run phase 1's reader test (`sample1.zil`), phase 2's eval test
+   (`sample2.zil` + `evaltest.mod`), and phase 2b's PROG/REPEAT/BIND test
+   (`sample3.zil` + `eval3test.mod`) to confirm nothing regressed. (All
    live under the session's scratchpad, which may not survive between
    machine sessions — if gone, they're small and quick to recreate from
    this doc's descriptions of what they cover.)
-2. Read `Zilf/Interpreter/Context.cs` in full (still not done — see "What's
-   still needed" above). This is where `PROG`/routine-call environment
-   push/pop almost certainly lives (`PushEnvironment`/`PopEnvironment`/
-   `ExecuteInEnvironment` were already spotted by name via grep, but not
-   read in context).
-3. Pick ONE of: (a) PROG/routine application (the biggest, most valuable
-   next slice — unlocks real ZIL control flow), or (b) DEFMAC/macro
-   expansion (unlocks reading real library/game source without phase-1's
-   `%`-stub mattering as much). Both are substantial; do not try both in
-   one sitting. Get a trivial end-to-end case working and tested before
-   widening — e.g. for (a): `<ROUTINE ADD1 (X) <+ .X 1>>` then somehow
-   invoking it (note: ROUTINE *definition* vs *compilation* vs *interpret-
-   time application* are three different things in the real zilf — a
-   ROUTINE is normally compiled to Z-machine code, not interpreted; check
-   whether interpret-time routine application is even a real original
-   behavior worth replicating, or whether phase 2's evaluator only ever
-   needs to run macros/FSUBRs/SUBRs and PROG, with ROUTINE bodies handed
-   to the *compiler* (phase 3) uncompiled-but-macro-expanded instead of
-   ever being `Eval`'d directly — this distinction matters and wasn't
-   nailed down this session).
+2. First resolve the still-open question from phase 2b's "what's still
+   needed" #1: read `Zilf/Interpreter/Values/ZilRoutine.cs` and check
+   whether/where the original ever calls `.Eval` on a routine body outside
+   the compiler, to settle whether interpret-time routine application is
+   worth replicating or whether the evaluator only needs to run macros/
+   FSUBRs/SUBRs/PROG and hand `ROUTINE` bodies to the phase-3 compiler
+   macro-expanded-but-uncompiled instead.
+3. Pick ONE of: (a) routine application (if #2 says it's worth doing —
+   reuse the `PROG`/`REPEAT`/`BIND` binding/save-restore pattern just
+   built, plus `"OPT"`/`"AUX"`/`"ARGS"`/`"TUPLE"` parameter-list parsing),
+   or (b) `DEFMAC`/macro expansion (unlocks reading real library/game
+   source without phase-1's `%`-stub mattering as much — and doesn't
+   depend on #2's answer either way). Both are substantial; do not try
+   both in one sitting. Get a trivial end-to-end case working and tested
+   before widening, the same way `<PROG (X) ...>` was gotten working
+   before nested/named/AGAIN cases were added this session.
 4. Update this doc's "what's done" section and commit again.

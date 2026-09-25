@@ -42,6 +42,7 @@ CONST
   KFalse*   = 9;
   KSubr*    = 10;    (* native procedure, evaluated args *)
   KFSubr*   = 11;    (* native procedure, unevaluated args *)
+  KActivation* = 12; (* PROG/REPEAT/BIND activation identity — see ZilEval.mod *)
 
   OblistBuckets = 2048;
 
@@ -205,6 +206,19 @@ BEGIN
   Strings.Copy(name, z.atomText);
   RETURN z
 END NewSubr;
+
+(* A PROG/REPEAT/BIND activation. Identity is just the pointer itself
+   (matches the original's C# reference-equality use of ZilActivation);
+   `name` is only for display and for the optional named-activation-atom
+   binding (see ZilEval.mod). *)
+PROCEDURE NewActivation*(name: ARRAY OF CHAR): Zo;
+VAR z: Zo;
+BEGIN
+  NEW(z);
+  z.kind := KActivation;
+  Strings.Copy(name, z.atomText);
+  RETURN z
+END NewActivation;
 
 (* ------------------------------------------------------------------ *)
 (* property lists (PUTPROP/GETPROP)                                     *)
@@ -371,6 +385,8 @@ BEGIN
       Strings.Copy("#SUBR (", s); Strings.Append(z.atomText, s); Strings.Append(")", s)
    |KFSubr:
       Strings.Copy("#FSUBR (", s); Strings.Append(z.atomText, s); Strings.Append(")", s)
+   |KActivation:
+      Strings.Copy("#ACTIVATION ", s); Strings.Append(z.atomText, s)
   ELSE
     Strings.Copy("#UNKNOWN", s)
   END

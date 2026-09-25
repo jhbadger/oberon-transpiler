@@ -41,6 +41,7 @@ CONST
   OAgain*  = 2;
 
   MaxArgs = 64;
+  MaxBindings = 32;
 
 TYPE
   ZResult* = RECORD
@@ -52,6 +53,17 @@ TYPE
 VAR
   evalErrFlag*: BOOLEAN;
   evalErrMsg*: ARRAY 512 OF CHAR;
+
+  (* An internal, non-user-visible atom whose localVal is rebound (via the
+     same save/restore-on-atom's-own-slot mechanism as every other PROG
+     binding) to the innermost enclosing PROG/REPEAT's activation — matches
+     the original's Context.EnclosingProgActivationAtom exactly, including
+     the trailing-space name trick (a real ZIL atom can't easily be spelled
+     with an embedded space, so this can't collide with user code). BIND
+     does NOT rebind this (see PerformProg's `catchy` flag in the original),
+     so RETURN/AGAIN with no explicit activation skip over an enclosing BIND
+     and find the next real PROG/REPEAT outward, exactly as in the original. *)
+  enclosingProgAtom: ZilObj.Zo;
 
 PROCEDURE MkVal*(z: ZilObj.Zo): ZResult;
 VAR r: ZResult;
@@ -125,6 +137,37 @@ END ValuesEqual;
    instead, as this transpiler's own examples do for CHAR comparisons. *)
 PROCEDURE IsOp(name: ARRAY OF CHAR; c: CHAR): BOOLEAN;
 BEGIN RETURN (name[0] = c) & (name[1] = 0X) END IsOp;
+
+(* RETURN and AGAIN are ordinary (evaluated-args) SUBRs — the activation
+   argument, when given, is already a KActivation value by the time it gets
+   here (it was fetched via .NAME / <LVAL NAME>, since PROG binds a named
+   activation atom's localVal to the activation itself; see the PROG/REPEAT/
+   BIND handling in Eval). Doesn't call Eval, so — unlike Eval itself — this
+   can be declared as its own procedure ahead of ApplySubr with no
+   forward-reference problem. *)
+PROCEDURE ApplyReturnOrAgain(isReturn: BOOLEAN; args: ARRAY OF ZilObj.Zo; n: INTEGER): ZResult;
+VAR r: ZResult; act: ZilObj.Zo; explicitIdx: INTEGER;
+BEGIN
+  IF isReturn THEN explicitIdx := 1 ELSE explicitIdx := 0 END;
+  IF n > explicitIdx THEN
+    act := args[explicitIdx];
+    IF act.kind # ZilObj.KActivation THEN
+      RETURN Err("RETURN/AGAIN: activation argument must be an ACTIVATION")
+    END
+  ELSE
+    act := enclosingProgAtom.localVal;
+    IF act = NIL THEN RETURN Err("RETURN/AGAIN: no enclosing PROG/REPEAT") END
+  END;
+  IF isReturn THEN
+    r.outcome := OReturn;
+    IF n >= 1 THEN r.value := args[0] ELSE r.value := TrueVal() END
+  ELSE
+    r.outcome := OAgain;
+    r.value := NIL
+  END;
+  r.activation := act;
+  RETURN r
+END ApplyReturnOrAgain;
 
 PROCEDURE ApplySubr*(name: ARRAY OF CHAR; args: ARRAY OF ZilObj.Zo; n: INTEGER): ZResult;
 VAR sum, i: INTEGER; s: ARRAY 4096 OF CHAR;
@@ -257,6 +300,12 @@ BEGIN
   ELSIF name = "CRLF" THEN
     Out.Ln; RETURN MkVal(TrueVal())
 
+  ELSIF name = "RETURN" THEN
+    RETURN ApplyReturnOrAgain(TRUE, args, n)
+
+  ELSIF name = "AGAIN" THEN
+    RETURN ApplyReturnOrAgain(FALSE, args, n)
+
   ELSE
     RETURN Err("unrecognized or not-yet-implemented SUBR")
   END
@@ -279,12 +328,18 @@ VAR
   nargs, i: INTEGER;
   name: ARRAY 64 OF CHAR;
   isFSubr: BOOLEAN;
+  (* PROG / REPEAT / BIND (see the dedicated comment at that branch below) *)
+  progArgs, progNameAtom, progBindings, progBody, progAct: ZilObj.Zo;
+  progBindAtoms, progSavedVals: ARRAY MaxBindings OF ZilObj.Zo;
+  progNBind, progI: INTEGER;
+  progOneBind, progTarget, progInit, progBindFirst, progBP: ZilObj.Zo;
+  progRepeat, progCatchy, progStop, progAgain: BOOLEAN;
 BEGIN
   IF z = NIL THEN RETURN MkVal(NIL) END;
 
   IF (z.kind = ZilObj.KAtom) OR (z.kind = ZilObj.KFix) OR (z.kind = ZilObj.KString)
      OR (z.kind = ZilObj.KChar) OR (z.kind = ZilObj.KVector) OR (z.kind = ZilObj.KFalse)
-     OR (z.kind = ZilObj.KSubr) OR (z.kind = ZilObj.KFSubr) THEN
+     OR (z.kind = ZilObj.KSubr) OR (z.kind = ZilObj.KFSubr) OR (z.kind = ZilObj.KActivation) THEN
     RETURN MkVal(z)
 
   ELSIF z.kind = ZilObj.KAdecl THEN
@@ -387,6 +442,129 @@ BEGIN
       END;
       RETURN r
 
+    ELSIF isFSubr & ((name = "PROG") OR (name = "REPEAT") OR (name = "BIND")) THEN
+      (* <[PROG|REPEAT|BIND] [name] (binding...) body...>. A binding is an
+         ATOM (starts unassigned), an ADECL atom:decl (decl ignored, same
+         as elsewhere in this port), or a 2-element LIST (atom-or-adecl
+         initializer). PROG/REPEAT rebind the internal `enclosingProgAtom`
+         to this activation so a bare RETURN/AGAIN finds it (BIND does
+         not — see the field's own comment); REPEAT always loops again
+         after a full body pass unless something escapes (a bare RETURN
+         is the normal way out). Every bound atom's PREVIOUS localVal
+         (including the optional named-activation atom and, for PROG/
+         REPEAT, enclosingProgAtom itself) is saved up front and restored
+         in one pass right before this branch returns — Oberon has no
+         try/finally, so this is done by falling through to a single
+         shared restore-then-return tail (via `progStop`/EXIT) instead of
+         returning early from inside the loops below. *)
+      progRepeat := (name = "REPEAT");
+      progCatchy := (name # "BIND");
+
+      progArgs := z.rest;
+      IF (progArgs = NIL) OR (progArgs.first = NIL) THEN
+        RETURN Err("PROG/REPEAT/BIND: missing bindings list")
+      END;
+
+      progNameAtom := NIL;
+      IF progArgs.first.kind = ZilObj.KAtom THEN
+        progNameAtom := progArgs.first;
+        progArgs := progArgs.rest
+      END;
+
+      IF (progArgs = NIL) OR (progArgs.first = NIL) OR (progArgs.first.kind # ZilObj.KList) THEN
+        RETURN Err("PROG/REPEAT/BIND: expected a bindings list")
+      END;
+      progBindings := progArgs.first;
+      progBody := progArgs.rest;
+      IF (progBody = NIL) OR (progBody.first = NIL) THEN
+        RETURN Err("PROG/REPEAT/BIND: empty body")
+      END;
+
+      progAct := ZilObj.NewActivation(name);
+      progNBind := 0;
+      progStop := FALSE;
+
+      IF progNameAtom # NIL THEN
+        progBindAtoms[progNBind] := progNameAtom;
+        progSavedVals[progNBind] := progNameAtom.localVal;
+        progNameAtom.localVal := progAct;
+        INC(progNBind)
+      END;
+
+      progBP := progBindings;
+      WHILE (progBP # NIL) & (progBP.first # NIL) & ~progStop DO
+        progOneBind := progBP.first;
+        progTarget := NIL; progInit := NIL;
+        IF progOneBind.kind = ZilObj.KAtom THEN
+          progTarget := progOneBind
+        ELSIF progOneBind.kind = ZilObj.KAdecl THEN
+          progTarget := progOneBind.adFirst
+        ELSIF (progOneBind.kind = ZilObj.KList) & (ZilObj.ListLength(progOneBind) = 2) THEN
+          progBindFirst := progOneBind.first;
+          IF progBindFirst.kind = ZilObj.KAdecl THEN progTarget := progBindFirst.adFirst
+          ELSE progTarget := progBindFirst END;
+          progInit := progOneBind.rest.first
+        ELSE
+          RETURN Err("PROG/REPEAT/BIND: malformed binding")
+        END;
+        IF (progTarget = NIL) OR (progTarget.kind # ZilObj.KAtom) THEN
+          RETURN Err("PROG/REPEAT/BIND: binding target must be an ATOM")
+        END;
+        IF progNBind >= MaxBindings THEN RETURN Err("PROG/REPEAT/BIND: too many bindings") END;
+
+        progBindAtoms[progNBind] := progTarget;
+        progSavedVals[progNBind] := progTarget.localVal;
+        INC(progNBind);
+
+        IF progInit # NIL THEN
+          r := Eval(progInit);
+          IF (r.outcome = OReturn) & (r.activation = progAct) THEN
+            r := MkVal(r.value); progStop := TRUE
+          ELSIF r.outcome # OValue THEN
+            progStop := TRUE
+          ELSE
+            progTarget.localVal := r.value
+          END
+        ELSE
+          progTarget.localVal := NIL
+        END;
+
+        progBP := progBP.rest
+      END;
+
+      IF ~progStop THEN
+        IF progCatchy THEN
+          progBindAtoms[progNBind] := enclosingProgAtom;
+          progSavedVals[progNBind] := enclosingProgAtom.localVal;
+          enclosingProgAtom.localVal := progAct;
+          INC(progNBind)
+        END;
+
+        LOOP
+          progAgain := FALSE;
+          progBP := progBody;
+          WHILE (progBP # NIL) & (progBP.first # NIL) DO
+            r := Eval(progBP.first);
+            IF (r.outcome = OAgain) & (r.activation = progAct) THEN
+              progAgain := TRUE
+            ELSIF (r.outcome = OReturn) & (r.activation = progAct) THEN
+              r := MkVal(r.value); progStop := TRUE; EXIT
+            ELSIF r.outcome # OValue THEN
+              progStop := TRUE; EXIT
+            END;
+            progBP := progBP.rest
+          END;
+          IF progStop THEN EXIT END;
+          IF ~(progRepeat OR progAgain) THEN EXIT END
+        END
+      END;
+
+      FOR progI := 0 TO progNBind - 1 DO
+        progBindAtoms[progI].localVal := progSavedVals[progI]
+      END;
+
+      RETURN r
+
     ELSIF isFSubr THEN
       RETURN Err("unrecognized or not-yet-implemented FSUBR")
 
@@ -423,6 +601,8 @@ PROCEDURE InitBuiltins*;
 VAR tAtom: ZilObj.Zo;
 BEGIN
   Register("QUOTE", TRUE); Register("COND", TRUE); Register("AND", TRUE); Register("OR", TRUE);
+  Register("PROG", TRUE); Register("REPEAT", TRUE); Register("BIND", TRUE);
+  Register("RETURN", FALSE); Register("AGAIN", FALSE);
   Register("SET", FALSE); Register("SETG", FALSE); Register("GLOBAL", FALSE);
   Register("LVAL", FALSE); Register("GVAL", FALSE);
   Register("GASSIGNED?", FALSE); Register("ASSIGNED?", FALSE);
@@ -436,7 +616,9 @@ BEGIN
   Register("PRINC", FALSE); Register("PRIN1", FALSE); Register("PRINT", FALSE); Register("CRLF", FALSE);
 
   tAtom := ZilObj.Intern("T");
-  tAtom.globalVal := tAtom  (* T is self-valued *)
+  tAtom.globalVal := tAtom;  (* T is self-valued *)
+
+  enclosingProgAtom := ZilObj.Intern("LPROG ")
 END InitBuiltins;
 
 END ZilEval.
