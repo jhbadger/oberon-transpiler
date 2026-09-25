@@ -67,6 +67,8 @@ CONST
   MaxBufLines = 20000;
   MaxLocals = 15;   (* the Z-machine's own per-routine limit *)
   MaxBlocks = 32;
+  MaxFlagNames = 64;
+  MaxPropNames = 96;
 
 TYPE
   LineText = POINTER TO ARRAY OF CHAR;
@@ -91,6 +93,13 @@ VAR
      leave the PROG, not the REPEAT. `returned` records whether anything
      actually jumped to the block's return label, so an unreferenced label
      isn't emitted. *)
+  (* object flags and properties, registered by CompileObjects *)
+  flagNameTab: ARRAY MaxFlagNames OF ARRAY 64 OF CHAR;
+  nFlagNames: INTEGER;
+  propNameTab: ARRAY MaxPropNames OF ARRAY 64 OF CHAR;
+  nPropNames: INTEGER;
+  objParent, objSibling, objChild: ARRAY ZilModel.MaxObjects OF INTEGER;
+
   blockNames: ARRAY MaxBlocks OF ARRAY 64 OF CHAR;
   blockAgain, blockReturn: ARRAY MaxBlocks OF ARRAY 16 OF CHAR;
   blockWantResult, blockReturned: ARRAY MaxBlocks OF BOOLEAN;
@@ -272,6 +281,31 @@ BEGIN
   Strings.Copy("T?", s); Strings.Append(n, s)
 END TableLabel;
 
+(* Object flags and properties are registered by CompileObjects; these two
+   read that registration back, and are declared here because ConstantText
+   (above the object code) needs them. *)
+PROCEDURE FindFlagIdx*(name: ARRAY OF CHAR): INTEGER;
+VAR i: INTEGER;
+BEGIN
+  i := 0;
+  WHILE i < nFlagNames DO
+    IF flagNameTab[i] = name THEN RETURN i END;
+    INC(i)
+  END;
+  RETURN -1
+END FindFlagIdx;
+
+PROCEDURE FindPropIdx*(name: ARRAY OF CHAR): INTEGER;
+VAR i: INTEGER;
+BEGIN
+  i := 0;
+  WHILE i < nPropNames DO
+    IF propNameTab[i] = name THEN RETURN i END;
+    INC(i)
+  END;
+  RETURN -1
+END FindPropIdx;
+
 PROCEDURE FindGlobalIdx*(name: ARRAY OF CHAR): INTEGER;
 VAR i: INTEGER;
 BEGIN
@@ -322,7 +356,7 @@ END VarName;
    would just move the error later. STRING values need a .GSTR/.STR
    definition to point at and are left for the strings slice. *)
 PROCEDURE ConstantText(z: ZilObj.Zo; VAR s: ARRAY OF CHAR): BOOLEAN;
-VAR name: ARRAY 64 OF CHAR; i: INTEGER;
+VAR name, propNm: ARRAY 64 OF CHAR; i: INTEGER;
 BEGIN
   (* <GVAL X> in a constant position is just X — unwrap and retry, matching
      the original's own `form.IsGVAL(...) -> expr = globalAtom; continue`
@@ -347,6 +381,16 @@ BEGIN
     IF FindRoutineIdx(name) >= 0 THEN Strings.Copy(name, s); RETURN TRUE END;
     IF FindObjectIdx(name) >= 0 THEN Strings.Copy(name, s); RETURN TRUE END;
     IF FindConstantIdx(name) >= 0 THEN Strings.Copy(name, s); RETURN TRUE END;
+    (* An object flag's name, and a property's P?NAME, are assembly symbols
+       emitted by CompileObjects — which runs before any routine is
+       compiled, so by the time a routine body needs one it is known. The
+       original reaches these the same way: DefineFlag/DefineProperty each
+       add a Constants entry. *)
+    IF FindFlagIdx(name) >= 0 THEN Strings.Copy(name, s); RETURN TRUE END;
+    IF (name[0] = "P") & (name[1] = "?") THEN
+      Strings.Copy(name, propNm); Strings.Delete(propNm, 0, 2);
+      IF FindPropIdx(propNm) >= 0 THEN Strings.Copy(name, s); RETURN TRUE END
+    END;
     RETURN FALSE
   END;
   RETURN FALSE
@@ -719,6 +763,39 @@ BEGIN
       IF ~ok THEN RETURN FALSE END;
       EmitPredInstr("ZERO?", opText, empty, label, polarity); RETURN TRUE
 
+    ELSIF (headName = "FSET?") OR (headName = "IN?") THEN
+      (* object predicates: "does this object have this flag set" and "is
+         this object directly inside that one". Both are single Z-machine
+         branch instructions whose ZAP mnemonics match their ZIL spelling. *)
+      IF (z.rest = NIL) OR (z.rest.first = NIL) OR (z.rest.rest = NIL) OR (z.rest.rest.first = NIL) THEN
+        Err("CompileCondition: FSET?/IN? expect 2 args"); RETURN FALSE
+      END;
+      ok := CompileOperand(z.rest.first, leftText);
+      IF ~ok THEN RETURN FALSE END;
+      spilled := (leftText = "STACK") & ~IsSimpleOperand(z.rest.rest.first);
+      IF spilled THEN
+        ok := SpillToTemp(leftText);
+        IF ~ok THEN RETURN FALSE END
+      END;
+      ok := CompileOperand(z.rest.rest.first, rightText);
+      IF ~ok THEN RETURN FALSE END;
+      IF spilled THEN FreeTemp END;
+      EmitPredInstr(headName, leftText, rightText, label, polarity);
+      RETURN TRUE
+
+    ELSIF (headName = "FIRST?") OR (headName = "NEXT?") THEN
+      (* these both store a value AND branch; in a pure condition position
+         only the branch matters, and the value goes to the stack *)
+      IF (z.rest = NIL) OR (z.rest.first = NIL) THEN
+        Err("CompileCondition: FIRST?/NEXT? expect 1 arg"); RETURN FALSE
+      END;
+      ok := CompileOperand(z.rest.first, leftText);
+      IF ~ok THEN RETURN FALSE END;
+      W("	"); W(headName); W(" "); W(leftText); W(" >STACK");
+      IF polarity THEN W(" /") ELSE W(" \") END;
+      W(label); WLn;
+      RETURN TRUE
+
     ELSIF (headName = "G=?") OR (headName = "L=?") THEN
       (* >= is "not <" and <= is "not >" — no separate Z-machine
          instruction, just LESS?/GRTR? with the branch polarity flipped,
@@ -902,6 +979,166 @@ BEGIN
   out[n] := '"'; INC(n);
   out[n] := 0X
 END CompileZapString;
+
+(* ---------------- TELL ----------------
+   TELL is a variadic print statement driven by a table of token patterns
+   (ZModel/TellTokens.cs + Compilation.Expressions.cs's CompileTell), not a
+   fixed builtin: the library extends it with ADD-TELL-TOKENS, so <TELL "x"
+   CR D ,HERE> and <TELL T .OBJ> go through the same matcher. *)
+
+(* Tries pattern `pi` against the argument chain starting at `ap`. On a
+   match, `consumed` is how many arguments it took and `output` is the
+   pattern's output FORM with its <LVAL ...> placeholders replaced by the
+   captured arguments, in order — ready to compile as an ordinary
+   statement. *)
+PROCEDURE MatchTellPattern(pi: INTEGER; ap: ZilObj.Zo;
+                           VAR consumed: INTEGER; VAR output: ZilObj.Zo): BOOLEAN;
+VAR tp, arg, spec, alt, capHead, capTail, cell: ZilObj.Zo;
+    outHead, outTail, elem, capPos: ZilObj.Zo;
+    matched: BOOLEAN;
+BEGIN
+  consumed := 0;
+  capHead := NIL; capTail := NIL;
+  tp := ZilModel.tellPatterns[pi].tokens;
+
+  WHILE (tp # NIL) & (tp.first # NIL) DO
+    IF (ap = NIL) OR (ap.first = NIL) THEN RETURN FALSE END;   (* ran out of args *)
+    spec := tp.first;
+    arg := ap.first;
+
+    IF spec.kind = ZilObj.KList THEN
+      (* a list of alternative introducer atoms *)
+      matched := FALSE;
+      alt := spec;
+      WHILE (alt # NIL) & (alt.first # NIL) DO
+        IF alt.first = arg THEN matched := TRUE END;
+        alt := alt.rest
+      END;
+      IF ~matched THEN RETURN FALSE END
+
+    ELSIF (spec.kind = ZilObj.KAtom) & (spec.atomText = "*") THEN
+      (* capture anything *)
+      cell := ZilObj.Cons(ZilObj.KList, arg, NIL);
+      IF capHead = NIL THEN capHead := cell ELSE capTail.rest := cell END;
+      capTail := cell
+
+    ELSIF spec.kind = ZilObj.KAtom THEN
+      IF spec # arg THEN RETURN FALSE END
+
+    ELSIF (spec.kind = ZilObj.KForm) & (ZilObj.ListLength(spec) = 2)
+          & ZilObj.IsAtomNamed(spec.first, "GVAL") THEN
+      IF (arg.kind # ZilObj.KForm) OR (ZilObj.ListLength(arg) # 2)
+         OR ~ZilObj.IsAtomNamed(arg.first, "GVAL")
+         OR (arg.rest.first # spec.rest.first) THEN RETURN FALSE END
+
+    ELSE
+      RETURN FALSE   (* a token spec shape this port doesn't match (e.g. *:DECL) *)
+    END;
+
+    INC(consumed);
+    tp := tp.rest;
+    ap := ap.rest
+  END;
+
+  (* substitute the captures into the output template *)
+  outHead := NIL; outTail := NIL; capPos := capHead;
+  elem := ZilModel.tellPatterns[pi].output;
+  WHILE (elem # NIL) & (elem.first # NIL) DO
+    IF (elem.first.kind = ZilObj.KForm) & (ZilObj.ListLength(elem.first) = 2)
+       & ZilObj.IsAtomNamed(elem.first.first, "LVAL") & (capPos # NIL) THEN
+      cell := ZilObj.Cons(ZilObj.KForm, capPos.first, NIL);
+      capPos := capPos.rest
+    ELSE
+      cell := ZilObj.Cons(ZilObj.KForm, elem.first, NIL)
+    END;
+    IF outHead = NIL THEN outHead := cell ELSE outTail.rest := cell END;
+    outTail := cell;
+    elem := elem.rest
+  END;
+  output := outHead;
+  RETURN TRUE
+END MatchTellPattern;
+
+(* Compiles a whole <TELL ...> form. Walks the arguments, trying every
+   registered pattern at each position first (so a library token like
+   `T .OBJ` wins over the generic fallbacks), then falling back exactly as
+   the original does: a literal STRING prints inline, a CHARACTER prints as
+   a character, 'FOO prints an object's short description, `P?FOO expr`
+   fetches and prints a property, and anything else is printed as a packed
+   string address.
+
+   Calls CompileStmt for a matched pattern's output form, and CompileStmt
+   calls back here — ordinary mutual recursion, which this transpiler
+   supports (see the correction section in Notes/zilf_port_plan.md). *)
+PROCEDURE CompileTell(z: ZilObj.Zo): BOOLEAN;
+VAR ap, output: ZilObj.Zo; consumed, pi, i: INTEGER; ok, handled: BOOLEAN;
+    opText, propText, dummy: ARRAY 64 OF CHAR;
+    strText, transText: ARRAY 4096 OF CHAR;
+    errBuf: ARRAY 256 OF CHAR;
+BEGIN
+  ap := z.rest;
+  WHILE (ap # NIL) & (ap.first # NIL) DO
+    handled := FALSE;
+    pi := 0;
+    WHILE (pi < ZilModel.nTellPatterns) & ~handled DO
+      IF MatchTellPattern(pi, ap, consumed, output) THEN
+        ok := CompileStmt(output, FALSE, dummy);
+        IF ~ok THEN RETURN FALSE END;
+        FOR i := 1 TO consumed DO ap := ap.rest END;
+        handled := TRUE
+      END;
+      INC(pi)
+    END;
+
+    IF ~handled THEN
+      IF ap.first.kind = ZilObj.KString THEN
+        TranslateZilString(ap.first.strBuf^, transText);
+        CompileZapString(transText, strText);
+        W("	PRINTI "); W(strText); WLn;
+        ap := ap.rest
+
+      ELSIF ap.first.kind = ZilObj.KChar THEN
+        FixText(ap.first.charVal, opText);
+        W("	PRINTC "); W(opText); WLn;
+        ap := ap.rest
+
+      ELSIF (ap.first.kind = ZilObj.KForm) & (ZilObj.ListLength(ap.first) = 2)
+            & ZilObj.IsAtomNamed(ap.first.first, "QUOTE") THEN
+        (* 'FOO names an object directly; the original retypes it to a GVAL
+           and prints it with PRINTD *)
+        ok := CompileOperand(ap.first.rest.first, opText);
+        IF ~ok THEN RETURN FALSE END;
+        W("	PRINTD "); W(opText); WLn;
+        ap := ap.rest
+
+      ELSIF (ap.first.kind = ZilObj.KAtom) & (ap.first.atomText[0] = "P")
+            & (ap.first.atomText[1] = "?") & (ap.rest # NIL) & (ap.rest.first # NIL) THEN
+        (* P?FOO expr -> fetch that property off expr and print it as a
+           packed string *)
+        ok := CompileOperand(ap.first, propText);
+        IF ~ok THEN RETURN FALSE END;
+        ok := CompileOperand(ap.rest.first, opText);
+        IF ~ok THEN RETURN FALSE END;
+        W("	GETP "); W(opText); W(","); W(propText); W(" >STACK"); WLn;
+        W("	PRINT STACK"); WLn;
+        ap := ap.rest.rest
+
+      ELSIF ap.first.kind = ZilObj.KAtom THEN
+        Strings.Copy("CompileTell: bare atom is not a TELL token or property: ", errBuf);
+        Strings.Append(ap.first.atomText, errBuf);
+        Err(errBuf); RETURN FALSE
+
+      ELSE
+        (* anything else is an operand holding a packed string address *)
+        ok := CompileOperand(ap.first, opText);
+        IF ~ok THEN RETURN FALSE END;
+        W("	PRINT "); W(opText); WLn;
+        ap := ap.rest
+      END
+    END
+  END;
+  RETURN TRUE
+END CompileTell;
 
 (* Compiles `z` as a routine BODY STATEMENT — as opposed to CompileOperand
    above, which compiles it as a value-producing EXPRESSION — mirroring
@@ -1099,6 +1336,12 @@ BEGIN
         W("	RETURN "); W(opText); WLn
       END;
       Strings.Copy(opText, resultText); termFlag := TRUE;
+      RETURN TRUE
+
+    ELSIF headName = "TELL" THEN
+      ok := CompileTell(z);
+      IF ~ok THEN RETURN FALSE END;
+      Strings.Copy("1", resultText);
       RETURN TRUE
 
     ELSIF headName = "QUIT" THEN
@@ -1613,6 +1856,348 @@ BEGIN
   RETURN TRUE
 END CompileTables;
 
+(* ---------------- objects, properties and flags ----------------
+   Ported from Compilation.Objects.cs + Zilf.Emit/Zap's ObjectBuilder and
+   GameBuilder.FinishObjects. An OBJECT/ROOM's property list is raw and
+   uninterpreted until now (ZilModel stores it exactly as read), so this is
+   where DESC, IN/LOC, FLAGS and ordinary properties are finally told apart.
+
+   Numbering follows the original exactly, and both count DOWNWARDS:
+   property numbers start at the maximum (31 in V1-3, 63 in V4+) and
+   descend in definition order, flag numbers start at the maximum minus one
+   (31 / 47) and descend. Getting this backwards would still assemble and
+   still run — it would just silently disagree with every property default
+   slot — so it is worth stating.
+
+   Not handled, because they need the vocabulary and the complex-PROPDEF
+   pattern machinery that aren't ported: SYNONYM, ADJECTIVE, PSEUDO, and
+   direction properties (`(NORTH TO CELLAR)`). Those are SKIPPED with a
+   comment in the emitted .zap rather than failing the compile, so a game
+   still builds and the gap is visible in the output. *)
+
+PROCEDURE MaxProps(): INTEGER;
+BEGIN IF ZilModel.zversion < 4 THEN RETURN 31 ELSE RETURN 63 END END MaxProps;
+
+PROCEDURE MaxFlags(): INTEGER;
+BEGIN IF ZilModel.zversion < 4 THEN RETURN 32 ELSE RETURN 48 END END MaxFlags;
+
+PROCEDURE RegisterFlag(name: ARRAY OF CHAR): INTEGER;
+VAR i: INTEGER;
+BEGIN
+  i := FindFlagIdx(name);
+  IF i >= 0 THEN RETURN i END;
+  IF nFlagNames >= MaxFlagNames THEN RETURN -1 END;
+  Strings.Copy(name, flagNameTab[nFlagNames]);
+  INC(nFlagNames);
+  RETURN nFlagNames - 1
+END RegisterFlag;
+
+PROCEDURE RegisterProp(name: ARRAY OF CHAR): INTEGER;
+VAR i: INTEGER;
+BEGIN
+  i := FindPropIdx(name);
+  IF i >= 0 THEN RETURN i END;
+  IF nPropNames >= MaxPropNames THEN RETURN -1 END;
+  Strings.Copy(name, propNameTab[nPropNames]);
+  INC(nPropNames);
+  RETURN nPropNames - 1
+END RegisterProp;
+
+(* True for the property names this port interprets itself rather than
+   emitting as ordinary properties. *)
+PROCEDURE IsPseudoProperty(name: ARRAY OF CHAR): BOOLEAN;
+BEGIN
+  RETURN (name = "DESC") OR (name = "IN") OR (name = "LOC") OR (name = "FLAGS")
+END IsPseudoProperty;
+
+PROCEDURE IsUnsupportedProperty(name: ARRAY OF CHAR): BOOLEAN;
+BEGIN
+  RETURN (name = "SYNONYM") OR (name = "ADJECTIVE") OR (name = "PSEUDO")
+END IsUnsupportedProperty;
+
+(* A direction property like (NORTH TO CELLAR) is a complex PROPDEF pattern,
+   recognised here by the TO/PER/SORRY keywords real source uses. *)
+PROCEDURE IsDirectionProperty(body: ZilObj.Zo): BOOLEAN;
+VAR p: ZilObj.Zo;
+BEGIN
+  p := body;
+  WHILE (p # NIL) & (p.first # NIL) DO
+    IF p.first.kind = ZilObj.KAtom THEN
+      IF (p.first.atomText = "TO") OR (p.first.atomText = "PER")
+         OR (p.first.atomText = "SORRY") THEN RETURN TRUE END
+    END;
+    p := p.rest
+  END;
+  RETURN FALSE
+END IsDirectionProperty;
+
+(* Emits the whole object table: the property-default words, one .OBJECT
+   row per object, and a property table per object. *)
+PROCEDURE CompileObjects(): BOOLEAN;
+VAR i, j, k, num, nOwnProps: INTEGER;
+    o: ZilModel.ObjectRec; p, body, v: ZilObj.Zo;
+    nm, text, errBuf: ARRAY 256 OF CHAR;
+    flagsWord: ARRAY 3, 256 OF CHAR;
+    haveDesc: BOOLEAN;
+BEGIN
+  nFlagNames := 0; nPropNames := 0;
+
+  (* --- pass 1: discover every flag and property name --- *)
+  (* PROPDEF-declared names first, so a property with a declared default is
+     certain to get a slot even if no object uses it *)
+  i := 0;
+  WHILE i < ZilModel.nPropDefaults DO
+    k := RegisterProp(ZilModel.propDefaults[i].name.atomText);
+    IF k < 0 THEN Err("CompileObjects: too many properties"); RETURN FALSE END;
+    INC(i)
+  END;
+
+  i := 0;
+  WHILE i < ZilModel.nObjects DO
+    objParent[i] := -1; objSibling[i] := -1; objChild[i] := -1;
+    p := ZilModel.objects[i].props;
+    WHILE (p # NIL) & (p.first # NIL) DO
+      IF (p.first.kind = ZilObj.KList) & (p.first.first # NIL)
+         & (p.first.first.kind = ZilObj.KAtom) THEN
+        Strings.Copy(p.first.first.atomText, nm);
+        IF nm = "FLAGS" THEN
+          body := p.first.rest;
+          WHILE (body # NIL) & (body.first # NIL) DO
+            IF body.first.kind = ZilObj.KAtom THEN
+              k := RegisterFlag(body.first.atomText);
+              IF k < 0 THEN Err("CompileObjects: too many flags"); RETURN FALSE END
+            END;
+            body := body.rest
+          END
+        ELSIF ~IsPseudoProperty(nm) & ~IsUnsupportedProperty(nm)
+              & ~IsDirectionProperty(p.first.rest) THEN
+          k := RegisterProp(nm);
+          IF k < 0 THEN Err("CompileObjects: too many properties"); RETURN FALSE END
+        END
+      END;
+      p := p.rest
+    END;
+    INC(i)
+  END;
+
+  IF nFlagNames > MaxFlags() THEN
+    Err("CompileObjects: too many flags for this Z-machine version"); RETURN FALSE
+  END;
+  IF nPropNames > MaxProps() THEN
+    Err("CompileObjects: too many properties for this Z-machine version"); RETURN FALSE
+  END;
+
+  (* --- pass 2: the containment tree ---
+     each child is pushed onto the front of its parent's child list, exactly
+     as the original does (ob.Sibling = parent.Child; parent.Child = ob) *)
+  i := 0;
+  WHILE i < ZilModel.nObjects DO
+    p := ZilModel.objects[i].props;
+    WHILE (p # NIL) & (p.first # NIL) DO
+      IF (p.first.kind = ZilObj.KList) & (p.first.first # NIL)
+         & (p.first.first.kind = ZilObj.KAtom) THEN
+        Strings.Copy(p.first.first.atomText, nm);
+        IF ((nm = "IN") OR (nm = "LOC")) & (p.first.rest # NIL)
+           & (p.first.rest.first # NIL) & (p.first.rest.first.kind = ZilObj.KAtom)
+           & ((p.first.rest.rest = NIL) OR (p.first.rest.rest.first = NIL)) THEN
+          j := FindObjectIdx(p.first.rest.first.atomText);
+          IF j >= 0 THEN
+            objParent[i] := j;
+            objSibling[i] := objChild[j];
+            objChild[j] := i
+          ELSE
+            Strings.Copy("CompileObjects: no such object: ", errBuf);
+            Strings.Append(p.first.rest.first.atomText, errBuf);
+            Err(errBuf); RETURN FALSE
+          END
+        END
+      END;
+      p := p.rest
+    END;
+    INC(i)
+  END;
+
+  (* --- flag and property symbols --- *)
+  IF nFlagNames > 0 THEN
+    W("	; object flags"); WLn;
+    i := 0;
+    WHILE i < nFlagNames DO
+      num := MaxFlags() - 1 - i;
+      FixText(num, text);
+      W("	"); W(flagNameTab[i]); W("="); W(text); WLn;
+      (* FX?NAME is the single-bit mask for the flag within its word, which
+         is what an .OBJECT row's flag words are built from *)
+      k := 1; j := 0;
+      WHILE j < 15 - (num MOD 16) DO k := k * 2; INC(j) END;
+      FixText(k, text);
+      W("	FX?"); W(flagNameTab[i]); W("="); W(text); WLn;
+      INC(i)
+    END;
+    WLn
+  END;
+
+  IF nPropNames > 0 THEN
+    W("	; object properties"); WLn;
+    i := 0;
+    WHILE i < nPropNames DO
+      FixText(MaxProps() - i, text);
+      W("	P?"); W(propNameTab[i]); W("="); W(text); WLn;
+      INC(i)
+    END;
+    WLn
+  END;
+
+  (* --- the object table itself --- *)
+  W("OBJECT:: .TABLE"); WLn;
+
+  (* property defaults, in property-number order 1..MaxProps *)
+  num := 1;
+  WHILE num <= MaxProps() DO
+    i := MaxProps() - num;    (* the registration index with this number *)
+    Strings.Copy("0", text);
+    IF (i >= 0) & (i < nPropNames) THEN
+      W("	; "); W(propNameTab[i]); WLn;
+      j := 0;
+      WHILE j < ZilModel.nPropDefaults DO
+        IF ZilModel.propDefaults[j].name.atomText = propNameTab[i] THEN
+          IF ~ConstantText(ZilModel.propDefaults[j].value, text) THEN
+            Strings.Copy("0", text)
+          END
+        END;
+        INC(j)
+      END
+    END;
+    W("	.WORD "); W(text); WLn;
+    INC(num)
+  END;
+
+  IF ZilModel.nObjects > 0 THEN WLn END;
+
+  i := 0;
+  WHILE i < ZilModel.nObjects DO
+    o := ZilModel.objects[i];
+    Strings.Copy("0", flagsWord[0]);
+    Strings.Copy("0", flagsWord[1]);
+    Strings.Copy("0", flagsWord[2]);
+
+    p := o.props;
+    WHILE (p # NIL) & (p.first # NIL) DO
+      IF (p.first.kind = ZilObj.KList) & (p.first.first # NIL)
+         & (p.first.first.kind = ZilObj.KAtom) & (p.first.first.atomText = "FLAGS") THEN
+        body := p.first.rest;
+        WHILE (body # NIL) & (body.first # NIL) DO
+          IF body.first.kind = ZilObj.KAtom THEN
+            k := RegisterFlag(body.first.atomText);
+            num := MaxFlags() - 1 - k;
+            j := num DIV 16;
+            IF flagsWord[j] = "0" THEN flagsWord[j][0] := 0X
+            ELSE Strings.Append("+", flagsWord[j]) END;
+            Strings.Append("FX?", flagsWord[j]);
+            Strings.Append(flagNameTab[k], flagsWord[j])
+          END;
+          body := body.rest
+        END
+      END;
+      p := p.rest
+    END;
+
+    W("	.OBJECT "); W(o.name.atomText);
+    W(","); W(flagsWord[0]);
+    W(","); W(flagsWord[1]);
+    IF ZilModel.zversion >= 4 THEN W(","); W(flagsWord[2]) END;
+    IF objParent[i] >= 0 THEN W(","); W(ZilModel.objects[objParent[i]].name.atomText)
+    ELSE W(",0") END;
+    IF objSibling[i] >= 0 THEN W(","); W(ZilModel.objects[objSibling[i]].name.atomText)
+    ELSE W(",0") END;
+    IF objChild[i] >= 0 THEN W(","); W(ZilModel.objects[objChild[i]].name.atomText)
+    ELSE W(",0") END;
+    W(",?PTBL?"); W(o.name.atomText); WLn;
+    INC(i)
+  END;
+  W("	.ENDT"); WLn; WLn;
+
+  (* --- one property table per object ---
+     properties must appear in DESCENDING property-number order, which the
+     Z-machine's property lookup relies on *)
+  i := 0;
+  WHILE i < ZilModel.nObjects DO
+    o := ZilModel.objects[i];
+    W("?PTBL?"); W(o.name.atomText); W(":: .TABLE"); WLn;
+
+    haveDesc := FALSE;
+    p := o.props;
+    WHILE (p # NIL) & (p.first # NIL) DO
+      IF (p.first.kind = ZilObj.KList) & (p.first.first # NIL)
+         & (p.first.first.kind = ZilObj.KAtom) & (p.first.first.atomText = "DESC")
+         & (p.first.rest # NIL) & (p.first.rest.first # NIL)
+         & (p.first.rest.first.kind = ZilObj.KString) THEN
+        TranslateZilString(p.first.rest.first.strBuf^, text);
+        CompileZapString(text, errBuf);
+        W("	.STRL "); W(errBuf); WLn;
+        haveDesc := TRUE
+      END;
+      p := p.rest
+    END;
+    IF ~haveDesc THEN W('	.STRL ""'); WLn END;
+
+    (* walk the property table in descending number order, which means
+       ascending registration index *)
+    k := 0;
+    WHILE k < nPropNames DO
+      p := o.props;
+      WHILE (p # NIL) & (p.first # NIL) DO
+        IF (p.first.kind = ZilObj.KList) & (p.first.first # NIL)
+           & (p.first.first.kind = ZilObj.KAtom)
+           & (p.first.first.atomText = propNameTab[k]) THEN
+          body := p.first.rest;
+          nOwnProps := 0; v := body;
+          WHILE (v # NIL) & (v.first # NIL) DO INC(nOwnProps); v := v.rest END;
+          IF nOwnProps = 0 THEN
+            Strings.Copy("CompileObjects: property has no value: ", errBuf);
+            Strings.Append(propNameTab[k], errBuf);
+            Err(errBuf); RETURN FALSE
+          END;
+          FixText(nOwnProps * 2, text);
+          W("	.PROP "); W(text); W(",P?"); W(propNameTab[k]); WLn;
+          v := body;
+          WHILE (v # NIL) & (v.first # NIL) DO
+            IF ~ConstantText(v.first, text) THEN
+              Strings.Copy("CompileObjects: non-constant value in property ", errBuf);
+              Strings.Append(propNameTab[k], errBuf);
+              Strings.Append(" of object ", errBuf);
+              Strings.Append(o.name.atomText, errBuf);
+              Err(errBuf); RETURN FALSE
+            END;
+            W("	.WORD "); W(text); WLn;
+            v := v.rest
+          END
+        END;
+        p := p.rest
+      END;
+      INC(k)
+    END;
+
+    (* note anything deliberately skipped, so the gap is visible *)
+    p := o.props;
+    WHILE (p # NIL) & (p.first # NIL) DO
+      IF (p.first.kind = ZilObj.KList) & (p.first.first # NIL)
+         & (p.first.first.kind = ZilObj.KAtom) THEN
+        Strings.Copy(p.first.first.atomText, nm);
+        IF IsUnsupportedProperty(nm) OR (~IsPseudoProperty(nm) & IsDirectionProperty(p.first.rest)) THEN
+          W("	; (skipped "); W(nm);
+          W(": needs the vocabulary/PROPDEF machinery)"); WLn
+        END
+      END;
+      p := p.rest
+    END;
+
+    W("	.BYTE 0"); WLn;
+    W("	.ENDT"); WLn; WLn;
+    INC(i)
+  END;
+  RETURN TRUE
+END CompileObjects;
+
 (* Emits an empty-but-well-formed V3 object table and dictionary, so a
    program that doesn't use objects or the parser still produces a story
    file an interpreter will load. A V3 object table starts with 31 words of
@@ -1626,21 +2211,15 @@ END CompileTables;
    original's Compilation.Objects.cs and Compilation.Syntax.cs); until then
    this keeps the header's OBJECT and VOCAB pointers valid rather than
    aiming them at whatever byte happens to follow. *)
-PROCEDURE EmitEmptyObjectAndVocab;
-VAR i, nDefaults, entryLen: INTEGER; n: ARRAY 16 OF CHAR;
+PROCEDURE EmitVocab;
+VAR entryLen: INTEGER; n: ARRAY 16 OF CHAR;
 BEGIN
-  (* property defaults: 31 words in V1-3, 63 in V4+ (the Z-machine spec's
-     fixed sizes); dictionary entry: 4 z-word bytes in V1-3, 6 in V4+, plus
-     3 data bytes either way — the same two numbers the original computes in
-     FinishSyntax as `zversion < 4 ? 4 : 6` plus the entry data size *)
-  IF ZilModel.zversion < 4 THEN nDefaults := 31; entryLen := 7
-  ELSE nDefaults := 63; entryLen := 9
-  END;
-
-  W("OBJECT:: .TABLE"); WLn;
-  i := 0;
-  WHILE i < nDefaults DO W("	.WORD 0"); WLn; INC(i) END;
-  W("	.ENDT"); WLn; WLn;
+  (* dictionary entry: 4 z-word bytes in V1-3, 6 in V4+, plus 3 data bytes
+     either way — the same numbers the original computes in FinishSyntax as
+     `zversion < 4 ? 4 : 6` plus the entry data size. The dictionary itself
+     is still empty: vocabulary and syntax emission is its own later slice,
+     and this keeps the header's VOCAB pointer valid meanwhile. *)
+  IF ZilModel.zversion < 4 THEN entryLen := 7 ELSE entryLen := 9 END;
 
   W("IMPURE::"); WLn; WLn;
 
@@ -1653,7 +2232,7 @@ BEGIN
 
   W("WORDS::"); WLn; WLn;
   W("ENDLOD::"); WLn; WLn
-END EmitEmptyObjectAndVocab;
+END EmitVocab;
 
 (* Emits a complete, assemblable .zap file for everything ZilModel has
    accumulated: the whole-program entry point this module previously
@@ -1690,7 +2269,9 @@ BEGIN
   IF ~ok THEN RETURN FALSE END;
   ok := CompileTables();
   IF ~ok THEN RETURN FALSE END;
-  EmitEmptyObjectAndVocab;
+  ok := CompileObjects();
+  IF ~ok THEN RETURN FALSE END;
+  EmitVocab;
 
   (* the entry routine first, so START:: is the lowest code address *)
   ok := CompileRoutine(entryIdx, TRUE);

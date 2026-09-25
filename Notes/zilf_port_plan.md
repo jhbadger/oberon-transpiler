@@ -2181,6 +2181,102 @@ values. All eleven end-to-end programs pass. Transpiler regression suite:
 **Corpus**: `sample/name` now reaches `TELL`, the last big codegen piece
 before a parser-driven game.
 
+## What's done: `TELL`, and object/property/flag tables
+
+Two of the three items the plan named next. Both are tested end to end, and
+together they are what a game with a world model needs.
+
+### `TELL` (`ZModel/TellTokens.cs` + `Compilation.Expressions.cs`)
+
+`TELL` is not a fixed builtin — it is a variadic print statement driven by a
+table of token patterns that the library extends with `ADD-TELL-TOKENS`, so
+`<TELL "x" CR D ,HERE>` and the library's own `<TELL T .OBJ>` go through one
+matcher.
+
+- **A pattern** is a sequence of token specs plus an output FORM. A spec is
+  an atom (match it), a LIST of atoms (match any — this is how `(CR CRLF)`
+  gives `CR` an alias), `*` (match anything and capture), or `<GVAL atom>`
+  (match that exact GVAL). The output FORM's `<LVAL ...>` elements are
+  replaced by the captures in order, and the result is compiled as an
+  ordinary statement. Patterns and outputs are kept as plain Zo structures
+  and walked directly rather than parsed into a separate representation,
+  which makes `ADD-TELL-TOKENS` almost nothing: accumulate token specs until
+  a FORM that isn't a `<GVAL ...>` arrives, and that FORM ends the pattern.
+  `*:DECL` specs are not matched (they need DECL).
+- **The five built-in patterns** (`(CR CRLF) <CRLF>`, `D`/`N`/`C`/`B` with
+  their print opcodes) are built directly rather than parsed from source
+  text as `Context.InitTellPatterns` does — there is no reader to hand a
+  string to here, and five patterns is little enough that a parser would
+  cost more than it saved.
+- **The fallbacks**, in the original's order: a literal STRING prints inline
+  (translated, so `|` really is a newline), a CHARACTER prints as a
+  character, `'FOO` prints an object's short description, `P?FOO expr`
+  fetches and prints that property, and anything else is printed as a
+  packed string address. A bare atom that is none of these is an error
+  naming the atom, as in the original.
+- `CompileTell` is **its own procedure calling `CompileStmt`, which calls
+  back** — the second place this port uses the mutual recursion earlier
+  phases believed impossible.
+
+### Objects, properties and flags (`Compilation.Objects.cs`)
+
+An OBJECT/ROOM's property list is stored raw and uninterpreted at
+registration time, so this is where `DESC`, `IN`/`LOC`, `FLAGS` and ordinary
+properties are finally told apart.
+
+- **Numbering counts DOWNWARDS**, exactly as the original does: property
+  numbers start at the maximum (31 in V1-3, 63 in V4+) and descend in
+  definition order; flag numbers start at the maximum minus one (31 / 47)
+  and descend. Getting this backwards would still assemble and still run —
+  it would just silently disagree with every property-default slot — so it
+  is worth stating rather than leaving to be re-derived.
+- **Emitted**: `NAME=<n>` and `FX?NAME=<bit>` per flag (the bit mask being
+  what an `.OBJECT` row's flag words are built from), `P?NAME=<n>` per
+  property, the property-default words in property-number order, one
+  `.OBJECT name,flags1,flags2[,flags3],parent,sibling,child,?PTBL?name` row
+  per object, and a `?PTBL?name` table per object holding its `.STRL`
+  description and its properties **in descending property-number order**,
+  which the Z-machine's property lookup relies on.
+- **The containment tree** is built the original's way: each child is pushed
+  onto the front of its parent's child list (`ob.Sibling = parent.Child;
+  parent.Child = ob`).
+- **`ConstantText` now resolves flag names and `P?NAME`**, because
+  `CompileObjects` runs before any routine is compiled, so by the time a
+  routine body references one it is registered. The original reaches these
+  the same way — `DefineFlag`/`DefineProperty` each add a `Constants` entry.
+- Added the object predicates `FSET?`, `IN?`, `FIRST?` and `NEXT?` (the last
+  two store a value *and* branch; in a condition position only the branch
+  matters and the value goes to the stack).
+- **Not handled, and skipped with a comment in the emitted `.zap` rather
+  than failing the compile**: `SYNONYM`, `ADJECTIVE`, `PSEUDO`, and
+  direction properties like `(NORTH TO CELLAR)`. All of them need the
+  vocabulary and complex-`PROPDEF` machinery that isn't ported. Failing
+  would block every game that has a map; skipping leaves the gap visible in
+  the output.
+
+**Tested end-to-end**, one program covering both: three objects and a room
+with `DESC`/`IN`/`FLAGS`/`SIZE`, a `<PROPDEF SIZE 5>` default, and a `GO`
+that prints an object's description through `TELL`'s `D` token (both from a
+global and by name), through `'FOO`, reads an explicit property and a
+**defaulted** one (`ROCK` has no `SIZE`, so 5 comes out of the
+property-default table — which validates the default slots and the property
+numbering together), tests two flags in both directions, `MOVE`s an object
+and re-reads its location. Every one of the eleven printed values correct.
+A separate `TELL` program covers the token matcher: literal strings, `CR`,
+`N`, `C` with a character literal, globals as operands, a compound
+expression as an operand, and custom tokens registered by
+`ADD-TELL-TOKENS` including an alias list.
+
+**Tested**: all thirteen end-to-end programs; `beer` and `mandelbrot` still
+compile clean; transpiler regression suite, 138 files, same 3
+pre-existing-only failures; corpus unchanged (the 5 "parse error" entries
+are the documented read-time-`%` failures from compiling library sub-files
+standalone, where a global their parent file sets is missing).
+
+**Corpus**: `sample/name` now gets past `TELL`'s built-in tokens and stops
+on its own `BUF` token, which its hand-written `TELL` macro would have
+defined — that file needs the MDL list primitives, not more TELL work.
+
 ## Corpus gap analysis: exactly what blocks compiling a real game
 
 Running the new driver over all 52 corpus files makes the remaining gap

@@ -36,6 +36,7 @@ CONST
   MaxBuzzwords*  = 512;
   MaxPropDefaults* = 512;
   MaxPropDefSpecs* = 128;
+  MaxTellPatterns* = 128;
 
   (* SynonymRec.kind values *)
   SynPlain* = 0; SynVerb* = 1; SynPrep* = 2; SynAdj* = 3; SynDir* = 4;
@@ -99,6 +100,21 @@ TYPE
     rawSpec*: ZilObj.Zo
   END;
 
+  (* One TELL token pattern (the original's ZModel.TellPattern): a sequence
+     of token specs to match against TELL's arguments, and the output FORM
+     to compile in their place. `tokens` is a LIST of specs, each an atom
+     (match that atom), a LIST of atoms (match any of them), the atom `*`
+     (match anything and capture it), or a <GVAL atom> form (match that
+     exact GVAL). `output` is a FORM whose <LVAL ...> elements are replaced
+     by the captures, in order. Both are kept as ordinary Zo structures
+     rather than a parsed representation — matching walks them directly,
+     which is cheap at this scale and keeps ADD-TELL-TOKENS's job to almost
+     nothing. *)
+  TellPatternRec* = RECORD
+    tokens*: ZilObj.Zo;
+    output*: ZilObj.Zo
+  END;
+
 VAR
   (* The Z-machine version the program targets, set by <VERSION ...> (see
      ZilEval's VERSION subr) — the original's ZEnvironment.ZVersion, which
@@ -148,6 +164,9 @@ VAR
 
   propDefSpecs*: ARRAY MaxPropDefSpecs OF PropDefSpecRec;
   nPropDefSpecs*: INTEGER;
+
+  tellPatterns*: ARRAY MaxTellPatterns OF TellPatternRec;
+  nTellPatterns*: INTEGER;
 
 PROCEDURE AddRoutine*(name, act, argSpec, body: ZilObj.Zo);
 BEGIN
@@ -248,12 +267,21 @@ BEGIN
   END
 END AddPropDefSpec;
 
+PROCEDURE AddTellPattern*(tokens, output: ZilObj.Zo);
+BEGIN
+  IF nTellPatterns < MaxTellPatterns THEN
+    tellPatterns[nTellPatterns].tokens := tokens;
+    tellPatterns[nTellPatterns].output := output;
+    INC(nTellPatterns)
+  END
+END AddTellPattern;
+
 PROCEDURE Reset*;
 BEGIN
   zversion := 3; timeStatusLine := FALSE;
   nRoutines := 0; nObjects := 0; nGlobals := 0; nConstants := 0; nTables := 0;
   nSyntaxes := 0; nSynonyms := 0; nDirections := 0; nBuzzwords := 0;
-  nPropDefaults := 0; nPropDefSpecs := 0
+  nPropDefaults := 0; nPropDefSpecs := 0; nTellPatterns := 0
 END Reset;
 
 BEGIN

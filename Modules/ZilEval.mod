@@ -1107,6 +1107,8 @@ VAR
   (* VERSION? / IFFLAG *)
   cond, flagVal: ZilObj.Zo; matched: BOOLEAN; ver: INTEGER;
   ifFlagName: ARRAY 64 OF CHAR; ifFlagNeg: BOOLEAN;
+  (* ADD-TELL-TOKENS *)
+  tellToks, tellTail: ZilObj.Zo;
   (* QUASIQUOTE walk mode (see the dedicated comment below) *)
   qqResult, qqTail, qqElem, qqInner, qqCell, qqSpliceP, qqVec: ZilObj.Zo;
   qqStop: BOOLEAN;
@@ -1662,6 +1664,43 @@ BEGIN
       END;
       RETURN r
 
+    ELSIF isFSubr & ((name = "ADD-TELL-TOKENS") OR (name = "TELL-TOKENS")) THEN
+      (* Ported from Subrs.ZModel.cs's ADD_TELL_TOKENS/TELL_TOKENS, plus
+         ZModel/TellTokens.cs's TellPattern.Parse. A spec is a flat sequence
+         of token specs and output FORMs: token specs accumulate until a
+         FORM that is NOT a <GVAL ...> arrives, and that FORM is the output
+         for everything accumulated so far. So
+
+           <ADD-TELL-TOKENS  T * <PRINT-DEF .X>  A * <PRINT-INDEF .X>>
+
+         is two patterns. TELL-TOKENS replaces the whole list (including the
+         built-in defaults) rather than appending, which is the only
+         difference between them. An FSUBR because the token specs are
+         syntax, not values — a bare `D` or `*` must not be evaluated. *)
+      IF name = "TELL-TOKENS" THEN ZilModel.nTellPatterns := 0 END;
+      tellToks := NIL; tellTail := NIL;
+      n := z.rest;
+      WHILE (n # NIL) & (n.first # NIL) DO
+        nFirst := n.first;
+        IF (nFirst.kind = ZilObj.KForm) & ~((ZilObj.ListLength(nFirst) = 2)
+           & ZilObj.IsAtomNamed(nFirst.first, "GVAL")) THEN
+          IF tellToks = NIL THEN
+            RETURN Err("ADD-TELL-TOKENS: an output form with no preceding token spec")
+          END;
+          ZilModel.AddTellPattern(tellToks, nFirst);
+          tellToks := NIL; tellTail := NIL
+        ELSE
+          cell := ZilObj.Cons(ZilObj.KList, nFirst, NIL);
+          IF tellToks = NIL THEN tellToks := cell ELSE tellTail.rest := cell END;
+          tellTail := cell
+        END;
+        n := n.rest
+      END;
+      IF tellToks # NIL THEN
+        RETURN Err("ADD-TELL-TOKENS: spec ends with an unterminated pattern")
+      END;
+      RETURN MkVal(TrueVal())
+
     ELSIF isFSubr & (name = "GDECL") THEN
       (* <GDECL (ATOM ATOM ...) decl ...> attaches DECL type constraints to
          globals. This port skips DECL checking entirely (an explicit
@@ -2191,6 +2230,33 @@ END ReadTimeEval;
    that. GLK and CORNERSTONE are always false here: both are targets this
    port doesn't emit for. *)
 PROCEDURE InitPredefined;
+VAR tk, ou: ARRAY 4 OF ZilObj.Zo;
+
+  (* builds a cons chain of `kind` from the first n items *)
+  PROCEDURE MkChain(kind: INTEGER; items: ARRAY OF ZilObj.Zo; n: INTEGER): ZilObj.Zo;
+  VAR head, tail, cell: ZilObj.Zo; k: INTEGER;
+  BEGIN
+    head := NIL; tail := NIL;
+    FOR k := 0 TO n - 1 DO
+      cell := ZilObj.Cons(kind, items[k], NIL);
+      IF head = NIL THEN head := cell ELSE tail.rest := cell END;
+      tail := cell
+    END;
+    IF head = NIL THEN RETURN ZilObj.NewEmpty(kind) END;
+    RETURN head
+  END MkChain;
+
+  (* the "<TOKEN> * <OPCODE .X>" shape all four of the remaining built-in
+     TELL patterns share *)
+  PROCEDURE DefTell1(token, opcode: ARRAY OF CHAR);
+  VAR t, o: ARRAY 4 OF ZilObj.Zo;
+  BEGIN
+    t[0] := ZilObj.Intern(token); t[1] := ZilObj.Intern("*");
+    o[0] := ZilObj.Intern("LVAL"); o[1] := ZilObj.Intern("X");
+    o[1] := MkChain(ZilObj.KForm, o, 2);
+    o[0] := ZilObj.Intern(opcode);
+    ZilModel.AddTellPattern(MkChain(ZilObj.KList, t, 2), MkChain(ZilObj.KForm, o, 2))
+  END DefTell1;
 
   PROCEDURE DefGlobal(name: ARRAY OF CHAR; value: ZilObj.Zo);
   VAR atom: ZilObj.Zo;
@@ -2229,6 +2295,28 @@ BEGIN
   DefConst("PS?ADJECTIVE", 32);
   DefConst("PS?VERB", 64);
   DefConst("PS?OBJECT", 128);
+
+  (* The TELL token patterns the original predefines in InitTellPatterns.
+     It writes them as ZIL source and parses it; there is no reader to hand
+     a string to here, so they are built directly — five patterns is little
+     enough that a parser would cost more than it saved.
+
+         (CR CRLF) <CRLF>
+         D * <PRINTD .X>
+         N * <PRINTN .X>
+         C * <PRINTC .X>
+         B * <PRINTB .X>
+  *)
+  ZilModel.nTellPatterns := 0;
+  tk[0] := ZilObj.Intern("CR"); tk[1] := ZilObj.Intern("CRLF");
+  tk[0] := MkChain(ZilObj.KList, tk, 2);
+  ou[0] := ZilObj.Intern("CRLF");
+  ZilModel.AddTellPattern(MkChain(ZilObj.KList, tk, 1), MkChain(ZilObj.KForm, ou, 1));
+
+  DefTell1("D", "PRINTD");
+  DefTell1("N", "PRINTN");
+  DefTell1("C", "PRINTC");
+  DefTell1("B", "PRINTB");
 
   (* the compilation flags the original predefines in InitCompilationFlags *)
   nFlags := 0;
@@ -2289,6 +2377,7 @@ BEGIN
   Register("USE-WHEN", FALSE); Register("INCLUDE-WHEN", FALSE);
   Register("COMPILATION-FLAG", FALSE); Register("COMPILATION-FLAG-DEFAULT", FALSE);
   Register("COMPILATION-FLAG-VALUE", FALSE); Register("IFFLAG", TRUE);
+  Register("ADD-TELL-TOKENS", TRUE); Register("TELL-TOKENS", TRUE);
   Register("VERSION?", TRUE); Register("GDECL", TRUE);
 
   tAtom := ZilObj.Intern("T");
