@@ -2277,6 +2277,122 @@ standalone, where a global their parent file sets is missing).
 on its own `BUF` token, which its hand-written `TELL` macro would have
 defined — that file needs the MDL list primitives, not more TELL work.
 
+## MILESTONE 3: `sample/name/name.zil` — the first INTERACTIVE game, plus the MDL interpreter layer
+
+`name.zil` asks for your name and two years and tells you how old you are.
+It compiles, assembles and runs correctly under frotz: status line, `READ`
+input, buffer manipulation, and the right arithmetic (`1852 - 1815 = 37`).
+It is the first compiled game here that takes input, and getting it working
+needed most of the MDL interpreter layer this port had been doing without —
+because `name.zil` defines **its own `TELL`** as a `DEFMAC` built on
+`MAPF`/`FUNCTION`.
+
+### The MDL primitives (`Interpreter/Subrs.*`)
+
+- **Structure access**: `NTH`, `REST`, `EMPTY?`, `LENGTH`, `TYPE`,
+  `PRIMTYPE`, `TYPE?`, `STRUCTURED?`, `APPLICABLE?`, `SPNAME`/`PNAME`,
+  `PARSE`, `ERROR`. All three value shapes are handled — cons chains
+  (LIST/FORM), flat arrays (VECTOR/TABLE) and STRINGs — so `REST` on a
+  VECTOR or STRING copies, this port having no offset-view representation.
+  `TYPE?` returns the matching type ATOM rather than plain T, as the
+  original does, because real source uses the returned atom.
+- **`<1 .L>`**: a FIX applied as a function is MDL's element accessor. Real
+  source uses this spelling far more than `NTH` itself.
+- **`FUNCTION`**: an anonymous `DEFINE` — the same value, never named.
+- **`APPLY`**, and **`MAPF`/`MAPR`** with `MAPRET`/`MAPSTOP`/`MAPLEAVE`.
+  The map control forms propagate out of the loop function exactly the way
+  `RETURN` propagates out of a `PROG`, so the enclosing `MAPF` catches them
+  through any nesting. **With no structure arguments at all, the loop
+  function is called repeatedly with none** until it stops — an idiom real
+  source really uses as a generator, and precisely what `name.zil`'s `TELL`
+  does to walk its own argument list.
+  `ApplyValue` reuses the ordinary application path by building
+  `<fn <QUOTE a0> ...>` rather than duplicating the argument-binding
+  machinery.
+- **SEGMENT splicing** (`!.X`) in an argument list and in a LIST literal —
+  `<FORM PROG '() !.O>` is how source builds a form from a computed list of
+  statements.
+
+### A real bug this exposed: `"ARGS"` must bind arguments UNEVALUATED
+
+`name.zil` first compiled and ran but printed *"You must be about 0 by
+now"*. The generated code said `PRINTN 0`: `<- ,CURYEAR ,BIRTHYEAR>` had
+been **constant-folded at macro-expansion time**, both globals still holding
+their declared 0.
+
+The cause was an earlier phase's belief, written into `ZilEval.mod`'s own
+comment, that a `DEFMAC`'s call-site arguments are always evaluated as they
+are bound. Checking `ArgSpec.cs` shows the real rule:
+`evaluator.GetRest(eval && !varargsQuoted)` — **`"ARGS"` binds the rest of
+the arguments unevaluated, `"TUPLE"` binds them evaluated**. That one bit is
+the entire difference between the two clauses, and it is what makes a
+`DEFMAC` written with `("ARGS" A)` a real macro: it sees the call site's
+syntax rather than its values. This would have silently miscompiled every
+game using such a macro — which is most of them.
+
+### `MOBLIST`/`LOOKUP`/`INSERT` — OBLISTs as compile-time data
+
+The corpus's top blocker for a long time, and a genuinely different problem
+from the package work. `zillib/libmsg.zil` doesn't use oblists for name
+*resolution* (the flat table handles that); it uses them as **hash maps
+built while compiling**, interning one atom per library message per
+category.
+
+The shape that made this small: **an OBLIST value carries nothing but its
+name**, and `INSERT`/`LOOKUP` intern `NAME!-<oblist name>` in the one flat
+table. That reproduces the original's own qualified spelling
+(`SUCCESS!-TAKE!-LIBRARY-MESSAGES`) exactly, so source that writes such a
+name out literally finds the same atom. Membership — what distinguishes
+"this oblist contains N" from "an atom of that name exists somewhere" — is
+recorded on the atom's own property list under an internal indicator,
+reusing `PUTPROP`/`GETPROP` rather than adding a table. `ROOT` and `OBLIST?`
+came along with it.
+
+Verified directly: `LOOKUP` false before `INSERT` and the same atom after,
+the interned atom really being the one spelled `FOO!-MYLIST` (checked by
+`SETG`ing that literal name and reading it back), two oblists keeping
+separate entries of the same name, and the two-level nesting `libmsg` builds
+(`SUCCESS!-TAKE!-MYLIST`). All six values correct.
+
+### Compiler work `name.zil` also needed
+
+- **`PROG`/`REPEAT` bindings**, previously refused. Bindings become extra
+  locals on the `.FUNCT` line, scoped by a rename stack — the Z-machine
+  knows nothing about inner scopes, so the scoping is entirely the
+  compiler's job, as it is in the original (`PushInnerLocal`/
+  `PopInnerLocal`). A binding shadowing a parameter gets a distinct ZAP name
+  (`X?1`); sibling blocks binding the same name **share one slot** rather
+  than each burning another of the routine's fifteen. `SET` resolves through
+  the rename stack and `SETG` deliberately does not, so `<SETG X ...>` inside
+  a `PROG` binding `X` still writes the global — verified both ways.
+- **`AND`/`OR`**, in both positions: short-circuit *branching* in a
+  condition (no value materialised at all), and in a value position the
+  first true (OR) / first false (AND) operand, held in a compiler temporary
+  because the test must not consume it. Verified that the short-circuit
+  really short-circuits, by printing from the operands.
+- **A routine-level block**, so a bare `<AGAIN>` loops back to the start of
+  the routine. It has an again label but **no return label**, which is how
+  the original distinguishes it — a `RETURN` with no enclosing `PROG` must
+  leave the routine, not jump to a block label.
+- **`EQUAL?` widened to 2-4 arguments**, matching the first against any of
+  the rest in one instruction, as the original does.
+- **An empty FORM `<>` compiles as 0.** The evaluator turns one into FALSE
+  when it sees it, but a routine body is never evaluated, so the literal
+  `<SET OK <>>` in real source arrives at the compiler still shaped as an
+  empty FORM.
+- `READ`, `COPYT`, `PRINTT`, `ZWSTR`, `DIRIN`, `INPUT`, `SOUND`, `POP`,
+  `FSTACK`, `MARGIN` added to the one-instruction builtin table; a TABLE
+  value usable directly as an operand (macro expansion can substitute one
+  into a routine body).
+
+**Tested**: sixteen end-to-end programs, all passing; `beer`, `mandelbrot`
+and `name` all compile and assemble; transpiler regression suite, 138 files,
+same 3 pre-existing-only failures.
+
+**Corpus**: `MOBLIST` is gone from the blocker list. `cloak`, `empty` and
+`cloak_test` now evaluate the entire zillib — parser, library messages and
+all — and stop at `DEFSTRUCT`; `advent` stops at `STRING`.
+
 ## Corpus gap analysis: exactly what blocks compiling a real game
 
 Running the new driver over all 52 corpus files makes the remaining gap

@@ -39,9 +39,18 @@ CONST
   MaxIncludePaths = 16;
   MaxPackages = 128;
   MaxFlags = 256;
+  MaxOblists = 256;
   OValue* = 0;
   OReturn* = 1;
   OAgain*  = 2;
+  (* MAPF's own control flow. Each propagates out of the loop function the
+     same way RETURN does — ShouldPass sends it up through any nesting until
+     the MAPF that started the iteration catches it. `value` NIL means the
+     form supplied no value at all (<MAPRET> with no arguments, which skips
+     the element entirely). *)
+  OMapRet*   = 3;
+  OMapStop*  = 4;
+  OMapLeave* = 5;
 
   MaxArgs = 64;
   MaxBindings = 32;
@@ -105,6 +114,9 @@ VAR
      macro's own body must evaluate completely normally, and only the
      macro's RESULT is what's being asked for unevaluated. *)
   expandOnlyPending: BOOLEAN;
+
+  oblists: ARRAY MaxOblists OF ZilObj.Zo;
+  nOblists: INTEGER;
 
   flagNames: ARRAY MaxFlags OF ARRAY 64 OF CHAR;
   flagValues: ARRAY MaxFlags OF ZilObj.Zo;
@@ -465,6 +477,154 @@ BEGIN
   RETURN MkVal(tab)
 END PerformITable;
 
+(* ---------------- OBLISTs as compile-time data ----------------
+   Name RESOLUTION in this port uses one flat atom table (phase 1's
+   simplification, and the package work confirmed it is enough). But
+   zillib/libmsg.zil uses OBLISTs for something else entirely: as hash maps
+   built while compiling. It does
+
+       <SETG LIBMSG-OL <MOBLIST LIBRARY-MESSAGES>>
+       <MOBLIST <OR <LOOKUP .N ,LIBMSG-OL> <INSERT .N ,LIBMSG-OL>>>
+
+   to get a per-category oblist, then interns each message name in it. The
+   original stores the resulting atom under a qualified name —
+   SUCCESS!-TAKE!-LIBRARY-MESSAGES — and that spelling is the whole trick
+   this port needs: an OBLIST here carries nothing but its NAME, and
+   INSERT/LOOKUP intern `NAME!-<oblist name>` in the one flat table. The
+   qualified names come out identical to the original's, so source that
+   spells one out literally still finds the same atom.
+
+   Membership (what distinguishes "this oblist contains N" from "that atom
+   merely exists") is recorded on the atom's own property list under an
+   internal indicator, reusing PUTPROP/GETPROP rather than adding a table. *)
+
+PROCEDURE OblistMarker(): ZilObj.Zo;
+BEGIN RETURN ZilObj.Intern("OBLIST ") END OblistMarker;
+
+PROCEDURE FindOrMakeOblist(name: ARRAY OF CHAR): ZilObj.Zo;
+VAR i: INTEGER; o: ZilObj.Zo;
+BEGIN
+  i := 0;
+  WHILE i < nOblists DO
+    IF oblists[i].atomText = name THEN RETURN oblists[i] END;
+    INC(i)
+  END;
+  NEW(o);
+  o.kind := ZilObj.KOblist;
+  Strings.Copy(name, o.atomText);
+  IF nOblists < MaxOblists THEN oblists[nOblists] := o; INC(nOblists) END;
+  RETURN o
+END FindOrMakeOblist;
+
+(* The flat-table name an entry called `pname` in `oblist` interns under. *)
+PROCEDURE QualifiedName(pname: ARRAY OF CHAR; oblist: ZilObj.Zo; VAR out: ARRAY OF CHAR);
+BEGIN
+  Strings.Copy(pname, out);
+  IF (oblist # NIL) & (oblist.atomText # "ROOT") THEN
+    Strings.Append("!-", out); Strings.Append(oblist.atomText, out)
+  END
+END QualifiedName;
+
+(* ---------------- MDL structure primitives ----------------
+   NTH/REST/EMPTY?/LENGTH/TYPE/TYPE? and friends work on any "structured"
+   value. The three shapes this port has are cons chains (LIST/FORM/FALSE),
+   flat arrays (VECTOR/TABLE) and STRINGs, so each accessor branches once on
+   the kind rather than going through the original's IStructure interface. *)
+
+PROCEDURE IsStructured*(z: ZilObj.Zo): BOOLEAN;
+BEGIN
+  IF z = NIL THEN RETURN FALSE END;
+  RETURN (z.kind = ZilObj.KList) OR (z.kind = ZilObj.KForm) OR (z.kind = ZilObj.KVector)
+         OR (z.kind = ZilObj.KString) OR (z.kind = ZilObj.KFalse) OR (z.kind = ZilObj.KTable)
+END IsStructured;
+
+PROCEDURE StructLength*(z: ZilObj.Zo): INTEGER;
+VAR n: INTEGER; p: ZilObj.Zo;
+BEGIN
+  IF z = NIL THEN RETURN 0 END;
+  IF (z.kind = ZilObj.KVector) OR (z.kind = ZilObj.KTable) THEN RETURN z.vecLen END;
+  IF z.kind = ZilObj.KString THEN RETURN z.strLen END;
+  n := 0; p := z;
+  WHILE (p # NIL) & (p.first # NIL) DO INC(n); p := p.rest END;
+  RETURN n
+END StructLength;
+
+(* 1-based, as every MDL accessor is. Returns NIL when out of range. *)
+PROCEDURE StructNth*(z: ZilObj.Zo; i: INTEGER): ZilObj.Zo;
+VAR p: ZilObj.Zo;
+BEGIN
+  IF (z = NIL) OR (i < 1) THEN RETURN NIL END;
+  IF (z.kind = ZilObj.KVector) OR (z.kind = ZilObj.KTable) THEN
+    IF i > z.vecLen THEN RETURN NIL END;
+    RETURN z.vecItems[i - 1]
+  END;
+  IF z.kind = ZilObj.KString THEN
+    IF i > z.strLen THEN RETURN NIL END;
+    RETURN ZilObj.NewChar(ORD(z.strBuf^[i - 1]))
+  END;
+  p := z;
+  WHILE (i > 1) & (p # NIL) DO p := p.rest; DEC(i) END;
+  IF (p = NIL) OR (p.first = NIL) THEN RETURN NIL END;
+  RETURN p.first
+END StructNth;
+
+(* Drops the first `n` elements. A cons chain can share its own tail; a
+   VECTOR or STRING has to be copied, since this port has no offset-view
+   representation (an explicit phase-1 simplification). *)
+PROCEDURE StructRest*(z: ZilObj.Zo; n: INTEGER): ZilObj.Zo;
+VAR p, v: ZilObj.Zo; i, len: INTEGER; buf: ARRAY 4096 OF CHAR;
+BEGIN
+  IF z = NIL THEN RETURN NIL END;
+  IF n <= 0 THEN RETURN z END;
+
+  IF (z.kind = ZilObj.KVector) OR (z.kind = ZilObj.KTable) THEN
+    len := z.vecLen - n;
+    IF len < 0 THEN len := 0 END;
+    v := ZilObj.NewVectorN(len);
+    FOR i := 0 TO len - 1 DO v.vecItems[i] := z.vecItems[n + i] END;
+    RETURN v
+  END;
+
+  IF z.kind = ZilObj.KString THEN
+    len := z.strLen - n;
+    IF len < 0 THEN len := 0 END;
+    FOR i := 0 TO len - 1 DO buf[i] := z.strBuf^[n + i] END;
+    buf[len] := 0X;
+    RETURN ZilObj.NewString(buf)
+  END;
+
+  p := z;
+  WHILE (n > 0) & (p # NIL) DO p := p.rest; DEC(n) END;
+  IF p = NIL THEN RETURN ZilObj.NewEmpty(z.kind) END;
+  RETURN p
+END StructRest;
+
+(* The type NAME of a value, as TYPE returns it and TYPE? matches against. *)
+PROCEDURE TypeName*(z: ZilObj.Zo; VAR s: ARRAY OF CHAR);
+BEGIN
+  IF z = NIL THEN Strings.Copy("FALSE", s); RETURN END;
+  CASE z.kind OF
+    ZilObj.KAtom:       Strings.Copy("ATOM", s)
+   |ZilObj.KFix:        Strings.Copy("FIX", s)
+   |ZilObj.KString:     Strings.Copy("STRING", s)
+   |ZilObj.KChar:       Strings.Copy("CHARACTER", s)
+   |ZilObj.KForm:       Strings.Copy("FORM", s)
+   |ZilObj.KList:       Strings.Copy("LIST", s)
+   |ZilObj.KVector:     Strings.Copy("VECTOR", s)
+   |ZilObj.KAdecl:      Strings.Copy("ADECL", s)
+   |ZilObj.KSegment:    Strings.Copy("SEGMENT", s)
+   |ZilObj.KFalse:      Strings.Copy("FALSE", s)
+   |ZilObj.KSubr:       Strings.Copy("SUBR", s)
+   |ZilObj.KFSubr:      Strings.Copy("FSUBR", s)
+   |ZilObj.KActivation: Strings.Copy("ACTIVATION", s)
+   |ZilObj.KFunction:   Strings.Copy("FUNCTION", s)
+   |ZilObj.KMacro:      Strings.Copy("MACRO", s)
+   |ZilObj.KTable:      Strings.Copy("TABLE", s)
+   |ZilObj.KOblist:     Strings.Copy("OBLIST", s)
+  ELSE Strings.Copy("ANY", s)
+  END
+END TypeName;
+
 (* Parses a Z-machine version specifier: one of the historical Infocom
    interpreter names (ZIP/EZIP/XZIP/YZIP), given either as an atom or a
    string, or a plain number 3..8. Direct port of the original's own
@@ -498,6 +658,7 @@ END ParseZVersion;
 
 PROCEDURE ApplySubr*(name: ARRAY OF CHAR; args: ARRAY OF ZilObj.Zo; n: INTEGER): ZResult;
 VAR sum, i, len, synKind: INTEGER; s: ARRAY 4096 OF CHAR; ind: ZilObj.Zo;
+    msgBuf: ARRAY 512 OF CHAR;
 BEGIN
   IF (name = "SET") OR (name = "SETG") OR (name = "GLOBAL") OR (name = "CONSTANT") THEN
     (* The originals for GLOBAL/CONSTANT are FSUBRs (name unevaluated,
@@ -760,6 +921,125 @@ BEGIN
       END
     END;
     RETURN MkVal(TrueVal())
+
+  ELSIF (name = "NTH") OR (name = "GET-ELEMENT") THEN
+    (* <NTH struct n>, 1-based. Also what <n struct> means when a FIX is
+       applied as a function — see EvalImpl's head dispatch. *)
+    IF (n < 2) OR (args[1].kind # ZilObj.KFix) THEN
+      RETURN Err("NTH: expected a structure and a FIX index")
+    END;
+    ind := StructNth(args[0], args[1].fixVal);
+    IF ind = NIL THEN RETURN Err("NTH: index out of range") END;
+    RETURN MkVal(ind)
+
+  ELSIF name = "REST" THEN
+    IF n < 1 THEN RETURN Err("REST: expected a structure") END;
+    IF n >= 2 THEN
+      IF args[1].kind # ZilObj.KFix THEN RETURN Err("REST: count must be a FIX") END;
+      RETURN MkVal(StructRest(args[0], args[1].fixVal))
+    END;
+    RETURN MkVal(StructRest(args[0], 1))
+
+  ELSIF name = "EMPTY?" THEN
+    IF n < 1 THEN RETURN Err("EMPTY?: expected a structure") END;
+    RETURN MkVal(BoolVal(StructLength(args[0]) = 0))
+
+  ELSIF name = "LENGTH" THEN
+    IF n < 1 THEN RETURN Err("LENGTH: expected a structure") END;
+    RETURN MkVal(ZilObj.NewFix(StructLength(args[0])))
+
+  ELSIF (name = "TYPE") OR (name = "PRIMTYPE") THEN
+    IF n < 1 THEN RETURN Err("TYPE: expected a value") END;
+    TypeName(args[0], s);
+    RETURN MkVal(ZilObj.Intern(s))
+
+  ELSIF name = "TYPE?" THEN
+    (* <TYPE? value TYPE...> is true when the value has ANY of the named
+       types, and returns that type atom rather than plain T — real source
+       relies on the atom (e.g. <COND (<TYPE? .X ATOM LIST> ...)>). *)
+    IF n < 2 THEN RETURN Err("TYPE?: expected a value and at least one type") END;
+    TypeName(args[0], s);
+    FOR i := 1 TO n - 1 DO
+      IF (args[i].kind = ZilObj.KAtom) & (args[i].atomText = s) THEN RETURN MkVal(args[i]) END
+    END;
+    RETURN MkVal(FalseVal())
+
+  ELSIF name = "STRUCTURED?" THEN
+    RETURN MkVal(BoolVal((n >= 1) & IsStructured(args[0])))
+
+  ELSIF name = "APPLICABLE?" THEN
+    RETURN MkVal(BoolVal((n >= 1) & (args[0] # NIL)
+                 & ((args[0].kind = ZilObj.KSubr) OR (args[0].kind = ZilObj.KFSubr)
+                    OR (args[0].kind = ZilObj.KFunction) OR (args[0].kind = ZilObj.KMacro))))
+
+  ELSIF name = "MOBLIST" THEN
+    (* <MOBLIST NAME> yields the oblist of that name, creating it the first
+       time — "make oblist". The argument is an atom in every real use. *)
+    IF n < 1 THEN RETURN Err("MOBLIST: expected a name") END;
+    IF args[0].kind = ZilObj.KOblist THEN RETURN MkVal(args[0]) END;
+    IF args[0].kind = ZilObj.KAtom THEN Strings.Copy(args[0].atomText, s)
+    ELSIF args[0].kind = ZilObj.KString THEN Strings.Copy(args[0].strBuf^, s)
+    ELSE RETURN Err("MOBLIST: expected an ATOM or STRING name")
+    END;
+    RETURN MkVal(FindOrMakeOblist(s))
+
+  ELSIF name = "ROOT" THEN
+    RETURN MkVal(FindOrMakeOblist("ROOT"))
+
+  ELSIF name = "OBLIST?" THEN
+    IF (n < 1) OR (args[0].kind # ZilObj.KAtom) THEN RETURN MkVal(FalseVal()) END;
+    ind := ZilObj.GetProp(args[0], OblistMarker());
+    IF ind = NIL THEN RETURN MkVal(FalseVal()) END;
+    RETURN MkVal(ind)
+
+  ELSIF (name = "LOOKUP") OR (name = "INSERT") THEN
+    (* <LOOKUP "NAME" oblist> finds an existing entry and is FALSE when
+       there is none; <INSERT "NAME" oblist> creates one. The pair is how
+       real source interns a name exactly once — <OR <LOOKUP ...>
+       <INSERT ...>> — so LOOKUP really must distinguish "absent" from
+       "an atom of that name exists somewhere else". *)
+    IF n < 2 THEN RETURN Err("LOOKUP/INSERT: expected a name and an OBLIST") END;
+    IF args[0].kind = ZilObj.KString THEN Strings.Copy(args[0].strBuf^, s)
+    ELSIF args[0].kind = ZilObj.KAtom THEN Strings.Copy(args[0].atomText, s)
+    ELSE RETURN Err("LOOKUP/INSERT: the name must be a STRING or ATOM")
+    END;
+    IF args[1].kind # ZilObj.KOblist THEN
+      RETURN Err("LOOKUP/INSERT: the second argument must be an OBLIST")
+    END;
+    QualifiedName(s, args[1], msgBuf);
+    ind := ZilObj.Intern(msgBuf);
+    IF name = "LOOKUP" THEN
+      IF ZilObj.GetProp(ind, OblistMarker()) = NIL THEN RETURN MkVal(FalseVal()) END;
+      RETURN MkVal(ind)
+    END;
+    ZilObj.PutProp(ind, OblistMarker(), args[1]);
+    RETURN MkVal(ind)
+
+  ELSIF (name = "SPNAME") OR (name = "PNAME") THEN
+    IF (n < 1) OR (args[0].kind # ZilObj.KAtom) THEN
+      RETURN Err("SPNAME: expected an ATOM")
+    END;
+    RETURN MkVal(ZilObj.NewString(args[0].atomText))
+
+  ELSIF name = "PARSE" THEN
+    (* <PARSE "TEXT"> yields the atom of that name — the inverse of SPNAME,
+       and the only part of the original's reader-level PARSE that real
+       source uses at compile time. *)
+    IF (n < 1) OR (args[0].kind # ZilObj.KString) THEN
+      RETURN Err("PARSE: expected a STRING")
+    END;
+    RETURN MkVal(ZilObj.Intern(args[0].strBuf^))
+
+  ELSIF name = "ERROR" THEN
+    (* Raises an interpreter error naming the arguments, which is all this
+       port needs from it — the original's condition system (retry, catch)
+       has no equivalent here. *)
+    Strings.Copy("ERROR:", s);
+    FOR i := 0 TO n - 1 DO
+      ZilObj.PrintTo(args[i], msgBuf);
+      Strings.Append(" ", s); Strings.Append(msgBuf, s)
+    END;
+    RETURN Err(s)
 
   ELSIF (name = "COMPILATION-FLAG") OR (name = "COMPILATION-FLAG-DEFAULT") THEN
     (* <COMPILATION-FLAG NAME [value]> defines (and redefines) a flag,
@@ -1095,6 +1375,30 @@ BEGIN
   RETURN result
 END LoadFile;
 
+(* Calls an already-evaluated applicable value with already-evaluated
+   arguments — what MAPF and APPLY need, and what the ordinary FORM path
+   can't give them (it starts from unevaluated argument FORMS).
+
+   Rather than duplicating the whole argument-binding machinery, this builds
+   the FORM <fn <QUOTE a0> <QUOTE a1> ...> and evaluates it: a function's
+   arguments are evaluated by the callee, and QUOTE hands each value back
+   unchanged, so the effect is exactly "apply fn to these values". A
+   non-atom head self-evaluates, so the function value can sit in head
+   position directly. *)
+PROCEDURE ApplyValue(fn: ZilObj.Zo; args: ARRAY OF ZilObj.Zo; n: INTEGER): ZResult;
+VAR head, tail, cell, q: ZilObj.Zo; i: INTEGER;
+BEGIN
+  head := ZilObj.Cons(ZilObj.KForm, fn, NIL);
+  tail := head;
+  FOR i := 0 TO n - 1 DO
+    q := ZilObj.Cons(ZilObj.KForm, args[i], NIL);
+    q := ZilObj.Cons(ZilObj.KForm, ZilObj.Intern("QUOTE"), q);
+    cell := ZilObj.Cons(ZilObj.KForm, q, NIL);
+    tail.rest := cell; tail := cell
+  END;
+  RETURN EvalImpl(head, FALSE)
+END ApplyValue;
+
 PROCEDURE EvalImpl(z: ZilObj.Zo; qq: BOOLEAN): ZResult;
 VAR
   head, n, resultHead, resultTail, cell, clause, body: ZilObj.Zo;
@@ -1109,6 +1413,14 @@ VAR
   ifFlagName: ARRAY 64 OF CHAR; ifFlagNeg: BOOLEAN;
   (* ADD-TELL-TOKENS *)
   tellToks, tellTail: ZilObj.Zo;
+  (* SEGMENT splicing *)
+  segLen, segI: INTEGER;
+  (* MAPF / MAPR / APPLY *)
+  mapArgs: ARRAY MaxArgs OF ZilObj.Zo;
+  mapStructs: ARRAY MaxArgs OF ZilObj.Zo;
+  mapHead, mapTail, mapCell: ZilObj.Zo;
+  mapI, mapNStruct, mapCount, mapLen, mapPos: INTEGER;
+  mapIsMapR, mapStop: BOOLEAN;
   (* QUASIQUOTE walk mode (see the dedicated comment below) *)
   qqResult, qqTail, qqElem, qqInner, qqCell, qqSpliceP, qqVec: ZilObj.Zo;
   qqStop: BOOLEAN;
@@ -1121,7 +1433,7 @@ VAR
   progRepeat, progCatchy, progStop, progAgain: BOOLEAN;
   (* FUNCTION / MACRO application (see the dedicated comment at that
      branch below) *)
-  fnIsMacro, fnStop, fnUsedVarargs, fnQuoted: BOOLEAN;
+  fnIsMacro, fnStop, fnUsedVarargs, fnQuoted, fnVarargsRaw: BOOLEAN;
   fnActualHead, fnCallArgs, fnSpecPos, fnOneSpec, fnTarget, fnDefault: ZilObj.Zo;
   fnSpecFirst, fnActivation, fnBP: ZilObj.Zo;
   fnBindAtoms, fnSavedVals: ARRAY MaxBindings OF ZilObj.Zo;
@@ -1252,14 +1564,27 @@ BEGIN
     WHILE (n # NIL) & (n.first # NIL) DO
       nFirst := n.first;
       IF nFirst.kind = ZilObj.KSegment THEN
-        RETURN Err("SEGMENT splicing inside LIST is not implemented yet")
-      END;
+        r := EvalImpl(nFirst.segForm, FALSE);
+        IF ShouldPass(r) THEN RETURN r END;
+        IF ~IsStructured(r.value) THEN
+          RETURN Err("SEGMENT: expected a structured value to splice")
+        END;
+        segLen := StructLength(r.value);
+        FOR segI := 1 TO segLen DO
+          cell := ZilObj.Cons(ZilObj.KList, StructNth(r.value, segI), NIL);
+          IF resultHead = NIL THEN resultHead := cell ELSE resultTail.rest := cell END;
+          resultTail := cell
+        END;
+        n := n.rest;
+        cell := NIL
+      ELSE
       r := EvalImpl(nFirst, FALSE);
       IF ShouldPass(r) THEN RETURN r END;
       cell := ZilObj.Cons(ZilObj.KList, r.value, NIL);
       IF resultHead = NIL THEN resultHead := cell ELSE resultTail.rest := cell END;
       resultTail := cell;
       n := n.rest
+      END
     END;
     IF resultHead = NIL THEN RETURN MkVal(ZilObj.NewEmpty(ZilObj.KList)) END;
     RETURN MkVal(resultHead)
@@ -1326,6 +1651,20 @@ BEGIN
       head := r.value
     END;
 
+    IF head.kind = ZilObj.KFix THEN
+      (* <1 .L> — a FIX applied as a function is MDL's element accessor,
+         equivalent to <NTH .L 1>. Real source uses this spelling far more
+         often than NTH itself. *)
+      IF (z.rest = NIL) OR (z.rest.first = NIL) THEN
+        RETURN Err("a FIX applied as a function expects a structure")
+      END;
+      r := EvalImpl(z.rest.first, FALSE);
+      IF ShouldPass(r) THEN RETURN r END;
+      nFirst := StructNth(r.value, head.fixVal);
+      IF nFirst = NIL THEN RETURN Err("index out of range") END;
+      RETURN MkVal(nFirst)
+    END;
+
     IF (head.kind = ZilObj.KFunction) OR (head.kind = ZilObj.KMacro) THEN
       (* Calling a DEFINE/DEFINE20 FUNCTION, or a DEFMAC MACRO (which wraps
          one). Ported from ZilFunction.ApplyImpl + ZilEvalMacro.Apply's
@@ -1372,10 +1711,25 @@ BEGIN
             RETURN Err("FUNCTION/MACRO: ARGS/TUPLE must be followed by an atom")
           END;
           fnTarget := fnSpecPos.first;
+          (* "ARGS" binds the remaining arguments UNEVALUATED; "TUPLE" binds
+             them evaluated. That one bit is the whole difference between
+             them (the original: `evaluator.GetRest(eval && !varargsQuoted)`
+             in ArgSpec, with varargsQuoted set for "ARGS"), and it is what
+             makes a DEFMAC written with ("ARGS" A) a real macro: it sees
+             the call site's syntax rather than its values. Evaluating here
+             instead silently constant-folds every macro argument — caught
+             by sample/name printing "about 0" for
+             <- ,CURYEAR ,BIRTHYEAR>, both globals still holding their
+             declared 0 at expansion time. *)
+          fnVarargsRaw := fnOneSpec.strBuf^ = "ARGS";
           fnUsedVarargs := TRUE;
           resultHead := NIL; resultTail := NIL;
           WHILE (fnCallArgs # NIL) & (fnCallArgs.first # NIL) & ~fnStop DO
-            r := EvalImpl(fnCallArgs.first, FALSE);
+            IF fnVarargsRaw THEN
+              r := MkVal(fnCallArgs.first)
+            ELSE
+              r := EvalImpl(fnCallArgs.first, FALSE)
+            END;
             IF r.outcome # OValue THEN
               fnStop := TRUE
             ELSE
@@ -1701,6 +2055,21 @@ BEGIN
       END;
       RETURN MkVal(TrueVal())
 
+    ELSIF isFSubr & (name = "FUNCTION") THEN
+      (* <FUNCTION (argspec) body...> is an anonymous DEFINE — the same
+         KFunction value, just never bound to a name. Real source passes one
+         straight to MAPF. An optional leading activation atom is accepted
+         for the same reason DEFINE accepts one. *)
+      n := z.rest;
+      fnActivation := NIL;
+      IF (n # NIL) & (n.first # NIL) & (n.first.kind = ZilObj.KAtom) THEN
+        fnActivation := n.first; n := n.rest
+      END;
+      IF (n = NIL) OR (n.first = NIL) OR (n.first.kind # ZilObj.KList) THEN
+        RETURN Err("FUNCTION: expected an argument-spec list")
+      END;
+      RETURN MkVal(ZilObj.NewFunction(n.first, fnActivation, n.rest))
+
     ELSIF isFSubr & (name = "GDECL") THEN
       (* <GDECL (ATOM ATOM ...) decl ...> attaches DECL type constraints to
          globals. This port skips DECL checking entirely (an explicit
@@ -1998,9 +2367,24 @@ BEGIN
       nargs := 0;
       n := z.rest;
       WHILE (n # NIL) & (n.first # NIL) DO
-        r := EvalImpl(n.first, FALSE);
-        IF ShouldPass(r) THEN RETURN r END;
-        IF nargs < MaxArgs THEN args[nargs] := r.value; INC(nargs) END;
+        IF n.first.kind = ZilObj.KSegment THEN
+          (* !<...> / !.X splices a structure's elements in as separate
+             arguments — <FORM PROG '() !.O> is the idiom real source uses
+             to build a form from a computed list of body statements *)
+          r := EvalImpl(n.first.segForm, FALSE);
+          IF ShouldPass(r) THEN RETURN r END;
+          IF ~IsStructured(r.value) THEN
+            RETURN Err("SEGMENT: expected a structured value to splice")
+          END;
+          segLen := StructLength(r.value);
+          FOR segI := 1 TO segLen DO
+            IF nargs < MaxArgs THEN args[nargs] := StructNth(r.value, segI); INC(nargs) END
+          END
+        ELSE
+          r := EvalImpl(n.first, FALSE);
+          IF ShouldPass(r) THEN RETURN r END;
+          IF nargs < MaxArgs THEN args[nargs] := r.value; INC(nargs) END
+        END;
         n := n.rest
       END;
 
@@ -2058,6 +2442,106 @@ BEGIN
           INC(usePos)
         END;
         RETURN MkVal(TrueVal())
+
+      ELSIF (name = "APPLY") OR (name = "APPLY-MACRO") THEN
+        IF nargs < 1 THEN RETURN Err("APPLY: expected an applicable value") END;
+        FOR mapI := 1 TO nargs - 1 DO mapArgs[mapI - 1] := args[mapI] END;
+        RETURN ApplyValue(args[0], mapArgs, nargs - 1)
+
+      ELSIF (name = "MAPRET") OR (name = "MAPSTOP") OR (name = "MAPLEAVE") THEN
+        (* MAPF's control flow. These propagate out of the loop function the
+           way RETURN propagates out of a PROG; the enclosing MAPF catches
+           them. More than one value isn't supported — the original lets
+           MAPRET/MAPSTOP contribute any number, but real source only ever
+           uses zero or one, and a ZResult carries one value. *)
+        IF nargs > 1 THEN
+          RETURN Err("MAPRET/MAPSTOP/MAPLEAVE: only zero or one value is supported here")
+        END;
+        r.activation := NIL;
+        IF nargs = 1 THEN r.value := args[0] ELSE r.value := NIL END;
+        IF name = "MAPRET" THEN r.outcome := OMapRet
+        ELSIF name = "MAPSTOP" THEN r.outcome := OMapStop
+        ELSE r.outcome := OMapLeave
+        END;
+        RETURN r
+
+      ELSIF (name = "MAPF") OR (name = "MAPR") THEN
+        (* <MAPF final loop struct...> applies `loop` to successive elements
+           of the structures in parallel, collects the values it returns,
+           and finally applies `final` to all of them at once. A FALSE
+           `final` discards the results (the original's own <> case), and
+           ,LIST is what makes <MAPF ,LIST ...> build a list.
+
+           With NO structures at all, `loop` is called with no arguments
+           until it says to stop — an idiom real source really uses as a
+           generator (sample/name's TELL macro walks its own argument list
+           that way). MAPR differs by passing the REST of each structure
+           rather than the element; both share this code.
+
+           Has to live here rather than in ApplySubr because it calls the
+           loop function, which means evaluating. *)
+        IF nargs < 2 THEN RETURN Err("MAPF: expected a final and a loop function") END;
+        mapIsMapR := name = "MAPR";
+        mapNStruct := nargs - 2;
+        mapCount := -1;
+        FOR mapI := 0 TO mapNStruct - 1 DO
+          IF ~IsStructured(args[mapI + 2]) THEN
+            RETURN Err("MAPF: arguments after the loop function must be structures")
+          END;
+          mapStructs[mapI] := args[mapI + 2];
+          mapLen := StructLength(mapStructs[mapI]);
+          IF (mapCount < 0) OR (mapLen < mapCount) THEN mapCount := mapLen END
+        END;
+
+        mapHead := NIL; mapTail := NIL; mapStop := FALSE; mapPos := 0;
+        r := MkVal(FalseVal());
+        WHILE ~mapStop & ((mapNStruct = 0) OR (mapPos < mapCount)) DO
+          IF mapNStruct > 0 THEN
+            FOR mapI := 0 TO mapNStruct - 1 DO
+              IF mapIsMapR THEN mapArgs[mapI] := StructRest(mapStructs[mapI], mapPos)
+              ELSE mapArgs[mapI] := StructNth(mapStructs[mapI], mapPos + 1) END
+            END
+          END;
+          r := ApplyValue(args[1], mapArgs, mapNStruct);
+          IF evalErrFlag THEN RETURN r END;
+
+          IF r.outcome = OMapLeave THEN
+            IF r.value = NIL THEN RETURN MkVal(FalseVal()) END;
+            RETURN MkVal(r.value)
+          ELSIF r.outcome = OMapStop THEN
+            IF r.value # NIL THEN
+              cell := ZilObj.Cons(ZilObj.KList, r.value, NIL);
+              IF mapHead = NIL THEN mapHead := cell ELSE mapTail.rest := cell END;
+              mapTail := cell
+            END;
+            mapStop := TRUE
+          ELSIF r.outcome = OMapRet THEN
+            IF r.value # NIL THEN
+              cell := ZilObj.Cons(ZilObj.KList, r.value, NIL);
+              IF mapHead = NIL THEN mapHead := cell ELSE mapTail.rest := cell END;
+              mapTail := cell
+            END
+          ELSIF r.outcome # OValue THEN
+            RETURN r     (* a RETURN/AGAIN passing through *)
+          ELSE
+            cell := ZilObj.Cons(ZilObj.KList, r.value, NIL);
+            IF mapHead = NIL THEN mapHead := cell ELSE mapTail.rest := cell END;
+            mapTail := cell
+          END;
+          INC(mapPos)
+        END;
+
+        (* apply the final function to everything collected *)
+        IF (args[0] = NIL) OR (args[0].kind = ZilObj.KFalse) THEN
+          RETURN MkVal(FalseVal())
+        END;
+        mapI := 0;
+        mapCell := mapHead;
+        WHILE (mapCell # NIL) & (mapCell.first # NIL) & (mapI < MaxArgs) DO
+          mapArgs[mapI] := mapCell.first; INC(mapI);
+          mapCell := mapCell.rest
+        END;
+        RETURN ApplyValue(args[0], mapArgs, mapI)
 
       ELSIF (name = "EVAL") OR (name = "EVAL-IN-SEGMENT") THEN
         (* <EVAL expr [environment]>: evaluates the (already-once-
@@ -2378,6 +2862,18 @@ BEGIN
   Register("COMPILATION-FLAG", FALSE); Register("COMPILATION-FLAG-DEFAULT", FALSE);
   Register("COMPILATION-FLAG-VALUE", FALSE); Register("IFFLAG", TRUE);
   Register("ADD-TELL-TOKENS", TRUE); Register("TELL-TOKENS", TRUE);
+  Register("NTH", FALSE); Register("GET-ELEMENT", FALSE); Register("REST", FALSE);
+  Register("EMPTY?", FALSE); Register("LENGTH", FALSE);
+  Register("TYPE", FALSE); Register("PRIMTYPE", FALSE); Register("TYPE?", FALSE);
+  Register("STRUCTURED?", FALSE); Register("APPLICABLE?", FALSE);
+  Register("SPNAME", FALSE); Register("PNAME", FALSE); Register("PARSE", FALSE);
+  Register("ERROR", FALSE);
+  Register("MOBLIST", FALSE); Register("ROOT", FALSE); Register("OBLIST?", FALSE);
+  Register("LOOKUP", FALSE); Register("INSERT", FALSE);
+  Register("FUNCTION", TRUE);
+  Register("APPLY", FALSE); Register("APPLY-MACRO", FALSE);
+  Register("MAPF", FALSE); Register("MAPR", FALSE);
+  Register("MAPRET", FALSE); Register("MAPSTOP", FALSE); Register("MAPLEAVE", FALSE);
   Register("VERSION?", TRUE); Register("GDECL", TRUE);
 
   tAtom := ZilObj.Intern("T");

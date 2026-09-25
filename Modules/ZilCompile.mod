@@ -69,6 +69,7 @@ CONST
   MaxBlocks = 32;
   MaxFlagNames = 64;
   MaxPropNames = 96;
+  MaxRenames = 64;
 
 TYPE
   LineText = POINTER TO ARRAY OF CHAR;
@@ -93,6 +94,27 @@ VAR
      leave the PROG, not the REPEAT. `returned` records whether anything
      actually jumped to the block's return label, so an unreferenced label
      isn't emitted. *)
+  (* ---- the current routine's locals ----
+     Index 0..nParams-1 are the declared arguments, in source order; after
+     them come the locals PROG/REPEAT bindings introduce. They all end up on
+     one .FUNCT line, because that is all a ZAP routine has: the Z-machine
+     knows nothing about inner scopes. The scoping is therefore entirely the
+     compiler's job, which is what the rename stack below is for — the
+     original does the same thing with PushInnerLocal/PopInnerLocal. *)
+  locName: ARRAY MaxLocals OF ARRAY 64 OF CHAR;   (* the ZAP name *)
+  locZil: ARRAY MaxLocals OF ARRAY 64 OF CHAR;    (* the ZIL name it stands for *)
+  locInit: ARRAY MaxLocals OF ARRAY 64 OF CHAR;   (* constant default, or "" *)
+  locExpr: ARRAY MaxLocals OF ZilObj.Zo;          (* non-constant default, or NIL *)
+  locInScope: ARRAY MaxLocals OF BOOLEAN;
+  nLocals, nParams: INTEGER;
+
+  (* The innermost-first mapping from a ZIL local name to the ZAP local
+     actually holding it. Pushed by a PROG/REPEAT binding, popped when that
+     block ends, so a binding really does shadow an outer one of the same
+     name and stops doing so afterwards. *)
+  renZil, renZap: ARRAY MaxRenames OF ARRAY 64 OF CHAR;
+  nRenames: INTEGER;
+
   (* object flags and properties, registered by CompileObjects *)
   flagNameTab: ARRAY MaxFlagNames OF ARRAY 64 OF CHAR;
   nFlagNames: INTEGER;
@@ -102,7 +124,7 @@ VAR
 
   blockNames: ARRAY MaxBlocks OF ARRAY 64 OF CHAR;
   blockAgain, blockReturn: ARRAY MaxBlocks OF ARRAY 16 OF CHAR;
-  blockWantResult, blockReturned: ARRAY MaxBlocks OF BOOLEAN;
+  blockWantResult, blockReturned, blockHasReturn: ARRAY MaxBlocks OF BOOLEAN;
   nBlocks: INTEGER;
 
 PROCEDURE W(s: ARRAY OF CHAR);
@@ -456,11 +478,114 @@ BEGIN
     ELSIF name = "PRINTU" THEN Strings.Copy("PRINTU", zap); nargs := 1
     ELSIF name = "PUSH" THEN Strings.Copy("PUSH", zap); nargs := 1
     ELSIF name = "RESTART" THEN Strings.Copy("RESTART", zap); nargs := 0
+    ELSIF name = "READ" THEN Strings.Copy("READ", zap); nargs := 2
+      (* V1-4's read takes a text buffer and a parse buffer and stores
+         nothing; V5's stores the terminating character, but CompileProgram
+         refuses V5 anyway, so the void form is the only one reachable *)
+    ELSIF name = "COPYT" THEN Strings.Copy("COPYT", zap); nargs := 3
+    ELSIF name = "PRINTT" THEN Strings.Copy("PRINTT", zap); nargs := 2
+    ELSIF name = "ZWSTR" THEN Strings.Copy("ZWSTR", zap); nargs := 4
+    ELSIF name = "DIRIN" THEN Strings.Copy("DIRIN", zap); nargs := 1
+    ELSIF name = "INPUT" THEN Strings.Copy("INPUT", zap); nargs := 1
+    ELSIF name = "SOUND" THEN Strings.Copy("SOUND", zap); nargs := 1
+    ELSIF name = "POP" THEN Strings.Copy("POP", zap); nargs := 0
+    ELSIF name = "FSTACK" THEN Strings.Copy("FSTACK", zap); nargs := 0
+    ELSIF name = "MARGIN" THEN Strings.Copy("MARGIN", zap); nargs := 2
     ELSE RETURN FALSE
     END
   END;
   RETURN TRUE
 END SimpleBuiltin;
+
+(* Maps a ZIL local name to the ZAP local currently holding it. Innermost
+   binding wins; an unbound name stands for itself, which is what makes an
+   ordinary parameter reference work with no bookkeeping at all. *)
+PROCEDURE ResolveLocal(name: ARRAY OF CHAR; VAR out: ARRAY OF CHAR);
+VAR i: INTEGER;
+BEGIN
+  i := nRenames - 1;
+  WHILE i >= 0 DO
+    IF renZil[i] = name THEN Strings.Copy(renZap[i], out); RETURN END;
+    DEC(i)
+  END;
+  Strings.Copy(name, out)
+END ResolveLocal;
+
+(* Allocates a ZAP local for a PROG/REPEAT binding of `zilName` and pushes
+   the rename that makes references to it resolve there. Reuses an
+   out-of-scope local previously allocated for the same ZIL name, so sibling
+   blocks binding the same name share one slot rather than each burning
+   another of the routine's fifteen. Only when the name is genuinely in use
+   does it get a distinct one (NAME?1, NAME?2, ...) — the original's
+   MakeUniqueVariableName does the same, and it matters because a binding
+   may legitimately shadow a parameter. *)
+PROCEDURE AllocInnerLocal(zilName: ARRAY OF CHAR): BOOLEAN;
+VAR i, k: INTEGER; cand, num: ARRAY 64 OF CHAR; taken: BOOLEAN;
+BEGIN
+  IF nRenames >= MaxRenames THEN
+    Err("CompileStmt: too many nested bindings"); RETURN FALSE
+  END;
+
+  (* an out-of-scope slot already created for this same name *)
+  i := nParams;
+  WHILE i < nLocals DO
+    IF ~locInScope[i] & (locZil[i] = zilName) THEN
+      locInScope[i] := TRUE;
+      Strings.Copy(zilName, renZil[nRenames]);
+      Strings.Copy(locName[i], renZap[nRenames]);
+      INC(nRenames);
+      RETURN TRUE
+    END;
+    INC(i)
+  END;
+
+  IF nLocals >= MaxLocals THEN
+    Err("CompileStmt: too many locals (arguments plus bindings)"); RETURN FALSE
+  END;
+
+  Strings.Copy(zilName, cand);
+  k := 0;
+  LOOP
+    taken := FALSE;
+    i := 0;
+    WHILE i < nLocals DO
+      IF locName[i] = cand THEN taken := TRUE END;
+      INC(i)
+    END;
+    IF ~taken THEN EXIT END;
+    INC(k);
+    Strings.IntToStr(k, num);
+    Strings.Copy(zilName, cand); Strings.Append("?", cand); Strings.Append(num, cand)
+  END;
+
+  Strings.Copy(cand, locName[nLocals]);
+  Strings.Copy(zilName, locZil[nLocals]);
+  locInit[nLocals][0] := 0X;
+  locExpr[nLocals] := NIL;
+  locInScope[nLocals] := TRUE;
+  INC(nLocals);
+
+  Strings.Copy(zilName, renZil[nRenames]);
+  Strings.Copy(cand, renZap[nRenames]);
+  INC(nRenames);
+  RETURN TRUE
+END AllocInnerLocal;
+
+(* Ends the scope of the innermost `count` bindings. *)
+PROCEDURE PopInnerLocals(count: INTEGER);
+VAR i, j: INTEGER;
+BEGIN
+  WHILE count > 0 DO
+    DEC(nRenames);
+    i := nParams;
+    WHILE i < nLocals DO
+      IF locName[i] = renZap[nRenames] THEN locInScope[i] := FALSE END;
+      INC(i)
+    END;
+    DEC(count)
+  END;
+  j := 0
+END PopInnerLocals;
 
 (* True when compiling `z` as an operand is guaranteed to push nothing onto
    the Z-machine stack, so an earlier operand already sitting there is safe.
@@ -503,6 +628,7 @@ END SpillToTemp;
 PROCEDURE CompileOperand(z: ZilObj.Zo; VAR opText: ARRAY OF CHAR): BOOLEAN;
 VAR leftText, rightText: ARRAY 64 OF CHAR; opcode: ARRAY 16 OF CHAR;
     headName: ARRAY 64 OF CHAR; argTexts: ARRAY 7, 64 OF CHAR; errBuf: ARRAY 256 OF CHAR;
+    andTmp, andEnd: ARRAY 16 OF CHAR;
     ok, spilled, simpleStore: BOOLEAN;
     nArgs, i, nSpills, maxArgs, simpleN: INTEGER; ap, ap2: ZilObj.Zo;
 BEGIN
@@ -516,8 +642,19 @@ BEGIN
        code (Game.MakeOperand(ch.Char)) — same here *)
     FixText(z.charVal, opText); RETURN TRUE
 
-  ELSIF z.kind = ZilObj.KFalse THEN
+  ELSIF (z.kind = ZilObj.KFalse) OR ((z.kind = ZilObj.KForm) & ZilObj.IsEmpty(z)) THEN
+    (* `<>` is FALSE. The evaluator turns an empty FORM into FALSE when it
+       sees one, but a routine body is never evaluated, so the literal
+       `<SET OK <>>` in real source arrives here still shaped as an empty
+       FORM — both spellings have to compile to 0. *)
     Strings.Copy("0", opText); RETURN TRUE
+
+  ELSIF z.kind = ZilObj.KTable THEN
+    (* a TABLE value used directly as an operand — which happens once macro
+       expansion has substituted a global's value into a routine body —
+       compiles to the label that table is emitted under *)
+    IF ConstantText(z, opText) THEN RETURN TRUE END;
+    Err("CompileOperand: a TEMP-TABLE has no address to take"); RETURN FALSE
 
   ELSIF z.kind = ZilObj.KAtom THEN
     (* A bare atom in operand position is a compile-time constant: T, a
@@ -532,7 +669,7 @@ BEGIN
     IF z.rest.first.kind # ZilObj.KAtom THEN
       Err("CompileOperand: LVAL target must be an ATOM"); RETURN FALSE
     END;
-    Strings.Copy(z.rest.first.atomText, opText); RETURN TRUE
+    ResolveLocal(z.rest.first.atomText, opText); RETURN TRUE
 
   ELSIF (z.kind = ZilObj.KForm) & (ZilObj.ListLength(z) = 2)
         & ZilObj.IsAtomNamed(z.first, "GVAL") THEN
@@ -551,7 +688,10 @@ BEGIN
 
   ELSIF z.kind = ZilObj.KForm THEN
     IF (z.first = NIL) OR (z.first.kind # ZilObj.KAtom) THEN
-      Err("CompileOperand: expected an operator atom in form head"); RETURN FALSE
+      Strings.Copy("CompileOperand: expected an operator atom in form head: ", errBuf);
+      ZilObj.PrintTo(z, headName);
+      Strings.Append(headName, errBuf);
+      Err(errBuf); RETURN FALSE
     END;
     Strings.Copy(z.first.atomText, headName);
 
@@ -580,6 +720,41 @@ BEGIN
       W(","); W(rightText); W(" >STACK"); WLn;
       Strings.Copy("STACK", opText); RETURN TRUE
 
+    ELSIF (headName = "AND") OR (headName = "OR") THEN
+      (* As a VALUE, <OR a b c> is the first of them that is true (or the
+         last if none are), and <AND a b c> is the first that is false (or
+         the last if none are). That needs somewhere to hold the value while
+         it is being tested, since the test must not consume it — hence a
+         compiler temporary rather than the stack. *)
+      IF (z.rest = NIL) OR (z.rest.first = NIL) THEN
+        IF headName = "AND" THEN Strings.Copy("1", opText) ELSE Strings.Copy("0", opText) END;
+        RETURN TRUE
+      END;
+      AllocTemp(andTmp);
+      IF tempMax > MaxLocals THEN
+        Err("CompileOperand: AND/OR needs more compiler temporaries than a routine has locals");
+        RETURN FALSE
+      END;
+      NewLabel(andEnd);
+      ap := z.rest;
+      WHILE (ap # NIL) & (ap.first # NIL) DO
+        ok := CompileOperand(ap.first, argTexts[0]);
+        IF ~ok THEN RETURN FALSE END;
+        W("	SET '"); W(andTmp); W(","); W(argTexts[0]); WLn;
+        IF (ap.rest # NIL) & (ap.rest.first # NIL) THEN
+          (* stop early: OR stops on a non-zero value, AND on a zero one *)
+          Strings.Copy("", argTexts[1]);
+          W("	ZERO? "); W(andTmp);
+          IF headName = "OR" THEN W(" \") ELSE W(" /") END;
+          W(andEnd); WLn
+        END;
+        ap := ap.rest
+      END;
+      W(andEnd); W(":"); WLn;
+      FreeTemp;
+      Strings.Copy(andTmp, opText);
+      RETURN TRUE
+
     ELSIF headName = "VALUE" THEN
       (* <VALUE X> is "read the variable named X" — the original's ValueOp;
          for a plain named variable that's just the variable itself as an
@@ -587,6 +762,7 @@ BEGIN
       IF (z.rest = NIL) OR ~VarName(z.rest.first, opText) THEN
         Err("CompileOperand: VALUE expects a variable name"); RETURN FALSE
       END;
+      ResolveLocal(opText, opText);
       RETURN TRUE
 
     ELSIF (headName = "INC") OR (headName = "DEC") THEN
@@ -596,6 +772,7 @@ BEGIN
       IF (z.rest = NIL) OR ~VarName(z.rest.first, opText) THEN
         Err("CompileOperand: INC/DEC expects a variable name"); RETURN FALSE
       END;
+      ResolveLocal(opText, opText);
       W("	"); W(headName); W(" '"); W(opText); WLn;
       RETURN TRUE
 
@@ -696,7 +873,10 @@ BEGIN
     END
 
   ELSE
-    Err("CompileOperand: expression of this kind cannot be compiled yet"); RETURN FALSE
+    Strings.Copy("CompileOperand: expression of this kind cannot be compiled yet: ", errBuf);
+    ZilObj.PrintTo(z, headName);
+    Strings.Append(headName, errBuf);
+    Err(errBuf); RETURN FALSE
   END
 END CompileOperand;
 
@@ -738,7 +918,8 @@ END EmitPredInstr;
    COND nested inside a *condition* isn't reachable from here. *)
 PROCEDURE CompileCondition(z: ZilObj.Zo; label: ARRAY OF CHAR; polarity: BOOLEAN): BOOLEAN;
 VAR headName: ARRAY 64 OF CHAR; leftText, rightText, opText, empty: ARRAY 64 OF CHAR;
-    ok, spilled: BOOLEAN;
+    skipLabel: ARRAY 16 OF CHAR; c: ZilObj.Zo; ok, spilled, isLast: BOOLEAN;
+    extraText: ARRAY 2, 64 OF CHAR; nExtra, nE2: INTEGER;
 BEGIN
   empty[0] := 0X;
   IF z = NIL THEN Err("CompileCondition: NIL condition"); RETURN FALSE END;
@@ -853,7 +1034,24 @@ BEGIN
       IF spilled THEN FreeTemp END;
       IF headName = "L?" THEN EmitPredInstr("LESS?", leftText, rightText, label, polarity)
       ELSIF headName = "G?" THEN EmitPredInstr("GRTR?", leftText, rightText, label, polarity)
-      ELSE EmitPredInstr("EQUAL?", leftText, rightText, label, polarity)
+      ELSE
+        (* EQUAL? takes 2-4 arguments, matching the first against ANY of the
+           rest — one Z-machine instruction with up to three comparands, as
+           in the original. *)
+        c := z.rest.rest.rest;
+        nExtra := 0;
+        WHILE (c # NIL) & (c.first # NIL) DO
+          IF nExtra >= 2 THEN
+            Err("CompileCondition: EQUAL? takes at most 4 arguments"); RETURN FALSE
+          END;
+          ok := CompileOperand(c.first, extraText[nExtra]);
+          IF ~ok THEN RETURN FALSE END;
+          INC(nExtra); c := c.rest
+        END;
+        W("	EQUAL? "); W(leftText); W(","); W(rightText);
+        FOR nE2 := 0 TO nExtra - 1 DO W(","); W(extraText[nE2]) END;
+        IF polarity THEN W(" /") ELSE W(" \") END;
+        W(label); WLn
       END;
       RETURN TRUE
 
@@ -867,10 +1065,50 @@ BEGIN
          OR (z.rest.rest = NIL) OR (z.rest.rest.first = NIL) THEN
         Err("CompileCondition: IGRTR?/DLESS? expect a variable and a limit"); RETURN FALSE
       END;
+      ResolveLocal(leftText, leftText);
       ok := CompileOperand(z.rest.rest.first, rightText);
       IF ~ok THEN RETURN FALSE END;
       Strings.Copy("'", opText); Strings.Append(leftText, opText);
       EmitPredInstr(headName, opText, rightText, label, polarity);
+      RETURN TRUE
+
+    ELSIF (headName = "AND") OR (headName = "OR") THEN
+      (* Short-circuit branching, and no value is materialised at all — the
+         whole point of handling AND/OR here rather than falling through to
+         "compile it as a value and test against zero".
+
+         Branching to `label` when <AND a b c> is TRUE means each of a, b
+         must branch PAST the test when false, and c decides; when FALSE,
+         any one of them failing is enough and they all branch to `label`
+         directly. OR is the exact dual. *)
+      IF (z.rest = NIL) OR (z.rest.first = NIL) THEN
+        (* <AND> is true, <OR> is false *)
+        IF (headName = "AND") = polarity THEN EmitBranch(label) END;
+        RETURN TRUE
+      END;
+      IF (headName = "AND") = polarity THEN
+        (* the short-circuit case needs a label to skip to *)
+        NewLabel(skipLabel);
+        c := z.rest;
+        WHILE (c # NIL) & (c.first # NIL) DO
+          isLast := (c.rest = NIL) OR (c.rest.first = NIL);
+          IF isLast THEN
+            ok := CompileCondition(c.first, label, polarity)
+          ELSE
+            ok := CompileCondition(c.first, skipLabel, ~polarity)
+          END;
+          IF ~ok THEN RETURN FALSE END;
+          c := c.rest
+        END;
+        W(skipLabel); W(":"); WLn
+      ELSE
+        c := z.rest;
+        WHILE (c # NIL) & (c.first # NIL) DO
+          ok := CompileCondition(c.first, label, polarity);
+          IF ~ok THEN RETURN FALSE END;
+          c := c.rest
+        END
+      END;
       RETURN TRUE
 
     ELSIF (headName = "NOT") OR (headName = "F?") THEN
@@ -1184,7 +1422,8 @@ VAR headName: ARRAY 64 OF CHAR; opText, targetName: ARRAY 64 OF CHAR;
     elsePart, isLastClauseStmt, hasMoreClauses, clauseTerminated: BOOLEAN;
     (* PROG / REPEAT / BIND *)
     againLabel, retLabel: ARRAY 16 OF CHAR; progResult: ARRAY 64 OF CHAR;
-    progRepeat, progTerm: BOOLEAN; progArgs: ZilObj.Zo;
+    progRepeat, progTerm: BOOLEAN; progArgs, item: ZilObj.Zo;
+    blkIdx, nProgBinds: INTEGER;
     (* simple one-instruction builtins *)
     sbOpcode: ARRAY 16 OF CHAR; sbArgs: ARRAY 7, 64 OF CHAR; sbErr: ARRAY 256 OF CHAR;
     sbStore, sbSpilled: BOOLEAN; sbN, sbCount, sbI, sbSpills: INTEGER; ap, ap2: ZilObj.Zo;
@@ -1207,6 +1446,11 @@ BEGIN
          OR (z.rest.rest = NIL) OR (z.rest.rest.first = NIL) THEN
         Err("CompileStmt: SET/SETG expect a variable name and a value"); RETURN FALSE
       END;
+      (* SET means the LOCAL of that name (the original's
+         VariableScopeQuirks.Local), so a PROG binding shadowing an outer
+         name is honoured; SETG always means the global, and must not be
+         redirected by a binding that happens to share the name. *)
+      IF headName = "SET" THEN ResolveLocal(targetName, targetName) END;
       ok := CompileOperand(z.rest.rest.first, opText);
       IF ~ok THEN RETURN FALSE END;
       W("	SET '"); W(targetName); W(","); W(opText); WLn;
@@ -1217,6 +1461,7 @@ BEGIN
       IF (z.rest = NIL) OR ~VarName(z.rest.first, targetName) THEN
         Err("CompileStmt: INC/DEC expect a variable name"); RETURN FALSE
       END;
+      ResolveLocal(targetName, targetName);
       W("	"); W(headName); W(" '"); W(targetName); WLn;
       Strings.Copy(targetName, resultText);
       RETURN TRUE
@@ -1246,16 +1491,38 @@ BEGIN
       IF (progArgs = NIL) OR (progArgs.first = NIL) OR (progArgs.first.kind # ZilObj.KList) THEN
         Err("CompileStmt: PROG/REPEAT/BIND expects a binding list"); RETURN FALSE
       END;
-      IF ~ZilObj.IsEmpty(progArgs.first) THEN
-        (* Bindings would have to become extra named locals on the .FUNCT
-           line, with renaming where a name is already in use (the
-           original's PushInnerLocal/PopInnerLocal). The machinery for
-           extra locals exists — it's what compiler temporaries use — but
-           the scoping and renaming don't; refuse rather than silently
-           compiling a binding into the wrong storage. *)
-        Err("CompileStmt: PROG/REPEAT bindings are not implemented yet (only an empty binding list)");
-        RETURN FALSE
+      (* Bindings become extra locals on the .FUNCT line, scoped by the
+         rename stack (AllocInnerLocal). A binding is an atom, or a
+         (atom initial-value) list; the initial value is compiled and
+         assigned on entry, which is also what makes a REPEAT's binding
+         reset each time the loop is entered — but NOT each time round,
+         since the again label is emitted after these assignments, matching
+         the original (it marks AgainLabel after the bindings are set up). *)
+      nProgBinds := 0;
+      bp := progArgs.first;
+      WHILE (bp # NIL) & (bp.first # NIL) DO
+        item := bp.first;
+        IF item.kind = ZilObj.KAtom THEN
+          IF ~AllocInnerLocal(item.atomText) THEN RETURN FALSE END;
+          INC(nProgBinds)
+        ELSIF (item.kind = ZilObj.KList) & (item.first # NIL) & (item.first.kind = ZilObj.KAtom) THEN
+          (* compile the initial value BEFORE the binding takes effect, so
+             <PROG ((X .X)) ...> initialises the new X from the outer one *)
+          IF (item.rest = NIL) OR (item.rest.first = NIL) THEN
+            Err("CompileStmt: a PROG binding list entry needs a value"); RETURN FALSE
+          END;
+          ok := CompileOperand(item.rest.first, opText);
+          IF ~ok THEN RETURN FALSE END;
+          IF ~AllocInnerLocal(item.first.atomText) THEN RETURN FALSE END;
+          INC(nProgBinds);
+          ResolveLocal(item.first.atomText, targetName);
+          W("	SET '"); W(targetName); W(","); W(opText); WLn
+        ELSE
+          Err("CompileStmt: a PROG binding must be an atom or (atom value)"); RETURN FALSE
+        END;
+        bp := bp.rest
       END;
+
       IF nBlocks >= MaxBlocks THEN
         Err("CompileStmt: PROG/REPEAT nested too deeply"); RETURN FALSE
       END;
@@ -1266,6 +1533,7 @@ BEGIN
       blockNames[nBlocks][0] := 0X;
       blockWantResult[nBlocks] := wantResult;
       blockReturned[nBlocks] := FALSE;
+      blockHasReturn[nBlocks] := TRUE;
       INC(nBlocks);
 
       W(againLabel); W(":"); WLn;
@@ -1280,7 +1548,7 @@ BEGIN
       WHILE (bp # NIL) & (bp.first # NIL) DO
         isLastClauseStmt := (bp.rest = NIL) OR (bp.rest.first = NIL);
         ok := CompileStmt(bp.first, wantResult & ~progRepeat & isLastClauseStmt, progResult);
-        IF ~ok THEN DEC(nBlocks); RETURN FALSE END;
+        IF ~ok THEN DEC(nBlocks); PopInnerLocals(nProgBinds); RETURN FALSE END;
         progTerm := termFlag;
         bp := bp.rest
       END;
@@ -1294,6 +1562,7 @@ BEGIN
       END;
 
       DEC(nBlocks);
+      PopInnerLocals(nProgBinds);
       IF blockReturned[nBlocks] THEN
         W(retLabel); W(":"); WLn;
         termFlag := FALSE
@@ -1326,12 +1595,18 @@ BEGIN
         ok := CompileOperand(z.rest.first, opText);
         IF ~ok THEN RETURN FALSE END
       END;
-      IF nBlocks > 0 THEN
-        IF blockWantResult[nBlocks - 1] & (opText # "STACK") THEN
+      (* The innermost block that can actually be returned FROM. The
+         routine's own block has an again label but no return label — the
+         original gives it ReturnLabel = null for exactly this reason, so a
+         RETURN with no enclosing PROG/REPEAT leaves the routine. *)
+      blkIdx := nBlocks - 1;
+      WHILE (blkIdx >= 0) & ~blockHasReturn[blkIdx] DO DEC(blkIdx) END;
+      IF blkIdx >= 0 THEN
+        IF blockWantResult[blkIdx] & (opText # "STACK") THEN
           W("	PUSH "); W(opText); WLn
         END;
-        EmitBranch(blockReturn[nBlocks - 1]);
-        blockReturned[nBlocks - 1] := TRUE
+        EmitBranch(blockReturn[blkIdx]);
+        blockReturned[blkIdx] := TRUE
       ELSE
         W("	RETURN "); W(opText); WLn
       END;
@@ -1533,12 +1808,8 @@ END CompileStmt;
    BuildRoutine: wantResult is true only for the routine's final
    statement) — and a RETURN of that final value. *)
 PROCEDURE CompileRoutine*(idx: INTEGER; isEntry: BOOLEAN): BOOLEAN;
-VAR rt: ZilModel.RoutineRec; opText: ARRAY 64 OF CHAR; n: ARRAY 16 OF CHAR;
-    a, bp, item, dflt: ZilObj.Zo; ok, isLast: BOOLEAN; nParams, i, phase: INTEGER;
-    (* the routine's declared locals, in .FUNCT order *)
-    localName: ARRAY MaxLocals OF ARRAY 64 OF CHAR;
-    localInit: ARRAY MaxLocals OF ARRAY 64 OF CHAR;  (* constant default, or "" *)
-    localExpr: ARRAY MaxLocals OF ZilObj.Zo;        (* non-constant default, or NIL *)
+VAR rt: ZilModel.RoutineRec; opText: ARRAY 64 OF CHAR; n, routineAgain: ARRAY 16 OF CHAR;
+    a, bp, item, dflt: ZilObj.Zo; ok, isLast: BOOLEAN; i, phase: INTEGER;
 BEGIN
   rt := ZilModel.routines[idx];
 
@@ -1558,7 +1829,7 @@ BEGIN
      DefineLocalsFromArgSpec + SetOrEmitDefaultValue, minus the
      shadowing-rename logic, which needs the inner-local scoping this port
      doesn't have yet.) *)
-  nParams := 0;
+  nParams := 0; nLocals := 0; nRenames := 0;
   phase := 0;   (* 0 = required, 1 = "OPT", 2 = "AUX" *)
   a := rt.argSpec;
   WHILE (a # NIL) & (a.first # NIL) DO
@@ -1576,15 +1847,15 @@ BEGIN
       END;
       dflt := NIL;
       IF item.kind = ZilObj.KAtom THEN
-        Strings.Copy(item.atomText, localName[nParams])
+        Strings.Copy(item.atomText, locName[nParams])
       ELSIF (item.kind = ZilObj.KList) & (item.first # NIL) & (item.first.kind = ZilObj.KAtom) THEN
-        Strings.Copy(item.first.atomText, localName[nParams]);
+        Strings.Copy(item.first.atomText, locName[nParams]);
         IF item.rest # NIL THEN dflt := item.rest.first END
       ELSE
         Err("CompileRoutine: an argument must be an atom or (atom default)"); RETURN FALSE
       END;
-      localInit[nParams][0] := 0X;
-      localExpr[nParams] := NIL;
+      locInit[nParams][0] := 0X;
+      locExpr[nParams] := NIL;
       IF dflt # NIL THEN
         IF phase = 0 THEN
           Err("CompileRoutine: a required argument cannot have a default value"); RETURN FALSE
@@ -1596,16 +1867,18 @@ BEGIN
            argument, which needs the argument-count test this port doesn't
            emit yet — so refuse that combination rather than silently
            overwriting a supplied value. *)
-        IF ~ConstantText(dflt, localInit[nParams]) THEN
+        IF ~ConstantText(dflt, locInit[nParams]) THEN
           IF phase = 1 THEN
             Err("CompileRoutine: an OPT argument's default must be a constant here");
             RETURN FALSE
           END;
-          localInit[nParams][0] := 0X;
-          localExpr[nParams] := dflt
+          locInit[nParams][0] := 0X;
+          locExpr[nParams] := dflt
         END
       END;
-      INC(nParams)
+      Strings.Copy(locName[nParams], locZil[nParams]);
+      locInScope[nParams] := TRUE;
+      INC(nParams); nLocals := nParams
     END;
     a := a.rest
   END;
@@ -1615,14 +1888,28 @@ BEGIN
      are only known once it has been compiled. *)
   BeginBuffer;
 
+  (* A block for the routine itself, so a bare <AGAIN> in the body loops
+     back to the start of the routine — the original pushes exactly this,
+     with AgainLabel = rb.RoutineStart and no return label (see the RETURN
+     handling in CompileStmt for what the missing return label means). *)
+  NewLabel(routineAgain);
+  Strings.Copy(routineAgain, blockAgain[0]);
+  blockReturn[0][0] := 0X;
+  blockNames[0][0] := 0X;
+  blockWantResult[0] := FALSE;
+  blockReturned[0] := FALSE;
+  blockHasReturn[0] := FALSE;
+  nBlocks := 1;
+  W(routineAgain); W(":"); WLn;
+
   (* non-constant AUX defaults become assignments at the top of the body,
      before anything else runs *)
   i := 0;
   WHILE i < nParams DO
-    IF localExpr[i] # NIL THEN
-      ok := CompileOperand(localExpr[i], opText);
+    IF locExpr[i] # NIL THEN
+      ok := CompileOperand(locExpr[i], opText);
       IF ~ok THEN EndBuffer; FlushBuffer; RETURN FALSE END;
-      W("	SET '"); W(localName[i]); W(","); W(opText); WLn
+      W("	SET '"); W(locName[i]); W(","); W(opText); WLn
     END;
     INC(i)
   END;
@@ -1656,18 +1943,19 @@ BEGIN
      sample/beer ended in frotz's "Fatal error: Illegal opcode" for exactly
      this reason. *)
   IF isEntry & ~termFlag THEN W("	QUIT"); WLn END;
+  nBlocks := 0;
   EndBuffer;
   IF errFlag THEN RETURN FALSE END;
 
   W(".FUNCT "); W(rt.name.atomText);
   i := 0;
-  WHILE i < nParams DO
-    W(","); W(localName[i]);
-    IF localInit[i][0] # 0X THEN W("="); W(localInit[i]) END;
+  WHILE i < nLocals DO
+    W(","); W(locName[i]);
+    IF locInit[i][0] # 0X THEN W("="); W(locInit[i]) END;
     INC(i)
   END;
-  IF nParams + tempMax > MaxLocals THEN
-    Err("CompileRoutine: too many locals (arguments plus compiler temporaries)");
+  IF nLocals + tempMax > MaxLocals THEN
+    Err("CompileRoutine: too many locals (arguments, bindings and compiler temporaries)");
     RETURN FALSE
   END;
   i := 1;

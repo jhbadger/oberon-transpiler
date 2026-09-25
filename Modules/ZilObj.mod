@@ -46,6 +46,10 @@ CONST
   KFunction*   = 13; (* DEFINE/DEFINE20-defined interpreter function *)
   KMacro*      = 14; (* DEFMAC-defined macro: wraps an applicable value *)
   KTable*      = 15; (* TABLE/LTABLE/PTABLE/PLTABLE/ITABLE value *)
+  KOblist*     = 16; (* an OBLIST, used as a compile-time hash map — see
+                        ZilEval's MOBLIST/LOOKUP/INSERT for why one is
+                        needed even though name RESOLUTION uses a single
+                        flat table. Carries only its name, in atomText. *)
 
   (* KTable tabFlags bits — see NewTable's own comment *)
   TfByte*   = 1;
