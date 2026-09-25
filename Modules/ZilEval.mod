@@ -43,6 +43,8 @@ CONST
   MaxArgs = 64;
   MaxBindings = 32;
 
+  APReq = 0; APOpt = 1; APAux = 2;
+
 TYPE
   ZResult* = RECORD
     outcome*: INTEGER;
@@ -169,8 +171,22 @@ BEGIN
   RETURN r
 END ApplyReturnOrAgain;
 
+(* Shared by the FORM/LIST SUBRs below — doesn't call Eval, so (like
+   ApplyReturnOrAgain) it can be its own procedure. *)
+PROCEDURE BuildConsChain(kind: INTEGER; args: ARRAY OF ZilObj.Zo; n: INTEGER): ZilObj.Zo;
+VAR head, tail, cell: ZilObj.Zo; i: INTEGER;
+BEGIN
+  head := NIL; tail := NIL;
+  FOR i := 0 TO n - 1 DO
+    cell := ZilObj.Cons(kind, args[i], NIL);
+    IF head = NIL THEN head := cell ELSE tail.rest := cell END;
+    tail := cell
+  END;
+  IF head = NIL THEN RETURN ZilObj.NewEmpty(kind) ELSE RETURN head END
+END BuildConsChain;
+
 PROCEDURE ApplySubr*(name: ARRAY OF CHAR; args: ARRAY OF ZilObj.Zo; n: INTEGER): ZResult;
-VAR sum, i: INTEGER; s: ARRAY 4096 OF CHAR;
+VAR sum, i, len: INTEGER; s: ARRAY 4096 OF CHAR;
 BEGIN
   IF (name = "SET") OR (name = "SETG") OR (name = "GLOBAL") THEN
     IF n < 2 THEN RETURN Err("SET/SETG: expected 2 args") END;
@@ -306,10 +322,61 @@ BEGIN
   ELSIF name = "AGAIN" THEN
     RETURN ApplyReturnOrAgain(FALSE, args, n)
 
+  ELSIF name = "FORM" THEN
+    IF n < 1 THEN RETURN Err("FORM: expected at least 1 arg") END;
+    RETURN MkVal(BuildConsChain(ZilObj.KForm, args, n))
+
+  ELSIF name = "LIST" THEN
+    RETURN MkVal(BuildConsChain(ZilObj.KList, args, n))
+
+  ELSIF name = "LENGTH?" THEN
+    IF (n # 2) OR (args[1].kind # ZilObj.KFix) THEN
+      RETURN Err("LENGTH?: expected a structure and a FIX limit")
+    END;
+    len := ZilObj.ListLength(args[0]);
+    IF (len >= 0) & (len <= args[1].fixVal) THEN RETURN MkVal(ZilObj.NewFix(len))
+    ELSE RETURN MkVal(FalseVal()) END
+
   ELSE
     RETURN Err("unrecognized or not-yet-implemented SUBR")
   END
 END ApplySubr;
+
+(* DEFINE/DEFINE20/DEFMAC: <[DEFINE|DEFMAC] name [act] (argspec...) body...>.
+   Ported from the original's shared PerformDefine — doesn't call Eval
+   (just builds and stores a FUNCTION or MACRO-wrapping-a-FUNCTION value),
+   so unlike Eval's inlined FSUBRs this can be its own procedure. The
+   redefine-check the original has (AllowRedefine / already-defined error)
+   is skipped — pragmatic subset, and re-running a test file repeatedly
+   benefits from silently allowing redefinition. *)
+PROCEDURE ApplyDefine(isMacro: BOOLEAN; restArgs: ZilObj.Zo): ZResult;
+VAR nameAtom, actAtom, argSpecList, bodyList, rest, funcVal: ZilObj.Zo;
+BEGIN
+  IF (restArgs = NIL) OR (restArgs.first = NIL) OR (restArgs.first.kind # ZilObj.KAtom) THEN
+    RETURN Err("DEFINE/DEFMAC: expected a name atom")
+  END;
+  nameAtom := restArgs.first;
+  rest := restArgs.rest;
+
+  actAtom := NIL;
+  IF (rest # NIL) & (rest.first # NIL) & (rest.first.kind = ZilObj.KAtom) THEN
+    actAtom := rest.first; rest := rest.rest
+  END;
+
+  IF (rest = NIL) OR (rest.first = NIL) OR (rest.first.kind # ZilObj.KList) THEN
+    RETURN Err("DEFINE/DEFMAC: expected an argument list")
+  END;
+  argSpecList := rest.first;
+  bodyList := rest.rest;
+  IF (bodyList = NIL) OR (bodyList.first = NIL) THEN
+    RETURN Err("DEFINE/DEFMAC: empty body")
+  END;
+
+  funcVal := ZilObj.NewFunction(argSpecList, actAtom, bodyList);
+  IF isMacro THEN nameAtom.globalVal := ZilObj.NewMacro(funcVal)
+  ELSE nameAtom.globalVal := funcVal END;
+  RETURN MkVal(nameAtom)
+END ApplyDefine;
 
 (* ------------------------------------------------------------------ *)
 (* Eval — one self-recursive procedure (FORM/LIST handling, and the      *)
@@ -334,12 +401,20 @@ VAR
   progNBind, progI: INTEGER;
   progOneBind, progTarget, progInit, progBindFirst, progBP: ZilObj.Zo;
   progRepeat, progCatchy, progStop, progAgain: BOOLEAN;
+  (* FUNCTION / MACRO application (see the dedicated comment at that
+     branch below) *)
+  fnIsMacro, fnStop, fnUsedVarargs: BOOLEAN;
+  fnActualHead, fnCallArgs, fnSpecPos, fnOneSpec, fnTarget, fnDefault: ZilObj.Zo;
+  fnSpecFirst, fnActivation, fnBP: ZilObj.Zo;
+  fnBindAtoms, fnSavedVals: ARRAY MaxBindings OF ZilObj.Zo;
+  fnNBind, fnI, fnPhase: INTEGER;
 BEGIN
   IF z = NIL THEN RETURN MkVal(NIL) END;
 
   IF (z.kind = ZilObj.KAtom) OR (z.kind = ZilObj.KFix) OR (z.kind = ZilObj.KString)
      OR (z.kind = ZilObj.KChar) OR (z.kind = ZilObj.KVector) OR (z.kind = ZilObj.KFalse)
-     OR (z.kind = ZilObj.KSubr) OR (z.kind = ZilObj.KFSubr) OR (z.kind = ZilObj.KActivation) THEN
+     OR (z.kind = ZilObj.KSubr) OR (z.kind = ZilObj.KFSubr) OR (z.kind = ZilObj.KActivation)
+     OR (z.kind = ZilObj.KFunction) OR (z.kind = ZilObj.KMacro) THEN
     RETURN MkVal(z)
 
   ELSIF z.kind = ZilObj.KAdecl THEN
@@ -383,8 +458,188 @@ BEGIN
       head := r.value
     END;
 
+    IF (head.kind = ZilObj.KFunction) OR (head.kind = ZilObj.KMacro) THEN
+      (* Calling a DEFINE/DEFINE20 FUNCTION, or a DEFMAC MACRO (which wraps
+         one). Ported from ZilFunction.ApplyImpl + ZilEvalMacro.Apply's
+         "expand, then Eval the expansion" two-phase design — verified
+         against both before writing this: in ZilForm.EvalImpl, calling any
+         IApplicable head passes UNEVALUATED args (`Rest.ToArray()`), and
+         it's the callee's own job to evaluate them; a MACRO's *own*
+         invocation still evaluates its call-site arguments completely
+         normally as it binds them (this is what distinguishes a ZIL
+         DEFMAC from a Lisp `defmacro` — the macro function body runs on
+         already-evaluated argument VALUES, not on quoted syntax, and it's
+         the macro's *return value* that gets treated as a new FORM to
+         Eval again, not its arguments that are left unevaluated). Needs to
+         call Eval (arg values, OPT/AUX defaults, body forms, and the
+         self-recursive re-Eval of a macro's expansion), so — same
+         forward-reference reason as PROG/REPEAT/BIND — this is inlined
+         rather than factored into its own procedure. *)
+      fnIsMacro := (head.kind = ZilObj.KMacro);
+      IF fnIsMacro THEN fnActualHead := head.macWrapped ELSE fnActualHead := head END;
+      IF (fnActualHead = NIL) OR (fnActualHead.kind # ZilObj.KFunction) THEN
+        RETURN Err("MACRO wraps a non-FUNCTION value (not supported yet)")
+      END;
+
+      fnNBind := 0;
+      fnStop := FALSE;
+      fnUsedVarargs := FALSE;
+      fnCallArgs := z.rest;
+      fnSpecPos := fnActualHead.funcArgSpec;
+      fnPhase := APReq;
+
+      WHILE (fnSpecPos # NIL) & (fnSpecPos.first # NIL) & ~fnStop DO
+        fnOneSpec := fnSpecPos.first;
+
+        IF (fnOneSpec.kind = ZilObj.KString) & (fnOneSpec.strBuf^ = "OPT") THEN
+          fnPhase := APOpt; fnSpecPos := fnSpecPos.rest
+
+        ELSIF (fnOneSpec.kind = ZilObj.KString) & (fnOneSpec.strBuf^ = "AUX") THEN
+          fnPhase := APAux; fnSpecPos := fnSpecPos.rest
+
+        ELSIF (fnOneSpec.kind = ZilObj.KString)
+              & ((fnOneSpec.strBuf^ = "ARGS") OR (fnOneSpec.strBuf^ = "TUPLE")) THEN
+          fnSpecPos := fnSpecPos.rest;
+          IF (fnSpecPos = NIL) OR (fnSpecPos.first = NIL) OR (fnSpecPos.first.kind # ZilObj.KAtom) THEN
+            RETURN Err("FUNCTION/MACRO: ARGS/TUPLE must be followed by an atom")
+          END;
+          fnTarget := fnSpecPos.first;
+          fnUsedVarargs := TRUE;
+          resultHead := NIL; resultTail := NIL;
+          WHILE (fnCallArgs # NIL) & (fnCallArgs.first # NIL) & ~fnStop DO
+            r := Eval(fnCallArgs.first);
+            IF r.outcome # OValue THEN
+              fnStop := TRUE
+            ELSE
+              cell := ZilObj.Cons(ZilObj.KList, r.value, NIL);
+              IF resultHead = NIL THEN resultHead := cell ELSE resultTail.rest := cell END;
+              resultTail := cell;
+              fnCallArgs := fnCallArgs.rest
+            END
+          END;
+          IF ~fnStop THEN
+            IF fnNBind >= MaxBindings THEN RETURN Err("FUNCTION/MACRO: too many bindings") END;
+            fnBindAtoms[fnNBind] := fnTarget;
+            fnSavedVals[fnNBind] := fnTarget.localVal;
+            INC(fnNBind);
+            IF resultHead = NIL THEN fnTarget.localVal := ZilObj.NewEmpty(ZilObj.KList)
+            ELSE fnTarget.localVal := resultHead END
+          END;
+          fnSpecPos := fnSpecPos.rest
+
+        ELSE
+          fnTarget := NIL; fnDefault := NIL;
+          IF fnOneSpec.kind = ZilObj.KAtom THEN
+            fnTarget := fnOneSpec
+          ELSIF fnOneSpec.kind = ZilObj.KAdecl THEN
+            fnTarget := fnOneSpec.adFirst
+          ELSIF (fnOneSpec.kind = ZilObj.KList) & (ZilObj.ListLength(fnOneSpec) = 2) THEN
+            fnSpecFirst := fnOneSpec.first;
+            IF fnSpecFirst.kind = ZilObj.KAdecl THEN fnTarget := fnSpecFirst.adFirst
+            ELSE fnTarget := fnSpecFirst END;
+            fnDefault := fnOneSpec.rest.first
+          ELSE
+            RETURN Err("FUNCTION/MACRO: malformed argument-list entry")
+          END;
+          IF (fnTarget = NIL) OR (fnTarget.kind # ZilObj.KAtom) THEN
+            RETURN Err("FUNCTION/MACRO: argument-list target must be an ATOM")
+          END;
+          IF fnNBind >= MaxBindings THEN RETURN Err("FUNCTION/MACRO: too many bindings") END;
+          fnBindAtoms[fnNBind] := fnTarget;
+          fnSavedVals[fnNBind] := fnTarget.localVal;
+          INC(fnNBind);
+
+          IF fnPhase = APReq THEN
+            IF (fnCallArgs = NIL) OR (fnCallArgs.first = NIL) THEN
+              RETURN Err("FUNCTION/MACRO: too few arguments")
+            END;
+            r := Eval(fnCallArgs.first);
+            IF r.outcome # OValue THEN fnStop := TRUE ELSE fnTarget.localVal := r.value END;
+            fnCallArgs := fnCallArgs.rest
+
+          ELSIF fnPhase = APOpt THEN
+            IF (fnCallArgs # NIL) & (fnCallArgs.first # NIL) THEN
+              r := Eval(fnCallArgs.first);
+              IF r.outcome # OValue THEN fnStop := TRUE ELSE fnTarget.localVal := r.value END;
+              fnCallArgs := fnCallArgs.rest
+            ELSIF fnDefault # NIL THEN
+              r := Eval(fnDefault);
+              IF r.outcome # OValue THEN fnStop := TRUE ELSE fnTarget.localVal := r.value END
+            ELSE
+              fnTarget.localVal := NIL
+            END
+
+          ELSE (* APAux: never consumes call-site args *)
+            IF fnDefault # NIL THEN
+              r := Eval(fnDefault);
+              IF r.outcome # OValue THEN fnStop := TRUE ELSE fnTarget.localVal := r.value END
+            ELSE
+              fnTarget.localVal := NIL
+            END
+          END;
+
+          fnSpecPos := fnSpecPos.rest
+        END
+      END;
+
+      IF ~fnStop & ~fnUsedVarargs & (fnCallArgs # NIL) & (fnCallArgs.first # NIL) THEN
+        RETURN Err("FUNCTION/MACRO: too many arguments")
+      END;
+
+      IF ~fnStop THEN
+        (* entering any function/macro application is an opaque boundary
+           for a bare RETURN/AGAIN: always clear enclosingProgAtom, whether
+           or not this function has its own activation atom (matches the
+           original's unconditional `innerEnv.Rebind(EnclosingProgActivationAtom)`
+           in ArgSpec.BeginApply). *)
+        fnBindAtoms[fnNBind] := enclosingProgAtom;
+        fnSavedVals[fnNBind] := enclosingProgAtom.localVal;
+        enclosingProgAtom.localVal := NIL;
+        INC(fnNBind);
+
+        IF fnActualHead.funcAct # NIL THEN
+          fnActivation := ZilObj.NewActivation("FUNCTION");
+          fnBindAtoms[fnNBind] := fnActualHead.funcAct;
+          fnSavedVals[fnNBind] := fnActualHead.funcAct.localVal;
+          fnActualHead.funcAct.localVal := fnActivation;
+          INC(fnNBind)
+        ELSE
+          fnActivation := NIL
+        END;
+
+        LOOP
+          fnBP := fnActualHead.funcBody;
+          WHILE (fnBP # NIL) & (fnBP.first # NIL) DO
+            r := Eval(fnBP.first);
+            IF r.outcome # OValue THEN EXIT END;
+            fnBP := fnBP.rest
+          END;
+          IF fnActivation = NIL THEN
+            fnStop := TRUE
+          ELSIF (r.outcome = OReturn) & (r.activation = fnActivation) THEN
+            r := MkVal(r.value); fnStop := TRUE
+          ELSIF (r.outcome = OAgain) & (r.activation = fnActivation) THEN
+            fnStop := FALSE
+          ELSE
+            fnStop := TRUE
+          END;
+          IF fnStop THEN EXIT END
+        END
+      END;
+
+      FOR fnI := 0 TO fnNBind - 1 DO
+        fnBindAtoms[fnI].localVal := fnSavedVals[fnI]
+      END;
+
+      IF fnIsMacro & (r.outcome = OValue) THEN
+        RETURN Eval(r.value)
+      ELSE
+        RETURN r
+      END
+    END;
+
     IF (head.kind # ZilObj.KSubr) & (head.kind # ZilObj.KFSubr) THEN
-      RETURN Err("not an applicable type (only SUBR/FSUBR are callable so far)")
+      RETURN Err("not an applicable type (only SUBR/FSUBR/FUNCTION/MACRO are callable so far)")
     END;
 
     Strings.Copy(head.atomText, name);
@@ -565,6 +820,12 @@ BEGIN
 
       RETURN r
 
+    ELSIF isFSubr & (name = "DEFMAC") THEN
+      RETURN ApplyDefine(TRUE, z.rest)
+
+    ELSIF isFSubr & ((name = "DEFINE") OR (name = "DEFINE20")) THEN
+      RETURN ApplyDefine(FALSE, z.rest)
+
     ELSIF isFSubr THEN
       RETURN Err("unrecognized or not-yet-implemented FSUBR")
 
@@ -603,6 +864,8 @@ BEGIN
   Register("QUOTE", TRUE); Register("COND", TRUE); Register("AND", TRUE); Register("OR", TRUE);
   Register("PROG", TRUE); Register("REPEAT", TRUE); Register("BIND", TRUE);
   Register("RETURN", FALSE); Register("AGAIN", FALSE);
+  Register("DEFINE", TRUE); Register("DEFINE20", TRUE); Register("DEFMAC", TRUE);
+  Register("FORM", FALSE); Register("LIST", FALSE); Register("LENGTH?", FALSE);
   Register("SET", FALSE); Register("SETG", FALSE); Register("GLOBAL", FALSE);
   Register("LVAL", FALSE); Register("GVAL", FALSE);
   Register("GASSIGNED?", FALSE); Register("ASSIGNED?", FALSE);

@@ -297,57 +297,129 @@ never reaching the `SET X 999` after it (`=> 2`); and `AGAIN` restarting a
 `REPEAT` (`=> 3`). **All 7 produced exactly the expected result.** Re-ran
 phase 1's `sample1.zil` and phase 2's `sample2.zil` too — no regressions.
 
+## What's done (phase 2c: DEFINE/DEFMAC function & macro application) — files, and what's tested
+
+Resolved last session's open question by reading
+`Zilf/ZModel/Values/ZilRoutine.cs` in full: **`ZilRoutine` (the `ROUTINE`
+keyword) has no `IApplicable`, `Apply`, or `Eval` override at all** — it's
+a `ZModel` value with only an `ExpandInPlace` method that macro-expands its
+argspec defaults and body in place, for the phase-3 *compiler* to consume
+later. **Interpret-time routine application is not a real original
+behavior** — routines are compiled, never `Eval`'d directly. This settles
+the question: the valuable next slice was function/macro application, not
+"routine application".
+
+The actual interpret-time-callable thing is **`ZilFunction`** (used by
+both `DEFINE`/`DEFINE20` and, wrapped in a `ZilEvalMacro`, by `DEFMAC`) —
+read `ZilFunction.cs`, `ZilEvalMacro.cs`, and `ArgSpec.cs`'s `BeginApply`
+(the real argument-binding algorithm) in full. **Non-obvious semantic
+point, verified against `ZilForm.EvalImpl`'s applicable-head dispatch
+before coding**: a ZIL `DEFMAC` macro is *not* like a Lisp `defmacro` —
+its call-site arguments are evaluated completely normally (self-evaluating
+atoms make this usually invisible), and it's the macro function's *return
+value* that gets treated as a new FORM and `Eval`'d again (`ZilEvalMacro.
+Apply` = `Expand` then `.Eval()` the expansion) — not its arguments that
+are left unevaluated the way a Scheme/CL macro's are.
+
+Added to **`ZilObj.mod`**: `KFunction` (`funcArgSpec` — kept as a *raw,
+unparsed* arg-spec list and walked afresh on every call rather than
+pre-compiled, since call frequency at this level makes that irrelevant;
+`funcAct`; `funcBody`) and `KMacro` (`macWrapped`).
+
+Added to **`ZilEval.mod`**: `DEFINE`/`DEFINE20`/`DEFMAC` (a standalone
+`ApplyDefine` procedure — doesn't call `Eval`, just builds and stores a
+value, so unlike the apply logic below it isn't subject to the
+forward-reference restriction), and the actual function/macro **apply**
+logic (inlined in `Eval`, same reason as `PROG`/`REPEAT`/`BIND` — reuses
+the *exact same* flat-array save/restore-bindings pattern). Also added
+`FORM`, `LIST` (evaluated-arg cons-chain builders, needed so a macro body
+can construct its expansion), and `LENGTH?` (needed for a `"ARGS"`-style
+recursive base case — ported faithfully: returns the actual length as a
+FIX if `<=` the given limit, else `FALSE`, not a plain boolean — verified
+against `Subrs.Structures.cs`).
+
+**Argument-spec subset implemented** (the common real-world shape,
+verified against `ArgSpec.Parse`/`BeginApply`): required positional atoms,
+`"OPT"` (with optional `(atom default-expr)` — defaults evaluate in the
+new environment, so they can see earlier-bound params, matching the
+original), `"AUX"` (same shape, never filled from call-site args), and
+`"ARGS"`/`"TUPLE"` (gathers all remaining call-site args, evaluated, into
+one LIST). The optional leading activation atom (`<DEFINE F ACT (...) ...>`)
+reuses the exact same mechanism as `PROG`'s named activation. **Deliberately
+NOT ported** (pragmatic subset, revisit only if real source needs them):
+DECL checking/type declarations anywhere in the spec, quoted (unevaluated)
+individual arguments, and the `"CALL"`/`"BIND"`/`"VALUE"`/`"NAME"`/`"ACT"`
+one-off clauses inside the arg list itself (as opposed to the leading
+activation atom, which *is* supported). Also **not ported**: the
+already-defined/redefinition check (`AllowRedefine`) — this port always
+silently allows redefinition, which is actually convenient for iterative
+test-file development.
+
+**Key implementation points confirmed against the original before
+coding**: entering *any* function/macro application unconditionally clears
+`enclosingProgAtom` (an opaque boundary for a bare `RETURN`/`AGAIN`,
+whether or not the function has its own activation atom — verified via
+`ArgSpec.BeginApply`'s unconditional `innerEnv.Rebind(EnclosingProgActivationAtom)`
+with no value, i.e. unassigned); a function *with* its own activation atom
+behaves like a hybrid of `PROG` and `REPEAT` — runs its body once via the
+equivalent of the original's `EvalProgram` (evaluate forms in sequence,
+stop and propagate on *any* non-Value signal, no activation-awareness at
+that level), but if the result is `AGAIN` targeting its *own* activation it
+restarts (unlike plain `PROG`), and if `RETURN` targets its own activation
+that becomes the final value (like `PROG`); with *no* activation atom, the
+raw result of the body (value or escaping signal) is returned completely
+as-is, with no interpretation at all.
+
+**Tested**: `/private/tmp/.../scratchpad/sample4.zil` + `eval4test.mod` —
+15 forms: a plain required-arg function (`ADD1`, `=> 6`); `"OPT"` with a
+default expression (`ADDN`, `=> 11` / `=> 15`); `"AUX"` (`DOUBLE-PLUS-ONE`,
+`=> 9`); `"ARGS"` gathering 3 call-site args into a LIST, checked via
+`LENGTH?` (`=> 3`); a **recursive factorial** using `"AUX"` + `REPEAT` +
+bare `RETURN` inside a function with no activation atom of its own
+(`FACT 5 => 120`, exercising the enclosing-activation-boundary-clearing
+behavior for real); a `DEFMAC` that builds `<FORM + .X .X>` and gets it
+evaluated (`DOUBLE 21 => 42`); and a `DEFMAC` that uses its own *evaluated*
+argument (a `COND` test result) to decide what `COND`-form to splice
+together via `FORM`+`LIST` (`MY-IF <G? 5 3> "yes" "no" => "yes"`). **All 15
+produced exactly the expected result.** Re-ran phases 1, 2, and 2b's
+existing tests too, plus the full `Modules/*.mod`+`examples/*.mod`
+regression suite (135 files) — no regressions anywhere.
+
 ## What's still needed for a complete phase 2 (Interpreter core)
 
-1. **Routine (function) application** — the other half of "PROG/routine
-   application": a `ZilRoutine`'s parameter list has to be bound the same
-   way `PROG`'s bindings are (in fact a routine body is essentially an
-   implicit `PROG`-like activation around the parameter bindings — reuse
-   the same save/restore-array pattern from `PROG`/`REPEAT`/`BIND` above
-   rather than re-deriving it), plus **optional (`"OPT"`) and auxiliary
-   (`"AUX"`) parameter groups** and **`"ARGS"`/`"TUPLE"` rest-parameter
-   capture** (all real ZIL argument-list syntax, not yet touched). Also
-   still unresolved from last session: whether interpret-time routine
-   *application* is a real original behavior worth replicating at all, or
-   whether phase 2's evaluator only ever needs to run macros/FSUBRs/SUBRs/
-   `PROG`, with `ROUTINE` bodies handed to the *compiler* (phase 3)
-   macro-expanded-but-uncompiled instead of ever being `Eval`'d directly —
-   check `Zilf/Interpreter/Values/ZilRoutine.cs` and how/whether
-   `Subrs.Programming.cs`-equivalent code ever calls `.Eval` on a routine
-   body outside of the compiler.
-2. **`ObList.cs`** (145 lines, read this session) confirms the real
+1. **`ObList.cs`** (145 lines, read in phase 2b) confirms the real
    package/OBLIST hierarchy this port's `ZilObj.Intern` flattens away is
    just a name→atom hash table per oblist, same shape as the flat one
    already implemented — extending to multiple named oblists later (if it
    turns out to matter) should be a moderate, not a rearchitecting, change.
-3. **`StdAtom` table** (`Language/StdAtom.cs`, 374 lines) — an enum of
+2. **`StdAtom` table** (`Language/StdAtom.cs`, 374 lines) — an enum of
    every special atom the interpreter/compiler hard-codes checks against.
-   Still being ported incrementally on demand (this session only needed
-   `LVAL`/`GVAL`/`QUOTE`/`SET`/`SETG`/etc. as plain interned-string
-   comparisons, no enum yet) — keep doing that rather than porting all 374
-   up front; revisit if the on-demand string-comparison approach starts
-   feeling unwieldy once dozens of builtins exist.
-4. **CHTYPE / type system**: `PrimType` (ATOM/FIX/STRING/LIST/VECTOR — the
+   Still being ported incrementally on demand (plain interned-string
+   comparisons so far, no enum yet) — keep doing that rather than porting
+   all 374 up front; revisit if the on-demand string-comparison approach
+   starts feeling unwieldy once dozens of builtins exist.
+3. **CHTYPE / type system**: `PrimType` (ATOM/FIX/STRING/LIST/VECTOR — the
    "primitive representation" every ZIL type ultimately reduces to) and
    the `BuiltinType`/`ChtypeMethod` attribute-driven coercion machinery.
    Needed to make phase 1's `#TYPE (...)` stub actually retype values.
-5. **`DEFMAC`/macro expansion** (`ZilForm.Expand`, already read in phase 1
-   — see `Zilf/Interpreter/Values/ZilForm.cs`) — needed before real ZIL
-   library/game source can be evaluated, since most such source leans on
-   author- or library-defined macros.
-6. **`ArgSpec.cs`/`ArgDecoder.cs`** (970+253 lines) — the original's
-   generic, reflection/attribute-driven SUBR argument-list declaration and
-   checking DSL. **Deliberately not being ported as a generic system** —
-   this session's `ApplySubr` just hand-checks each builtin's own arg
-   count/types inline (same philosophy as zapf's `HandleInstruction`
-   checking operand counts directly rather than through a schema). Keep
-   doing this for new builtins; only reconsider if the number of builtins
-   grows large enough that the per-builtin boilerplate becomes the
-   bottleneck (unlikely before Compiler/Builtins-scale work starts).
-7. Once 1-6 exist, **go back and fix phase 1's two remaining stubs** (`%`
-   compile-time eval and `#TYPE` CHTYPE in `ZilRead.mod`) to call the real
-   evaluator/CHTYPE instead of passing their argument through unevaluated/
-   unretyped.
+4. Now that phase 2c's function/macro application exists, **go back and
+   fix phase 1's two remaining `ZilRead.mod` stubs** (`%` compile-time eval
+   should call `ZilEval.Eval`; `#TYPE (...)` CHTYPE still needs #3 above
+   first) instead of passing their argument through unevaluated/unretyped.
+   This unlocks reading real macro-heavy library/game source *while
+   reading it*, not just evaluating already-read forms.
+5. **Widen the argument-spec subset** (see phase 2c's "deliberately not
+   ported" list) only on demand, the same way builtins are added on
+   demand — don't speculatively build out DECL checking, quoted args, or
+   the `"CALL"`/`"BIND"`/`"VALUE"`/`"NAME"` one-offs until a real macro
+   from actual library/game source needs one.
+6. **`ArgSpec.cs`/`ArgDecoder.cs`**'s SUBR-argument-checking half (as
+   opposed to the FUNCTION/MACRO-argument-binding half phase 2c already
+   covers) remains **deliberately not ported as a generic system** —
+   `ApplySubr` just hand-checks each builtin's own arg count/types inline
+   (same philosophy as zapf's `HandleInstruction`). Keep doing this for
+   new builtins; only reconsider if the per-builtin boilerplate becomes
+   the bottleneck.
 
 ## What phase 3+ needs to cover (Compiler / ZModel / Emit.Zap)
 
@@ -378,26 +450,30 @@ Before starting:
 
 ## Suggested order for the next session
 
-1. Re-run phase 1's reader test (`sample1.zil`), phase 2's eval test
-   (`sample2.zil` + `evaltest.mod`), and phase 2b's PROG/REPEAT/BIND test
-   (`sample3.zil` + `eval3test.mod`) to confirm nothing regressed. (All
-   live under the session's scratchpad, which may not survive between
-   machine sessions — if gone, they're small and quick to recreate from
-   this doc's descriptions of what they cover.)
-2. First resolve the still-open question from phase 2b's "what's still
-   needed" #1: read `Zilf/Interpreter/Values/ZilRoutine.cs` and check
-   whether/where the original ever calls `.Eval` on a routine body outside
-   the compiler, to settle whether interpret-time routine application is
-   worth replicating or whether the evaluator only needs to run macros/
-   FSUBRs/SUBRs/PROG and hand `ROUTINE` bodies to the phase-3 compiler
-   macro-expanded-but-uncompiled instead.
-3. Pick ONE of: (a) routine application (if #2 says it's worth doing —
-   reuse the `PROG`/`REPEAT`/`BIND` binding/save-restore pattern just
-   built, plus `"OPT"`/`"AUX"`/`"ARGS"`/`"TUPLE"` parameter-list parsing),
-   or (b) `DEFMAC`/macro expansion (unlocks reading real library/game
-   source without phase-1's `%`-stub mattering as much — and doesn't
-   depend on #2's answer either way). Both are substantial; do not try
-   both in one sitting. Get a trivial end-to-end case working and tested
-   before widening, the same way `<PROG (X) ...>` was gotten working
-   before nested/named/AGAIN cases were added this session.
-4. Update this doc's "what's done" section and commit again.
+1. Re-run all four existing test harnesses to confirm nothing regressed:
+   phase 1's `sample1.zil` (`readtest.mod`), phase 2's `sample2.zil`
+   (`evaltest.mod`), phase 2b's `sample3.zil` (`eval3test.mod`), and phase
+   2c's `sample4.zil` (`eval4test.mod`). (All live under the session's
+   scratchpad, which may not survive between machine sessions — if gone,
+   they're small and quick to recreate from this doc's descriptions of
+   what they cover.) Also re-run the transpiler's own full
+   `Modules/*.mod`+`examples/*.mod` regression suite if any transpiler
+   work happened in between sessions.
+2. With phases 1-2c now covering read + eval + control flow + function/
+   macro application, real (if simple) ZIL *library-style* source — code
+   that defines and uses its own `DEFMAC` macros — should now be
+   evaluable end-to-end for the first time. Before writing more
+   interpreter features on spec, it's worth trying a short real excerpt
+   from `~/lib/src/zilf`'s own library files (or a small real game's
+   source) through phases 1-2c as a sanity/integration check, expecting
+   it to fail on something specific — that failure is the most
+   trustworthy signal for what to port next, more so than continuing to
+   guess from the "what's still needed" list above.
+3. Otherwise, pick from the "what's still needed" list above — items 4
+   (fixing phase 1's `%`/`#TYPE` stubs now that Eval exists) and 1
+   (`ObList`, if a real source file turns out to need qualified atoms)
+   are the most likely to matter soon; the rest are genuinely on-demand.
+4. Once phase 2 feels solid (or once real source above exposes what's
+   still missing), move to **phase 3** (Compiler/ZModel/Emit.Zap) — see
+   that section below for where to start reading first.
+5. Update this doc's "what's done" section and commit again.

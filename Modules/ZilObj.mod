@@ -43,6 +43,8 @@ CONST
   KSubr*    = 10;    (* native procedure, evaluated args *)
   KFSubr*   = 11;    (* native procedure, unevaluated args *)
   KActivation* = 12; (* PROG/REPEAT/BIND activation identity — see ZilEval.mod *)
+  KFunction*   = 13; (* DEFINE/DEFINE20-defined interpreter function *)
+  KMacro*      = 14; (* DEFMAC-defined macro: wraps an applicable value *)
 
   OblistBuckets = 2048;
 
@@ -96,7 +98,20 @@ TYPE
     segForm*: Zo;
 
     (* property list (PUTPROP/GETPROP), any kind *)
-    assoc*: AssocNode
+    assoc*: AssocNode;
+
+    (* FUNCTION (DEFINE/DEFINE20): the arg-spec list is kept raw/unparsed
+       and walked afresh on every call rather than pre-compiled into a
+       separate structure — simpler, and call frequency at this level
+       (macro expansion, small interpreter-only helpers) makes the
+       re-walk cost irrelevant. See ZilEval.mod's function/macro apply
+       logic (inlined in Eval, same forward-reference reason as PROG). *)
+    funcArgSpec*: Zo;   (* raw LIST, e.g. (X "OPT" (Y 5) "AUX" Z) *)
+    funcAct*: Zo;       (* optional leading activation atom, or NIL *)
+    funcBody*: Zo;      (* LIST of body forms *)
+
+    (* MACRO (DEFMAC): wraps an applicable value (a FUNCTION) *)
+    macWrapped*: Zo
   END;
 
 VAR
@@ -219,6 +234,19 @@ BEGIN
   Strings.Copy(name, z.atomText);
   RETURN z
 END NewActivation;
+
+PROCEDURE NewFunction*(argSpec, act, body: Zo): Zo;
+VAR z: Zo;
+BEGIN
+  NEW(z);
+  z.kind := KFunction;
+  z.funcArgSpec := argSpec; z.funcAct := act; z.funcBody := body;
+  RETURN z
+END NewFunction;
+
+PROCEDURE NewMacro*(wrapped: Zo): Zo;
+VAR z: Zo;
+BEGIN NEW(z); z.kind := KMacro; z.macWrapped := wrapped; RETURN z END NewMacro;
 
 (* ------------------------------------------------------------------ *)
 (* property lists (PUTPROP/GETPROP)                                     *)
@@ -387,6 +415,10 @@ BEGIN
       Strings.Copy("#FSUBR (", s); Strings.Append(z.atomText, s); Strings.Append(")", s)
    |KActivation:
       Strings.Copy("#ACTIVATION ", s); Strings.Append(z.atomText, s)
+   |KFunction:
+      Strings.Copy("#FUNCTION (...)", s)
+   |KMacro:
+      Strings.Copy("#MACRO (...)", s)
   ELSE
     Strings.Copy("#UNKNOWN", s)
   END
