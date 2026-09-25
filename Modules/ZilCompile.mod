@@ -63,18 +63,41 @@ BEGIN errFlag := FALSE; errMsg[0] := 0X END ClearErr;
    own null-terminated string format, not plain text) — Files.WriteLine is
    the only text-clean file write available, and it writes a whole line at
    a time, so lines have to be assembled before they're written. *)
+CONST
+  MaxBufLines = 20000;
+  MaxLocals = 15;   (* the Z-machine's own per-routine limit *)
+
+TYPE
+  LineText = POINTER TO ARRAY OF CHAR;
+
 VAR
   outIsFile: BOOLEAN;
   outFile: Files.File;
   outRider: Files.Rider;
   lineBuf: ARRAY 8192 OF CHAR;
 
+  (* routine-body buffering and compiler temporaries — see the block of
+     procedures just after CloseOutput for what these are for *)
+  buffering: BOOLEAN;
+  bufLines: ARRAY MaxBufLines OF LineText;
+  nBufLines: INTEGER;
+  tempDepth, tempMax: INTEGER;
+
 PROCEDURE W(s: ARRAY OF CHAR);
 BEGIN Strings.Append(s, lineBuf) END W;
 
 PROCEDURE WLn;
+VAR t: LineText;
 BEGIN
-  IF outIsFile THEN Files.WriteLine(outRider, lineBuf)
+  IF buffering THEN
+    IF nBufLines < MaxBufLines THEN
+      NEW(t, Strings.Length(lineBuf) + 1);
+      Strings.Copy(lineBuf, t^);
+      bufLines[nBufLines] := t; INC(nBufLines)
+    ELSE
+      Err("routine body too long for the emission buffer")
+    END
+  ELSIF outIsFile THEN Files.WriteLine(outRider, lineBuf)
   ELSE Out.String(lineBuf); Out.Ln
   END;
   lineBuf[0] := 0X
@@ -97,6 +120,58 @@ BEGIN
     outFile := NIL; outIsFile := FALSE
   END
 END CloseOutput;
+
+(* ---------------- routine body buffering, and compiler temporaries ----------------
+   A routine's `.FUNCT NAME,local,...` line has to name every local the
+   body uses, but which compiler temporaries a body needs is only known
+   once it has been compiled. So a routine's body is compiled into a line
+   buffer first; the .FUNCT line is written afterwards, with the temporary
+   count the body turned out to need, and the buffer is then flushed
+   underneath it.
+
+   The temporaries exist to fix an operand-ordering bug: every compound
+   sub-expression leaves its result on the Z-machine stack, so when two of
+   them feed one instruction, the operands come off the stack in the
+   opposite order to the one they went on. The original solves this the
+   same way (PushInnerLocal with a ?TMP atom, in ZBuiltins.cs's
+   SetValueOp) — spill the earlier value into a named local so the later
+   one can have the stack to itself. `SET '?TMPn,STACK` is the spill: the
+   Z-machine store instruction reads its value operand from the stack,
+   popping it. Temporaries are allocated by nesting depth (?TMP1, ?TMP2,
+   ...) and released as each instruction consumes them, so a routine only
+   declares as many as its deepest expression actually needed. *)
+PROCEDURE BeginBuffer;
+BEGIN buffering := TRUE; nBufLines := 0; tempDepth := 0; tempMax := 0 END BeginBuffer;
+
+PROCEDURE EndBuffer;
+BEGIN buffering := FALSE END EndBuffer;
+
+PROCEDURE FlushBuffer;
+VAR i: INTEGER;
+BEGIN
+  i := 0;
+  WHILE i < nBufLines DO
+    IF outIsFile THEN Files.WriteLine(outRider, bufLines[i]^)
+    ELSE Out.String(bufLines[i]^); Out.Ln
+    END;
+    bufLines[i] := NIL;
+    INC(i)
+  END;
+  nBufLines := 0
+END FlushBuffer;
+
+(* Allocates the next temporary and yields its ZAP local name. *)
+PROCEDURE AllocTemp(VAR name: ARRAY OF CHAR);
+VAR n: ARRAY 16 OF CHAR;
+BEGIN
+  INC(tempDepth);
+  IF tempDepth > tempMax THEN tempMax := tempDepth END;
+  Strings.IntToStr(tempDepth, n);
+  Strings.Copy("?TMP", name); Strings.Append(n, name)
+END AllocTemp;
+
+PROCEDURE FreeTemp;
+BEGIN DEC(tempDepth) END FreeTemp;
 
 (* Renders a FIX as decimal text (negative numbers included, matching ZAP
    expression syntax — zapf's own expression parser accepts a leading
@@ -240,6 +315,37 @@ END ConstantText;
    Read by CompileRoutine right after compiling the final statement. *)
 VAR termFlag: BOOLEAN;
 
+(* True when compiling `z` as an operand is guaranteed to push nothing onto
+   the Z-machine stack, so an earlier operand already sitting there is safe.
+   Over-approximates slightly (<VALUE X>, <INC X> and a few others emit no
+   push either but are not listed) — the cost of being wrong in this
+   direction is one extra spill instruction, never wrong code. *)
+PROCEDURE IsSimpleOperand(z: ZilObj.Zo): BOOLEAN;
+BEGIN
+  IF z = NIL THEN RETURN FALSE END;
+  IF (z.kind = ZilObj.KFix) OR (z.kind = ZilObj.KChar)
+     OR (z.kind = ZilObj.KFalse) OR (z.kind = ZilObj.KAtom) THEN RETURN TRUE END;
+  RETURN (z.kind = ZilObj.KForm) & (ZilObj.ListLength(z) = 2)
+         & (ZilObj.IsAtomNamed(z.first, "LVAL") OR ZilObj.IsAtomNamed(z.first, "GVAL"))
+END IsSimpleOperand;
+
+(* Moves an operand already sitting on the stack into a fresh temporary, so
+   a later operand of the same instruction can use the stack without the two
+   coming back off it in the wrong order. Returns FALSE (with the error set)
+   only if the routine has run out of Z-machine locals. *)
+PROCEDURE SpillToTemp(VAR text: ARRAY OF CHAR): BOOLEAN;
+VAR tmp: ARRAY 16 OF CHAR;
+BEGIN
+  AllocTemp(tmp);
+  IF tempMax > MaxLocals THEN
+    Err("expression needs more compiler temporaries than a routine has locals");
+    RETURN FALSE
+  END;
+  W("	SET '"); W(tmp); W(",STACK"); WLn;
+  Strings.Copy(tmp, text);
+  RETURN TRUE
+END SpillToTemp;
+
 (* Compiles `z` as a value-producing expression, emitting whatever
    instructions are needed and returning the ZAP operand text that holds
    the result (a literal number, a local variable's bare name, or
@@ -250,7 +356,7 @@ VAR termFlag: BOOLEAN;
 PROCEDURE CompileOperand(z: ZilObj.Zo; VAR opText: ARRAY OF CHAR): BOOLEAN;
 VAR leftText, rightText: ARRAY 64 OF CHAR; opcode: ARRAY 16 OF CHAR;
     headName: ARRAY 64 OF CHAR; argTexts: ARRAY 3, 64 OF CHAR;
-    ok: BOOLEAN; nArgs, i: INTEGER; ap: ZilObj.Zo;
+    ok, spilled: BOOLEAN; nArgs, i, nSpills: INTEGER; ap, ap2: ZilObj.Zo;
 BEGIN
   IF z = NIL THEN Err("CompileOperand: NIL expression"); RETURN FALSE END;
 
@@ -308,25 +414,19 @@ BEGIN
       END;
       ok := CompileOperand(z.rest.first, leftText);
       IF ~ok THEN RETURN FALSE END;
+      spilled := (leftText = "STACK") & ~IsSimpleOperand(z.rest.rest.first);
+      IF spilled THEN
+        ok := SpillToTemp(leftText);
+        IF ~ok THEN RETURN FALSE END
+      END;
       ok := CompileOperand(z.rest.rest.first, rightText);
       IF ~ok THEN RETURN FALSE END;
+      IF spilled THEN FreeTemp END;
       IF headName = "+" THEN Strings.Copy("ADD", opcode)
       ELSIF headName = "-" THEN Strings.Copy("SUB", opcode)
       ELSIF headName = "*" THEN Strings.Copy("MUL", opcode)
       ELSIF headName = "MOD" THEN Strings.Copy("MOD", opcode)
       ELSE Strings.Copy("DIV", opcode)
-      END;
-      (* Both sub-expressions routed through the stack means the operands
-         come back off it in the opposite order to the one they were pushed
-         in — harmless for the commutative ops, wrong for the rest. The
-         original avoids this by spilling one side into a compiler temporary
-         local (PushInnerLocal ?TMP), which this port can't do yet because
-         a routine's local list is already written by the time its body is
-         compiled. Refuse to emit silently-wrong code until that's fixed. *)
-      IF (leftText = "STACK") & (rightText = "STACK")
-         & ((headName = "-") OR (headName = "/") OR (headName = "MOD")) THEN
-        Err("CompileOperand: both operands of a non-commutative op on the stack (needs compiler temporaries)");
-        RETURN FALSE
       END;
       W("	"); W(opcode); W(" "); W(leftText);
       W(","); W(rightText); W(" >STACK"); WLn;
@@ -357,7 +457,7 @@ BEGIN
          EmitCall, which for zversion < 4 always emits CALL and pops the
          result with FSTACK when it isn't wanted (see CompileStmt for that
          void case). *)
-      nArgs := 0; ap := z.rest;
+      nArgs := 0; nSpills := 0; ap := z.rest;
       WHILE (ap # NIL) & (ap.first # NIL) DO
         IF nArgs >= 3 THEN
           Err("CompileOperand: V3 allows at most 3 call arguments"); RETURN FALSE
@@ -368,8 +468,23 @@ BEGIN
            of the half-written CALL line *)
         ok := CompileOperand(ap.first, argTexts[nArgs]);
         IF ~ok THEN RETURN FALSE END;
+        (* and an argument left on the stack has to be spilled if anything
+           still to be compiled might push over it *)
+        IF argTexts[nArgs] = "STACK" THEN
+          spilled := FALSE; ap2 := ap.rest;
+          WHILE (ap2 # NIL) & (ap2.first # NIL) DO
+            IF ~IsSimpleOperand(ap2.first) THEN spilled := TRUE END;
+            ap2 := ap2.rest
+          END;
+          IF spilled THEN
+            ok := SpillToTemp(argTexts[nArgs]);
+            IF ~ok THEN RETURN FALSE END;
+            INC(nSpills)
+          END
+        END;
         INC(nArgs); ap := ap.rest
       END;
+      WHILE nSpills > 0 DO FreeTemp; DEC(nSpills) END;
       W("	CALL "); W(headName);
       i := 0;
       WHILE i < nArgs DO
@@ -424,7 +539,8 @@ END EmitPredInstr;
    CompileOperand for everything else; it never calls CompileStmt, so a
    COND nested inside a *condition* isn't reachable from here. *)
 PROCEDURE CompileCondition(z: ZilObj.Zo; label: ARRAY OF CHAR; polarity: BOOLEAN): BOOLEAN;
-VAR headName: ARRAY 64 OF CHAR; leftText, rightText, opText, empty: ARRAY 64 OF CHAR; ok: BOOLEAN;
+VAR headName: ARRAY 64 OF CHAR; leftText, rightText, opText, empty: ARRAY 64 OF CHAR;
+    ok, spilled: BOOLEAN;
 BEGIN
   empty[0] := 0X;
   IF z = NIL THEN Err("CompileCondition: NIL condition"); RETURN FALSE END;
@@ -455,13 +571,14 @@ BEGIN
       END;
       ok := CompileOperand(z.rest.first, leftText);
       IF ~ok THEN RETURN FALSE END;
+      spilled := (leftText = "STACK") & ~IsSimpleOperand(z.rest.rest.first);
+      IF spilled THEN
+        ok := SpillToTemp(leftText);
+        IF ~ok THEN RETURN FALSE END
+      END;
       ok := CompileOperand(z.rest.rest.first, rightText);
       IF ~ok THEN RETURN FALSE END;
-      IF (leftText = "STACK") & (rightText = "STACK")
-         & ((headName = "L?") OR (headName = "G?")) THEN
-        Err("CompileCondition: both operands of L?/G? on the stack (needs compiler temporaries)");
-        RETURN FALSE
-      END;
+      IF spilled THEN FreeTemp END;
       IF headName = "L?" THEN EmitPredInstr("LESS?", leftText, rightText, label, polarity)
       ELSIF headName = "G?" THEN EmitPredInstr("GRTR?", leftText, rightText, label, polarity)
       ELSE EmitPredInstr("EQUAL?", leftText, rightText, label, polarity)
@@ -744,12 +861,37 @@ END CompileStmt;
    BuildRoutine: wantResult is true only for the routine's final
    statement) — and a RETURN of that final value. *)
 PROCEDURE CompileRoutine*(idx: INTEGER; isEntry: BOOLEAN): BOOLEAN;
-VAR rt: ZilModel.RoutineRec; opText: ARRAY 64 OF CHAR; a: ZilObj.Zo;
-    bp: ZilObj.Zo; ok, isLast: BOOLEAN;
+VAR rt: ZilModel.RoutineRec; opText: ARRAY 64 OF CHAR; n: ARRAY 16 OF CHAR;
+    a, bp: ZilObj.Zo; ok, isLast: BOOLEAN; nParams, i: INTEGER;
 BEGIN
   rt := ZilModel.routines[idx];
-  W(".FUNCT "); W(rt.name.atomText);
 
+  bp := rt.body;
+  IF (bp = NIL) OR (bp.first = NIL) THEN
+    Err("CompileRoutine: empty body"); RETURN FALSE
+  END;
+
+  (* The body is compiled into a buffer first, because the .FUNCT line has
+     to name every local the body uses and the compiler temporaries it needs
+     are only known once it has been compiled. *)
+  BeginBuffer;
+  WHILE (bp # NIL) & (bp.first # NIL) DO
+    isLast := (bp.rest = NIL) OR (bp.rest.first = NIL);
+    ok := CompileStmt(bp.first, isLast, opText);
+    IF ~ok THEN EndBuffer; FlushBuffer; RETURN FALSE END;
+    IF isLast & ~termFlag THEN
+      (* no implicit fall-through return exists anywhere in the original
+         either — every routine explicitly returns its last value, unless
+         that last statement already left the routine on its own *)
+      W("	RETURN "); W(opText); WLn
+    END;
+    bp := bp.rest
+  END;
+  EndBuffer;
+  IF errFlag THEN RETURN FALSE END;
+
+  W(".FUNCT "); W(rt.name.atomText);
+  nParams := 0;
   a := rt.argSpec;
   WHILE (a # NIL) & (a.first # NIL) DO
     IF a.first.kind # ZilObj.KAtom THEN
@@ -757,7 +899,18 @@ BEGIN
       RETURN FALSE
     END;
     W(","); W(a.first.atomText);
+    INC(nParams);
     a := a.rest
+  END;
+  IF nParams + tempMax > MaxLocals THEN
+    Err("CompileRoutine: too many locals (parameters plus compiler temporaries)");
+    RETURN FALSE
+  END;
+  i := 1;
+  WHILE i <= tempMax DO
+    Strings.IntToStr(i, n);
+    W(",?TMP"); W(n);
+    INC(i)
   END;
   WLn;
 
@@ -768,23 +921,7 @@ BEGIN
      is immediately followed by START:: and nothing else. *)
   IF isEntry THEN W("START::"); WLn END;
 
-  bp := rt.body;
-  IF (bp = NIL) OR (bp.first = NIL) THEN
-    Err("CompileRoutine: empty body"); RETURN FALSE
-  END;
-
-  WHILE (bp # NIL) & (bp.first # NIL) DO
-    isLast := (bp.rest = NIL) OR (bp.rest.first = NIL);
-    ok := CompileStmt(bp.first, isLast, opText);
-    IF ~ok THEN RETURN FALSE END;
-    IF isLast & ~termFlag THEN
-      (* no implicit fall-through return exists anywhere in the original
-         either — every routine explicitly returns its last value, unless
-         that last statement already left the routine on its own *)
-      W("	RETURN "); W(opText); WLn
-    END;
-    bp := bp.rest
-  END;
+  FlushBuffer;
   WLn;
   RETURN TRUE
 END CompileRoutine;
@@ -968,5 +1105,5 @@ BEGIN
 END CompileProgram;
 
 BEGIN
-  outIsFile := FALSE; lineBuf[0] := 0X
+  outIsFile := FALSE; buffering := FALSE; nBufLines := 0; lineBuf[0] := 0X
 END ZilCompile.

@@ -1533,7 +1533,9 @@ registrations in `ZBuiltins.cs` and `RoutineBuilder.EmitCall`.
   format, not plain text) — `Files.WriteLine` is the only text-clean file
   write available and writes a whole line at a time, hence the line buffer.
 
-**A real, silently-wrong-code bug found and closed off (not yet fixed).**
+**A real, silently-wrong-code bug found** (fixed in the very next slice —
+see the section below; the description is kept because the reasoning is
+what the fix is built on).
 Every compound sub-expression routes its result through the Z-machine
 stack. When *both* operands of a binary op do that, they come back off the
 stack in the opposite order to the one they went on — harmless for `+`,
@@ -1582,6 +1584,59 @@ not that the `.zap` looks plausible):
 `examples/*.mod`, now including `examples/zilf.mod`) — 135 pass, the same
 3 pre-existing-only failures (`ClojBio`, `ClojStats`, `Editor`).
 
+## What's done (phase 3b continued: compiler temporaries, and buffered routine bodies)
+
+Fixes the operand-ordering bug the globals slice could only refuse, which
+the plan named as the thing to do before widening codegen any further.
+
+**The bug**: every compound sub-expression leaves its result on the
+Z-machine stack, so when two of them feed one instruction, the operands
+come back off the stack in the opposite order to the one they went on —
+harmless for `+`, `*` and `EQUAL?`, wrong for `-`, `/`, `MOD`, `L?`, `G?`
+and for the argument list of a routine call.
+
+**The fix**, the same one the original uses (`PushInnerLocal` with a `?TMP`
+atom, in `ZBuiltins.cs`'s `SetValueOp`): spill the earlier value into a
+named local so the later one has the stack to itself. `SET '?TMPn,STACK`
+is the spill — the Z-machine store instruction reads its value operand
+from the stack, popping it.
+
+What that needed structurally: **a routine's `.FUNCT NAME,local,...` line
+names every local the body uses, but which temporaries a body needs is
+only known once it has been compiled.** So `CompileRoutine` now compiles
+the body into a line buffer first, then writes the `.FUNCT` line with the
+temporary count the body turned out to need, then flushes the buffer
+underneath it. (`START::` is written between the two, matching real zilf
+output.)
+
+- Temporaries are allocated by nesting depth (`?TMP1`, `?TMP2`, …) and
+  released as each instruction consumes them, so a routine declares only
+  as many as its deepest expression actually needed — verified in the
+  generated `.zap`: a routine with two sequentially-nested subtractions
+  reuses `?TMP1` for both, while a three-argument call with two compound
+  arguments declares `?TMP1` and `?TMP2`.
+- A spill is emitted only when it is needed: the operand must actually be
+  sitting on the stack, *and* something still to be compiled must be able
+  to push over it (`IsSimpleOperand` — a FIX/CHARACTER/`<>`/atom/`.X`/`,X`
+  operand emits nothing, so an earlier stack value is safe). This
+  over-approximates slightly in the safe direction; being wrong costs one
+  extra spill instruction, never wrong code.
+- The Z-machine's 15-locals-per-routine limit is checked (parameters plus
+  temporaries) and reported.
+
+**Tested end-to-end** (compile → `zapf` → `zmachine.mod`, checking printed
+values): six routines specifically shaped to need temporaries — `<- <+ .A
+1> <+ .B 1>>` (the case the previous slice refused, now correct), a
+doubly-nested subtraction, a division with two compound operands, an `L?`
+condition with two compound operands in both the true and false
+directions, and a three-argument routine call with two compound arguments.
+All six correct. All four earlier end-to-end programs re-run and produced
+**identical** output, including the ones that never needed a temporary —
+so no spill is emitted where one isn't wanted.
+
+**Tested**: corpus (52 files, zero parse failures) and the full transpiler
+regression suite (138 files, same 3 pre-existing-only failures).
+
 ## Corpus gap analysis: exactly what blocks compiling a real game
 
 Running the new driver over all 52 corpus files makes the remaining gap
@@ -1621,17 +1676,10 @@ is the known qualified-OBLIST investigation and should stay one task.
    (compile → `zapf` → `zmachine.mod`, checking the printed values). Also
    re-run the transpiler's own full `Modules/*.mod`+`examples/*.mod`
    regression suite (138 files, 3 pre-existing failures).
-2. **Fix the stack-ordering bug properly** — buffer a routine's body
-   before writing its `.FUNCT` line so compiler temporaries can be added
-   to the local list, then spill one operand into a temporary instead of
-   refusing the case. See the globals section above for the full
-   description. Do this BEFORE widening codegen further: nearly every
-   additional builtin can hit it, and every one added first is another
-   thing to revisit.
-3. **The four cheap registrations** — `VERSION`, `FILE-FLAGS`, `GDECL`,
+2. **The four cheap registrations** — `VERSION`, `FILE-FLAGS`, `GDECL`,
    `VERSION?` — see the corpus gap analysis above. Highest files-unblocked
    per line of work of anything left.
-4. Then the remaining phase-3b codegen widenings, roughly in value order:
+3. Then the remaining phase-3b codegen widenings, roughly in value order:
    a. **`AND`/`OR` and the loop constructs**: read `Compilation.Loops.cs`
       (896 lines, still not read). `COND`'s condition fallback already
       handles a bare value tested for truthiness, but `AND`/`OR`'s
@@ -1653,9 +1701,9 @@ is the known qualified-OBLIST investigation and should stay one task.
       dictionary is emitted today.
    e. More `ZBuiltins.cs` builtins on demand, same methodology as always,
       each tested compile → `zapf` → run → check the actual result.
-5. The `PACKAGE`/`USE`/`ADD-TELL-TOKENS`/qualified-OBLIST cluster remains
+4. The `PACKAGE`/`USE`/`ADD-TELL-TOKENS`/qualified-OBLIST cluster remains
    its own self-contained investigation (see phase 3a's own section for
    what's already known) — 11 corpus files are blocked on it, so it has to
    happen eventually, but it is not a quick slice and shouldn't be
    attempted as one.
-6. Update this doc's "what's done" section and commit again.
+5. Update this doc's "what's done" section and commit again.
