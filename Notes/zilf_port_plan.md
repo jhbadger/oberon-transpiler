@@ -2100,6 +2100,87 @@ early by `RETURN`, and an `AGAIN` loop over a global — all five printed the
 expected values. All nine earlier end-to-end programs re-run unchanged.
 Transpiler regression suite: 138 files, same 3 pre-existing-only failures.
 
+## MILESTONE 2: `sample/mandelbrot/mandelbrot.zil` — a second real game, and the first V4 one
+
+Compiles clean and renders the Mandelbrot set as ASCII art, verified by
+running the story file and reading the picture. It is `<VERSION EZIP>`, so
+it also exercises the V4 emission path (`.NEW 4`, the `CALL1`/`CALL2`/
+`CALL`/`XCALL` split, 63-word property defaults) end to end for the first
+time. Three things it needed:
+
+### `"OPT"`/`"AUX"` arguments (`DefineLocalsFromArgSpec`)
+
+A ZAP `.FUNCT` line doesn't distinguish the three argument kinds — they are
+all just the routine's locals, in order, and the Z-machine's own calling
+convention is what makes the leading ones parameters: the caller supplies
+some, and every local the caller didn't supply keeps its declared default.
+So this is mostly a matter of collecting them in source order with their
+defaults. A constant default rides along on the `.FUNCT` line as
+`NAME=value`; a non-constant one (mandelbrot has several, e.g.
+`(SPANX <* 3 ,MANDEL-SCALE>)`) becomes an assignment emitted at the top of
+the body, which the buffered-body design already made easy. An **`"OPT"`
+argument with a non-constant default is refused**: it would have to run
+that assignment only when the caller *didn't* supply the argument, which
+needs an argument-count test this port doesn't emit — better an explicit
+error than silently overwriting a supplied value. Renaming to avoid
+shadowing (`MakeUniqueVariableName`) is not ported.
+
+### A table of one-instruction builtins
+
+The bulk of `ZBuiltins.cs`'s 237 registrations are just "emit this opcode
+with these operands", so `SimpleBuiltin` is a lookup returning the ZAP
+mnemonic, the operand count and whether it stores — which is what decides
+between the value path in `CompileOperand` and the void path in
+`CompileStmt`. Both paths compile every operand before writing the
+instruction line (an operand can emit instructions of its own) and spill to
+a temporary where a later operand could push over an earlier one, the same
+rule the arithmetic and call paths already use. Registered so far:
+`GET`/`NTH`, `GETB`, `GETP`, `GETPT`, `NEXTP`, `BAND`, `BOR`, `BCOM`,
+`ASH`/`ASHIFT`, `SHIFT`, `RANDOM`, `LOC`, `PTSIZE`, `PUT`, `PUTB`, `PUTP`,
+`MOVE`, `REMOVE`, `FSET`, `FCLEAR`, `HLIGHT`, `SCREEN`, `SPLIT`, `CLEAR`,
+`CURSET`, `BUFOUT`, `DIROUT`, `USL`, `PRINT`, `PRINTD`, `PRINTB`, `PRINTU`,
+`PUSH`, `RESTART`. Adding another is one line. Builtins with real
+compilation behaviour (the predicates, the variable ops, `COND`, the loop
+constructs, calls) are deliberately not in the table.
+
+Also added the comparison predicates `G=?`/`L=?` — no separate Z-machine
+instruction, just `LESS?`/`GRTR?` with the branch polarity flipped, exactly
+as the original defines them.
+
+### Table emission (`Compilation.Tables.cs`)
+
+Every registered `TABLE`/`LTABLE`/`PTABLE`/`PLTABLE`/`ITABLE` is emitted as
+a labelled ZAP table (`T?1`, `T?2`, ..., the original's own generated
+naming), and `ConstantText` renders a table *value* as its label — so
+`<CONSTANT MANDEL-CHARS <TABLE ...>>` emits `MANDEL-CHARS=T?1` and a `GET`
+against it resolves. Tables are matched **by identity**, not by name or
+contents: a table is an anonymous value that a CONSTANT or GLOBAL happens
+to hold, and the same contents could legitimately appear twice (the
+original keys its own dictionary by reference for the same reason).
+Element width is a word unless the table was flagged BYTE; an LTABLE's
+length prefix is emitted in the same width; ITABLE's repetition is already
+expanded when the value is built. The LEXV format is not ported.
+
+All tables are emitted in **dynamic** memory, before `IMPURE::`, even ones
+declared PURE. Static memory is read-only, so putting a pure table there is
+the optimisation and putting it in dynamic memory is the safe direction —
+a game that writes to a table the compiler wrongly believed was pure still
+works.
+
+Error messages now name the offending builtin or global, which is what
+turned "unrecognized builtin" into a two-minute diagnosis rather than a
+bisect.
+
+**Tested**: `mandelbrot` compiled, assembled and run (art verified by
+reading it); `beer` still compiles and runs; a dedicated argument-spec
+program (`"AUX"` with constant and computed defaults, `"OPT"` with and
+without the argument supplied, `G=?`/`L=?`) printed all five expected
+values. All eleven end-to-end programs pass. Transpiler regression suite:
+138 files, same 3 pre-existing-only failures.
+
+**Corpus**: `sample/name` now reaches `TELL`, the last big codegen piece
+before a parser-driven game.
+
 ## Corpus gap analysis: exactly what blocks compiling a real game
 
 Running the new driver over all 52 corpus files makes the remaining gap
