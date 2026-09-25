@@ -2112,7 +2112,7 @@ END CompileGlobals;
    dynamic memory is the safe direction — a game that writes to a table the
    compiler wrongly believed was pure still works. *)
 PROCEDURE CompileTables(): BOOLEAN;
-VAR i, j: INTEGER; label, text, errBuf: ARRAY 256 OF CHAR;
+VAR i, j: INTEGER; label: ARRAY 512 OF CHAR; text, errBuf: ARRAY 512 OF CHAR;
     t, elemWidth: ZilObj.Zo; isByte: BOOLEAN; width: ARRAY 8 OF CHAR;
 BEGIN
   i := 0;
@@ -2134,7 +2134,11 @@ BEGIN
       IF ~ConstantText(t.vecItems[j], text) THEN
         Strings.Copy("CompileTables: element ", errBuf);
         FixText(j, label); Strings.Append(label, errBuf);
-        Strings.Append(" of a table is not a compilable constant", errBuf);
+        Strings.Append(" of table ", errBuf);
+        TableLabel(i, label); Strings.Append(label, errBuf);
+        Strings.Append(" is not a compilable constant: ", errBuf);
+        ZilObj.PrintTo(t.vecItems[j], label);
+        Strings.Append(label, errBuf);
         Err(errBuf); RETURN FALSE
       END;
       (* an element written <BYTE n> or <WORD n> overrides the table's own

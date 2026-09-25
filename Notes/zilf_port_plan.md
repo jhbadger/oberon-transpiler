@@ -2515,54 +2515,77 @@ qualified-OBLIST investigation and should stay one task.
 
 ## Suggested order for the next session
 
-**Where this stands**: three complete, unmodified games from zilf's own
-sample set compile through this port, assemble with the Oberon `zapf`, and
-run correctly — `sample/beer` (V3), `sample/mandelbrot` (V4, ASCII art) and
-`sample/name` (V3, **interactive**: reads input, prints a status line). The
-pipeline:
+**Where this stands**: three complete, unmodified games compile, assemble
+and run — `sample/beer` (V3), `sample/mandelbrot` (V4, ASCII art) and
+`sample/name` (V3, interactive: reads input, prints a status line).
+**`sample/cloak` evaluates the entire `zillib`** — parser, library messages,
+pronouns, DEFSTRUCT records, packages, compilation flags — and stops inside
+code generation. The pipeline:
 
 ```
 obc --mod-path Modules examples/zilf.mod -o zilf
 ./zilf -i ~/lib/src/zilf/zillib game.zil game.zap && ./zapf game.zap && frotz game.z3
 ```
 
-**Both remaining major games now stop at the same single blocker.**
-`advent.zil` and `cloak.zil` each evaluate the whole of `zillib` — the
-4,000-line parser, the library-message system, the package system, the
-compilation flags — and stop at `DEFSTRUCT`.
-
-1. **Re-run the checks** before changing anything: the sixteen end-to-end
-   programs in the session scratchpad (compile → `zapf` → run, checking the
-   printed values), `beer`/`mandelbrot`/`name` end to end, the 52-file
-   corpus with `-i .../zillib`, and the transpiler's own suite (138 files,
-   3 pre-existing failures). The scratchpad may not survive between machine
+1. **Re-run the checks** first: the sixteen end-to-end programs in the
+   session scratchpad (compile → `zapf` → run, checking printed values),
+   `beer`/`mandelbrot`/`name` end to end, the 52-file corpus with
+   `-i .../zillib`, and the transpiler's own suite (138 files, 3
+   pre-existing failures). The scratchpad may not survive between machine
    sessions; each test program is described in its own section above.
-2. **`DEFSTRUCT`** (`Interpreter/Subrs.Defstruct.cs`, 920 lines) is now
-   *the* blocker — it is what both `advent` and `cloak` stop at, and
-   nothing else is close. It defines a record type over a TABLE or VECTOR
-   and generates the accessor macros for it; `zillib/parser.zil` uses it
-   five times with `('NTH ZGET) ('PUT ZPUT) ('START-OFFSET 0)` style option
-   lists, `zillib/pronouns.zil` once over a VECTOR. It is a real piece of
-   work, not a one-SUBR slice, but it is now the highest-value thing by a
-   wide margin: it is the last thing between this port and evaluating a
-   full parser-driven game.
-3. **Then the remaining codegen for a parser game**, in rough order:
-   **vocabulary and syntax tables** (`Compilation.Syntax.cs` — the
-   dictionary is emitted empty today, and `SYNONYM`/`ADJECTIVE`/`PSEUDO`
-   object properties are skipped with a comment because they need it);
-   **complex PROPDEF patterns** (`ComplexPropDef.cs`, 1,021 lines — needed
-   for direction properties like `(NORTH TO CELLAR)`, also skipped today);
-   **string operands and packed string tables** (`.GSTR`/`.STR`), so a
-   string can be an operand and not only a `PRINTI` literal.
-4. **Smaller known gaps**, each blocking one or two corpus files:
+
+2. **The vocabulary and syntax tables** are now the whole remaining story
+   for a parser game, and `cloak` stops exactly there: it fails on a table
+   element that is a vocabulary word (`ENGLISH-NUM-WORDS`, a `PLTABLE` of
+   `<VOC "one" ...>` results), which needs a dictionary to point at.
+
+   **Scope, from reading the original**: `Compiler/Compilation.Syntax.cs`
+   (477 lines) and `ZModel/Syntax.cs` (421), plus the small
+   `ZModel/Vocab/*` classes. Comparable in size to the whole DEFSTRUCT +
+   MDL-layer batch, so plan it as its own session, not a slice.
+
+   **The good news, worth knowing before starting**: the hard part —
+   encoding a word into Z-characters — is already done. `zapf` implements
+   it and exposes it as the `.ZWORD "text"` directive (see
+   `Modules/ZapfZChar.mod`), so the compiler only has to emit the table
+   structure, not the encoding. From `GameBuilder.FinishSyntax`, that
+   structure is:
+
+   ```
+   VOCAB:: .TABLE
+       .BYTE <count of self-inserting break chars>
+       .BYTE <each break char>
+       .BYTE <entry length>          ; zwordBytes + dataBytes
+       .WORD <word count>
+       .VOCBEG <entry length>,<zwordBytes>   ; 4 z-word bytes in V1-3, 6 in V4+
+       W?FOO:: .ZWORD "foo"
+       <the word's data bytes: part-of-speech flags, then per-POS values>
+       ...
+       .VOCEND
+       .ENDT
+   ```
+
+   and `zapf` already parses every one of those directives — `.VOCBEG`,
+   `.VOCEND`, `.ZWORD` are all in `ZapfParser.mod`'s directive table. What
+   is missing on this side is: a vocabulary registry in `ZilModel` (word
+   text plus part of speech); registering words from `VOC`, `SYNONYM`,
+   `BUZZ`, `DIRECTIONS`, `SYNTAX` and from objects' `SYNONYM`/`ADJECTIVE`
+   properties (all of which `ZilCompile.CompileObjects` currently *skips
+   with a comment* for exactly this reason); `ConstantText` resolving a
+   vocabulary atom to its `W?NAME` symbol; and then the syntax/action
+   tables that turn `<SYNTAX TAKE OBJECT = V-TAKE>` into parser data.
+
+3. **Then the rest of what a parser game needs in the compiler**: complex
+   PROPDEF patterns (`ComplexPropDef.cs`, 1,021 lines — direction
+   properties like `(NORTH TO CELLAR)`, also skipped with a comment
+   today), and string operands with packed string tables (`.GSTR`/`.STR`)
+   so a string can be an operand and not only a `PRINTI` literal.
+
+4. **Smaller known gaps**: `BIT-SYNONYM` (where `advent` stops),
    `ZIP-OPTIONS`, `FREQUENT-WORDS?`, `SUPPRESS-WARNINGS?`, `ITABLE`'s
-   keyword argument shapes (`<ITABLE NONE n>` parses, other keyword forms
-   don't), and the standalone-sub-file `%`-evaluation failures (those are
-   expected: a library sub-file compiled on its own is missing a global its
-   parent sets).
-5. **Codegen gaps worth closing when something hits them**: an `"OPT"`
-   argument with a non-constant default (needs the argument-count test);
-   a V5+ hand-built header; `MAPRET`/`MAPSTOP` with more than one value.
+   remaining keyword argument shapes, an `"OPT"` argument with a
+   non-constant default (needs the argument-count test), and a V5+
+   hand-built header.
 
 **Testing discipline that has caught everything so far**: compile →
 assemble with `zapf` → actually run the story file → check the real printed
@@ -2573,3 +2596,7 @@ wrong number, and the missing entry-point `QUIT` produced one that ran all
 `examples/zmachine.mod`, check it under `frotz` before assuming the
 compiler is at fault (`zmachine.mod` hangs on `beer.z3`, which frotz runs
 correctly, while it renders `mandelbrot.z4` perfectly).
+
+**And when an error message names something that makes no sense**, suspect
+a *later* error masking the real one. That is why `Err` now keeps the first
+message — see the diagnostics note in the DEFSTRUCT milestone above.
