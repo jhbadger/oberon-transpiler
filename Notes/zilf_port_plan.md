@@ -1311,6 +1311,65 @@ identical output) plus the full transpiler regression suite (137 files —
 includes the new `ZilCompile.mod` — same 3 pre-existing-only failures) —
 no regressions.
 
+## What's done (phase 3b continued: multi-statement bodies, SET/PRINTI/PRINTN/CRLF)
+
+Widened `ZilCompile.mod` exactly per the plan's own item (a) then most of
+(b): `CompileRoutine` now compiles every body statement (not just a
+single one), wanting a result only for the last — matching the original's
+`BuildRoutine` loop precisely, `wantResult = (i == routine.BodyLength)`.
+Introduced the statement-vs-expression split the original itself has
+(`CompileForm` vs `CompileAsOperand`): a new `CompileStmt` handles the
+statement-shaped builtins `SET`/`PRINTI`/`PRINTN`/`CRLF` directly (none of
+these are meaningful as a *nested* expression operand the way arithmetic
+is) and falls back to the existing `CompileOperand` for anything else —
+so a bare value expression used as a statement (the original trivial test
+case) still works unchanged. `CompileStmt` always calls `CompileOperand`,
+never the reverse, so — unlike `CompileOperand` — it doesn't need to be
+self-recursive or declared before it; it's simply declared after, with no
+forward-reference issue, the same one-directional-dependency reasoning
+already used elsewhere in this port wherever it applies.
+
+- **`SET`** compiles to `SET 'target,<operand>` (confirmed the leading
+  `'` on the *target* from real examples in `~/cloak_plus.zap`, e.g. `SET
+  'HERE,FOYER` — a Z-machine `SET` instruction's first operand names the
+  variable itself, not its value) and returns the target's own bare name
+  as the statement's value if needed — correct regardless of whether the
+  assigned value came from a literal or a compound `STACK`-routed
+  sub-expression, since by the time `SET` finishes, the *variable* holds
+  the value either way.
+- **`PRINTI`** required confirming ZAP's actual string-escaping
+  convention first, rather than assuming C-style backslash escapes:
+  checked `ZapfTok.ReadString` (this port's own zapf tokenizer, already
+  built and tested) and confirmed ZAP doubles an embedded `"` (`""`)
+  rather than backslash-escaping it — implemented as a new
+  `CompileZapString` helper that re-encodes an already-decoded ZIL string
+  into that convention.
+- **`PRINTN`**/**`CRLF`** are straightforward direct mappings.
+- All three void-shaped builtins (`PRINTI`/`PRINTN`/`CRLF`) return the
+  literal text `"1"` when used as a routine's final (value-wanted)
+  statement — a safe stand-in for `T`, since none of them produce a real
+  ZIL value, but the calling convention still needs *something*
+  returnable in that position.
+
+**Tested end-to-end** (same discipline as the original `ADD1` milestone —
+compile, assemble with `zapf`, run in `examples/zmachine.mod`, check the
+actual result, not just that the `.zap` text looks plausible): a routine
+that doubles its argument via `<SET X <* .X 2>>`, prints `"Doubled: "` via
+`PRINTI`, prints the new value via `PRINTN`, emits a `CRLF`, then returns
+`.X` as its last statement. Called with `X=41`, correctly printed
+`"Doubled: 82"` and then correctly returned `82` as the routine's own
+result (confirmed via the test harness's own `PRINTN` of the `CALL`'s
+result) — verifying multi-statement compilation, `SET`'s
+read-back-from-the-variable result semantics, string literal encoding,
+and the interaction between all of them together, in one real compiled
+program. Also confirmed the original trivial `<ROUTINE ADD1 (X) <+ .X
+1>>` test still produces byte-identical `.zap` output after this
+widening — a true extension, not a rewrite that happened to still work.
+
+**Tested**: re-ran all five existing phase-2 test harnesses (byte-
+identical output) plus the full transpiler regression suite (137 files,
+same 3 pre-existing-only failures) — no regressions.
+
 ## Suggested order for the next session
 
 1. Re-run all five existing phase-2 test harnesses to confirm nothing
@@ -1359,29 +1418,32 @@ no regressions.
    separate, larger investigation or squarely phase 3b's job, not another
    quick SUBR to add. This is a natural point to stop registration-only
    work and move to actual code generation.
-4. **Phase 3b has begun** (see the "Milestone: phase 3b begins" section
-   above) — `ZilCompile.mod` compiles a trivial required-args-only
-   `ROUTINE` with FIX literals, `LVAL` parameter references, and `+`/`-`/
-   `*`//` to real `.zap` text, verified assembling and running correctly
-   end-to-end. Natural next widening steps, roughly in order of value:
-   a. **Multi-statement bodies**: `CompileRoutine` currently errors if a
-      routine has more than one body form. Compiling every non-last
-      statement "for effect" (`wantResult = FALSE`, matching
-      `BuildRoutine`'s own loop) and only the last for its value is a
-      small, mechanical extension of what's already there.
-   b. **More `ZBuiltins.cs` VoidCall/ValueCall builtins** on demand, the
-      same one-at-a-time methodology used throughout this whole port —
-      `SET`/`SETG` (store to a local/global), `PRINTI`/`PRINTN`/`CRLF`
-      (this port's own evaluator already has native equivalents to model
-      the compiled form after), `MOVE`/`FSET`/`FCLEAR` (once object
-      compilation exists, see (d)). Test each the same way `ADD1` was:
-      compile, assemble, run, check the actual printed/observable result.
+4. **Phase 3b is under way** (see the "Milestone: phase 3b begins" and
+   "phase 3b continued" sections above) — `ZilCompile.mod` now compiles a
+   required-args-only `ROUTINE` with a multi-statement body, FIX literals,
+   `LVAL` parameter references, `+`/`-`/`*`//`, and `SET`/`PRINTI`/
+   `PRINTN`/`CRLF`, all verified assembling and running correctly
+   end-to-end (including `SET`'s value read back from the variable
+   afterward, and ZAP's actual `""`-doubling string-escaping convention,
+   confirmed against `ZapfTok.ReadString` rather than assumed). Remaining
+   natural next widening steps, roughly in order of value:
+   a. **`SETG`/globals**: needs `Compilation.Globals.cs` (463 lines, not
+      yet read) for real storage allocation — `SET` alone (locals only)
+      was enough for the tests so far, but most real routines read/write
+      globals too.
+   b. **More `ZBuiltins.cs` VoidCall/ValueCall builtins** on demand, same
+      methodology as always: `MOVE`/`FSET`/`FCLEAR` (once object
+      compilation exists, see (d)), and whatever a next real test routine
+      turns out to need. Test each the same way `ADD1` was: compile,
+      assemble, run, check the actual printed/observable result.
    c. **`COND`** compiled as a real branch tree (not interpreted) — read
       `Compilation.Conditions.cs` (663 lines, not yet read) first; this is
       where the VALUE/VOID/PRED/VALUE-PRED calling convention from the
       phase 3 architecture reading pass actually gets exercised, so expect
       to need `PredCall`-shaped builtins (`EQUAL?`, `G?`, `L?`, etc.)
-      alongside it.
+      alongside it. Likely the single highest-value next slice, since
+      real ZIL routines lean on `COND` constantly and nothing with real
+      control flow can be compiled without it.
    d. **Object/property/flag table emission**: read `Compilation.Objects.cs`
       (762 lines, not yet read) — needed before `MOVE`/`FSET?`/`GETP`/etc.
       mean anything, and before a compiled game can do much besides pure
