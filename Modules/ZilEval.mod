@@ -223,6 +223,22 @@ BEGIN
   IF head = NIL THEN RETURN ZilObj.NewEmpty(kind) ELSE RETURN head END
 END BuildConsChain;
 
+(* Copies a raw cons-chain (e.g. a body form-chain) into a VECTOR —
+   used by REPLACE-DEFINITION below to stash an unevaluated body for later
+   (matches the original's own choice of ZilVector for exactly this
+   "stored, pending" state). Doesn't call Eval, so this can be its own
+   procedure. *)
+PROCEDURE ChainToVector(chain: ZilObj.Zo): ZilObj.Zo;
+VAR cnt, i: INTEGER; p, v: ZilObj.Zo;
+BEGIN
+  cnt := 0; p := chain;
+  WHILE (p # NIL) & (p.first # NIL) DO INC(cnt); p := p.rest END;
+  v := ZilObj.NewVectorN(cnt);
+  p := chain; i := 0;
+  WHILE (p # NIL) & (p.first # NIL) DO v.vecItems[i] := p.first; INC(i); p := p.rest END;
+  RETURN v
+END ChainToVector;
+
 (* Scans a flag LIST (e.g. (BYTE LENGTH)) for the TABLE-family SUBRs
    below into a bitmask of ZilObj.TfXXX constants. Doesn't call Eval —
    flagList's elements are plain atoms, nothing to evaluate — so this can
@@ -323,7 +339,7 @@ BEGIN
 END PerformITable;
 
 PROCEDURE ApplySubr*(name: ARRAY OF CHAR; args: ARRAY OF ZilObj.Zo; n: INTEGER): ZResult;
-VAR sum, i, len, synKind: INTEGER; s: ARRAY 4096 OF CHAR;
+VAR sum, i, len, synKind: INTEGER; s: ARRAY 4096 OF CHAR; ind: ZilObj.Zo;
 BEGIN
   IF (name = "SET") OR (name = "SETG") OR (name = "GLOBAL") OR (name = "CONSTANT") THEN
     (* The originals for GLOBAL/CONSTANT are FSUBRs (name unevaluated,
@@ -537,6 +553,26 @@ BEGIN
     FOR i := 0 TO n - 1 DO ZilModel.AddBuzzword(args[i]) END;
     RETURN MkVal(TrueVal())
 
+  ELSIF name = "DELAY-DEFINITION" THEN
+    (* Part of the "hooks" system (Subrs.Meta.cs) library files use to let
+       a game override a default definition before it's ever encountered:
+       marks a not-yet-seen DEFAULT-DEFINITION section so that, when it IS
+       encountered, it won't insert its own body — it'll wait for a
+       REPLACE-DEFINITION instead. Implemented directly with this port's
+       existing PUTPROP/GETPROP (the original does exactly the same thing,
+       just via ctx.PutProp/GetProp) — no new machinery needed. A plain
+       evaluated-args SUBR in the original (name self-evaluates), so no
+       Eval call needed here either. *)
+    IF (n < 1) OR (args[0].kind # ZilObj.KAtom) THEN
+      RETURN Err("DELAY-DEFINITION: expected a name atom")
+    END;
+    ind := ZilObj.Intern("REPLACE-DEFINITION");
+    IF ZilObj.GetProp(args[0], ind) # NIL THEN
+      RETURN ErrAtom("DELAY-DEFINITION: section has already been referenced:", args[0])
+    END;
+    ZilObj.PutProp(args[0], ind, ZilObj.Intern("DELAY-DEFINITION"));
+    RETURN MkVal(args[0])
+
   ELSIF name = "VOC" THEN
     (* Pragmatic subset: the original CHTYPEs the interned atom to a VOC
        pseudo-type and also registers it (by part-of-speech, an optional
@@ -724,6 +760,10 @@ VAR
   insCand, insSavedDir: ARRAY 1024 OF CHAR;
   insName: ARRAY 512 OF CHAR;
   insTry: INTEGER;
+  (* DEFAULT-DEFINITION / REPLACE-DEFINITION (see the dedicated comment
+     at that branch) *)
+  defName, defBody, defState, defInd, defP: ZilObj.Zo;
+  defI: INTEGER;
 BEGIN
   IF z = NIL THEN RETURN MkVal(NIL) END;
 
@@ -1256,6 +1296,82 @@ BEGIN
     ELSIF isFSubr & (name = "ROOM") THEN
       RETURN ApplyObject(TRUE, z.rest)
 
+    ELSIF isFSubr & ((name = "DEFAULT-DEFINITION") OR (name = "REPLACE-DEFINITION")) THEN
+      (* Ported from Subrs.Meta.cs's DEFAULT_DEFINITION/REPLACE_DEFINITION:
+         a "hooks" mechanism library files use to let a game override a
+         default definition before or after it's encountered. State is
+         tracked via PUTPROP/GETPROP on `name`, using the indicator atom
+         "REPLACE-DEFINITION" — the SAME atom is also one of the possible
+         STATE VALUES (self-referential terminal marker for "already
+         inserted"), exactly matching the original's own reuse of
+         StdAtom.REPLACE_DEFINITION in both roles. A pending replacement
+         body (from REPLACE-DEFINITION arriving before the matching
+         DEFAULT-DEFINITION) is stashed as a VECTOR (ChainToVector),
+         matching the original's own choice of ZilVector for this state.
+         Needs to call EvalImpl on the body forms actually inserted, so —
+         same forward-reference reason as INSERT-FILE/PROG — this is
+         inlined here rather than a separate procedure. *)
+      IF (z.rest = NIL) OR (z.rest.first = NIL) OR (z.rest.first.kind # ZilObj.KAtom) THEN
+        RETURN Err("DEFAULT-DEFINITION/REPLACE-DEFINITION: expected a name atom")
+      END;
+      defName := z.rest.first;
+      defBody := z.rest.rest;
+      IF (defBody = NIL) OR (defBody.first = NIL) THEN
+        RETURN Err("DEFAULT-DEFINITION/REPLACE-DEFINITION: empty body")
+      END;
+      defInd := ZilObj.Intern("REPLACE-DEFINITION");
+      defState := ZilObj.GetProp(defName, defInd);
+
+      IF name = "REPLACE-DEFINITION" THEN
+        IF defState = NIL THEN
+          ZilObj.PutProp(defName, defInd, ChainToVector(defBody));
+          RETURN MkVal(defName)
+        ELSIF defState = ZilObj.Intern("DELAY-DEFINITION") THEN
+          ZilObj.PutProp(defName, defInd, defInd);
+          r := MkVal(defName);
+          defP := defBody;
+          WHILE (defP # NIL) & (defP.first # NIL) DO
+            r := EvalImpl(defP.first, FALSE);
+            IF r.outcome # OValue THEN EXIT END;
+            defP := defP.rest
+          END;
+          RETURN r
+        ELSIF (defState = defInd) OR (defState = ZilObj.Intern("DEFAULT-DEFINITION")) THEN
+          RETURN ErrAtom("REPLACE-DEFINITION: section has already been inserted:", defName)
+        ELSIF defState.kind = ZilObj.KVector THEN
+          RETURN ErrAtom("REPLACE-DEFINITION: duplicate replacement for section:", defName)
+        ELSE
+          RETURN ErrAtom("REPLACE-DEFINITION: bad state for section:", defName)
+        END
+
+      ELSE (* DEFAULT-DEFINITION *)
+        IF defState = NIL THEN
+          ZilObj.PutProp(defName, defInd, ZilObj.Intern("DEFAULT-DEFINITION"));
+          r := MkVal(defName);
+          defP := defBody;
+          WHILE (defP # NIL) & (defP.first # NIL) DO
+            r := EvalImpl(defP.first, FALSE);
+            IF r.outcome # OValue THEN EXIT END;
+            defP := defP.rest
+          END;
+          RETURN r
+        ELSIF (defState = defInd) OR (defState = ZilObj.Intern("DELAY-DEFINITION")) THEN
+          RETURN MkVal(defName)
+        ELSIF defState.kind = ZilObj.KVector THEN
+          ZilObj.PutProp(defName, defInd, defInd);
+          r := MkVal(defName);
+          FOR defI := 0 TO defState.vecLen - 1 DO
+            r := EvalImpl(defState.vecItems[defI], FALSE);
+            IF r.outcome # OValue THEN RETURN r END
+          END;
+          RETURN r
+        ELSIF defState = ZilObj.Intern("DEFAULT-DEFINITION") THEN
+          RETURN ErrAtom("DEFAULT-DEFINITION: duplicate default for section:", defName)
+        ELSE
+          RETURN ErrAtom("DEFAULT-DEFINITION: bad state for section:", defName)
+        END
+      END
+
     ELSIF isFSubr THEN
       RETURN Err("unrecognized or not-yet-implemented FSUBR")
 
@@ -1397,6 +1513,8 @@ BEGIN
   Register("SYNONYM", FALSE); Register("VERB-SYNONYM", FALSE); Register("PREP-SYNONYM", FALSE);
   Register("ADJ-SYNONYM", FALSE); Register("DIR-SYNONYM", FALSE);
   Register("DIRECTIONS", FALSE); Register("BUZZ", FALSE); Register("VOC", FALSE);
+  Register("DELAY-DEFINITION", FALSE);
+  Register("DEFAULT-DEFINITION", TRUE); Register("REPLACE-DEFINITION", TRUE);
 
   tAtom := ZilObj.Intern("T");
   tAtom.globalVal := tAtom;  (* T is self-valued *)

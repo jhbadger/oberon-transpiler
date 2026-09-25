@@ -1119,6 +1119,78 @@ same shape as `INSERT-FILE`), `VERSION`/`VERSION?` (40+25 — compiler
 directives, phase 3b), `PROPDEF` (33, phase 3b), and a long tail of
 single-digit items.
 
+## What's done (phase 3a continued: the DEFAULT/REPLACE/DELAY-DEFINITION "hooks" system) — files, and what's tested
+
+Read `Subrs.Meta.cs`'s `DELAY_DEFINITION`/`REPLACE_DEFINITION`/
+`DEFAULT_DEFINITION` in full. This is a small state machine, entirely
+implementable with machinery this port already has: state lives in a
+`PUTPROP`/`GETPROP` property (indicator atom `"REPLACE-DEFINITION"` —
+the *same* atom is also reused as one of the possible *state values*
+itself, a self-referential terminal marker for "already inserted",
+exactly matching the original's own reuse of `StdAtom.REPLACE_DEFINITION`
+in both roles) on the definition-section's own name atom:
+
+- **`DELAY-DEFINITION name`**: a plain evaluated-args SUBR (added directly
+  to `ApplySubr`) — errors if already referenced, else marks the section
+  `"DELAY-DEFINITION"`.
+- **`REPLACE-DEFINITION name body...`** and **`DEFAULT-DEFINITION name
+  body...`**: FSUBRs (body unevaluated), inlined into `EvalImpl` (same
+  forward-reference reason as `INSERT-FILE` — the body actually inserted
+  needs `EvalImpl`). A pending replacement (one arriving *before* its
+  matching `DEFAULT-DEFINITION`) is stashed as a VECTOR via a new
+  `ChainToVector` helper (doesn't call `Eval`, so it's a standalone
+  procedure, like `BuildConsChain`) — matching the original's own choice
+  of `ZilVector` for exactly this state. The full 4-state transition table
+  (unset → insert now; delayed → a later `REPLACE-DEFINITION` inserts
+  immediately; a stored pending vector → the matching
+  `DEFAULT-DEFINITION` runs *that* instead of its own body; already
+  inserted → error) is implemented directly, verified against the
+  original's own branches line-by-line rather than approximated.
+
+**Tested**: `sample8.zil` — all four real interleavings: a plain
+`DEFAULT-DEFINITION` with no prior state (inserts immediately); `DELAY-
+DEFINITION` followed by `REPLACE-DEFINITION` (inserts the replacement
+immediately, since delayed); a `REPLACE-DEFINITION` arriving *before* its
+matching `DEFAULT-DEFINITION` (correctly runs the stored replacement
+instead of the default body when the `DEFAULT-DEFINITION` is later
+encountered — the trickiest case, confirmed via the arithmetic result
+actually run, not just which branch was taken); and a duplicate
+`DEFAULT-DEFINITION` for an already-defaulted section (correctly errors).
+All 6 forms produced exactly the expected result. Re-ran all five existing
+phase-2 test harnesses (byte-identical output) plus the full transpiler
+regression suite (136 files, same 3 pre-existing-only failures) — no
+regressions.
+
+**Then re-ran the full 84-file corpus aggregate**: `DEFAULT-DEFINITION`/
+`REPLACE-DEFINITION`/`DELAY-DEFINITION` (was 43+19+14 = 76 combined) are
+now completely absent from the histogram.
+
+**Investigated `DEFAULT-LIBRARY-MESSAGES`/`ADD-TELL-TOKENS`** (70+44 —
+now the two largest remaining items) before attempting to port them, and
+found they're a *different* problem than expected: grepped the entire
+`src/` tree for any C# implementation and found none at all — they're not
+`[Subr]`/`[FSubr]`-attributed builtins like everything ported so far.
+Reading `zillib/libmsg.zil`'s own header comment confirmed why: "Library
+messages are stored in the GVALs of atoms which are inserted into OBLISTs
+created for this purpose" — e.g. the message `SUCCESS` in category `TAKE`
+lives in the GVAL of an atom literally named `SUCCESS!-TAKE!-LIBRARY-
+MESSAGES`, constructed via the **qualified-OBLIST atom naming** (`FOO!-BAR`)
+system that phase 1 deliberately flattened away into one global table
+(`ZilObj.Intern`) back at the very start of this port — documented then as
+a known, revisit-if-it-matters gap (see phase 1's own "simplifications"
+section). This is genuinely a different, larger undertaking than "port one
+more builtin" — it needs the real qualified-OBLIST/package hierarchy
+(`ObList.cs`, read back in phase 2b, confirmed to be "just a name→atom
+hash table per oblist, same shape as the flat one already implemented" —
+so the *data structure* change is moderate, but atom *parsing* would need
+to recognize and split `!-`-qualified names, which `ZilRead.mod` doesn't
+do at all currently) before `DEFAULT-LIBRARY-MESSAGES` itself (whatever
+mechanism actually defines it — not found in this session's search, it
+may be built dynamically the same way `PRONOUN`'s macros construct routine
+names via `PARSE`/`STRING`) can be tackled. Deliberately not started this
+session — flagged for its own investigation, separate from the "port the
+next SUBR" pattern that's worked well so far.
+
 ## Suggested order for the next session
 
 1. Re-run all five existing phase-2 test harnesses to confirm nothing
@@ -1137,38 +1209,32 @@ single-digit items.
    transpiler's own full `Modules/*.mod`+`examples/*.mod` regression suite
    (136 files — includes the new `ZilModel.mod`) if any transpiler work
    happened in between sessions.
-2. `EVAL`, the table family, and now `SYNTAX`/`SYNONYM`/`VOC`/`DIRECTIONS`/
-   `BUZZ` are all done (see the dedicated sections above). `SYNTAX` turned
-   out *not* to need the full vocabulary-encoding subsystem after all —
-   it's a plain SUBR whose raw arguments could just be registered the same
-   way `OBJECT`'s were, deferring real semantic decomposition
-   (`Syntax.Parse`, `SyntaxMatcher.cs`, the `ZModel/Vocab/` subtree) to
-   phase 3b. The full-corpus histogram is now much flatter with no single
-   dominant item — read phase 3a's own "SYNTAX/vocabulary registration"
-   section above for the current list before picking a next step. Two
-   candidates stand out:
-   a. **The "hooks" subsystem** (`DEFAULT-DEFINITION`/`REPLACE-DEFINITION`/
-      `DELAY-DEFINITION`/`DEFAULT-LIBRARY-MESSAGES`/`ADD-TELL-TOKENS`,
-      190+ occurrences combined): read `Subrs.Meta.cs`'s
-      `DEFAULT_DEFINITION`/`REPLACE_DEFINITION` (already partly read this
-      session) in full. The mechanism is genuinely implementable with
-      machinery this port already has (`PUTPROP`/`GETPROP` state tracking
-      on the definition-section name atom, exactly like this port's
-      existing property-list support) — `<DEFAULT-DEFINITION name
-      body...>` evaluates `body` immediately unless a replacement/delay
-      was already registered for `name`. Needs to be inlined into
-      `EvalImpl` (it's an FSUBR that conditionally calls `EvalProgram`-
-      equivalent on its body), same shape as `INSERT-FILE`.
-   b. `PROPDEF` (33 occurrences): the *default* directional-exit pattern
-      is already known (`Context.InitPropDefs`, read back in phase 2b) and
-      could plausibly be hard-coded for the common case, deferring general
-      custom-`PROPDEF` support (`ComplexPropDef.cs`, 1,021 lines, not yet
-      read) — but confirm this is actually sufficient for real source
-      before committing to it, since real files (`1dungeon.zil` itself)
-      define their own custom `PROPDEF`s a hard-coded default wouldn't
-      cover.
-   After either: re-run the full 84-file aggregate again to measure the
-   effect, the same way every registration slice so far has been measured.
+2. `EVAL`, the table family, `SYNTAX`/`SYNONYM`/`VOC`/`DIRECTIONS`/`BUZZ`,
+   and now `DEFAULT-DEFINITION`/`REPLACE-DEFINITION`/`DELAY-DEFINITION`
+   are all done (see the dedicated sections above). **`DEFAULT-LIBRARY-
+   MESSAGES`/`ADD-TELL-TOKENS` (70+44, now the two largest remaining
+   items) turned out to be a dead end for the "port one more SUBR"
+   pattern** — investigated and found neither has any C# implementation
+   at all; they depend on the qualified-OBLIST atom system (`FOO!-BAR`,
+   e.g. `SUCCESS!-TAKE!-LIBRARY-MESSAGES`) that phase 1 deliberately
+   flattened away into one global table. Don't re-attempt this the same
+   way as previous slices — it needs the qualified-OBLIST/package
+   hierarchy first (see phase 3a's own section above for what's already
+   known: `ObList.cs`'s data structure is a moderate change, but
+   `ZilRead.mod` doesn't parse `!-`-qualified atom names at all yet, and
+   the actual mechanism that defines `DEFAULT-LIBRARY-MESSAGES` still
+   hasn't been located in the C# source — it may be built dynamically).
+   This is a self-contained investigation of its own, not a quick slice.
+3. `PROPDEF` (33 occurrences) is a smaller, separately-scoped candidate:
+   the *default* directional-exit pattern is already known
+   (`Context.InitPropDefs`, read back in phase 2b) and could plausibly be
+   hard-coded for the common case, deferring general custom-`PROPDEF`
+   support (`ComplexPropDef.cs`, 1,021 lines, not yet read) — but confirm
+   this is actually sufficient for real source before committing to it,
+   since real files (`1dungeon.zil` itself) define their own custom
+   `PROPDEF`s a hard-coded default wouldn't cover. After implementing:
+   re-run the full 84-file aggregate again to measure the effect, the
+   same way every registration slice so far has been measured.
 4. Once registration (3a and its natural continuations above) feels
    sufficiently broad, move to **phase 3b: actual code generation** — read
    `Compilation.Objects.cs` (object/property/flag table layout) and
