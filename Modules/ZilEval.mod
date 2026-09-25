@@ -99,6 +99,13 @@ VAR
      global named FOO; with this port's flat atom table that isolation is
      the one thing a separate map still has to provide, so they live in
      their own little name-to-value table rather than as atom globals. *)
+  (* Set by ExpandOnce immediately before a single EvalImpl call, and
+     consumed by that call's own entry — see ExpandTree for what this is
+     for. It deliberately does NOT propagate into nested EvalImpl calls: a
+     macro's own body must evaluate completely normally, and only the
+     macro's RESULT is what's being asked for unevaluated. *)
+  expandOnlyPending: BOOLEAN;
+
   flagNames: ARRAY MaxFlags OF ARRAY 64 OF CHAR;
   flagValues: ARRAY MaxFlags OF ZilObj.Zo;
   nFlags: INTEGER;
@@ -1136,7 +1143,11 @@ VAR
   defI: INTEGER;
   (* PROPDEF *)
   pdName, pdRest, pdSpec: ZilObj.Zo;
+  (* expand-only mode — see expandOnlyPending *)
+  myExpandOnly: BOOLEAN;
 BEGIN
+  myExpandOnly := expandOnlyPending;
+  expandOnlyPending := FALSE;
   IF z = NIL THEN RETURN MkVal(NIL) END;
 
   IF qq THEN
@@ -1287,8 +1298,19 @@ BEGIN
         IF flagVal = NIL THEN RETURN ErrAtom("calling unassigned atom:", zFirst) END;
 
         IF IsTrue(flagVal) = ifFlagNeg THEN RETURN MkVal(FalseVal()) END;
-        r := MkVal(FalseVal());
         body := z.rest;
+        IF myExpandOnly THEN
+          (* Expanding rather than evaluating (a routine body being prepared
+             for compilation): yield the guarded code itself. The original's
+             generated macro expands to <1 .A> for a single statement and
+             <BIND () !.A> for several — same here, so a multi-statement
+             body needs the compiler to handle BIND. *)
+          IF (body = NIL) OR (body.first = NIL) THEN RETURN MkVal(FalseVal()) END;
+          IF (body.rest = NIL) OR (body.rest.first = NIL) THEN RETURN MkVal(body.first) END;
+          cell := ZilObj.Cons(ZilObj.KForm, ZilObj.NewEmpty(ZilObj.KList), body);
+          RETURN MkVal(ZilObj.Cons(ZilObj.KForm, ZilObj.Intern("BIND"), cell))
+        END;
+        r := MkVal(FalseVal());
         WHILE (body # NIL) & (body.first # NIL) DO
           r := EvalImpl(body.first, FALSE);
           IF ShouldPass(r) THEN RETURN r END;
@@ -1494,6 +1516,11 @@ BEGIN
       END;
 
       IF fnIsMacro & (r.outcome = OValue) THEN
+        (* Normally a macro's result is immediately re-evaluated as a new
+           FORM. In expand-only mode the caller wants exactly that result,
+           unevaluated — which is what the original's ZilForm.Expand
+           returns, as distinct from Eval. *)
+        IF myExpandOnly THEN RETURN r END;
         RETURN EvalImpl(r.value, FALSE)
       ELSE
         RETURN r
@@ -2020,6 +2047,102 @@ BEGIN
     RETURN MkVal(z)
   END
 END EvalImpl;
+
+(* ---------------- compile-time macro expansion ----------------
+   A ROUTINE's body is captured raw and unevaluated at registration time,
+   so any DEFMAC used inside it is still sitting there as an unexpanded
+   FORM when the compiler comes to it. The original expands them as the
+   first step of compiling a routine (ZilRoutine.ExpandInPlace, called from
+   Compilation.Compile.cs); ExpandTree below is the same walk, and
+   ZilCompile.CompileRoutine calls it before compiling anything.
+
+   Expansion is NOT evaluation: <TELL "hi"> must turn into the code the
+   macro produces, not run it. ExpandOnce gets that by setting
+   expandOnlyPending for exactly one EvalImpl call, which makes the macro
+   branch hand back its result instead of re-evaluating it. *)
+
+PROCEDURE ExpandOnce(z: ZilObj.Zo): ZResult;
+BEGIN
+  expandOnlyPending := TRUE;
+  RETURN EvalImpl(z, FALSE)
+END ExpandOnce;
+
+(* True when `z` is a FORM whose head names something that expands: a DEFMAC
+   macro, or one of the IF-<FLAG>/IFN-<FLAG> conditional forms a
+   compilation flag brings with it (which the original really does define as
+   macros — see EvalImpl's own handling of them). *)
+PROCEDURE IsExpandable(z: ZilObj.Zo): BOOLEAN;
+VAR head: ZilObj.Zo; nm: ARRAY 64 OF CHAR;
+BEGIN
+  IF (z = NIL) OR (z.kind # ZilObj.KForm) OR (z.first = NIL)
+     OR (z.first.kind # ZilObj.KAtom) THEN RETURN FALSE END;
+  head := z.first.globalVal;
+  IF (head # NIL) & (head.kind = ZilObj.KMacro) THEN RETURN TRUE END;
+  IF head # NIL THEN RETURN FALSE END;
+  Strings.Copy(z.first.atomText, nm);
+  IF (nm[0] = "I") & (nm[1] = "F") & (nm[2] = "-") THEN Strings.Delete(nm, 0, 3)
+  ELSIF (nm[0] = "I") & (nm[1] = "F") & (nm[2] = "N") & (nm[3] = "-") THEN Strings.Delete(nm, 0, 4)
+  ELSE RETURN FALSE
+  END;
+  RETURN FlagValue(nm) # NIL
+END IsExpandable;
+
+(* Expands every macro call anywhere inside `z`, returning the rewritten
+   structure (a fresh one; the input is left alone). Mirrors the original's
+   RecursiveExpandWithSplice: rebuild LISTs, VECTORs and FORMs element by
+   element, and when a FORM's own head turns out to be a macro, expand it
+   and then expand the RESULT again — a macro may expand into another macro
+   call. Self-recursive.
+
+   Two simplifications against the original, both deliberate: no `!.A`
+   splicing of a macro result into its surrounding list (the original wraps
+   results in ZilMacroResult and SelectMany's them; nothing in the corpus's
+   routine bodies needs it yet), and an expansion error leaves the form
+   as-is rather than substituting FALSE, so the compiler reports the real
+   construct it couldn't handle instead of a mysterious 0. *)
+PROCEDURE ExpandTree*(z: ZilObj.Zo): ZilObj.Zo;
+VAR r: ZResult; head, tail, cell, p, item: ZilObj.Zo;
+    savedErr: BOOLEAN; i: INTEGER; vec: ZilObj.Zo;
+BEGIN
+  IF z = NIL THEN RETURN NIL END;
+
+  IF z.kind = ZilObj.KForm THEN
+    IF IsExpandable(z) THEN
+      savedErr := evalErrFlag;
+      r := ExpandOnce(z);
+      IF evalErrFlag OR (r.outcome # OValue) THEN
+        evalErrFlag := savedErr;   (* leave it to the compiler to complain *)
+        RETURN z
+      END;
+      IF r.value = z THEN RETURN z END;   (* expanded to itself: stop *)
+      RETURN ExpandTree(r.value)
+    END
+  END;
+
+  IF (z.kind = ZilObj.KForm) OR (z.kind = ZilObj.KList) THEN
+    head := NIL; tail := NIL;
+    p := z;
+    WHILE (p # NIL) & (p.first # NIL) DO
+      cell := ZilObj.Cons(z.kind, ExpandTree(p.first), NIL);
+      IF head = NIL THEN head := cell ELSE tail.rest := cell END;
+      tail := cell;
+      p := p.rest
+    END;
+    IF head = NIL THEN RETURN ZilObj.NewEmpty(z.kind) END;
+    RETURN head
+
+  ELSIF z.kind = ZilObj.KVector THEN
+    vec := ZilObj.NewVectorN(z.vecLen);
+    FOR i := 0 TO z.vecLen - 1 DO
+      item := ExpandTree(z.vecItems[i]);
+      vec.vecItems[i] := item
+    END;
+    RETURN vec
+
+  ELSE
+    RETURN z
+  END
+END ExpandTree;
 
 (* Stable public entry point — see EvalImpl's own header comment for why
    the real self-recursive evaluator takes a second (quasiquote-mode)

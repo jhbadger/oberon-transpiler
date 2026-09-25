@@ -43,7 +43,7 @@ MODULE ZilCompile;
   port it).
 *)
 
-IMPORT ZilObj, ZilModel, Out, Files, Strings;
+IMPORT ZilObj, ZilModel, ZilEval, Out, Files, Strings;
 
 VAR
   errFlag*: BOOLEAN;
@@ -881,6 +881,14 @@ BEGIN
   IF (bp = NIL) OR (bp.first = NIL) THEN
     Err("CompileRoutine: empty body"); RETURN FALSE
   END;
+
+  (* Expand every macro call in the body before compiling a single form.
+     A ROUTINE's body is captured raw and unevaluated at registration time,
+     so a DEFMAC used inside it (TELL above all, and the IF-<FLAG> forms a
+     compilation flag brings with it) is still an unexpanded FORM here. The
+     original does exactly this, as the first step of compiling a routine:
+     ZilRoutine.ExpandInPlace, called from Compilation.Compile.cs. *)
+  bp := ZilEval.ExpandTree(bp);
 
   (* The body is compiled into a buffer first, because the .FUNCT line has
      to name every local the body uses and the compiler temporaries it needs

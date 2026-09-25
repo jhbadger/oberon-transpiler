@@ -1953,6 +1953,62 @@ the failure list. The new top blocker is `MOBLIST` (7 files).
 **Tested**: all eight end-to-end programs; transpiler regression suite, 138
 files, same 3 pre-existing-only failures.
 
+## What's done: macro expansion of routine bodies
+
+The prerequisite the compilation-flag slice exposed, and the thing standing
+between "compiles toy programs" and "compiles real routines": a ROUTINE's
+body is captured raw and unevaluated at registration time, so every `DEFMAC`
+used inside it — `TELL` above all, and every `IF-<FLAG>` — was still an
+unexpanded FORM when the compiler reached it, and came out as "unrecognized
+builtin".
+
+The original does this as the first step of compiling a routine
+(`ZilRoutine.ExpandInPlace`, called from `Compilation.Compile.cs`), and the
+port follows the same shape.
+
+**The distinction that makes it work: expansion is not evaluation.**
+`<TELL "hi">` must turn into the code the macro produces, not run it. This
+port's evaluator expands-and-immediately-re-evaluates a macro in one step
+(phase 2c), which is right for `Eval` but wrong here — the original has a
+separate `ZilForm.Expand` alongside `Eval` for exactly this reason. Added a
+one-shot `expandOnlyPending` flag that `ExpandOnce` sets immediately before
+a single `EvalImpl` call and that call consumes at entry, so the macro
+branch hands back its result instead of re-evaluating it. It deliberately
+does **not** propagate into nested `EvalImpl` calls: a macro's own body must
+evaluate completely normally, and it is only the macro's *result* that is
+wanted unevaluated.
+
+**`ZilEval.ExpandTree`** is the recursive walk, mirroring
+`RecursiveExpandWithSplice`: rebuild LISTs, VECTORs and FORMs element by
+element, and when a FORM's head is a macro, expand it and then expand the
+**result** again, since a macro may expand into another macro call.
+`ZilCompile.CompileRoutine` calls it on the body before compiling anything.
+`IsExpandable` also recognizes the `IF-<FLAG>`/`IFN-<FLAG>` forms — which
+really are macros in the original — and EvalImpl's handling of them now
+yields the guarded code in expand-only mode (`<1 .A>` for a single
+statement, `<BIND () !.A>` for several, matching the original's generated
+macro) instead of evaluating it.
+
+Two deliberate simplifications against the original: no `!.A` splicing of a
+macro result into its surrounding list (the original wraps results in
+`ZilMacroResult` and `SelectMany`s them; nothing in the corpus's routine
+bodies has needed it), and an expansion error leaves the form as it was
+rather than substituting FALSE — so the compiler then reports the real
+construct it couldn't handle instead of a mysterious `0`.
+
+**Tested end-to-end**: a program with three `DEFMAC`s used inside a routine
+body — a simple one, one macro call nested inside another's argument, and a
+macro that expands into a *further* macro call (exercising the re-expand
+step) — plus `IF-DEBUG`/`IF-BETA`/`IFN-BETA` guarding statements inside the
+body, and a macro call inside a `COND` condition (exercising the recursion
+through list structure). Compiled, assembled and run: `double=42`,
+`nested=23`, `quad=20`, `debug on`, `beta off`, `macro in cond` — all
+correct.
+
+**Tested**: all nine end-to-end programs; corpus unchanged (the blockers
+ahead of it are all at evaluation time); transpiler regression suite, 138
+files, same 3 pre-existing-only failures.
+
 ## Corpus gap analysis: exactly what blocks compiling a real game
 
 Running the new driver over all 52 corpus files makes the remaining gap
@@ -1997,15 +2053,7 @@ qualified-OBLIST investigation and should stay one task.
    (compile → `zapf` → `zmachine.mod`, checking the printed values). Also
    re-run the transpiler's own full `Modules/*.mod`+`examples/*.mod`
    regression suite (138 files, 3 pre-existing failures).
-2. **Macro expansion of routine bodies**, in `ZilCompile`. Routine bodies
-   are stored raw at registration time and the compiler does no expansion,
-   so any `DEFMAC` used inside a routine — `TELL` above all, and every
-   `IF-<FLAG>` — is reported as an unrecognized builtin. The interpreter
-   already expands macros (phase 2c); what's missing is calling it from
-   the compiler on each body form before compiling it. This is now a
-   prerequisite for compiling any real game, and it is a small change to a
-   part of the code that already exists on both sides.
-3. **`MOBLIST`/`LOOKUP`/`INSERT`/`SPNAME`, i.e. OBLISTs as first-class
+2. **`MOBLIST`/`LOOKUP`/`INSERT`/`SPNAME`, i.e. OBLISTs as first-class
    data** — the current top blocker at 7 files, and a genuinely different
    problem from the package work. `zillib/libmsg.zil` doesn't use oblists
    for name *resolution* (which the flat table handles fine); it uses them
