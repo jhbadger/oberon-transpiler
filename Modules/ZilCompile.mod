@@ -50,6 +50,7 @@ VAR
   errMsg*: ARRAY 512 OF CHAR;
 
 VAR curRoutine: ARRAY 64 OF CHAR;   (* for error messages *)
+    curStmt: ARRAY 512 OF CHAR;
 
 PROCEDURE Err(msg: ARRAY OF CHAR);
 BEGIN
@@ -59,6 +60,10 @@ BEGIN
   IF curRoutine[0] # 0X THEN
     Strings.Append(" [in routine ", errMsg);
     Strings.Append(curRoutine, errMsg);
+    IF curStmt[0] # 0X THEN
+      Strings.Append(", statement ", errMsg);
+      Strings.Append(curStmt, errMsg)
+    END;
     Strings.Append("]", errMsg)
   END
 END Err;
@@ -579,8 +584,6 @@ BEGIN
   ELSIF name = "GETP" THEN Strings.Copy("GETP", zap); nargs := 2
   ELSIF name = "GETPT" THEN Strings.Copy("GETPT", zap); nargs := 2
   ELSIF name = "NEXTP" THEN Strings.Copy("NEXTP", zap); nargs := 2
-  ELSIF (name = "BAND") OR (name = "ANDB") THEN Strings.Copy("BAND", zap); nargs := 2
-  ELSIF (name = "BOR") OR (name = "ORB") THEN Strings.Copy("BOR", zap); nargs := 2
   ELSIF name = "BCOM" THEN Strings.Copy("BCOM", zap); nargs := 1
   ELSIF (name = "ASH") OR (name = "ASHIFT") THEN Strings.Copy("ASHIFT", zap); nargs := 2
   ELSIF name = "SHIFT" THEN Strings.Copy("SHIFT", zap); nargs := 2
@@ -960,7 +963,9 @@ BEGIN
 
     ELSIF (headName = "+") OR (headName = "-") OR (headName = "*") OR (headName = "/")
        OR (headName = "MOD") OR (headName = "REST") OR (headName = "ZREST")
-       OR (headName = "BACK") OR (headName = "ZBACK") THEN
+       OR (headName = "BACK") OR (headName = "ZBACK")
+       OR (headName = "ORB") OR (headName = "BOR")
+       OR (headName = "ANDB") OR (headName = "BAND") THEN
       (* N-ARY, folded left: <+ a b c> is (a+b)+c, which is what real source
          expects and what the original produces. One argument is special in
          two ways — <- x> is negation, and <REST t>/<BACK t> default their
@@ -975,6 +980,8 @@ BEGIN
         Strings.Copy("SUB", opcode)
       ELSIF headName = "*" THEN Strings.Copy("MUL", opcode)
       ELSIF headName = "MOD" THEN Strings.Copy("MOD", opcode)
+      ELSIF (headName = "ORB") OR (headName = "BOR") THEN Strings.Copy("BOR", opcode)
+      ELSIF (headName = "ANDB") OR (headName = "BAND") THEN Strings.Copy("BAND", opcode)
       ELSE Strings.Copy("DIV", opcode)
       END;
 
@@ -999,7 +1006,8 @@ BEGIN
         ok := CompileOperand(ap.first, rightText);
         IF ~ok THEN RETURN FALSE END;
         ok := FixStackedPair(leftText, rightText,
-                             (opcode = "ADD") OR (opcode = "MUL"));
+                             (opcode = "ADD") OR (opcode = "MUL")
+                             OR (opcode = "BOR") OR (opcode = "BAND"));
         IF ~ok THEN RETURN FALSE END;
         W("	"); W(opcode); W(" "); W(leftText);
         W(","); W(rightText); W(" >STACK"); WLn;
@@ -1886,6 +1894,31 @@ BEGIN
       RETURN TRUE
     END;
 
+    (* a call to a routine this program defines, likewise *)
+    IF FindRoutineIdx(headName) >= 0 THEN
+      IF ZilModel.zversion < 4 THEN sN := 3 ELSE sN := 7 END;
+      nA := 0; ap := z.rest;
+      WHILE (ap # NIL) & (ap.first # NIL) & (nA < sN) DO
+        ok := CompileOperand(ap.first, argT[nA]);
+        IF ~ok THEN RETURN FALSE END;
+        INC(nA); ap := ap.rest
+      END;
+      IF (ap = NIL) OR (ap.first = NIL) THEN
+        IF ZilModel.zversion < 4 THEN Strings.Copy("CALL", opcode)
+        ELSIF nA = 0 THEN Strings.Copy("CALL1", opcode)
+        ELSIF nA = 1 THEN Strings.Copy("CALL2", opcode)
+        ELSIF nA <= 3 THEN Strings.Copy("CALL", opcode)
+        ELSE Strings.Copy("XCALL", opcode)
+        END;
+        W("	"); W(opcode); W(" "); W(headName);
+        i := 0;
+        WHILE i < nA DO W(","); W(argT[i]); INC(i) END;
+        W(" >"); W(dest); WLn;
+        RETURN TRUE
+      END
+      (* too many arguments: fall through so CompileOperand reports it *)
+    END;
+
     (* a value-producing one-instruction builtin, likewise *)
     IF SimpleBuiltin(headName, opcode, sN, sStore) & sStore THEN
       nA := 0; ap := z.rest;
@@ -2547,7 +2580,7 @@ VAR rt: ZilModel.RoutineRec; opText: ARRAY 64 OF CHAR; n, routineAgain: ARRAY 16
     a, bp, item, dflt: ZilObj.Zo; ok, isLast: BOOLEAN; i, phase: INTEGER;
 BEGIN
   rt := ZilModel.routines[idx];
-  Strings.Copy(rt.name.atomText, curRoutine);
+  Strings.Copy(rt.name.atomText, curRoutine); curStmt[0] := 0X;
 
   bp := rt.body;
 
@@ -2666,8 +2699,21 @@ BEGIN
     (* The entry routine never wants a result: it has no caller to return
        one to. The original writes exactly this — CompileStmt(rb, stmt,
        !entryPoint && i == BodyLength) in BuildRoutine. *)
+    ZilObj.PrintTo(bp.first, curStmt);
     ok := CompileStmt(bp.first, isLast & ~isEntry, opText);
     IF ~ok THEN EndBuffer; FlushBuffer; RETURN FALSE END;
+    (* Every binding and temporary a statement allocates must be released by
+       the time it finishes. A leak silently consumes one of the routine's
+       fifteen local slots for the rest of the routine, which shows up much
+       later as a confusing "out of locals" — so check it where it happens. *)
+    IF (nRenames # 0) OR (tempDepth # 0) OR (nTmpStack # 0) THEN
+      Strings.Copy("internal: leaked ", opText);
+      Strings.IntToStr(nRenames, n); Strings.Append(n, opText);
+      Strings.Append(" binding(s)/", opText);
+      Strings.IntToStr(tempDepth, n); Strings.Append(n, opText);
+      Strings.Append(" temp(s) compiling a statement", opText);
+      Err(opText); EndBuffer; FlushBuffer; RETURN FALSE
+    END;
     IF isLast & ~isEntry & ~termFlag THEN
       (* no implicit fall-through return exists anywhere in the original
          either — every routine explicitly returns its last value, unless
