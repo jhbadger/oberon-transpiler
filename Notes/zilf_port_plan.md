@@ -1437,96 +1437,225 @@ extension, not a rewrite that happened to still pass.
 identical output) plus the full transpiler regression suite (137 files,
 same 3 pre-existing-only failures) — no regressions.
 
+## Correction: this transpiler DOES support mutual recursion
+
+Every earlier phase of this port worked around a believed lack of forward
+declarations by collapsing naturally-mutually-recursive procedures into one
+big self-recursive one (`ZilRead.ReadOne`, `ZilEval.EvalImpl`,
+`ZilCompile.CompileStmt` with `COND` inlined into it). **That belief is
+wrong.** `codegen.c` emits a C prototype for every top-level procedure
+before emitting any bodies, so a procedure may call another declared later
+in the file, and two top-level procedures may call each other. Verified
+directly this session with a two-procedure `IsEven`/`IsOdd` test program,
+which compiled and ran correctly.
+
+What is true — and is probably what the original observation came from — is
+that the `PROCEDURE Foo(...); FORWARD;` *syntax* does not parse in this
+dialect at all. It isn't needed.
+
+Practical effect: new code in this port may be factored the obvious way.
+The existing self-recursive procedures are left as they are because they
+work and are tested, not because they have to be that shape; don't cite the
+"no FORWARD" reason in new comments, and don't collapse a new procedure
+into an existing one to avoid a forward reference.
+
+## What's done (phase 3b continued: globals, constants, and whole-program `.zap` emission)
+
+This is the plan's own next item (a), plus the program-level emitter that
+globals turned out to require: a `GLOBAL::` table has to be *placed* in the
+story file's memory map, which means something has to emit the whole file,
+not just one routine at a time.
+
+Read `Compilation.Globals.cs` (463 lines) and the relevant half of
+`Zilf.Emit/Zap/GameBuilder.cs` (`Finish`, `FinishSymbols`, `FinishGlobals`,
+`FinishSyntax`) in full, plus the `SET`/`SETG`/`INC`/`DEC`/`VALUE` builtin
+registrations in `ZBuiltins.cs` and `RoutineBuilder.EmitCall`.
+
+**`Modules/ZilCompile.mod`** gained:
+
+- **`CompileProgram(entryName)`** — emits a complete, assemblable `.zap`.
+  The emission ORDER is not cosmetic and was taken from `GameBuilder.Finish`:
+  constants (symbols only), then `GLOBAL::`/`OBJECT::`/impure tables, then
+  `IMPURE::`, then `VOCAB::`/`WORDS::`, then `ENDLOD::`, then the routines.
+  `IMPURE` is the header's static-memory base and `ENDLOD` its high-memory
+  base, so globals *must* precede `IMPURE::` or writes to them would be
+  writes to read-only memory. The original splits these across four files
+  stitched with `.INSERT`; this port emits one stream in the same order.
+- **`CompileGlobals`** — one `.GVAR NAME=value` per GLOBAL. `.GVAR` is what
+  allocates the Z-machine variable number (zapf hands out 16, 17, … in
+  declaration order), so order is semantically significant in V3, where the
+  interpreter reads `HERE`/`SCORE`/`MOVES` from variables 16/17/18
+  specifically — ported the original's `MoveGlobal("HERE", 0)` etc. from
+  `FinishGlobals`, applied (as there) only for V3. `DoFunnyGlobals` — the
+  "soft globals" spill table for games with more than ~240 globals — is
+  deliberately NOT ported; the overflow is reported as a compile error
+  instead.
+- **`CompileConstants`** — one `NAME=value` assembly symbol per CONSTANT.
+- **`ConstantText`** — the original's `CompileConstant`, cut down to the
+  value shapes this slice can render, with its resolution order preserved
+  exactly (`T` → 1, then routine names, then object names, then constant
+  names, each becoming a bare ZAP symbol). A bare atom naming a *global* is
+  deliberately rejected: the original only reads that as the global's
+  variable index in "optimistic" mode and warns when it does, and zapf
+  rejects a variable symbol in a constant expression anyway.
+- **Operands**: `,X` (GVAL), bare atoms, `<>`, and CHARACTER literals.
+  `,X` resolves to the bare ZAP name whether X is a global, a constant, an
+  object or a routine — zapf resolves a `.GVAR`-declared name to a variable
+  reference and anything else to its value, so one spelling covers all four
+  (which is exactly what the original's `GvalOp` does).
+- **Statements**: `SETG` (identical to `SET` in ZAP text — `SetgValueOp` in
+  the original literally just calls `SetValueOp`; the two differ only in
+  which namespace the *original* resolves the name in, and in ZAP a local
+  declared by `.FUNCT` already shadows a same-named global), `INC`/`DEC`
+  (emitted as the real `INC 'VAR`/`DEC 'VAR` instructions rather than the
+  original's un-peepholed `ADD VAR,1 >VAR`), `RETURN`, `RTRUE`, `RFALSE`,
+  `QUIT`, and **calls to routines the program defines**. V3 has only the
+  storing `CALL` opcode, so a call whose value is discarded is followed by
+  `FSTACK` to pop it — confirmed from `EmitCall`'s own `zversion < 4`
+  branch, which does exactly this.
+- **Conditions**: `IGRTR?`/`DLESS?` (one instruction each, taking the
+  variable by number — hence `IGRTR? 'I,MAX`, confirmed against real usage
+  in `~/cloak_plus.zap`) and `NOT`/`F?`/`T?` (a polarity flip, no
+  instruction, as in the original).
+- **Dead-code suppression after a terminating clause**: a `COND` clause
+  whose body ends in `RETURN`/`RTRUE`/`RFALSE`/`QUIT` no longer emits the
+  now-unreachable result `PUSH` and jump to the end label. Tracked with a
+  module-level `termFlag` that `CompileStmt` sets; `CompileRoutine` reads
+  the same flag to skip the trailing `RETURN` when the body's last
+  statement already left the routine. `COND` itself always reports
+  "doesn't terminate", because proving otherwise needs every clause to
+  terminate *and* (with no `ELSE`) a clause to always match — the
+  conservative answer costs an unreachable instruction, the optimistic one
+  would let control run off the end of a routine.
+- **Output abstraction** (`OpenOutput`/`CloseOutput`/`W`/`WLn`): emission
+  now goes to a real file or to stdout. Note `Files.WriteString` on this
+  system appends a NUL byte (it writes Oberon's own null-terminated string
+  format, not plain text) — `Files.WriteLine` is the only text-clean file
+  write available and writes a whole line at a time, hence the line buffer.
+
+**A real, silently-wrong-code bug found and closed off (not yet fixed).**
+Every compound sub-expression routes its result through the Z-machine
+stack. When *both* operands of a binary op do that, they come back off the
+stack in the opposite order to the one they went on — harmless for `+`,
+`*` and `EQUAL?`, but wrong for `-`, `/`, `MOD`, `L?` and `G?`. The
+original avoids this entirely by spilling one side into a compiler
+temporary local (`PushInnerLocal` with a `?TMP` atom). This port can't do
+that yet because a routine's local list is already written to the `.FUNCT`
+line by the time its body is compiled. **For now the compiler refuses the
+case with an explicit error** rather than emitting wrong code (verified:
+`<- <+ .A 1> <+ .B 1>>` is rejected; `<+ <+ .A 1> <+ .B 1>>` still
+compiles and runs correctly). **The real fix is buffering a routine's body
+before writing its `.FUNCT` line**, so the temporaries a body turned out to
+need can be appended to the local list — worth doing before any more
+codegen widening, since almost every further builtin can hit this.
+
+**`examples/zilf.mod` — the compiler driver** (the `zilf` command that
+didn't exist yet). Reads a `.zil`, runs the interleaved read-eval loop over
+every top-level form (the original's reader and evaluator are interleaved
+by design — `%<...>` and `DEFMAC` both need it), then calls
+`CompileProgram`. `zilf game.zil game.zap && zapf game.zap` is now the
+whole pipeline. Options: `-e/--entry NAME` (default `GO`, matching
+`ZEnvironment.EntryRoutineName`), `-q/--quiet`.
+
+**Tested end-to-end** — the established discipline (compile → assemble with
+`zapf` → run in `examples/zmachine.mod` → check the actual printed result,
+not that the `.zap` looks plausible):
+
+- A globals program: `CONSTANT MAX-SCORE 350`, four globals, a `BUMP`
+  routine doing `<SETG SCORE <+ ,SCORE .N>>` and `<INC MOVES>`, called
+  twice from `GO`. Printed `start=0 / score=17 / moves=2 / max=350 /
+  left=333 / over ten` — every value correct, exercising global read,
+  global write across a routine call, `INC` on a global, a constant as an
+  operand, `SETG` from a compound expression, and `COND` branching on a
+  global.
+- A 12-case regression program re-running all three earlier phase-3b
+  milestones through the new driver (`<+ .X 1>`; `<+ <* .X 2> 1>`; the
+  `SET`/`PRINTI`/`PRINTN`/`CRLF` doubling routine; the value-`COND` with
+  and without `ELSE`; the void-`COND`) plus the new `IGRTR?`, `NOT`,
+  `RETURN`, `RTRUE`/`RFALSE` and nested-routine-call cases. All twelve
+  printed the expected values.
+- The whole real corpus (52 files across `zillib/` and `sample/*/`) through
+  the new driver: **zero parse failures** — phase 1's reader result still
+  holds under the new top-level loop.
+
+**Tested**: full transpiler regression suite, 138 files (`Modules/*.mod` +
+`examples/*.mod`, now including `examples/zilf.mod`) — 135 pass, the same
+3 pre-existing-only failures (`ClojBio`, `ClojStats`, `Editor`).
+
+## Corpus gap analysis: exactly what blocks compiling a real game
+
+Running the new driver over all 52 corpus files makes the remaining gap
+concrete and *short*. Nothing fails to parse; 40 files fail during
+evaluation, and every failure is one of a small set of missing top-level
+SUBRs (count = files blocked at that point, first failure only):
+
+| Missing | Files blocked | Notes |
+|---|---|---|
+| `VERSION` | 9 | `<VERSION ZIP>` / `<VERSION XZIP>` — sets the Z-machine version. Small, and it gates the first line of nearly every game including `advent.zil`. |
+| `FILE-FLAGS` | 7 | per-file compiler flags; likely a near-no-op registration |
+| `PACKAGE` | 4 | needs the qualified-OBLIST system (known blocker, see phase 3a) |
+| `USE` | 4 | same OBLIST blocker |
+| `ADD-TELL-TOKENS` | 3 | same OBLIST blocker (already investigated — see above) |
+| `ITABLE` arg shapes | 3 | `<ITABLE NONE n>` / `<ITABLE BYTE ...>` — the repetition-count parser doesn't accept the keyword forms yet |
+| `GDECL` | 2 | global DECLs; this port skips DECL checking anyway, so likely a no-op registration |
+| `VERSION?` | 1 | version-conditional compilation |
+| `STATUS-LINE-SECTION` | 1 | |
+| SEGMENT splicing inside LIST | 1 | `zillib/scope.zil`; a phase-2 reader/eval gap |
+| arithmetic on non-FIX | 2 | `sample/rascal` — probably a real evaluator gap worth a look |
+| unassigned atom at eval time | 2 | `INITIAL-PLAYER-MAX-HP`, `ZORK-NUMBER` — forward references across files |
+
+The useful conclusion: **`VERSION` + `FILE-FLAGS` + `GDECL` + `VERSION?`
+are four small, self-contained registrations that between them unblock the
+top level of 19 of the 40 failing files**, and are the cheapest next step
+by a wide margin. The `PACKAGE`/`USE`/`ADD-TELL-TOKENS` cluster (11 files)
+is the known qualified-OBLIST investigation and should stay one task.
+
 ## Suggested order for the next session
 
-1. Re-run all five existing phase-2 test harnesses to confirm nothing
-   regressed: phase 1's `sample1.zil` (`readtest.mod`), phase 2's
-   `sample2.zil` (`evaltest.mod`), phase 2b's `sample3.zil`
-   (`eval3test.mod`), phase 2c's `sample4.zil` (`eval4test.mod`), and
-   phase 2d's `sample5.zil` (`eval5test.mod`). Also re-run `readfile.mod`
-   over every file in `zillib/` and `sample/` (zero failures out of 84)
-   and `evalfile.mod` against `sample/zork1/zork1.zil` — with phase 3a's
-   `ROUTINE`/`OBJECT`/`ROOM` registration now in place, `INSERT-FILE
-   "GMACROS"`/`"GGLOBALS"`/`"GMAIN"` should each still process their
-   entire file and return `"DONE"` (see phase 3a's own section above for
-   why). (All live under the session's scratchpad, which may not survive
-   between machine sessions — if gone, they're small and quick to recreate
-   from this doc's descriptions of what they cover.) Also re-run the
-   transpiler's own full `Modules/*.mod`+`examples/*.mod` regression suite
-   (136 files — includes the new `ZilModel.mod`) if any transpiler work
-   happened in between sessions.
-2. `EVAL`, the table family, `SYNTAX`/`SYNONYM`/`VOC`/`DIRECTIONS`/`BUZZ`,
-   and now `DEFAULT-DEFINITION`/`REPLACE-DEFINITION`/`DELAY-DEFINITION`
-   are all done (see the dedicated sections above). **`DEFAULT-LIBRARY-
-   MESSAGES`/`ADD-TELL-TOKENS` (70+44, now the two largest remaining
-   items) turned out to be a dead end for the "port one more SUBR"
-   pattern** — investigated and found neither has any C# implementation
-   at all; they depend on the qualified-OBLIST atom system (`FOO!-BAR`,
-   e.g. `SUCCESS!-TAKE!-LIBRARY-MESSAGES`) that phase 1 deliberately
-   flattened away into one global table. Don't re-attempt this the same
-   way as previous slices — it needs the qualified-OBLIST/package
-   hierarchy first (see phase 3a's own section above for what's already
-   known: `ObList.cs`'s data structure is a moderate change, but
-   `ZilRead.mod` doesn't parse `!-`-qualified atom names at all yet, and
-   the actual mechanism that defines `DEFAULT-LIBRARY-MESSAGES` still
-   hasn't been located in the C# source — it may be built dynamically).
-   This is a self-contained investigation of its own, not a quick slice.
-3. `PROPDEF` is now done too (see its own section above) — the common
-   simple case (`<PROPDEF name default-value>`, what real source
-   overwhelmingly uses) registers directly; the rarer complex-pattern case
-   is captured raw, deferring real parsing (`ComplexPropDef.cs`, 1,021
-   lines, still not read) to phase 3b. With `PROPDEF` done, **essentially
-   every clean, well-scoped phase-3a registration candidate the corpus
-   histogram has surfaced is now implemented** — what's left
-   (`DEFAULT-LIBRARY-MESSAGES`/`ADD-TELL-TOKENS`, blocked on the
-   qualified-OBLIST system; `VERSION`/`VERSION?`, compiler directives;
-   `MOVE`/`REMOVE`/`FCLEAR`, runtime object-tree operations with no
-   interpret-time meaning; a long tail of single-digit items) is either a
-   separate, larger investigation or squarely phase 3b's job, not another
-   quick SUBR to add. This is a natural point to stop registration-only
-   work and move to actual code generation.
-4. **Phase 3b is under way** (see the three "phase 3b" milestone/
-   continuation sections above) — `ZilCompile.mod` now compiles a
-   required-args-only `ROUTINE` with a multi-statement body, FIX literals,
-   `LVAL` parameter references, `+`/`-`/`*`//`, `SET`/`PRINTI`/`PRINTN`/
-   `CRLF`, and now **`COND` as a real compiled branch tree** (comparison
-   predicates `ZERO?`/`EQUAL?`/`L?`/`G?`, `ELSE`, both value-producing and
-   void-statement use), all verified assembling and running correctly
-   end-to-end. Remaining natural next widening steps, roughly in order of
-   value:
-   a. **`SETG`/globals**: needs `Compilation.Globals.cs` (463 lines, not
-      yet read) for real storage allocation — `SET` alone (locals only)
-      was enough for the tests so far, but most real routines read/write
-      globals too. Likely the next highest-value slice now that `COND`
-      exists, since real conditional logic constantly branches on global
-      state.
-   b. **`AND`/`OR`/loops**: read `Compilation.Loops.cs` (896 lines, not yet
-      read) — `COND`'s own `CompileCondition` fallback already handles a
-      bare value tested for truthiness, but `AND`/`OR`'s short-circuit
-      *sequencing* (and the loop constructs — `REPEAT`, `PROG`'s
-      `AGAIN`-as-loop sense, not to be confused with this port's own
-      interpreter-level `PROG`/`REPEAT` from phase 2b, which is a
-      completely different piece of code) aren't implemented in the
-      compiler at all yet.
-   c. **More `ZBuiltins.cs` VoidCall/ValueCall/PredCall builtins** on
-      demand, same methodology as always: `MOVE`/`FSET`/`FCLEAR`/`FSET?`/
-      `IN?` (once object compilation exists, see (d)), and whatever a next
-      real test routine turns out to need. Test each the same way `ADD1`
-      was: compile, assemble, run, check the actual printed/observable
-      result.
-   d. **Object/property/flag table emission**: read `Compilation.Objects.cs`
-      (762 lines, not yet read) — needed before `MOVE`/`FSET?`/`GETP`/etc.
-      mean anything, and before a compiled game can do much besides pure
-      arithmetic and conditionals.
-   Keep testing each addition the same end-to-end way (compile → `zapf` →
-   `zmachine.mod`, checking the actual result) rather than trusting the
-   `.zap` text looks right by inspection alone — that discipline is what
-   caught nothing going wrong so far, precisely because it was followed.
-5. If phase 3 feels too large to continue cold, the smaller fallback is
-   still on the table: pick from phase 2's "what's still needed" list —
-   item 4 (fixing phase 1's `%`/`#TYPE` stubs, now that `Eval`/quasiquote
-   both exist) is the most likely of the remaining phase-2 items to matter
-   soon; the rest are genuinely on-demand and should stay deprioritized
-   given phase 2f's finding that phase 2's interpreter core is already
-   essentially sufficient.
+1. Re-run the checks this session established, which are quicker and
+   broader than the old per-phase harnesses: build the driver
+   (`obc --mod-path Modules examples/zilf.mod -o zilf`), run it over all
+   52 corpus files under `~/lib/src/zilf/zillib/` and
+   `~/lib/src/zilf/sample/*/` expecting zero *parse* failures, and re-run
+   the two end-to-end programs described in the globals section above
+   (compile → `zapf` → `zmachine.mod`, checking the printed values). Also
+   re-run the transpiler's own full `Modules/*.mod`+`examples/*.mod`
+   regression suite (138 files, 3 pre-existing failures).
+2. **Fix the stack-ordering bug properly** — buffer a routine's body
+   before writing its `.FUNCT` line so compiler temporaries can be added
+   to the local list, then spill one operand into a temporary instead of
+   refusing the case. See the globals section above for the full
+   description. Do this BEFORE widening codegen further: nearly every
+   additional builtin can hit it, and every one added first is another
+   thing to revisit.
+3. **The four cheap registrations** — `VERSION`, `FILE-FLAGS`, `GDECL`,
+   `VERSION?` — see the corpus gap analysis above. Highest files-unblocked
+   per line of work of anything left.
+4. Then the remaining phase-3b codegen widenings, roughly in value order:
+   a. **`AND`/`OR` and the loop constructs**: read `Compilation.Loops.cs`
+      (896 lines, still not read). `COND`'s condition fallback already
+      handles a bare value tested for truthiness, but `AND`/`OR`'s
+      short-circuit *sequencing* and the compiled `REPEAT`/`AGAIN` forms
+      (not to be confused with this port's interpreter-level `PROG`/
+      `REPEAT` from phase 2b — completely different code) don't exist in
+      the compiler at all.
+   b. **Object/property/flag table emission**: read
+      `Compilation.Objects.cs` (762 lines, not yet read). `ZilCompile`
+      currently emits a well-formed but *empty* V3 object table (31 words
+      of property defaults, no entries) purely so the header's `OBJECT`
+      pointer is valid. Needed before `MOVE`/`FSET?`/`GETP`/`IN?` mean
+      anything, and before a compiled game can do more than arithmetic,
+      conditionals and printing.
+   c. **Strings**: `TELL` and packed string tables (`.GSTR`/`.STR`), so a
+      string can be an operand rather than only a `PRINTI` literal.
+   d. **Vocabulary/syntax tables**: `Compilation.Syntax.cs`. Same
+      placeholder situation as objects — an empty but well-formed
+      dictionary is emitted today.
+   e. More `ZBuiltins.cs` builtins on demand, same methodology as always,
+      each tested compile → `zapf` → run → check the actual result.
+5. The `PACKAGE`/`USE`/`ADD-TELL-TOKENS`/qualified-OBLIST cluster remains
+   its own self-contained investigation (see phase 3a's own section for
+   what's already known) — 11 corpus files are blocked on it, so it has to
+   happen eventually, but it is not a quick slice and shouldn't be
+   attempted as one.
 6. Update this doc's "what's done" section and commit again.
