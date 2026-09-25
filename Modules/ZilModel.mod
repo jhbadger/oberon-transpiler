@@ -30,6 +30,13 @@ CONST
   MaxGlobals*  = 2048;
   MaxConstants* = 2048;
   MaxTables*   = 2048;
+  MaxSyntaxes* = 2048;
+  MaxSynonyms* = 2048;
+  MaxDirections* = 64;
+  MaxBuzzwords*  = 512;
+
+  (* SynonymRec.kind values *)
+  SynPlain* = 0; SynVerb* = 1; SynPrep* = 2; SynAdj* = 3; SynDir* = 4;
 
 TYPE
   RoutineRec* = RECORD
@@ -48,6 +55,28 @@ TYPE
   GlobalRec* = RECORD
     name*: ZilObj.Zo;
     value*: ZilObj.Zo     (* already-evaluated default value, or NIL *)
+  END;
+
+  (* SYNTAX's real shape (Syntax.cs, ~400 lines of parsing: verb, up to
+     two OBJECT/TOPIC clauses each with an optional preposition/FIND-flag/
+     scope-bits, an action/preaction/action-name, and verb synonyms) is
+     deferred to phase 3b — this just captures the raw, already-evaluated
+     argument list (self-evaluating atoms/lists make evaluating them
+     transparent, same reasoning as GLOBAL/CONSTANT/TABLE) exactly as
+     given, the same "register now, really interpret later" pattern used
+     for ROUTINE/OBJECT's raw property lists. *)
+  SyntaxRec* = RECORD
+    rawArgs*: ZilObj.Zo   (* raw chain of the SYNTAX call's own arguments *)
+  END;
+
+  (* SYNONYM/VERB-SYNONYM/PREP-SYNONYM/ADJ-SYNONYM/DIR-SYNONYM all share
+     this one shape in the original (PerformSynonym): an original atom and
+     one atom it's a synonym of; `kind` distinguishes which SYNONYM
+     variant registered it (SynPlain/SynVerb/SynPrep/SynAdj/SynDir). *)
+  SynonymRec* = RECORD
+    kind*: INTEGER;
+    original*: ZilObj.Zo;
+    synonym*: ZilObj.Zo
   END;
 
 VAR
@@ -70,6 +99,18 @@ VAR
      compiler-internal scratch space, never part of the final output). *)
   tables*: ARRAY MaxTables OF ZilObj.Zo;
   nTables*: INTEGER;
+
+  syntaxes*: ARRAY MaxSyntaxes OF SyntaxRec;
+  nSyntaxes*: INTEGER;
+
+  synonyms*: ARRAY MaxSynonyms OF SynonymRec;
+  nSynonyms*: INTEGER;
+
+  directions*: ARRAY MaxDirections OF ZilObj.Zo;
+  nDirections*: INTEGER;
+
+  buzzwords*: ARRAY MaxBuzzwords OF ZilObj.Zo;
+  nBuzzwords*: INTEGER;
 
 PROCEDURE AddRoutine*(name, act, argSpec, body: ZilObj.Zo);
 BEGIN
@@ -118,9 +159,44 @@ BEGIN
   END
 END AddTable;
 
+PROCEDURE AddSyntax*(rawArgs: ZilObj.Zo);
+BEGIN
+  IF nSyntaxes < MaxSyntaxes THEN
+    syntaxes[nSyntaxes].rawArgs := rawArgs;
+    INC(nSyntaxes)
+  END
+END AddSyntax;
+
+PROCEDURE AddSynonym*(kind: INTEGER; original, synonym: ZilObj.Zo);
+BEGIN
+  IF nSynonyms < MaxSynonyms THEN
+    synonyms[nSynonyms].kind := kind;
+    synonyms[nSynonyms].original := original;
+    synonyms[nSynonyms].synonym := synonym;
+    INC(nSynonyms)
+  END
+END AddSynonym;
+
+PROCEDURE AddDirection*(atom: ZilObj.Zo);
+BEGIN
+  IF nDirections < MaxDirections THEN
+    directions[nDirections] := atom;
+    INC(nDirections)
+  END
+END AddDirection;
+
+PROCEDURE AddBuzzword*(atom: ZilObj.Zo);
+BEGIN
+  IF nBuzzwords < MaxBuzzwords THEN
+    buzzwords[nBuzzwords] := atom;
+    INC(nBuzzwords)
+  END
+END AddBuzzword;
+
 PROCEDURE Reset*;
 BEGIN
-  nRoutines := 0; nObjects := 0; nGlobals := 0; nConstants := 0; nTables := 0
+  nRoutines := 0; nObjects := 0; nGlobals := 0; nConstants := 0; nTables := 0;
+  nSyntaxes := 0; nSynonyms := 0; nDirections := 0; nBuzzwords := 0
 END Reset;
 
 END ZilModel.

@@ -323,7 +323,7 @@ BEGIN
 END PerformITable;
 
 PROCEDURE ApplySubr*(name: ARRAY OF CHAR; args: ARRAY OF ZilObj.Zo; n: INTEGER): ZResult;
-VAR sum, i, len: INTEGER; s: ARRAY 4096 OF CHAR;
+VAR sum, i, len, synKind: INTEGER; s: ARRAY 4096 OF CHAR;
 BEGIN
   IF (name = "SET") OR (name = "SETG") OR (name = "GLOBAL") OR (name = "CONSTANT") THEN
     (* The originals for GLOBAL/CONSTANT are FSUBRs (name unevaluated,
@@ -506,6 +506,49 @@ BEGIN
 
   ELSIF name = "ITABLE" THEN
     RETURN PerformITable(args, n)
+
+  ELSIF name = "SYNTAX" THEN
+    (* Full semantic decomposition (verb/prep/object/scope-flags/action)
+       deferred to phase 3b — see ZilModel.mod's SyntaxRec comment. Args
+       arrive already-evaluated (SYNTAX is a plain SUBR in the original),
+       but every element is self-evaluating (atoms and lists of atoms),
+       so capturing them is transparent — same reasoning as GLOBAL/
+       CONSTANT/TABLE. *)
+    IF n < 3 THEN RETURN Err("SYNTAX: expected at least 3 args") END;
+    ZilModel.AddSyntax(BuildConsChain(ZilObj.KList, args, n));
+    RETURN MkVal(args[0])
+
+  ELSIF (name = "SYNONYM") OR (name = "VERB-SYNONYM") OR (name = "PREP-SYNONYM")
+        OR (name = "ADJ-SYNONYM") OR (name = "DIR-SYNONYM") THEN
+    IF n < 2 THEN RETURN Err("SYNONYM: expected an original atom and at least one synonym") END;
+    IF name = "SYNONYM" THEN synKind := ZilModel.SynPlain
+    ELSIF name = "VERB-SYNONYM" THEN synKind := ZilModel.SynVerb
+    ELSIF name = "PREP-SYNONYM" THEN synKind := ZilModel.SynPrep
+    ELSIF name = "ADJ-SYNONYM" THEN synKind := ZilModel.SynAdj
+    ELSE synKind := ZilModel.SynDir END;
+    FOR i := 1 TO n - 1 DO ZilModel.AddSynonym(synKind, args[0], args[i]) END;
+    RETURN MkVal(args[0])
+
+  ELSIF name = "DIRECTIONS" THEN
+    FOR i := 0 TO n - 1 DO ZilModel.AddDirection(args[i]) END;
+    RETURN MkVal(TrueVal())
+
+  ELSIF name = "BUZZ" THEN
+    FOR i := 0 TO n - 1 DO ZilModel.AddBuzzword(args[i]) END;
+    RETURN MkVal(TrueVal())
+
+  ELSIF name = "VOC" THEN
+    (* Pragmatic subset: the original CHTYPEs the interned atom to a VOC
+       pseudo-type and also registers it (by part-of-speech, an optional
+       2nd arg) into ZEnvironment's vocabulary dictionary for later
+       dictionary-table encoding (phase 3b). This just interns and returns
+       the plain atom, ignoring the part-of-speech argument — VOC's main
+       real-source use is as a self-evaluating-atom-producing building
+       block inside other expressions, which this preserves. *)
+    IF (n < 1) OR (args[0].kind # ZilObj.KString) THEN
+      RETURN Err("VOC: expected a STRING")
+    END;
+    RETURN MkVal(ZilObj.Intern(args[0].strBuf^))
 
   ELSIF name = "CONS" THEN
     (* <CONS first rest>: prepends first onto rest, a LIST — or FALSE
@@ -1350,6 +1393,10 @@ BEGIN
   Register("EVAL", FALSE); Register("EVAL-IN-SEGMENT", FALSE);
   Register("TABLE", FALSE); Register("LTABLE", FALSE); Register("PTABLE", FALSE);
   Register("PLTABLE", FALSE); Register("ITABLE", FALSE);
+  Register("SYNTAX", FALSE);
+  Register("SYNONYM", FALSE); Register("VERB-SYNONYM", FALSE); Register("PREP-SYNONYM", FALSE);
+  Register("ADJ-SYNONYM", FALSE); Register("DIR-SYNONYM", FALSE);
+  Register("DIRECTIONS", FALSE); Register("BUZZ", FALSE); Register("VOC", FALSE);
 
   tAtom := ZilObj.Intern("T");
   tAtom.globalVal := tAtom;  (* T is self-valued *)

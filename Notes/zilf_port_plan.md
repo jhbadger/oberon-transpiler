@@ -1058,6 +1058,67 @@ remaining item in the histogram, with vocabulary-adjacent forms
 (`SYNONYM`/`VOC`/`VERB-SYNONYM`/`DEFAULT-DEFINITION`/etc.) and `PROPDEF`
 next after it.
 
+## What's done (phase 3a continued: SYNTAX/vocabulary registration) — files, and what's tested
+
+Read `Syntax.cs` (421 lines) as scoped. Found `SYNTAX`'s *real* semantic
+shape is genuinely involved (~400 lines: verb, up to two `OBJECT`/`TOPIC`
+clauses each with an optional preposition/`FIND`-flag/scope-bits, an
+action/preaction/action-name, and verb synonyms) — but also confirmed (via
+`Subrs.ZModel.cs`) that `SYNTAX` itself, like `TABLE`, is a **plain
+evaluated-args SUBR**, not an FSUBR — so the same "register the raw,
+already-evaluated arguments now, defer real semantic decomposition to
+phase 3b" pattern already used for `OBJECT`'s raw property lists applies
+directly, without needing to port `Syntax.Parse`'s full logic yet. This
+turned out to be the right call: `SYNTAX` (like `TABLE`) didn't need its
+own new architecture, just the same registration pattern applied once
+more. Also read the `SYNONYM`-family SUBRs (`SYNONYM`/`VERB-SYNONYM`/
+`PREP-SYNONYM`/`ADJ-SYNONYM`/`DIR-SYNONYM`, all sharing one
+`PerformSynonym` shape: an original atom and one or more atoms that are
+synonyms of it) and `VOC`/`DIRECTIONS`/`BUZZ` (also plain SUBRs, simple
+list-registration or intern-and-return shapes) — did **not** need to read
+`SyntaxMatcher.cs` or the `ZModel/Vocab/` subtree at all for this slice,
+since real dictionary/vocab-table *encoding* is squarely phase 3b's job.
+
+- **`ZilModel.mod`**: `SyntaxRec` (just `rawArgs`, the raw argument
+  chain), `SynonymRec` (`kind` — `SynPlain`/`SynVerb`/`SynPrep`/`SynAdj`/
+  `SynDir` — plus the original and synonym atoms), and flat
+  `directions`/`buzzwords` lists, each with an `Add*` procedure.
+- **`ZilEval.mod`**: `SYNTAX`, `SYNONYM`-family, `DIRECTIONS`, `BUZZ`, and
+  `VOC` all added directly to `ApplySubr` (no forward-reference issue —
+  none of them call `Eval`). `VOC` is a deliberate simplification: the
+  original `CHTYPE`s the result to a `VOC` pseudo-type and registers it
+  by part-of-speech for later dictionary encoding; this just interns and
+  returns the plain atom, since this port has no pseudo-type system yet
+  and `VOC`'s dominant real use is as a self-evaluating-atom-producing
+  building block inside other expressions, which this preserves.
+
+**Tested**: `sample7.zil` — two `SYNTAX` definitions (one- and two-object),
+all five `SYNONYM`-family variants, `DIRECTIONS`, `BUZZ`, and `VOC` — all
+10 forms produced exactly the expected result (each returns its own verb/
+original atom, or `T`, or the interned word atom). Re-ran all five
+existing phase-2 test harnesses (byte-identical output) plus the full
+transpiler regression suite (136 files, same 3 pre-existing-only
+failures) — no regressions.
+
+**Then re-ran the full 84-file corpus aggregate**: **`SYNTAX` (was 451
+occurrences — the single largest item in the entire histogram), plus
+`SYNONYM`/`VOC`/`VERB-SYNONYM` (92+82+38), are now completely absent.**
+On `sample/zork1/zork1.zil` specifically, **7 of its 9 `INSERT-FILE`d
+files now process end-to-end with zero errors** — `GSYNTAX` and
+`1DUNGEON` newly joined `GMACROS`/`GGLOBALS`/`GCLOCK`/`GMAIN`/`GPARSER`;
+only `GVERBS` and `1ACTIONS` remain, both now blocked on `GDECL` (a small,
+6-occurrence item — likely simple). The aggregate histogram overall
+shrank dramatically and is now much flatter, with no single dominant
+item — remaining significant entries are `DEFAULT-LIBRARY-MESSAGES`/
+`ADD-TELL-TOKENS`/`DEFAULT-DEFINITION`/`REPLACE-DEFINITION`/
+`DELAY-DEFINITION` (70+44+43+19+14 = 190, a "hooks/customization"
+subsystem — `<DEFAULT-DEFINITION name body...>` conditionally evaluates
+`body` based on `PUTPROP`/`GETPROP` state, genuinely implementable with
+machinery this port already has, but an FSUBR needing to call `Eval` —
+same shape as `INSERT-FILE`), `VERSION`/`VERSION?` (40+25 — compiler
+directives, phase 3b), `PROPDEF` (33, phase 3b), and a long tail of
+single-digit items.
+
 ## Suggested order for the next session
 
 1. Re-run all five existing phase-2 test harnesses to confirm nothing
@@ -1076,37 +1137,38 @@ next after it.
    transpiler's own full `Modules/*.mod`+`examples/*.mod` regression suite
    (136 files — includes the new `ZilModel.mod`) if any transpiler work
    happened in between sessions.
-2. `EVAL` and the table family are both done (see the dedicated section
-   above) and completely gone from the full-corpus histogram. **`SYNTAX`/
-   vocabulary (451 occurrences, still totally untouched) is now
-   unambiguously the largest remaining item** — it needs its own dedicated
-   reading pass before implementing, the same discipline used for the
-   Compiler/Emit/ZModel architecture pass earlier this session: read
-   `Syntax.cs` (421 lines) and `SyntaxMatcher.cs` (223 lines) first, plus
-   enough of the `ZModel/Vocab/` subtree (`IVocabFormat.cs`, and at least
-   one concrete format — `OldParser/OldParserVocabFormat.cs` is likely the
-   more relevant one for a Zap/Z-machine target than `NewParser/` or the
-   Glulx-specific format) to understand `SYNTAX`'s own registration shape
-   (verb/preposition/object/direction pattern → an action routine name)
-   *before* writing any code — don't assume it's as cheap as
-   `ROUTINE`/`OBJECT`/`TABLE` turned out to be; vocabulary/dictionary
-   encoding is a genuinely different, self-contained subsystem, not just
-   "more of the same registration pattern". `SYNONYM`/`VOC`/
-   `VERB-SYNONYM`/`DEFAULT-DEFINITION`/`REPLACE-DEFINITION`/
-   `DELAY-DEFINITION` (92+82+38+43+18+14 = 287 more occurrences) are all
-   part of the same vocabulary subsystem and would likely come along with
-   it. After implementing: re-run the full 84-file aggregate again to
-   measure the effect, the same way `INSERT-FILE`, phase 3a, and this
-   slice were each measured.
-3. `PROPDEF` (33 occurrences) is a smaller, separately-scoped candidate if
-   `SYNTAX` feels too large to start cold: the *default* directional-exit
-   `PROPDEF` pattern is already known (`Context.InitPropDefs`, read back
-   in phase 2b) and could plausibly be hard-coded for the common case,
-   deferring general custom-`PROPDEF` support (`ComplexPropDef.cs`, 1,021
-   lines, not yet read) — but confirm this is actually sufficient for real
-   source before committing to it, since several real files (`1dungeon.zil`
-   itself) define their own custom `PROPDEF`s that a hard-coded default
-   wouldn't cover.
+2. `EVAL`, the table family, and now `SYNTAX`/`SYNONYM`/`VOC`/`DIRECTIONS`/
+   `BUZZ` are all done (see the dedicated sections above). `SYNTAX` turned
+   out *not* to need the full vocabulary-encoding subsystem after all —
+   it's a plain SUBR whose raw arguments could just be registered the same
+   way `OBJECT`'s were, deferring real semantic decomposition
+   (`Syntax.Parse`, `SyntaxMatcher.cs`, the `ZModel/Vocab/` subtree) to
+   phase 3b. The full-corpus histogram is now much flatter with no single
+   dominant item — read phase 3a's own "SYNTAX/vocabulary registration"
+   section above for the current list before picking a next step. Two
+   candidates stand out:
+   a. **The "hooks" subsystem** (`DEFAULT-DEFINITION`/`REPLACE-DEFINITION`/
+      `DELAY-DEFINITION`/`DEFAULT-LIBRARY-MESSAGES`/`ADD-TELL-TOKENS`,
+      190+ occurrences combined): read `Subrs.Meta.cs`'s
+      `DEFAULT_DEFINITION`/`REPLACE_DEFINITION` (already partly read this
+      session) in full. The mechanism is genuinely implementable with
+      machinery this port already has (`PUTPROP`/`GETPROP` state tracking
+      on the definition-section name atom, exactly like this port's
+      existing property-list support) — `<DEFAULT-DEFINITION name
+      body...>` evaluates `body` immediately unless a replacement/delay
+      was already registered for `name`. Needs to be inlined into
+      `EvalImpl` (it's an FSUBR that conditionally calls `EvalProgram`-
+      equivalent on its body), same shape as `INSERT-FILE`.
+   b. `PROPDEF` (33 occurrences): the *default* directional-exit pattern
+      is already known (`Context.InitPropDefs`, read back in phase 2b) and
+      could plausibly be hard-coded for the common case, deferring general
+      custom-`PROPDEF` support (`ComplexPropDef.cs`, 1,021 lines, not yet
+      read) — but confirm this is actually sufficient for real source
+      before committing to it, since real files (`1dungeon.zil` itself)
+      define their own custom `PROPDEF`s a hard-coded default wouldn't
+      cover.
+   After either: re-run the full 84-file aggregate again to measure the
+   effect, the same way every registration slice so far has been measured.
 4. Once registration (3a and its natural continuations above) feels
    sufficiently broad, move to **phase 3b: actual code generation** — read
    `Compilation.Objects.cs` (object/property/flag table layout) and
