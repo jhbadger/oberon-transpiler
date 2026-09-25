@@ -2428,60 +2428,61 @@ qualified-OBLIST investigation and should stay one task.
 
 ## Suggested order for the next session
 
-**Where this stands**: two complete, unmodified games from zilf's own
-sample set — `sample/beer` (V3) and `sample/mandelbrot` (V4) — compile
-through this port, assemble with the Oberon `zapf`, and run correctly. The
-whole pipeline is real:
+**Where this stands**: three complete, unmodified games from zilf's own
+sample set compile through this port, assemble with the Oberon `zapf`, and
+run correctly — `sample/beer` (V3), `sample/mandelbrot` (V4, ASCII art) and
+`sample/name` (V3, **interactive**: reads input, prints a status line). The
+pipeline:
 
 ```
 obc --mod-path Modules examples/zilf.mod -o zilf
 ./zilf -i ~/lib/src/zilf/zillib game.zil game.zap && ./zapf game.zap && frotz game.z3
 ```
 
-1. **Re-run the checks** before changing anything: the eleven end-to-end
+**Both remaining major games now stop at the same single blocker.**
+`advent.zil` and `cloak.zil` each evaluate the whole of `zillib` — the
+4,000-line parser, the library-message system, the package system, the
+compilation flags — and stop at `DEFSTRUCT`.
+
+1. **Re-run the checks** before changing anything: the sixteen end-to-end
    programs in the session scratchpad (compile → `zapf` → run, checking the
-   printed values), `beer` and `mandelbrot` end to end, the 52-file corpus
-   with `-i .../zillib` (expect zero parse failures), and the transpiler's
-   own `Modules/*.mod`+`examples/*.mod` suite (138 files, 3 pre-existing
-   failures). The scratchpad may not survive between machine sessions; the
-   test programs are small and each is described in its own section above.
-2. **`TELL`** is the last big codegen piece before a parser-driven game, and
-   `sample/name` is already stopped at exactly it. `TELL` is a variadic
-   print builtin with a token table (`D` for an object's description, `N`
-   for a number, `C` for a character, a bare string, an operand, plus the
-   game-extensible tokens `ADD-TELL-TOKENS` registers). See
-   `Compilation.Expressions.cs`'s TELL handling and `ZEnvironment`'s
-   TellPatterns.
-3. **Objects, properties and flags** (`Compilation.Objects.cs`, 762 lines,
-   still not read). `ZilCompile` emits a well-formed but *empty* object
-   table purely so the header pointer is valid. Needed before `MOVE`/
-   `FSET?`/`GETP`/`IN?` mean anything — the instructions are already
-   emitted by the simple-builtin table, they just have no objects to act
-   on — and before any game with a world model.
-4. **`MOBLIST`/`LOOKUP`/`INSERT`/`SPNAME`, i.e. OBLISTs as first-class
-   data** — still the top *evaluation* blocker at 7 files, and a different
-   problem from the package work (which is done). `zillib/libmsg.zil` uses
-   oblists as compile-time hash maps, not for name resolution. Promising
-   shape: give an OBLIST value just a name and have `INSERT`/`LOOKUP`
-   intern `NAME!-<oblistname>` in the one flat table, reproducing the
-   original's own qualified spelling
-   (`SUCCESS!-TAKE!-LIBRARY-MESSAGES`). It also drags in `MAPF`/`FUNCTION`/
-   `TYPE?`/`REST`/`ERROR`/indirect `SETG`, none of which exist yet — check
-   that before scoping it.
-5. **Smaller known gaps**, each blocking 1-3 corpus files: `STRING`
-   (advent), `DEFSTRUCT`, `ZIP-OPTIONS`, `FREQUENT-WORDS?`,
-   `STATUS-LINE-SECTION`, `GUNASSIGN`, `ITABLE`'s keyword argument shapes
-   (`<ITABLE NONE n>`), and SEGMENT splicing inside a LIST.
-6. **Codegen gaps worth closing when something hits them**: `AND`/`OR`
-   short-circuit sequencing; `PROG`/`REPEAT` *bindings* (refused today —
-   needs inner-local scoping and renaming); string operands and packed
-   string tables (`.GSTR`/`.STR`); the vocabulary and syntax tables; a V5+
-   hand-built header.
+   printed values), `beer`/`mandelbrot`/`name` end to end, the 52-file
+   corpus with `-i .../zillib`, and the transpiler's own suite (138 files,
+   3 pre-existing failures). The scratchpad may not survive between machine
+   sessions; each test program is described in its own section above.
+2. **`DEFSTRUCT`** (`Interpreter/Subrs.Defstruct.cs`, 920 lines) is now
+   *the* blocker — it is what both `advent` and `cloak` stop at, and
+   nothing else is close. It defines a record type over a TABLE or VECTOR
+   and generates the accessor macros for it; `zillib/parser.zil` uses it
+   five times with `('NTH ZGET) ('PUT ZPUT) ('START-OFFSET 0)` style option
+   lists, `zillib/pronouns.zil` once over a VECTOR. It is a real piece of
+   work, not a one-SUBR slice, but it is now the highest-value thing by a
+   wide margin: it is the last thing between this port and evaluating a
+   full parser-driven game.
+3. **Then the remaining codegen for a parser game**, in rough order:
+   **vocabulary and syntax tables** (`Compilation.Syntax.cs` — the
+   dictionary is emitted empty today, and `SYNONYM`/`ADJECTIVE`/`PSEUDO`
+   object properties are skipped with a comment because they need it);
+   **complex PROPDEF patterns** (`ComplexPropDef.cs`, 1,021 lines — needed
+   for direction properties like `(NORTH TO CELLAR)`, also skipped today);
+   **string operands and packed string tables** (`.GSTR`/`.STR`), so a
+   string can be an operand and not only a `PRINTI` literal.
+4. **Smaller known gaps**, each blocking one or two corpus files:
+   `ZIP-OPTIONS`, `FREQUENT-WORDS?`, `SUPPRESS-WARNINGS?`, `ITABLE`'s
+   keyword argument shapes (`<ITABLE NONE n>` parses, other keyword forms
+   don't), and the standalone-sub-file `%`-evaluation failures (those are
+   expected: a library sub-file compiled on its own is missing a global its
+   parent sets).
+5. **Codegen gaps worth closing when something hits them**: an `"OPT"`
+   argument with a non-constant default (needs the argument-count test);
+   a V5+ hand-built header; `MAPRET`/`MAPSTOP` with more than one value.
 
 **Testing discipline that has caught everything so far**: compile →
-assemble with `zapf` → actually run the story file → check the real
-printed output. Never trust that the `.zap` text looks right. And when a
-compiled game misbehaves under `examples/zmachine.mod`, check it under
-`frotz` before assuming the compiler is at fault — `zmachine.mod` hangs on
-`beer.z3`, which frotz runs correctly, while it renders `mandelbrot.z4`
-perfectly.
+assemble with `zapf` → actually run the story file → check the real printed
+output. Never trust that the `.zap` text looks right — the `"ARGS"`
+constant-folding bug produced a perfectly plausible `.zap` that printed the
+wrong number, and the missing entry-point `QUIT` produced one that ran all
+99 verses and then crashed. When a compiled game misbehaves under
+`examples/zmachine.mod`, check it under `frotz` before assuming the
+compiler is at fault (`zmachine.mod` hangs on `beer.z3`, which frotz runs
+correctly, while it renders `mandelbrot.z4` perfectly).

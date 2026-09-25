@@ -972,6 +972,28 @@ BEGIN
                  & ((args[0].kind = ZilObj.KSubr) OR (args[0].kind = ZilObj.KFSubr)
                     OR (args[0].kind = ZilObj.KFunction) OR (args[0].kind = ZilObj.KMacro))))
 
+  ELSIF name = "STRING" THEN
+    (* <STRING a b ...> concatenates its arguments into one STRING: a
+       STRING contributes its text and a CHARACTER its character, which is
+       all real source uses it for (e.g. verbs.zil's
+       <STRING " / " ,ZIL-VERSION>). *)
+    s[0] := 0X;
+    FOR i := 0 TO n - 1 DO
+      IF args[i].kind = ZilObj.KString THEN Strings.Append(args[i].strBuf^, s)
+      ELSIF args[i].kind = ZilObj.KChar THEN
+        msgBuf[0] := CHR(args[i].charVal); msgBuf[1] := 0X;
+        Strings.Append(msgBuf, s)
+      ELSE
+        RETURN Err("STRING: arguments must be STRINGs or CHARACTERs")
+      END
+    END;
+    RETURN MkVal(ZilObj.NewString(s))
+
+  ELSIF name = "VECTOR" THEN
+    ind := ZilObj.NewVectorN(n);
+    FOR i := 0 TO n - 1 DO ind.vecItems[i] := args[i] END;
+    RETURN MkVal(ind)
+
   ELSIF name = "MOBLIST" THEN
     (* <MOBLIST NAME> yields the oblist of that name, creating it the first
        time — "make oblist". The argument is an atom in every real use. *)
@@ -2868,6 +2890,7 @@ BEGIN
   Register("STRUCTURED?", FALSE); Register("APPLICABLE?", FALSE);
   Register("SPNAME", FALSE); Register("PNAME", FALSE); Register("PARSE", FALSE);
   Register("ERROR", FALSE);
+  Register("STRING", FALSE); Register("VECTOR", FALSE);
   Register("MOBLIST", FALSE); Register("ROOT", FALSE); Register("OBLIST?", FALSE);
   Register("LOOKUP", FALSE); Register("INSERT", FALSE);
   Register("FUNCTION", TRUE);
