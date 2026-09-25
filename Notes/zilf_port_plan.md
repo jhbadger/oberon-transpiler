@@ -1191,6 +1191,51 @@ names via `PARSE`/`STRING`) can be tackled. Deliberately not started this
 session — flagged for its own investigation, separate from the "port the
 next SUBR" pattern that's worked well so far.
 
+## What's done (phase 3a continued: PROPDEF) — files, and what's tested
+
+Confirmed via `Subrs.ZModel.cs`'s `PROPDEF` that the common real-source
+shape (`<PROPDEF name default-value>`, no complex spec — exactly what
+`zork1.zil` itself uses: `<PROPDEF SIZE 5>`, `<PROPDEF CAPACITY 0>`, etc.)
+is by far the dominant case, with the complex-pattern form (`<PROPDEF
+DIRECTIONS <> (DIR TO R:ROOM = ...)>`, used to define direction-property
+syntax) genuinely rare. `PROPDEF` is an FSUBR (name and the complex spec
+are raw/unevaluated; only the default value is explicitly `Eval`'d inside
+the original's own SUBR body), so — same forward-reference reason as
+`INSERT-FILE`/`DEFAULT-DEFINITION`/`PROPDEF` needing `EvalImpl` for the
+default value — this is inlined into `EvalImpl`, not a separate procedure.
+
+Replicated the original's one genuine special case exactly (not
+approximated): a `<PROPDEF DIRECTIONS <> (DIR ...)>` — `DIRECTIONS` atom,
+`FALSE` default, *and* a spec present — registers only the complex
+pattern, not a real property default, since `DIRECTIONS` isn't an actual
+property in that form; any other combination (including `DIRECTIONS`
+with a spec *and* a truthy default) registers both. The complex spec
+itself is captured raw (`ZilModel.PropDefSpecRec`) rather than parsed —
+real parsing (`ComplexPropDef.Parse`, 1,021 lines) is deferred to phase
+3b, same "register now, interpret later" pattern as `OBJECT`/`SYNTAX`.
+
+**Tested**: `sample9.zil` plus a new `modeltest.mod` harness (reads+evals
+a file, then prints `ZilModel`'s registered state directly — useful
+beyond just this test, for inspecting any future registration) — the
+simple case (`SIZE`/`TEXT-HELD`, the latter with a `FALSE` default,
+confirming a falsy-but-real default still registers, matching the
+original's own documented rationale for that), the `DIRECTIONS` special
+case (correctly registers *only* the complex spec, not a property
+default), and a complex spec with a truthy default (correctly registers
+*both*) — all behaved exactly as expected. Re-ran all five existing
+phase-2 test harnesses (byte-identical output) plus the full transpiler
+regression suite (136 files, same 3 pre-existing-only failures) — no
+regressions.
+
+**Then re-ran the full 84-file corpus aggregate**: `PROPDEF` (was 33
+occurrences) is now completely absent. The remaining histogram is
+unchanged in shape from phase 3a's hooks-system slice: dominated by the
+OBLIST-dependent `DEFAULT-LIBRARY-MESSAGES`/`ADD-TELL-TOKENS` (already
+investigated and deferred — see that section above), `VERSION`/`VERSION?`
+(compiler directives, phase 3b), `MOVE`/`REMOVE`/`FCLEAR` (Z-machine
+runtime object-tree operations, deliberately still unimplemented), and an
+increasingly long tail of single-digit items.
+
 ## Suggested order for the next session
 
 1. Re-run all five existing phase-2 test harnesses to confirm nothing
@@ -1225,18 +1270,22 @@ next SUBR" pattern that's worked well so far.
    the actual mechanism that defines `DEFAULT-LIBRARY-MESSAGES` still
    hasn't been located in the C# source — it may be built dynamically).
    This is a self-contained investigation of its own, not a quick slice.
-3. `PROPDEF` (33 occurrences) is a smaller, separately-scoped candidate:
-   the *default* directional-exit pattern is already known
-   (`Context.InitPropDefs`, read back in phase 2b) and could plausibly be
-   hard-coded for the common case, deferring general custom-`PROPDEF`
-   support (`ComplexPropDef.cs`, 1,021 lines, not yet read) — but confirm
-   this is actually sufficient for real source before committing to it,
-   since real files (`1dungeon.zil` itself) define their own custom
-   `PROPDEF`s a hard-coded default wouldn't cover. After implementing:
-   re-run the full 84-file aggregate again to measure the effect, the
-   same way every registration slice so far has been measured.
-4. Once registration (3a and its natural continuations above) feels
-   sufficiently broad, move to **phase 3b: actual code generation** — read
+3. `PROPDEF` is now done too (see its own section above) — the common
+   simple case (`<PROPDEF name default-value>`, what real source
+   overwhelmingly uses) registers directly; the rarer complex-pattern case
+   is captured raw, deferring real parsing (`ComplexPropDef.cs`, 1,021
+   lines, still not read) to phase 3b. With `PROPDEF` done, **essentially
+   every clean, well-scoped phase-3a registration candidate the corpus
+   histogram has surfaced is now implemented** — what's left
+   (`DEFAULT-LIBRARY-MESSAGES`/`ADD-TELL-TOKENS`, blocked on the
+   qualified-OBLIST system; `VERSION`/`VERSION?`, compiler directives;
+   `MOVE`/`REMOVE`/`FCLEAR`, runtime object-tree operations with no
+   interpret-time meaning; a long tail of single-digit items) is either a
+   separate, larger investigation or squarely phase 3b's job, not another
+   quick SUBR to add. This is a natural point to stop registration-only
+   work and move to actual code generation.
+4. **Phase 3b: actual code generation** — this is now the clear next
+   major step, not further phase-3a additions. Read
    `Compilation.Objects.cs` (object/property/flag table layout) and
    `Compilation.Routines.cs`+`ZBuiltins.cs` (routine body → `.zap` text,
    starting with the simplest VoidCall/ValueCall builtins) next, since

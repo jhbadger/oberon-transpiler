@@ -764,6 +764,8 @@ VAR
      at that branch) *)
   defName, defBody, defState, defInd, defP: ZilObj.Zo;
   defI: INTEGER;
+  (* PROPDEF *)
+  pdName, pdRest, pdSpec: ZilObj.Zo;
 BEGIN
   IF z = NIL THEN RETURN MkVal(NIL) END;
 
@@ -1296,6 +1298,42 @@ BEGIN
     ELSIF isFSubr & (name = "ROOM") THEN
       RETURN ApplyObject(TRUE, z.rest)
 
+    ELSIF isFSubr & (name = "PROPDEF") THEN
+      (* <PROPDEF name default-value [complex-spec...]>. Ported from
+         Subrs.ZModel.cs's PROPDEF: an FSUBR (name and the complex spec
+         are raw/unevaluated; only default-value is explicitly Eval'd
+         inside the SUBR body in the original, so this needs to call
+         EvalImpl — same forward-reference reason as INSERT-FILE/
+         DEFAULT-DEFINITION). By far the common real-source shape has no
+         complex spec at all (e.g. zork1.zil's own <PROPDEF SIZE 5>) —
+         see ZilModel.mod's PropDefaultRec/PropDefSpecRec comment for why
+         the rarer complex-pattern case is just captured raw rather than
+         parsed now. Replicates the original's one special case exactly:
+         a <PROPDEF DIRECTIONS <> (DIR ...)> (FALSE default, a spec
+         present) registers the complex pattern WITHOUT also registering
+         DIRECTIONS as a real property default, since DIRECTIONS isn't a
+         real property in that form. *)
+      IF (z.rest = NIL) OR (z.rest.first = NIL) OR (z.rest.first.kind # ZilObj.KAtom) THEN
+        RETURN Err("PROPDEF: expected a property-name atom")
+      END;
+      pdName := z.rest.first;
+      pdRest := z.rest.rest;
+      IF (pdRest = NIL) OR (pdRest.first = NIL) THEN
+        RETURN Err("PROPDEF: expected a default value")
+      END;
+      r := EvalImpl(pdRest.first, FALSE);
+      IF r.outcome # OValue THEN RETURN r END;
+      pdSpec := pdRest.rest;
+
+      IF ~(ZilObj.IsAtomNamed(pdName, "DIRECTIONS") & ~IsTrue(r.value)
+           & (pdSpec # NIL) & (pdSpec.first # NIL)) THEN
+        ZilModel.AddPropDefault(pdName, r.value)
+      END;
+      IF (pdSpec # NIL) & (pdSpec.first # NIL) THEN
+        ZilModel.AddPropDefSpec(pdName, pdSpec)
+      END;
+      RETURN MkVal(pdName)
+
     ELSIF isFSubr & ((name = "DEFAULT-DEFINITION") OR (name = "REPLACE-DEFINITION")) THEN
       (* Ported from Subrs.Meta.cs's DEFAULT_DEFINITION/REPLACE_DEFINITION:
          a "hooks" mechanism library files use to let a game override a
@@ -1491,6 +1529,7 @@ BEGIN
   Register("RETURN", FALSE); Register("AGAIN", FALSE);
   Register("DEFINE", TRUE); Register("DEFINE20", TRUE); Register("DEFMAC", TRUE);
   Register("ROUTINE", TRUE); Register("OBJECT", TRUE); Register("ROOM", TRUE);
+  Register("PROPDEF", TRUE);
   Register("FORM", FALSE); Register("LIST", FALSE); Register("LENGTH?", FALSE);
   Register("SET", FALSE); Register("SETG", FALSE); Register("GLOBAL", FALSE); Register("CONSTANT", FALSE);
   Register("LVAL", FALSE); Register("GVAL", FALSE);

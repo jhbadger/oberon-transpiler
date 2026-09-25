@@ -34,6 +34,8 @@ CONST
   MaxSynonyms* = 2048;
   MaxDirections* = 64;
   MaxBuzzwords*  = 512;
+  MaxPropDefaults* = 512;
+  MaxPropDefSpecs* = 128;
 
   (* SynonymRec.kind values *)
   SynPlain* = 0; SynVerb* = 1; SynPrep* = 2; SynAdj* = 3; SynDir* = 4;
@@ -79,6 +81,24 @@ TYPE
     synonym*: ZilObj.Zo
   END;
 
+  (* PROPDEF's simple case (<PROPDEF NAME default-value>, by far the most
+     common in real source — e.g. zork1.zil's own <PROPDEF SIZE 5>) just
+     needs a name and an already-evaluated default value. The rarer
+     complex-pattern case (<PROPDEF DIRECTIONS <> (DIR TO R:ROOM = ...)>,
+     used to define direction-property syntax) is captured as raw,
+     unevaluated spec forms — real parsing (ComplexPropDef.Parse in the
+     original, 1,021 lines, not ported) is deferred to phase 3b, same
+     "register now, interpret later" pattern as OBJECT/SYNTAX. *)
+  PropDefaultRec* = RECORD
+    name*: ZilObj.Zo;
+    value*: ZilObj.Zo
+  END;
+
+  PropDefSpecRec* = RECORD
+    name*: ZilObj.Zo;
+    rawSpec*: ZilObj.Zo
+  END;
+
 VAR
   routines*: ARRAY MaxRoutines OF RoutineRec;
   nRoutines*: INTEGER;
@@ -111,6 +131,12 @@ VAR
 
   buzzwords*: ARRAY MaxBuzzwords OF ZilObj.Zo;
   nBuzzwords*: INTEGER;
+
+  propDefaults*: ARRAY MaxPropDefaults OF PropDefaultRec;
+  nPropDefaults*: INTEGER;
+
+  propDefSpecs*: ARRAY MaxPropDefSpecs OF PropDefSpecRec;
+  nPropDefSpecs*: INTEGER;
 
 PROCEDURE AddRoutine*(name, act, argSpec, body: ZilObj.Zo);
 BEGIN
@@ -193,10 +219,29 @@ BEGIN
   END
 END AddBuzzword;
 
+PROCEDURE AddPropDefault*(name, value: ZilObj.Zo);
+BEGIN
+  IF nPropDefaults < MaxPropDefaults THEN
+    propDefaults[nPropDefaults].name := name;
+    propDefaults[nPropDefaults].value := value;
+    INC(nPropDefaults)
+  END
+END AddPropDefault;
+
+PROCEDURE AddPropDefSpec*(name, rawSpec: ZilObj.Zo);
+BEGIN
+  IF nPropDefSpecs < MaxPropDefSpecs THEN
+    propDefSpecs[nPropDefSpecs].name := name;
+    propDefSpecs[nPropDefSpecs].rawSpec := rawSpec;
+    INC(nPropDefSpecs)
+  END
+END AddPropDefSpec;
+
 PROCEDURE Reset*;
 BEGIN
   nRoutines := 0; nObjects := 0; nGlobals := 0; nConstants := 0; nTables := 0;
-  nSyntaxes := 0; nSynonyms := 0; nDirections := 0; nBuzzwords := 0
+  nSyntaxes := 0; nSynonyms := 0; nDirections := 0; nBuzzwords := 0;
+  nPropDefaults := 0; nPropDefSpecs := 0
 END Reset;
 
 END ZilModel.
