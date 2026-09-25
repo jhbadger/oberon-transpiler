@@ -2679,19 +2679,48 @@ would fit:
    allocations (a call spills several arguments while compiling the ones
    between) and popping "the top" then frees somebody else's slot.
 
-### What is still in the way
+### What is still in the way — one routine, one local
 
-`zillib`'s `MATCH-NOUN-PHRASE` declares thirteen locals and has two nested
-`DO` loops, so all fifteen slots are in use before any temporary — and one
-of its expressions still wants one. The remaining candidates for removing it
-are widening the destination hint further (a `RETURN <OR ...>` could
-accumulate into the return path) and giving `AND`/`OR` in value position a
-stack-only shape. After that: `PSEUDO` properties and complex-PROPDEF
-direction properties, both still skipped with a comment.
+**`cloak` emits 81 routines and then stops on `zillib`'s
+`MATCH-NOUN-PHRASE`.** That routine declares thirteen locals of its own and
+contains a `REPEAT (I)` and a `DO (J ...)` whose scopes overlap, so all
+fifteen slots are in use before any compiler temporary — and one expression
+inside still wants one.
+
+What has been ruled out, so the next session doesn't redo it:
+
+- It is **not a leak.** Every statement is now checked for leaked bindings
+  and temporaries when it finishes, and the check is clean; the accounting
+  really is 13 + 2 = 15.
+- It is **not** the obvious temporary sources. Predicates materialise on the
+  stack, commutative operations skip the order fix-up, `SET`, calls,
+  arithmetic and one-instruction builtins all store into their destination,
+  blocks in condition position materialise nothing, and bitwise ops fold
+  n-ary.
+
+What is left to try, in order of likely value:
+
+1. **`AND`/`OR` in value position with no destination** still takes a
+   temporary, because the accumulated value must be testable without being
+   consumed. Giving it a stack-only shape, or threading a destination
+   through more callers (a `RETURN <OR ...>`, a block's last statement),
+   would remove the last one.
+2. **Reuse a dead parameter slot.** The original tracks which locals are
+   still live; a parameter that is never read again is a free slot. That is
+   a bigger change (liveness) but it is the general answer.
+3. Failing both, note that this is **one library routine**: a targeted
+   rewrite of the offending expression is not available (the library is not
+   ours to change), but the routine could be compiled with a
+   `SET`-into-an-existing-local shape if the expression were recognised.
+
+After that: `PSEUDO` properties and complex-PROPDEF direction properties,
+both still skipped with a comment in the emitted `.zap`.
 
 **Tested**: seventeen end-to-end programs, all passing; `beer`,
 `mandelbrot` and `name` all still compile, assemble and run (`beer` and
-`name` re-checked under frotz).
+`name` re-checked under frotz, `mandelbrot` still rendering its 49 rows of
+art); transpiler regression suite, 138 files, same 3 pre-existing-only
+failures.
 
 ## Corpus gap analysis: exactly what blocks compiling a real game
 
