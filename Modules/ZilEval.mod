@@ -316,6 +316,14 @@ BEGIN
   ELSIF name = "CRLF" THEN
     Out.Ln; RETURN MkVal(TrueVal())
 
+  ELSIF name = "PRINTN" THEN
+    IF (n # 1) OR (args[0].kind # ZilObj.KFix) THEN RETURN Err("PRINTN: expected 1 FIX arg") END;
+    Out.Int(args[0].fixVal, 0); RETURN MkVal(args[0])
+
+  ELSIF name = "PRINTC" THEN
+    IF (n # 1) OR (args[0].kind # ZilObj.KChar) THEN RETURN Err("PRINTC: expected 1 CHARACTER arg") END;
+    Out.Char(CHR(args[0].charVal MOD 256)); RETURN MkVal(args[0])
+
   ELSIF name = "RETURN" THEN
     RETURN ApplyReturnOrAgain(TRUE, args, n)
 
@@ -386,7 +394,18 @@ END ApplyDefine;
 (* and a longer explanation).                                            *)
 (* ------------------------------------------------------------------ *)
 
-PROCEDURE Eval*(z: ZilObj.Zo): ZResult;
+(* EvalImpl(z, qq): the real self-recursive evaluator. `qq` is FALSE for
+   ordinary evaluation and TRUE while walking inside a QUASIQUOTE template
+   (see the dedicated comment inside the procedure body for what that mode
+   does) — threaded as a parameter, rather than as a second self-recursive
+   procedure, for the usual forward-reference reason: normal eval and
+   quasiquote-walk each need to call the other (QUASIQUOTE's own FSUBR
+   case switches INTO walk mode; an UNQUOTE'd spot switches back OUT to
+   normal eval), so they have to be the same procedure. The exported
+   `Eval*` below is a thin wrapper (`EvalImpl(z, FALSE)`) kept as the
+   stable public entry point so every existing caller/test harness is
+   unaffected. *)
+PROCEDURE EvalImpl(z: ZilObj.Zo; qq: BOOLEAN): ZResult;
 VAR
   head, n, resultHead, resultTail, cell, clause, body: ZilObj.Zo;
   nFirst, zFirst, zRestFirst, clauseFirst: ZilObj.Zo;
@@ -395,6 +414,10 @@ VAR
   nargs, i: INTEGER;
   name: ARRAY 64 OF CHAR;
   isFSubr: BOOLEAN;
+  (* QUASIQUOTE walk mode (see the dedicated comment below) *)
+  qqResult, qqTail, qqElem, qqInner, qqCell, qqSpliceP, qqVec: ZilObj.Zo;
+  qqStop: BOOLEAN;
+  qqVecIdx: INTEGER;
   (* PROG / REPEAT / BIND (see the dedicated comment at that branch below) *)
   progArgs, progNameAtom, progBindings, progBody, progAct: ZilObj.Zo;
   progBindAtoms, progSavedVals: ARRAY MaxBindings OF ZilObj.Zo;
@@ -403,13 +426,94 @@ VAR
   progRepeat, progCatchy, progStop, progAgain: BOOLEAN;
   (* FUNCTION / MACRO application (see the dedicated comment at that
      branch below) *)
-  fnIsMacro, fnStop, fnUsedVarargs: BOOLEAN;
+  fnIsMacro, fnStop, fnUsedVarargs, fnQuoted: BOOLEAN;
   fnActualHead, fnCallArgs, fnSpecPos, fnOneSpec, fnTarget, fnDefault: ZilObj.Zo;
   fnSpecFirst, fnActivation, fnBP: ZilObj.Zo;
   fnBindAtoms, fnSavedVals: ARRAY MaxBindings OF ZilObj.Zo;
   fnNBind, fnI, fnPhase: INTEGER;
 BEGIN
   IF z = NIL THEN RETURN MkVal(NIL) END;
+
+  IF qq THEN
+    (* QUASIQUOTE walk mode. The real zilf implements `/~ as an ordinary
+       library (zillib/qq.mud) built on CHTYPE/PACKAGE/MAPF/APPLY/PRIMTYPE
+       reflection this port doesn't have; since `/~ turn out to be used
+       pervasively across the CORE zillib files (not an opt-in extra —
+       confirmed by grepping real library/game source before writing this),
+       this implements the same OBSERVABLE behavior natively instead —
+       same "pragmatic reimplementation over faithful port" approach as
+       PROG/REPEAT/BIND vs. LocalEnvironment. A non-structured value (ATOM/
+       FIX/STRING/etc.) passes through literally; a LIST/FORM/VECTOR is
+       rebuilt recursively with the same shape; an UNQUOTE (`~X`, read as
+       <UNQUOTE X>) evaluates X normally and substitutes the result; an
+       UNQUOTE wrapping a SEGMENT (`~!.X` etc. — the original detects
+       splicing this same way, via DECL? on a TILDE/SEGMENT combination)
+       evaluates X normally and splices its elements into the surrounding
+       LIST/FORM instead of inserting a single element — this needs to be
+       special-cased in the rebuild loop below (peeking at each element's
+       raw shape) rather than handled generically inside this procedure's
+       own single-value return, since splicing must be able to contribute
+       zero or many elements, not exactly one. ADECL bodies and top-level
+       splice attempts (a bare `~!.X` with no surrounding LIST/FORM to
+       splice into) are deliberately not specially handled — pragmatic
+       subset; not needed by any real macro seen so far. *)
+    IF (z.kind = ZilObj.KForm) & (ZilObj.ListLength(z) = 2) & ZilObj.IsAtomNamed(z.first, "UNQUOTE") THEN
+      qqInner := z.rest.first;
+      IF qqInner.kind = ZilObj.KSegment THEN RETURN EvalImpl(qqInner.segForm, FALSE)
+      ELSE RETURN EvalImpl(qqInner, FALSE) END
+
+    ELSIF (z.kind = ZilObj.KForm) OR (z.kind = ZilObj.KList) THEN
+      qqResult := NIL; qqTail := NIL; qqStop := FALSE; r := MkVal(NIL);
+      n := z;
+      WHILE (n # NIL) & (n.first # NIL) & ~qqStop DO
+        qqElem := n.first;
+        IF (qqElem.kind = ZilObj.KForm) & (ZilObj.ListLength(qqElem) = 2)
+           & ZilObj.IsAtomNamed(qqElem.first, "UNQUOTE") & (qqElem.rest.first.kind = ZilObj.KSegment) THEN
+          qqInner := qqElem.rest.first;
+          r := EvalImpl(qqInner.segForm, FALSE);
+          IF r.outcome # OValue THEN
+            qqStop := TRUE
+          ELSE
+            qqSpliceP := r.value;
+            WHILE (qqSpliceP # NIL) & (qqSpliceP.first # NIL) DO
+              qqCell := ZilObj.Cons(z.kind, qqSpliceP.first, NIL);
+              IF qqResult = NIL THEN qqResult := qqCell ELSE qqTail.rest := qqCell END;
+              qqTail := qqCell;
+              qqSpliceP := qqSpliceP.rest
+            END
+          END
+        ELSE
+          r := EvalImpl(qqElem, TRUE);
+          IF r.outcome # OValue THEN
+            qqStop := TRUE
+          ELSE
+            qqCell := ZilObj.Cons(z.kind, r.value, NIL);
+            IF qqResult = NIL THEN qqResult := qqCell ELSE qqTail.rest := qqCell END;
+            qqTail := qqCell
+          END
+        END;
+        n := n.rest
+      END;
+      IF qqStop THEN RETURN r END;
+      IF qqResult = NIL THEN RETURN MkVal(ZilObj.NewEmpty(z.kind)) ELSE RETURN MkVal(qqResult) END
+
+    ELSIF z.kind = ZilObj.KVector THEN
+      (* No splice support inside vector templates (pragmatic subset —
+         real macros overwhelmingly quasiquote FORM/LIST, not VECTOR); an
+         UNQUOTE-of-SEGMENT here just inserts the evaluated segment's whole
+         value as one element rather than splicing it. *)
+      qqVec := ZilObj.NewVectorN(z.vecLen);
+      FOR qqVecIdx := 0 TO z.vecLen - 1 DO
+        r := EvalImpl(z.vecItems[qqVecIdx], TRUE);
+        IF r.outcome # OValue THEN RETURN r END;
+        qqVec.vecItems[qqVecIdx] := r.value
+      END;
+      RETURN MkVal(qqVec)
+
+    ELSE
+      RETURN MkVal(z)   (* leaf: literal, unevaluated *)
+    END
+  END;
 
   IF (z.kind = ZilObj.KAtom) OR (z.kind = ZilObj.KFix) OR (z.kind = ZilObj.KString)
      OR (z.kind = ZilObj.KChar) OR (z.kind = ZilObj.KVector) OR (z.kind = ZilObj.KFalse)
@@ -418,7 +522,7 @@ BEGIN
     RETURN MkVal(z)
 
   ELSIF z.kind = ZilObj.KAdecl THEN
-    RETURN Eval(z.adFirst)  (* DECL check skipped *)
+    RETURN EvalImpl(z.adFirst, FALSE)  (* DECL check skipped *)
 
   ELSIF z.kind = ZilObj.KSegment THEN
     RETURN Err("a SEGMENT can only be evaluated inside a structure")
@@ -432,7 +536,7 @@ BEGIN
       IF nFirst.kind = ZilObj.KSegment THEN
         RETURN Err("SEGMENT splicing inside LIST is not implemented yet")
       END;
-      r := Eval(nFirst);
+      r := EvalImpl(nFirst, FALSE);
       IF ShouldPass(r) THEN RETURN r END;
       cell := ZilObj.Cons(ZilObj.KList, r.value, NIL);
       IF resultHead = NIL THEN resultHead := cell ELSE resultTail.rest := cell END;
@@ -453,7 +557,7 @@ BEGIN
       IF head = NIL THEN head := zFirst.localVal END;
       IF head = NIL THEN RETURN ErrAtom("calling unassigned atom:", zFirst) END
     ELSE
-      r := Eval(zFirst);
+      r := EvalImpl(zFirst, FALSE);
       IF ShouldPass(r) THEN RETURN r END;
       head := r.value
     END;
@@ -507,7 +611,7 @@ BEGIN
           fnUsedVarargs := TRUE;
           resultHead := NIL; resultTail := NIL;
           WHILE (fnCallArgs # NIL) & (fnCallArgs.first # NIL) & ~fnStop DO
-            r := Eval(fnCallArgs.first);
+            r := EvalImpl(fnCallArgs.first, FALSE);
             IF r.outcome # OValue THEN
               fnStop := TRUE
             ELSE
@@ -528,11 +632,16 @@ BEGIN
           fnSpecPos := fnSpecPos.rest
 
         ELSE
-          fnTarget := NIL; fnDefault := NIL;
+          fnTarget := NIL; fnDefault := NIL; fnQuoted := FALSE;
           IF fnOneSpec.kind = ZilObj.KAtom THEN
             fnTarget := fnOneSpec
           ELSIF fnOneSpec.kind = ZilObj.KAdecl THEN
             fnTarget := fnOneSpec.adFirst
+          ELSIF fnOneSpec.kind = ZilObj.KForm THEN
+            (* not a (atom default) pair — the only other legal shape is a
+               bare quoted atom, e.g. 'N read as <QUOTE N>; the check just
+               below confirms and unwraps it, erroring otherwise *)
+            fnTarget := fnOneSpec
           ELSIF (fnOneSpec.kind = ZilObj.KList) & (ZilObj.ListLength(fnOneSpec) = 2) THEN
             fnSpecFirst := fnOneSpec.first;
             IF fnSpecFirst.kind = ZilObj.KAdecl THEN fnTarget := fnSpecFirst.adFirst
@@ -540,6 +649,19 @@ BEGIN
             fnDefault := fnOneSpec.rest.first
           ELSE
             RETURN Err("FUNCTION/MACRO: malformed argument-list entry")
+          END;
+          (* A target still shaped like <QUOTE atom> (from source '`X` — the
+             original checks this after any ADECL-unwrap above, and this
+             port matches that order rather than the reverse) means the
+             call-site argument for this parameter should be bound as-is,
+             without evaluating it — e.g. DEFMAC BOTTLES ('N) in zilf's own
+             99-bottles sample: N is quoted so it captures the caller's
+             *literal* `.N` reference, which the macro body's quasiquote
+             template later splices back in with ~.N so the generated code
+             evaluates it in the caller's own scope, not the macro's. *)
+          IF (fnTarget # NIL) & (fnTarget.kind = ZilObj.KForm) & (ZilObj.ListLength(fnTarget) = 2)
+             & ZilObj.IsAtomNamed(fnTarget.first, "QUOTE") THEN
+            fnQuoted := TRUE; fnTarget := fnTarget.rest.first
           END;
           IF (fnTarget = NIL) OR (fnTarget.kind # ZilObj.KAtom) THEN
             RETURN Err("FUNCTION/MACRO: argument-list target must be an ATOM")
@@ -553,17 +675,17 @@ BEGIN
             IF (fnCallArgs = NIL) OR (fnCallArgs.first = NIL) THEN
               RETURN Err("FUNCTION/MACRO: too few arguments")
             END;
-            r := Eval(fnCallArgs.first);
+            IF fnQuoted THEN r := MkVal(fnCallArgs.first) ELSE r := EvalImpl(fnCallArgs.first, FALSE) END;
             IF r.outcome # OValue THEN fnStop := TRUE ELSE fnTarget.localVal := r.value END;
             fnCallArgs := fnCallArgs.rest
 
           ELSIF fnPhase = APOpt THEN
             IF (fnCallArgs # NIL) & (fnCallArgs.first # NIL) THEN
-              r := Eval(fnCallArgs.first);
+              IF fnQuoted THEN r := MkVal(fnCallArgs.first) ELSE r := EvalImpl(fnCallArgs.first, FALSE) END;
               IF r.outcome # OValue THEN fnStop := TRUE ELSE fnTarget.localVal := r.value END;
               fnCallArgs := fnCallArgs.rest
             ELSIF fnDefault # NIL THEN
-              r := Eval(fnDefault);
+              r := EvalImpl(fnDefault, FALSE);
               IF r.outcome # OValue THEN fnStop := TRUE ELSE fnTarget.localVal := r.value END
             ELSE
               fnTarget.localVal := NIL
@@ -571,7 +693,7 @@ BEGIN
 
           ELSE (* APAux: never consumes call-site args *)
             IF fnDefault # NIL THEN
-              r := Eval(fnDefault);
+              r := EvalImpl(fnDefault, FALSE);
               IF r.outcome # OValue THEN fnStop := TRUE ELSE fnTarget.localVal := r.value END
             ELSE
               fnTarget.localVal := NIL
@@ -610,7 +732,7 @@ BEGIN
         LOOP
           fnBP := fnActualHead.funcBody;
           WHILE (fnBP # NIL) & (fnBP.first # NIL) DO
-            r := Eval(fnBP.first);
+            r := EvalImpl(fnBP.first, FALSE);
             IF r.outcome # OValue THEN EXIT END;
             fnBP := fnBP.rest
           END;
@@ -632,7 +754,7 @@ BEGIN
       END;
 
       IF fnIsMacro & (r.outcome = OValue) THEN
-        RETURN Eval(r.value)
+        RETURN EvalImpl(r.value, FALSE)
       ELSE
         RETURN r
       END
@@ -659,13 +781,13 @@ BEGIN
         IF (clause.kind # ZilObj.KList) OR ZilObj.IsEmpty(clause) THEN
           RETURN Err("COND: each clause must be a non-empty list")
         END;
-        cr := Eval(clause.first);
+        cr := EvalImpl(clause.first, FALSE);
         IF ShouldPass(cr) THEN RETURN cr END;
         IF IsTrue(cr.value) THEN
           r := cr;
           body := clause.rest;
           WHILE (body # NIL) & (body.first # NIL) DO
-            r := Eval(body.first);
+            r := EvalImpl(body.first, FALSE);
             IF ShouldPass(r) THEN RETURN r END;
             body := body.rest
           END;
@@ -679,7 +801,7 @@ BEGIN
       r := MkVal(TrueVal());
       n := z.rest;
       WHILE (n # NIL) & (n.first # NIL) DO
-        r := Eval(n.first);
+        r := EvalImpl(n.first, FALSE);
         IF ShouldPass(r) THEN RETURN r END;
         IF ~IsTrue(r.value) THEN RETURN r END;
         n := n.rest
@@ -690,12 +812,18 @@ BEGIN
       r := MkVal(FalseVal());
       n := z.rest;
       WHILE (n # NIL) & (n.first # NIL) DO
-        r := Eval(n.first);
+        r := EvalImpl(n.first, FALSE);
         IF ShouldPass(r) THEN RETURN r END;
         IF IsTrue(r.value) THEN RETURN r END;
         n := n.rest
       END;
       RETURN r
+
+    ELSIF isFSubr & (name = "QUASIQUOTE") THEN
+      (* `X reads as <QUASIQUOTE X> (see ZilRead.mod) — switch into
+         quasiquote-walk mode for X; see the dedicated comment at the top
+         of this procedure's body for what that mode does. *)
+      RETURN EvalImpl(z.rest.first, TRUE)
 
     ELSIF isFSubr & ((name = "PROG") OR (name = "REPEAT") OR (name = "BIND")) THEN
       (* <[PROG|REPEAT|BIND] [name] (binding...) body...>. A binding is an
@@ -772,7 +900,7 @@ BEGIN
         INC(progNBind);
 
         IF progInit # NIL THEN
-          r := Eval(progInit);
+          r := EvalImpl(progInit, FALSE);
           IF (r.outcome = OReturn) & (r.activation = progAct) THEN
             r := MkVal(r.value); progStop := TRUE
           ELSIF r.outcome # OValue THEN
@@ -799,7 +927,7 @@ BEGIN
           progAgain := FALSE;
           progBP := progBody;
           WHILE (progBP # NIL) & (progBP.first # NIL) DO
-            r := Eval(progBP.first);
+            r := EvalImpl(progBP.first, FALSE);
             IF (r.outcome = OAgain) & (r.activation = progAct) THEN
               progAgain := TRUE
             ELSIF (r.outcome = OReturn) & (r.activation = progAct) THEN
@@ -834,7 +962,7 @@ BEGIN
       nargs := 0;
       n := z.rest;
       WHILE (n # NIL) & (n.first # NIL) DO
-        r := Eval(n.first);
+        r := EvalImpl(n.first, FALSE);
         IF ShouldPass(r) THEN RETURN r END;
         IF nargs < MaxArgs THEN args[nargs] := r.value; INC(nargs) END;
         n := n.rest
@@ -845,7 +973,14 @@ BEGIN
   ELSE
     RETURN MkVal(z)
   END
-END Eval;
+END EvalImpl;
+
+(* Stable public entry point — see EvalImpl's own header comment for why
+   the real self-recursive evaluator takes a second (quasiquote-mode)
+   parameter internally while this wrapper keeps every existing caller
+   unaffected. *)
+PROCEDURE Eval*(z: ZilObj.Zo): ZResult;
+BEGIN RETURN EvalImpl(z, FALSE) END Eval;
 
 (* ------------------------------------------------------------------ *)
 (* builtin registration                                                  *)
@@ -862,6 +997,7 @@ PROCEDURE InitBuiltins*;
 VAR tAtom: ZilObj.Zo;
 BEGIN
   Register("QUOTE", TRUE); Register("COND", TRUE); Register("AND", TRUE); Register("OR", TRUE);
+  Register("QUASIQUOTE", TRUE);
   Register("PROG", TRUE); Register("REPEAT", TRUE); Register("BIND", TRUE);
   Register("RETURN", FALSE); Register("AGAIN", FALSE);
   Register("DEFINE", TRUE); Register("DEFINE20", TRUE); Register("DEFMAC", TRUE);
@@ -877,6 +1013,7 @@ BEGIN
   Register("L?", FALSE); Register("G?", FALSE); Register("L=?", FALSE); Register("G=?", FALSE);
   Register("NOT", FALSE);
   Register("PRINC", FALSE); Register("PRIN1", FALSE); Register("PRINT", FALSE); Register("CRLF", FALSE);
+  Register("PRINTN", FALSE); Register("PRINTC", FALSE);
 
   tAtom := ZilObj.Intern("T");
   tAtom.globalVal := tAtom;  (* T is self-valued *)

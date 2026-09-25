@@ -43,7 +43,16 @@ TYPE
     r: Files.Rider;
     filename*: ARRAY 512 OF CHAR;
     line*: INTEGER;
-    heldChar: INTEGER;       (* -1 = none held *)
+    (* A 2-deep pushback stack (heldChar is the top, returned first by
+       NextChar). One slot isn't enough: SkipWhitespace's "! before
+       non-whitespace" case must push back both the '!' and the character
+       after it so the main dispatch's own bang-lookahead can re-read them
+       in order — a single slot silently lost the second character,
+       corrupting the stream (e.g. "!\B" mid-token would read '!', then
+       skip straight past the already-consumed '\' to read whatever came
+       after B instead) whenever a bang-prefixed token followed some
+       whitespace. -1 = slot empty. *)
+    heldChar, heldChar2: INTEGER;
     err*: BOOLEAN;
     errMsg*: ARRAY 256 OF CHAR;
     sawPercent*: BOOLEAN;    (* set whenever a '%' construct was parsed but not evaluated *)
@@ -57,7 +66,7 @@ BEGIN
   Files.Set(rd.r, rd.f, 0);
   Strings.Copy(filename, rd.filename);
   rd.line := 1;
-  rd.heldChar := -1;
+  rd.heldChar := -1; rd.heldChar2 := -1;
   rd.err := FALSE; rd.errMsg[0] := 0X;
   rd.sawPercent := FALSE; rd.sawChtype := FALSE;
   RETURN TRUE
@@ -72,7 +81,9 @@ BEGIN rd.err := TRUE; Strings.Copy(msg, rd.errMsg) END SetErr;
 PROCEDURE NextChar(VAR rd: Reader): INTEGER;
 VAR b: BYTE; c: INTEGER;
 BEGIN
-  IF rd.heldChar >= 0 THEN c := rd.heldChar; rd.heldChar := -1; RETURN c END;
+  IF rd.heldChar >= 0 THEN
+    c := rd.heldChar; rd.heldChar := rd.heldChar2; rd.heldChar2 := -1; RETURN c
+  END;
   IF rd.r.eof THEN RETURN -1 END;
   Files.Read(rd.r, b);
   IF rd.r.eof THEN RETURN -1 END;
@@ -81,9 +92,12 @@ BEGIN
   RETURN c
 END NextChar;
 
+(* Pushes onto a 2-deep stack (see the Reader record's own comment) — the
+   most recently pushed-back character is the next one NextChar returns. *)
 PROCEDURE PushBack(VAR rd: Reader; c: INTEGER);
 BEGIN
   IF c = 10 THEN DEC(rd.line) END;
+  rd.heldChar2 := rd.heldChar;
   rd.heldChar := c
 END PushBack;
 
@@ -105,6 +119,7 @@ BEGIN
        OR (u = ORD("{")) OR (u = ORD("}")) OR (u = ORD("[")) OR (u = ORD("]"))
        OR (u = ORD(":")) OR (u = ORD(";")) OR (u = ORD('"')) OR (u = ORD("'"))
        OR (u = ORD(",")) OR (u = ORD("%")) OR (u = ORD("#"))
+       OR (u = ORD("`")) OR (u = ORD("~"))
 END IsNonAtomChar;
 
 (* Skips whitespace, including "! <ws>" (bang immediately before real
@@ -248,7 +263,7 @@ VAR
   z, z2, inner, ty, result, v: ZilObj.Zo;
   okInner, innerDone, innerTerm, run: BOOLEAN;
   items: ARRAY MaxStructItems OF ZilObj.Zo;
-  atomName: ARRAY 8 OF CHAR;
+  atomName: ARRAY 16 OF CHAR;
   banged: BOOLEAN;
 BEGIN
   ok := TRUE; done := FALSE; isTerm := FALSE; termChar := 0;
@@ -320,13 +335,27 @@ BEGIN
     RETURN v
 
   ELSIF (c = ORD(".")) OR (c = ORD(".") + 128) OR (c = ORD(",")) OR (c = ORD(",") + 128)
-      OR (c = ORD("'")) OR (c = ORD("'") + 128) THEN
+      OR (c = ORD("'")) OR (c = ORD("'") + 128)
+      OR (c = ORD("`")) OR (c = ORD("`") + 128) OR (c = ORD("~")) OR (c = ORD("~") + 128) THEN
     (* .X -> <LVAL X>   ,X -> <GVAL X>   'X -> <QUOTE X>
-       banged forms (!., !, , !') wrap the result in a SEGMENT *)
+       `X -> <QUASIQUOTE X>   ~X -> <UNQUOTE X>  (see ZilEval.mod's
+       quasiquote-walk logic for how these two are actually used — the
+       real zilf implements them as an ordinary library, zillib/qq.mud,
+       registering `/~ as runtime-extensible reader-macro prefix chars via
+       a MAKE-PREFIX-MACRO SUBR this port doesn't have; since `/~ turn out
+       to be used pervasively by the CORE zillib files (not just as an
+       opt-in extra), this port hardcodes their expansion natively here
+       instead of porting the general extensible-prefix-macro mechanism
+       and qq.mud's own CHTYPE/PACKAGE/MAPF-based implementation — same
+       "replicate the observable behavior pragmatically" approach as
+       PROG/REPEAT/BIND vs. the original's LocalEnvironment chain)
+       banged forms (!., !, , !', !`, !~) wrap the result in a SEGMENT *)
     banged := c >= 128;
     IF (c MOD 128) = ORD(".") THEN Strings.Copy("LVAL", atomName)
     ELSIF (c MOD 128) = ORD(",") THEN Strings.Copy("GVAL", atomName)
-    ELSE Strings.Copy("QUOTE", atomName)
+    ELSIF (c MOD 128) = ORD("'") THEN Strings.Copy("QUOTE", atomName)
+    ELSIF (c MOD 128) = ORD("`") THEN Strings.Copy("QUASIQUOTE", atomName)
+    ELSE Strings.Copy("UNQUOTE", atomName)
     END;
     inner := ReadOne(rd, okInner, innerDone, innerTerm, innerTermCh);
     IF (~okInner) THEN ok := FALSE; RETURN NIL END;

@@ -345,15 +345,16 @@ new environment, so they can see earlier-bound params, matching the
 original), `"AUX"` (same shape, never filled from call-site args), and
 `"ARGS"`/`"TUPLE"` (gathers all remaining call-site args, evaluated, into
 one LIST). The optional leading activation atom (`<DEFINE F ACT (...) ...>`)
-reuses the exact same mechanism as `PROG`'s named activation. **Deliberately
-NOT ported** (pragmatic subset, revisit only if real source needs them):
-DECL checking/type declarations anywhere in the spec, quoted (unevaluated)
-individual arguments, and the `"CALL"`/`"BIND"`/`"VALUE"`/`"NAME"`/`"ACT"`
-one-off clauses inside the arg list itself (as opposed to the leading
-activation atom, which *is* supported). Also **not ported**: the
-already-defined/redefinition check (`AllowRedefine`) — this port always
-silently allows redefinition, which is actually convenient for iterative
-test-file development.
+reuses the exact same mechanism as `PROG`'s named activation. Quoted
+(unevaluated) individual arguments (`'N`) were initially skipped here too,
+but turned out to be needed almost immediately — see phase 2d below.
+**Still deliberately NOT ported** (pragmatic subset, revisit only if real
+source needs them): DECL checking/type declarations anywhere in the spec,
+and the `"CALL"`/`"BIND"`/`"VALUE"`/`"NAME"`/`"ACT"` one-off clauses inside
+the arg list itself (as opposed to the leading activation atom, which *is*
+supported). Also **not ported**: the already-defined/redefinition check
+(`AllowRedefine`) — this port always silently allows redefinition, which
+is actually convenient for iterative test-file development.
 
 **Key implementation points confirmed against the original before
 coding**: entering *any* function/macro application unconditionally clears
@@ -384,6 +385,128 @@ together via `FORM`+`LIST` (`MY-IF <G? 5 3> "yes" "no" => "yes"`). **All 15
 produced exactly the expected result.** Re-ran phases 1, 2, and 2b's
 existing tests too, plus the full `Modules/*.mod`+`examples/*.mod`
 regression suite (135 files) — no regressions anywhere.
+
+## What's done (phase 2d: quasiquote, quoted args, and two real reader bugs) — files, and what's tested
+
+Followed this doc's own "Suggested order" advice: tried a short real excerpt
+through phases 1-2c instead of continuing to guess from the TODO list —
+`~/lib/src/zilf/sample/beer/beer.zil` (the 99-bottles-of-beer sample). This
+immediately surfaced three real, previously-unknown gaps, all now fixed:
+
+1. **Quasiquote (`` ` ``/`~`) is not a niche feature.** Before assuming it
+   was skippable (`beer.zil` only needs it because it explicitly
+   `<USE "QQ">`s), grepped all of `zillib/*.zil` and every `sample/*/*.zil`:
+   `` `<...> `` is used pervasively across the **core** zillib files
+   (`parser.zil`, `scope.zil`, `verbs.zil`, `pronouns.zil`, `template.zil`,
+   `orphan.zil`, `status.zil`, `pseudo.zil`) and most of the real game
+   samples — not an opt-in extra. This is essential, not optional, for the
+   "pragmatic subset covering common real ZIL games" goal.
+
+   The real implementation (`zillib/qq.mud`) is itself an ordinary ZIL
+   library built on CHTYPE/NEWTYPE, the full PACKAGE/OBLIST hierarchy,
+   MAPF/MAPRET, APPLY, and PRIMTYPE reflection, registering `` ` ``/`~` at
+   runtime via a `MAKE-PREFIX-MACRO` SUBR this port has none of the
+   infrastructure for. Rather than port that whole mechanism, this
+   implements the same *observable* behavior natively — same
+   "pragmatic reimplementation over faithful port" approach already used
+   for `PROG`/`REPEAT`/`BIND` vs. `LocalEnvironment`.
+
+   - **`ZilRead.mod`**: `` ` ``/`~` are new reader prefix chars (mirroring
+     the existing `.`/`,`/`'` → `LVAL`/`GVAL`/`QUOTE` sugar exactly),
+     producing `<QUASIQUOTE X>` / `<UNQUOTE X>` — ordinary 2-element FORMs,
+     no new `ZilObj` kinds needed. (Also bumped `atomName`'s buffer from
+     `ARRAY 8 OF CHAR` to 16 — it was sized for `"QUOTE"`, silently
+     truncating `"QUASIQUOTE"` to 7 characters.)
+   - **`ZilEval.mod`**: the evaluator (`Eval`) is renamed to an internal
+     `EvalImpl(z, qq: BOOLEAN)`, with `Eval*` now a thin
+     `EvalImpl(z, FALSE)` wrapper — the quasiquote-walk mode and normal
+     eval mode each need to call the other (`QUASIQUOTE`'s FSUBR case
+     switches into walk mode; an `UNQUOTE`'d spot switches back out), so —
+     same forward-reference reason as everything else self-recursive in
+     this port — they have to be one procedure. Every one of the ~16
+     existing self-recursive call sites was mechanically updated
+     (`Eval(x)` → `EvalImpl(x, FALSE)`) via a scripted regex pass (verified
+     safe first: every call site's argument was a single simple
+     expression, no nested calls, so no ambiguity) rather than by hand, to
+     avoid missing one.
+   - **Semantics** (verified against `qq.mud`'s `QQ-IMPL` before coding,
+     then reimplemented natively): a non-structured leaf (ATOM/FIX/STRING/
+     etc.) passes through completely literally, unevaluated; a LIST/FORM
+     is rebuilt recursively with the same shape; `~X` evaluates `X`
+     normally and substitutes the single result; `~!X` (unquote wrapping a
+     SEGMENT — matching the original's own splicing detection, which is
+     also just "unquote of a segment") evaluates `X` normally and splices
+     *its* elements into the surrounding LIST/FORM instead of inserting
+     one — this needed special-casing in the rebuild loop itself (peeking
+     at each raw element's shape before recursing), since splicing must be
+     able to contribute zero or many elements, which a single recursive
+     return value can't represent. VECTOR is walked too (real templates
+     use it far less than FORM/LIST) but **without splice support** —
+     pragmatic subset. ADECL bodies and a bare top-level `~!X` (splicing
+     with nothing to splice into) are not specially handled either.
+
+2. **Quoted individual arguments** (`'N` in an arg-spec, e.g.
+   `DEFMAC BOTTLES ('N)`) — the other deliberately-skipped-in-phase-2c
+   feature that `beer.zil` turned out to need immediately: a quoted
+   parameter binds the caller's *literal, unevaluated* argument form
+   rather than its evaluated value. This is *the* standard ZIL idiom for
+   writing a macro that syntactically re-embeds one of its own arguments
+   into generated code (quote it going in, `~`-unquote it back out inside
+   the quasiquote template) so the generated code, evaluated later in the
+   *caller's* scope, refers to the caller's own variable — not a value
+   frozen at macro-expansion time. Verified against `ArgSpec.Parse`'s own
+   ADECL-then-QUOTE unwrap order and matched it. **Found and fixed a real
+   bug while wiring this up**: a bare `<QUOTE atom>`-shaped spec item
+   (`fnOneSpec.kind = ZilObj.KForm`) didn't match any of the existing
+   item-shape branches (bare ATOM / ADECL / 2-list-with-default) and fell
+   straight into the "malformed argument-list entry" error *before* ever
+   reaching the new quote-unwrapping check — needed its own branch in the
+   shape dispatch purely to flow through to the check below it.
+
+3. **Two real, previously-latent bugs found and fixed while chasing why
+   `beer.zil` still wouldn't read even after (1) and (2) landed** — both
+   completely unrelated to quasiquote, and both worth calling out because
+   they'd silently corrupt *any* bang-prefixed token (`!\X` character
+   literals, `!.X`/`!,X`/`!'X`/`!<...>` segments) that follows whitespace
+   preceded by anything else, which just hadn't been exercised by any
+   earlier test file:
+   - **`ZilRead.mod`'s `SkipWhitespace` had a single-slot pushback bug.**
+     Its own "`!` immediately before real whitespace is itself whitespace"
+     rule needs to push back *two* characters (the `!` and whatever
+     followed it) so the main dispatch's separate bang-lookahead can
+     re-read them in order — but `Reader.heldChar` was a single `INTEGER`
+     slot, so the second `PushBack` call silently overwrote the first,
+     losing a character and desynchronizing the whole rest of that token
+     read (e.g. `<PRINTC !\s>` would lose the `\` and instead read the
+     *next* raw byte in the stream as if it were the character right after
+     `!`, eventually producing "empty atom" errors several characters
+     later with no direct connection to the real cause). Fixed by making
+     the pushback buffer a proper 2-deep LIFO stack (`heldChar`+
+     `heldChar2`). Isolated repro (confirmed failing before, passing
+     after): `<A !\B>` — a bang-prefixed token as anything but a FORM's
+     very first element.
+   - (Same session, same root cause class, listed under (1) above for
+     where it was found) the `atomName` buffer truncating `"QUASIQUOTE"`.
+
+**Tested**: `/private/tmp/.../scratchpad/sample5.zil` + `eval5test.mod` —
+basic substitution (`` `<FOO ~.X BAR>` `` with X=5 `=> <FOO 5 BAR>`),
+nested lists with a computed unquote (`` `(A ~.X (NESTED ~<+ .X 1>) C)` ``
+`=> (A 5 (NESTED 6) C)`), unquote-splicing (`` `<ADD ~.X ~!.LST>` `` with
+LST=(1 2 3) `=> <ADD 5 1 2 3>`), and **the actual `beer.zil` `BOTTLES`
+macro verbatim** (quoted `'N`, quasiquoted `PROG` template, `~.N` splicing
+the caller's own reference back in) called from a real `DEFINE`d function
+— correctly prints "7" then (since `N==?` means *not* exactly equal, verified
+against `Subrs.Math.cs` before trusting the output) pluralizes with an "s"
+for `N=7` but not for `N=1`, exactly matching real English-pluralization
+behavior and confirming the whole macro pipeline end-to-end. Also
+confirmed via `readbeer.mod` that **the entire real `beer.zil` file now
+reads without error** (`ROUTINE`/`GO`/`SING` bodies parse fine as inert
+data — actually *compiling* them is phase 3's job). Re-ran every earlier
+phase's existing tests, plus the full transpiler `Modules/*.mod`+
+`examples/*.mod` regression suite (135 files) — no regressions anywhere.
+
+Also added (needed to make the `BOTTLES` test actually runnable):
+`PRINTN`, `PRINTC` SUBRs in `ZilEval.mod`.
 
 ## What's still needed for a complete phase 2 (Interpreter core)
 
@@ -450,30 +573,31 @@ Before starting:
 
 ## Suggested order for the next session
 
-1. Re-run all four existing test harnesses to confirm nothing regressed:
+1. Re-run all five existing test harnesses to confirm nothing regressed:
    phase 1's `sample1.zil` (`readtest.mod`), phase 2's `sample2.zil`
-   (`evaltest.mod`), phase 2b's `sample3.zil` (`eval3test.mod`), and phase
-   2c's `sample4.zil` (`eval4test.mod`). (All live under the session's
-   scratchpad, which may not survive between machine sessions — if gone,
-   they're small and quick to recreate from this doc's descriptions of
-   what they cover.) Also re-run the transpiler's own full
-   `Modules/*.mod`+`examples/*.mod` regression suite if any transpiler
-   work happened in between sessions.
-2. With phases 1-2c now covering read + eval + control flow + function/
-   macro application, real (if simple) ZIL *library-style* source — code
-   that defines and uses its own `DEFMAC` macros — should now be
-   evaluable end-to-end for the first time. Before writing more
-   interpreter features on spec, it's worth trying a short real excerpt
-   from `~/lib/src/zilf`'s own library files (or a small real game's
-   source) through phases 1-2c as a sanity/integration check, expecting
-   it to fail on something specific — that failure is the most
-   trustworthy signal for what to port next, more so than continuing to
-   guess from the "what's still needed" list above.
-3. Otherwise, pick from the "what's still needed" list above — items 4
-   (fixing phase 1's `%`/`#TYPE` stubs now that Eval exists) and 1
-   (`ObList`, if a real source file turns out to need qualified atoms)
-   are the most likely to matter soon; the rest are genuinely on-demand.
+   (`evaltest.mod`), phase 2b's `sample3.zil` (`eval3test.mod`), phase 2c's
+   `sample4.zil` (`eval4test.mod`), and phase 2d's `sample5.zil`
+   (`eval5test.mod`). (All live under the session's scratchpad, which may
+   not survive between machine sessions — if gone, they're small and quick
+   to recreate from this doc's descriptions of what they cover.) Also
+   re-run the transpiler's own full `Modules/*.mod`+`examples/*.mod`
+   regression suite if any transpiler work happened in between sessions.
+2. Phase 2d's approach — try a short real excerpt from `~/lib/src/zilf`'s
+   own samples/library before guessing what to build next — paid off well
+   (surfaced quasiquote, quoted args, *and* two real reader bugs from one
+   29-line file). Keep doing this: try another small real sample (`sample/
+   empty/empty.zil`, `sample/cloak/cloak.zil`, or a `zillib/*.zil` file
+   read in isolation) through phases 1-2d and see what it needs next,
+   rather than continuing to guess from the "what's still needed" list.
+3. Otherwise, pick from the "what's still needed" list above — item 4
+   (fixing phase 1's `%`/`#TYPE` stubs, now that `Eval`/quasiquote both
+   exist) is the most likely to matter soon for reading more real source
+   *while* reading it, not just evaluating already-read forms; the rest
+   are genuinely on-demand.
 4. Once phase 2 feels solid (or once real source above exposes what's
    still missing), move to **phase 3** (Compiler/ZModel/Emit.Zap) — see
-   that section below for where to start reading first.
+   that section below for where to start reading first. Note that
+   `beer.zil`'s `ROUTINE GO`/`ROUTINE SING` now read fine as inert data
+   (phase 1) but can't be *run* without phase 3, since (confirmed this
+   session) `ROUTINE` bodies are compiled, never interpreted directly.
 5. Update this doc's "what's done" section and commit again.
