@@ -1236,6 +1236,81 @@ investigated and deferred — see that section above), `VERSION`/`VERSION?`
 runtime object-tree operations, deliberately still unimplemented), and an
 increasingly long tail of single-digit items.
 
+## Milestone: phase 3b begins — first real ZIL-to-.zap code generation
+
+Read `Compilation.Routines.cs` in full to understand `BuildRoutine`'s
+shape: set up Z-machine locals 1:1 from the argspec (via
+`rb.DefineRequiredParameter`/etc.), compile each body statement via
+`CompileStmt` (wanting a result *only* for the routine's last statement —
+matches this port's own established "the last body form's value is the
+result" convention from `PROG`/function application), and for the
+result-wanted case, explicitly `rb.Return(result)` — there's no implicit
+fall-through return anywhere in the original, every routine explicitly
+returns or (for the entry point) quits.
+
+Confirmed the exact `.zap` textual syntax needed by reading a **real
+zilf-compiled `.zap` file already present on this machine**
+(`~/cloak_plus.zap`, 4,427 lines) rather than guessing: `.FUNCT
+NAME,local1[=default],local2,...` declares a routine and its locals;
+plain instruction lines are `MNEMONIC operand1,operand2,... >storeTarget
+/branchLabel` (or `\branchLabel` for inverted polarity); `STACK` is a
+literal pseudo-variable name usable as both a store target and an
+operand (confirmed via real examples like `MUL N,2 >STACK` immediately
+followed by further ops consuming `STACK`); `RETURN operand` and the
+0-operand `RTRUE`/`RFALSE` are ordinary instructions, both already in
+`ZapfOpcodes.mod`'s table. Found an even more directly reusable artifact:
+a **minimal, previously-verified-working `.zap` template** sitting in
+this session's own scratchpad from earlier zapf-port testing
+(`sample1.zap` — a bare header plus `.FUNCT GO` / `START::` / `QUIT` /
+`.END`), used as the base for this milestone's own test file instead of
+reconstructing header boilerplate from scratch.
+
+**Added `Modules/ZilCompile.mod`** — deliberately minimal, the same "get
+one trivial case working before widening" discipline used to start every
+earlier phase. Handles: a required-args-only `ROUTINE`, body expressions
+that are FIX literals, `.X`-style `LVAL` references to the routine's own
+parameters, and the four arithmetic `BinaryOp`s (`+`/`-`/`*`//`). Compound
+sub-expressions always route their result through the Z-machine stack
+(`STACK`) rather than allocating temporary locals — correct, not maximally
+efficient, but consistent with this port's "correctness first,
+optimization never" philosophy (the original's own peephole optimizer,
+already decided against porting, is what would tighten this in the real
+compiler). `CompileOperand` is self-recursive (same forward-reference
+reason as `ZilRead.ReadOne`/`ZilEval.EvalImpl` — Oberon has no `FORWARD`),
+returning the `.zap` operand text for whatever it just compiled (a literal
+number, a bare local name, or `"STACK"`) so the caller can use it as an
+operand to a further instruction.
+
+**Tested end-to-end, exactly the way the plan called for**: compiled
+`<ROUTINE ADD1 (X) <+ .X 1>>`, wrapped it with a hand-written minimal `GO`
+entry point (`CALL ADD1,41 >STACK` / `PRINTN STACK` / `CRLF` / `QUIT`),
+assembled the result with the existing `zapf` (512-byte story file,
+assembled cleanly), and ran it through `examples/zmachine.mod`. The
+interpreter printed `41+1=42` correctly (verified after stripping ANSI
+escape codes) — **the first real ZIL routine compiled by this port,
+assembled, and executed, producing the correct result end-to-end.** Also
+tested a nested expression, `<+ <* .X 2> 1>` for `X=41` (expected `83`,
+matching `41*2+1`) to validate the stack-based sub-expression handling —
+also correct.
+
+**A cosmetic artifact worth recording so it isn't re-investigated as a
+bug later**: running any minimal-header V3 story through
+`examples/zmachine.mod` prints a stray `"7"` prefix before the first
+`PRINTN`'d value and a stray `"8"` on the next screen redraw (confirmed:
+a literal `PRINTN 42` alone, with no `ROUTINE`/`CALL` involved at all,
+produces the exact same `"742"`/`"8"` artifacts). This is pre-existing
+status-line/screen-model behavior in `zmachine.mod` when a game has no
+real object tree or globals configured for the status line to render
+(this milestone's test header is a bare minimal template, not a real
+game) — confirmed unrelated to `ZilCompile.mod` by reproducing it with a
+hand-written `.zap` file containing no compiled code at all. Not a phase-
+3b bug; not investigated further since it's out of scope for this slice.
+
+**Tested**: re-ran all five existing phase-2 test harnesses (byte-
+identical output) plus the full transpiler regression suite (137 files —
+includes the new `ZilCompile.mod` — same 3 pre-existing-only failures) —
+no regressions.
+
 ## Suggested order for the next session
 
 1. Re-run all five existing phase-2 test harnesses to confirm nothing
@@ -1284,18 +1359,37 @@ increasingly long tail of single-digit items.
    separate, larger investigation or squarely phase 3b's job, not another
    quick SUBR to add. This is a natural point to stop registration-only
    work and move to actual code generation.
-4. **Phase 3b: actual code generation** — this is now the clear next
-   major step, not further phase-3a additions. Read
-   `Compilation.Objects.cs` (object/property/flag table layout) and
-   `Compilation.Routines.cs`+`ZBuiltins.cs` (routine body → `.zap` text,
-   starting with the simplest VoidCall/ValueCall builtins) next, since
-   those weren't read yet (see the reading-pass section's "what's still
-   not read" for the full list and reasoning per file). Get one trivial
-   routine (`<ROUTINE ADD1 (X) <+ .X 1>>`) compiling to correct `.zap`
-   text, assembling with the existing `zapf`, and running in
-   `examples/zmachine.mod` before widening to more builtins — this
-   mirrors exactly how `zapf` itself and each phase-2 slice were validated
-   end-to-end.
+4. **Phase 3b has begun** (see the "Milestone: phase 3b begins" section
+   above) — `ZilCompile.mod` compiles a trivial required-args-only
+   `ROUTINE` with FIX literals, `LVAL` parameter references, and `+`/`-`/
+   `*`//` to real `.zap` text, verified assembling and running correctly
+   end-to-end. Natural next widening steps, roughly in order of value:
+   a. **Multi-statement bodies**: `CompileRoutine` currently errors if a
+      routine has more than one body form. Compiling every non-last
+      statement "for effect" (`wantResult = FALSE`, matching
+      `BuildRoutine`'s own loop) and only the last for its value is a
+      small, mechanical extension of what's already there.
+   b. **More `ZBuiltins.cs` VoidCall/ValueCall builtins** on demand, the
+      same one-at-a-time methodology used throughout this whole port —
+      `SET`/`SETG` (store to a local/global), `PRINTI`/`PRINTN`/`CRLF`
+      (this port's own evaluator already has native equivalents to model
+      the compiled form after), `MOVE`/`FSET`/`FCLEAR` (once object
+      compilation exists, see (d)). Test each the same way `ADD1` was:
+      compile, assemble, run, check the actual printed/observable result.
+   c. **`COND`** compiled as a real branch tree (not interpreted) — read
+      `Compilation.Conditions.cs` (663 lines, not yet read) first; this is
+      where the VALUE/VOID/PRED/VALUE-PRED calling convention from the
+      phase 3 architecture reading pass actually gets exercised, so expect
+      to need `PredCall`-shaped builtins (`EQUAL?`, `G?`, `L?`, etc.)
+      alongside it.
+   d. **Object/property/flag table emission**: read `Compilation.Objects.cs`
+      (762 lines, not yet read) — needed before `MOVE`/`FSET?`/`GETP`/etc.
+      mean anything, and before a compiled game can do much besides pure
+      arithmetic.
+   Keep testing each addition the same end-to-end way (compile → `zapf` →
+   `zmachine.mod`, checking the actual result) rather than trusting the
+   `.zap` text looks right by inspection alone — that discipline is what
+   caught nothing going wrong so far, precisely because it was followed.
 5. If phase 3 feels too large to continue cold, the smaller fallback is
    still on the table: pick from phase 2's "what's still needed" list —
    item 4 (fixing phase 1's `%`/`#TYPE` stubs, now that `Eval`/quasiquote
