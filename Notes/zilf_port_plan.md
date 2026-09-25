@@ -1723,6 +1723,72 @@ stopped on its eighth line. The remaining frontier, by first failure:
 **Tested**: transpiler regression suite, 138 files, same 3 pre-existing-only
 failures.
 
+## What's done (phase 3b continued: include paths, and read-time `%` evaluation)
+
+Two small changes that together moved the corpus further than any codegen
+slice has.
+
+**A library search path.** `ZilEval.AddIncludePath`/`ClearIncludePaths`,
+and `-i/--include DIR` on the driver. INSERT-FILE now resolves a name
+against the including file's own directory first (as before) and then
+against each configured library path, keeping the existing per-directory
+`name` / `name.zil` / `name.mud` / lowercased variants. Every real game
+lives in its own directory and does `<INSERT-FILE "parser">` to pull in the
+shared library out of `zillib/`, so without this no real game's source
+could be read at all — this is what `ZilEval.SetCurrentDir`'s own comment
+had already flagged as "add it if/when something needs it".
+
+**Read-time `%<...>` evaluation** — the last phase-1 stub, and the thing
+that turned out to be blocking every cloak-family game. `%<...>` means
+"evaluate this NOW, while parsing", and library source really depends on
+it: `zillib/parser.zil` builds an OBJECT's property list with
+`%<VERSION? (ZIP <LIST DESC ...>) (ELSE ())>`, which is a FORM — not the
+LIST an OBJECT property must be — until it's evaluated at read time.
+
+The dependency has to be inverted to do this: ZilEval imports ZilRead, and
+Oberon has no circular imports. `ZilRead` now declares
+`EvalProc = PROCEDURE(z: ZilObj.Zo): ZilObj.Zo` and an `evalHook` variable
+that `ZilEval.InitBuiltins` installs — exactly the pattern `Cloj.mod`
+already uses for its own evaluator callback. With the hook NIL (a driver
+that only wants to parse) the old behaviour stands: the argument comes back
+unevaluated and `rd.sawPercent` is set. `%%<...>` (evaluate and discard) is
+handled the same way.
+
+**Three bugs this immediately surfaced, all fixed:**
+
+- **`GLULX` has to be a RECOGNIZED version specifier** even though this
+  port will never emit for it. `zillib/parser.zil` defines `WORD-SIZE` with
+  `<VERSION? (GLULX <CONSTANT WORD-SIZE 4>) (ELSE <CONSTANT WORD-SIZE 2>)>`
+  — rejecting the specifier outright killed the whole form instead of
+  simply not matching that clause, so `WORD-SIZE` was never defined at all.
+  `ParseZVersion` now returns the original's own `GLULX_ZVERSION` (1000)
+  for it; `VERSION` itself still refuses to target it.
+- **An evaluation error inside INSERT-FILE didn't stop the included file.**
+  Errors are reported through `evalErrFlag`, not through the result's
+  outcome (`Err` returns a FALSE *value*), so the include loop kept going
+  and every later form failed in some confusing derived way — the
+  `WORD-SIZE` case above surfaced hundreds of lines later as
+  "`*`: expected FIX args". The loop now checks `evalErrFlag` and stops
+  where the error actually is.
+- **Error messages didn't carry the underlying cause.** A read-time `%`
+  failure surfaces as a *read* error while the useful message is the
+  evaluator's, and an INSERT-FILE read error named neither the file nor the
+  reason; both now report the full chain. `OBJECT`/`ROOM`'s "each property
+  must be a list" now names the object and prints the offending value —
+  which is how the `%` problem was found at all.
+
+**Measured effect on the corpus** (52 files, with `-i .../zillib`): **12
+files now get all the way through evaluation and into code generation** —
+nine are library files that simply have no `GO` routine, two stop on a
+global initializer ZilCompile can't render yet, and `sample/mandelbrot`
+reaches real codegen and stops on an unimplemented builtin. Every
+cloak-family game now reads the whole 4,000-line `zillib/parser.zil` and
+stops at `USE` — the qualified-OBLIST cluster, now by far the single
+biggest blocker at 11 files.
+
+**Tested**: all six end-to-end programs re-run with identical output;
+transpiler regression suite, 138 files, same 3 pre-existing-only failures.
+
 ## Corpus gap analysis: exactly what blocks compiling a real game
 
 Running the new driver over all 52 corpus files makes the remaining gap
@@ -1767,14 +1833,17 @@ qualified-OBLIST investigation and should stay one task.
    (compile → `zapf` → `zmachine.mod`, checking the printed values). Also
    re-run the transpiler's own full `Modules/*.mod`+`examples/*.mod`
    regression suite (138 files, 3 pre-existing failures).
-2. **A library/include search path** — five corpus files, including every
-   real game, stop at `INSERT-FILE "parser"`, because this port resolves an
-   INSERT-FILE only against the including file's own directory and the
-   library lives in `zillib/`. The original has a configurable include-path
-   list; `ZilEval.SetCurrentDir`'s own comment already notes this port
-   dropped it only because there was no CLI to configure it from — and now
-   there is (`examples/zilf.mod`). Small, and on the critical path for
-   compiling any real game.
+2. **The qualified-OBLIST / package cluster (`USE`, `PACKAGE`, `ENTRY`,
+   `ENDPACKAGE`, `ADD-TELL-TOKENS`, `DEFAULT-LIBRARY-MESSAGES`)** is now
+   unambiguously the single biggest blocker: 11 corpus files, including
+   every cloak-family game, stop there and nothing else comes close. It has
+   been deferred since phase 1 (which flattened the OBLIST hierarchy into
+   one global table) and investigated once in phase 3a. It is not a quick
+   slice — `ObList.cs` is a moderate data-structure change, and
+   `ZilRead.mod` doesn't parse `!-`-qualified atom names at all — but it
+   is now the thing standing between this port and reading a real game
+   end to end. Treat it as this port's next major piece of work, not as
+   another one-SUBR widening.
 3. Then the remaining phase-3b codegen widenings, roughly in value order:
    a. **`AND`/`OR` and the loop constructs**: read `Compilation.Loops.cs`
       (896 lines, still not read). `COND`'s condition fallback already

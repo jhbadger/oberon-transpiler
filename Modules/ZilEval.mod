@@ -36,6 +36,7 @@ MODULE ZilEval;
 IMPORT ZilObj, ZilRead, ZilModel, Strings, Out;
 
 CONST
+  MaxIncludePaths = 16;
   OValue* = 0;
   OReturn* = 1;
   OAgain*  = 2;
@@ -80,6 +81,10 @@ VAR
      whichever file is currently being read, not always the original. *)
   currentDir: ARRAY 512 OF CHAR;
 
+  (* library search path — see AddIncludePath *)
+  includePaths: ARRAY MaxIncludePaths OF ARRAY 512 OF CHAR;
+  nIncludePaths: INTEGER;
+
 PROCEDURE MkVal*(z: ZilObj.Zo): ZResult;
 VAR r: ZResult;
 BEGIN r.outcome := OValue; r.value := z; r.activation := NIL; RETURN r END MkVal;
@@ -111,6 +116,28 @@ BEGIN evalErrFlag := FALSE; evalErrMsg[0] := 0X END ClearErr;
    "" for the current working directory). *)
 PROCEDURE SetCurrentDir*(dir: ARRAY OF CHAR);
 BEGIN Strings.Copy(dir, currentDir) END SetCurrentDir;
+
+(* Adds a directory to the library search path INSERT-FILE falls back on
+   when a file isn't beside the file including it — the original's
+   configurable include-path list (FindIncludeFile in Subrs.Meta.cs). Real
+   games live in their own directory and `<INSERT-FILE "parser">` the
+   shared library out of zillib/, so without this no real game's source can
+   be read at all. A trailing "/" is added if the caller left it off, so
+   the directory can be concatenated with a filename directly. *)
+PROCEDURE AddIncludePath*(dir: ARRAY OF CHAR);
+VAR k: INTEGER;
+BEGIN
+  IF (dir[0] = 0X) OR (nIncludePaths >= MaxIncludePaths) THEN RETURN END;
+  Strings.Copy(dir, includePaths[nIncludePaths]);
+  k := Strings.Length(includePaths[nIncludePaths]);
+  IF includePaths[nIncludePaths][k - 1] # "/" THEN
+    Strings.Append("/", includePaths[nIncludePaths])
+  END;
+  INC(nIncludePaths)
+END AddIncludePath;
+
+PROCEDURE ClearIncludePaths*;
+BEGIN nIncludePaths := 0 END ClearIncludePaths;
 
 (* Extracts the directory portion of `path` (up to and including the last
    "/"), or "" if there is none. Doesn't call Eval, so — unlike the actual
@@ -341,9 +368,13 @@ END PerformITable;
 (* Parses a Z-machine version specifier: one of the historical Infocom
    interpreter names (ZIP/EZIP/XZIP/YZIP), given either as an atom or a
    string, or a plain number 3..8. Direct port of the original's own
-   ParseZVersion (Subrs.ZModel.cs), minus the GLULX case (a different VM
-   target, skipped for this port per the plan's scope decisions). Returns 0
-   for anything unrecognized. *)
+   ParseZVersion (Subrs.ZModel.cs). GLULX maps to 1000, the original's own
+   ZEnvironment.GLULX_ZVERSION — it has to be RECOGNIZED even though this
+   port will never emit for it, because real library source selects between
+   Glulx and Z-machine with <VERSION? (GLULX ...) (ELSE ...)> and rejecting
+   the specifier outright would kill the whole form rather than simply not
+   matching it (zillib/parser.zil's WORD-SIZE definition is exactly this).
+   Returns 0 for anything unrecognized. *)
 PROCEDURE ParseZVersion*(z: ZilObj.Zo): INTEGER;
 VAR text: ARRAY 64 OF CHAR;
 BEGIN
@@ -360,6 +391,7 @@ BEGIN
   ELSIF text = "EZIP" THEN RETURN 4
   ELSIF text = "XZIP" THEN RETURN 5
   ELSIF text = "YZIP" THEN RETURN 6
+  ELSIF text = "GLULX" THEN RETURN 1000
   END;
   RETURN 0
 END ParseZVersion;
@@ -591,6 +623,9 @@ BEGIN
     IF i = 0 THEN
       RETURN ErrAtom("VERSION: unrecognized version specifier (want ZIP/EZIP/XZIP/YZIP or 3-8):", args[0])
     END;
+    IF i = 1000 THEN
+      RETURN Err("VERSION: GLULX is not a supported target for this port")
+    END;
     ZilModel.zversion := i;
     IF (n >= 2) & (args[1].kind = ZilObj.KAtom) & (args[1].atomText = "TIME") THEN
       IF i # 3 THEN RETURN Err("VERSION: TIME is only meaningful in version 3") END;
@@ -759,7 +794,7 @@ END ApplyRoutine;
    name, the ROOM-vs-OBJECT flag, and the raw chain of property lists
    as-is, with no Eval calls needed. *)
 PROCEDURE ApplyObject(isRoom: BOOLEAN; restArgs: ZilObj.Zo): ZResult;
-VAR nameAtom, p: ZilObj.Zo;
+VAR nameAtom, p: ZilObj.Zo; objErr: ARRAY 256 OF CHAR;
 BEGIN
   IF (restArgs = NIL) OR (restArgs.first = NIL) OR (restArgs.first.kind # ZilObj.KAtom) THEN
     RETURN Err("OBJECT/ROOM: expected a name atom")
@@ -768,7 +803,12 @@ BEGIN
 
   p := restArgs.rest;
   WHILE (p # NIL) & (p.first # NIL) DO
-    IF p.first.kind # ZilObj.KList THEN RETURN Err("OBJECT/ROOM: each property must be a list") END;
+    IF p.first.kind # ZilObj.KList THEN
+      Strings.Copy("OBJECT/ROOM ", objErr);
+      Strings.Append(nameAtom.atomText, objErr);
+      Strings.Append(": each property must be a list, got", objErr);
+      RETURN ErrAtom(objErr, p.first)
+    END;
     p := p.rest
   END;
 
@@ -826,6 +866,8 @@ VAR
   (* INSERT-FILE (see the dedicated comment at that branch) *)
   insRd: ZilRead.Reader;
   insOk, insDone, insIsTerm, insOpened: BOOLEAN;
+  insBase: INTEGER;
+  insMsg: ARRAY 512 OF CHAR;
   insTermCh: INTEGER;
   insZ: ZilObj.Zo;
   insResult: ZResult;
@@ -1567,15 +1609,21 @@ BEGIN
            GetIncludeFileNameVariants does this same lowercase fallback
            for the same reason. *)
         insOpened := FALSE;
-        Strings.Copy(args[0].strBuf^, insName);
-        FOR insTry := 0 TO 5 DO
-          IF ~insOpened THEN
-            Strings.Copy(currentDir, insCand); Strings.Append(insName, insCand);
-            IF insTry MOD 3 = 1 THEN Strings.Append(".zil", insCand)
-            ELSIF insTry MOD 3 = 2 THEN Strings.Append(".mud", insCand) END;
-            IF ZilRead.Open(insRd, insCand) THEN insOpened := TRUE END
+        insBase := -1;   (* -1 means currentDir; 0.. index into includePaths *)
+        WHILE ~insOpened & (insBase < nIncludePaths) DO
+          Strings.Copy(args[0].strBuf^, insName);
+          FOR insTry := 0 TO 5 DO
+            IF ~insOpened THEN
+              IF insBase < 0 THEN Strings.Copy(currentDir, insCand)
+              ELSE Strings.Copy(includePaths[insBase], insCand) END;
+              Strings.Append(insName, insCand);
+              IF insTry MOD 3 = 1 THEN Strings.Append(".zil", insCand)
+              ELSIF insTry MOD 3 = 2 THEN Strings.Append(".mud", insCand) END;
+              IF ZilRead.Open(insRd, insCand) THEN insOpened := TRUE END
+            END;
+            IF insTry = 2 THEN Strings.ToLower(insName) END
           END;
-          IF insTry = 2 THEN Strings.ToLower(insName) END
+          INC(insBase)
         END;
         IF ~insOpened THEN RETURN ErrAtom("INSERT-FILE: file not found:", args[0]) END;
 
@@ -1585,11 +1633,27 @@ BEGIN
         insResult := MkVal(ZilObj.NewString("DONE"));
         LOOP
           insZ := ZilRead.ReadOne(insRd, insOk, insDone, insIsTerm, insTermCh);
-          IF ~insOk THEN insResult := Err("INSERT-FILE: read error in included file"); EXIT END;
+          IF ~insOk THEN
+            Strings.Copy("INSERT-FILE: read error in ", insMsg);
+            Strings.Append(insCand, insMsg); Strings.Append(": ", insMsg);
+            Strings.Append(insRd.errMsg, insMsg);
+            IF evalErrFlag THEN
+              Strings.Append(" (", insMsg); Strings.Append(evalErrMsg, insMsg); Strings.Append(")", insMsg)
+            END;
+            insResult := Err(insMsg); EXIT
+          END;
           IF insDone THEN EXIT END;
           IF insIsTerm THEN insResult := Err("INSERT-FILE: stray terminator in included file"); EXIT END;
           r := EvalImpl(insZ, FALSE);
-          IF r.outcome # OValue THEN insResult := r; EXIT END
+          IF r.outcome # OValue THEN insResult := r; EXIT END;
+          (* An evaluation error is reported through evalErrFlag, not
+             through the outcome (Err returns a FALSE value), so without
+             this check an included file kept evaluating after its first
+             error and every later form failed in some confusing derived
+             way — e.g. a failed <CONSTANT WORD-SIZE ...> turning into
+             "expected FIX args" hundreds of lines later. Stop where the
+             error actually is. *)
+          IF evalErrFlag THEN insResult := r; EXIT END
         END;
         ZilRead.Close(insRd);
         Strings.Copy(insSavedDir, currentDir);
@@ -1641,9 +1705,23 @@ BEGIN
   atom.globalVal := ZilObj.NewSubr(name, isF)
 END Register;
 
+(* Installed into ZilRead.evalHook so the reader can evaluate `%<...>` /
+   `%%<...>` forms at read time (see ZilRead's EvalProc comment for why the
+   dependency has to be inverted this way). Returns NIL on an evaluation
+   error, which the reader turns into a read error — the error text itself
+   stays in evalErrMsg for the driver to report. *)
+PROCEDURE ReadTimeEval(z: ZilObj.Zo): ZilObj.Zo;
+VAR r: ZResult;
+BEGIN
+  r := EvalImpl(z, FALSE);
+  IF evalErrFlag OR (r.outcome # OValue) THEN RETURN NIL END;
+  RETURN r.value
+END ReadTimeEval;
+
 PROCEDURE InitBuiltins*;
 VAR tAtom: ZilObj.Zo;
 BEGIN
+  ZilRead.evalHook := ReadTimeEval;
   Register("QUOTE", TRUE); Register("COND", TRUE); Register("AND", TRUE); Register("OR", TRUE);
   Register("QUASIQUOTE", TRUE);
   Register("PROG", TRUE); Register("REPEAT", TRUE); Register("BIND", TRUE);

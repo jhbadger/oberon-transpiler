@@ -16,6 +16,11 @@ MODULE Zilf;
   With no output file named, the .zap goes to stdout.
 
   Options:
+    -i, --include DIR  add DIR to the library search path (repeatable).
+                        Real games live in their own directory and
+                        <INSERT-FILE "parser"> the shared library out of
+                        zilf's zillib/, so compiling one needs at least
+                        -i /path/to/zilf/zillib
     -e, --entry NAME   compile NAME as the entry routine (default: GO)
     -q, --quiet        suppress progress messages
 
@@ -39,10 +44,12 @@ VAR
   ok, done, isTerm, quiet, haveIn, haveOut: BOOLEAN;
   termChar, i, n, nForms: INTEGER;
   arg, inFile, outFile, entryName, dir: ARRAY 512 OF CHAR;
+  detail: ARRAY 1024 OF CHAR;
 
 PROCEDURE Usage;
 BEGIN
   Out.String("usage: zilf [options] input.zil [output.zap]"); Out.Ln;
+  Out.String("  -i, --include DIR  add DIR to the library search path (repeatable)"); Out.Ln;
   Out.String("  -e, --entry NAME   entry routine name (default: GO)"); Out.Ln;
   Out.String("  -q, --quiet        suppress progress messages"); Out.Ln
 END Usage;
@@ -83,6 +90,10 @@ BEGIN
     Args.Get(i, arg);
     IF (arg = "-q") OR (arg = "--quiet") THEN
       quiet := TRUE
+    ELSIF (arg = "-i") OR (arg = "--include") THEN
+      INC(i);
+      IF i > n THEN Fail("--include requires a directory", "") END;
+      Args.Get(i, arg); ZilEval.AddIncludePath(arg)
     ELSIF (arg = "-e") OR (arg = "--entry") THEN
       INC(i);
       IF i > n THEN Fail("--entry requires a routine name", "") END;
@@ -117,7 +128,13 @@ BEGIN
     z := ZilRead.ReadOne(rd, ok, done, isTerm, termChar);
     IF ~ok THEN
       ZilRead.Close(rd);
-      Fail("parse error", rd.errMsg)
+      (* a read-time %<...> evaluation failure surfaces as a READ error, but
+         the useful message is the evaluator's — report both *)
+      Strings.Copy(rd.errMsg, detail);
+      IF ZilEval.evalErrFlag THEN
+        Strings.Append(": ", detail); Strings.Append(ZilEval.evalErrMsg, detail)
+      END;
+      Fail("parse error", detail)
     END;
     IF ~done THEN
       IF isTerm THEN

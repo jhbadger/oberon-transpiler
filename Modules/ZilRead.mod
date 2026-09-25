@@ -38,6 +38,18 @@ CONST
   MaxStructItems = 1024;
 
 TYPE
+  (* Read-time evaluation hook. `%<...>` means "evaluate this NOW, while
+     parsing" and `%%<...>` means "evaluate it now and discard the result"
+     — so the reader needs the evaluator. ZilEval already imports this
+     module, and Oberon has no circular imports, so the dependency is
+     inverted through a procedure variable that ZilEval installs into
+     `evalHook` when it initialises (the same pattern Cloj.mod already uses
+     for its own EvalProc). While the hook is NIL — a driver that only
+     wants to parse, e.g. a syntax check — the old behaviour stands: the
+     argument comes back unevaluated and rd.sawPercent is set so the
+     caller knows the result is not semantically faithful. *)
+  EvalProc* = PROCEDURE(z: ZilObj.Zo): ZilObj.Zo;
+
   Reader* = RECORD
     f: Files.File;
     r: Files.Rider;
@@ -58,6 +70,9 @@ TYPE
     sawPercent*: BOOLEAN;    (* set whenever a '%' construct was parsed but not evaluated *)
     sawChtype*: BOOLEAN      (* set whenever a '#atom (...)' construct was parsed but not retyped *)
   END;
+
+VAR
+  evalHook*: EvalProc;
 
 PROCEDURE Open*(VAR rd: Reader; filename: ARRAY OF CHAR): BOOLEAN;
 BEGIN
@@ -396,20 +411,31 @@ BEGIN
     RETURN z
 
   ELSIF (c = ORD("%")) OR (c = ORD("%") + 128) THEN
-    rd.sawPercent := TRUE;
     c2 := NextChar(rd);
     IF c2 = ORD("%") THEN
-      (* %% macro-splice at read time: no evaluator yet, drop the argument *)
+      (* %%<...>: evaluate at read time purely for the side effect, then
+         carry on and return the NEXT object — the value is discarded *)
       inner := ReadOne(rd, okInner, innerDone, innerTerm, innerTermCh);
       IF ~okInner THEN ok := FALSE; RETURN NIL END;
+      IF evalHook # NIL THEN inner := evalHook(inner) ELSE rd.sawPercent := TRUE END;
       z := ReadOne(rd, ok, done, isTerm, termChar);
       RETURN z
     END;
     IF c2 >= 0 THEN PushBack(rd, c2) END;
-    (* % compile-time eval: return the argument unevaluated (see header) *)
+    (* %<...>: evaluate at read time and read the result in place of the
+       form. Real library source depends on this — zillib's parser.zil
+       builds an OBJECT's property list with
+       `%<VERSION? (ZIP <LIST DESC ...>) (ELSE ())>`, which is a FORM, not
+       the LIST an OBJECT property has to be, until it is evaluated here. *)
     inner := ReadOne(rd, okInner, innerDone, innerTerm, innerTermCh);
     IF ~okInner THEN ok := FALSE; RETURN NIL END;
     IF innerDone OR innerTerm THEN SetErr(rd, "object expected after '%'"); ok := FALSE; RETURN NIL END;
+    IF evalHook # NIL THEN
+      inner := evalHook(inner);
+      IF inner = NIL THEN SetErr(rd, "read-time evaluation of a '%' form failed"); ok := FALSE; RETURN NIL END
+    ELSE
+      rd.sawPercent := TRUE
+    END;
     RETURN inner
 
   ELSIF (c = ORD("#")) OR (c = ORD("#") + 128) THEN
