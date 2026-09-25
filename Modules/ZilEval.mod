@@ -37,6 +37,7 @@ IMPORT ZilObj, ZilRead, ZilModel, Strings, Out;
 
 CONST
   MaxIncludePaths = 16;
+  MaxPackages = 128;
   OValue* = 0;
   OReturn* = 1;
   OAgain*  = 2;
@@ -84,6 +85,13 @@ VAR
   (* library search path — see AddIncludePath *)
   includePaths: ARRAY MaxIncludePaths OF ARRAY 512 OF CHAR;
   nIncludePaths: INTEGER;
+
+  (* Names of packages that have been defined (by a <PACKAGE "NAME"> form)
+     or are provided natively — see the PACKAGE/USE comments below for the
+     whole story on how much of the original's OBLIST machinery this port
+     does and doesn't need. *)
+  packages: ARRAY MaxPackages OF ARRAY 64 OF CHAR;
+  nPackages: INTEGER;
 
 PROCEDURE MkVal*(z: ZilObj.Zo): ZResult;
 VAR r: ZResult;
@@ -138,6 +146,39 @@ END AddIncludePath;
 
 PROCEDURE ClearIncludePaths*;
 BEGIN nIncludePaths := 0 END ClearIncludePaths;
+
+PROCEDURE PackageDefined(pname: ARRAY OF CHAR): BOOLEAN;
+VAR i: INTEGER;
+BEGIN
+  i := 0;
+  WHILE i < nPackages DO
+    IF packages[i] = pname THEN RETURN TRUE END;
+    INC(i)
+  END;
+  RETURN FALSE
+END PackageDefined;
+
+PROCEDURE DefinePackage(pname: ARRAY OF CHAR);
+BEGIN
+  IF ~PackageDefined(pname) & (nPackages < MaxPackages) THEN
+    Strings.Copy(pname, packages[nPackages]); INC(nPackages)
+  END
+END DefinePackage;
+
+(* Packages this port provides natively, so <USE "..."> on one must NOT try
+   to load a file. In the original these are either empty placeholder
+   packages created by Context.InitPackages (NEWSTRUC, ZILCH, ZIL,
+   READER-MACROS) or a real MDL implementation of something this port has
+   built in: zillib/qq.mud implements QUASIQUOTE in MDL, using NEWTYPE/
+   MAPF/CHTYPE/APPLY/MAKE-PREFIX-MACRO — none of which this port has —
+   while phase 2d ported quasiquote directly into the evaluator instead. So
+   <USE "QQ"> is satisfied, not skipped: the functionality really is
+   present, just not via that file. *)
+PROCEDURE BuiltinPackage(pname: ARRAY OF CHAR): BOOLEAN;
+BEGIN
+  RETURN (pname = "QQ") OR (pname = "READER-MACROS") OR (pname = "NEWSTRUC")
+         OR (pname = "ZILCH") OR (pname = "ZIL")
+END BuiltinPackage;
 
 (* Extracts the directory portion of `path` (up to and including the last
    "/"), or "" if there is none. Doesn't call Eval, so — unlike the actual
@@ -627,6 +668,9 @@ BEGIN
       RETURN Err("VERSION: GLULX is not a supported target for this port")
     END;
     ZilModel.zversion := i;
+    (* the original's SetZVersion updates PLUS-MODE alongside the version,
+       so source can test <COND (,PLUS-MODE ...)> for "V4 or later" *)
+    ind := ZilObj.Intern("PLUS-MODE"); ind.globalVal := BoolVal(i > 3);
     IF (n >= 2) & (args[1].kind = ZilObj.KAtom) & (args[1].atomText = "TIME") THEN
       IF i # 3 THEN RETURN Err("VERSION: TIME is only meaningful in version 3") END;
       ZilModel.timeStatusLine := TRUE
@@ -656,6 +700,54 @@ BEGIN
         RETURN ErrAtom("FILE-FLAGS: unrecognized file flag:", args[i])
       END
     END;
+    RETURN MkVal(TrueVal())
+
+  ELSIF (name = "PACKAGE") OR (name = "ZPACKAGE") OR (name = "ZZPACKAGE")
+        OR (name = "DEFINITIONS") OR (name = "ZSECTION") OR (name = "ZZSECTION") THEN
+    (* Ported from Subrs.Packages.cs, reduced to what a SINGLE FLAT OBLIST
+       needs. The original gives each package an internal and an external
+       OBLIST and pushes a three-deep lookup path (internal, external,
+       root), so an unqualified name inside the package resolves to the
+       package's own atom and only ENTRY'd names escape. This port has one
+       global atom table (phase 1's deliberate simplification), which makes
+       every name visible everywhere — strictly MORE permissive, so a name
+       the original would have found is still found. What it gives up is
+       isolation: two packages that each define a different FOO would
+       collide here where the original keeps them apart. Real library and
+       game source is written so that ENTRY'd names don't collide anyway,
+       and the corpus confirms it (four packages in the whole of zillib,
+       with disjoint exports).
+
+       So all a package declaration has to do here is record that the
+       package now exists, which is what USE checks before deciding to load
+       a file. DEFINITIONS/ZSECTION differ from PACKAGE only in the oblist
+       path they build, which is exactly the part that doesn't apply. *)
+    IF (n < 1) OR (args[0].kind # ZilObj.KString) THEN
+      RETURN Err("PACKAGE/DEFINITIONS: expected a STRING package name")
+    END;
+    DefinePackage(args[0].strBuf^);
+    RETURN MkVal(ZilObj.Intern(args[0].strBuf^))
+
+  ELSIF (name = "ENDPACKAGE") OR (name = "END-DEFINITIONS") OR (name = "ENDSECTION")
+        OR (name = "ENDBLOCK") THEN
+    (* Pops the oblist path the matching PACKAGE/BLOCK pushed. With one flat
+       table there is no path to pop. *)
+    RETURN MkVal(TrueVal())
+
+  ELSIF name = "BLOCK" THEN
+    RETURN MkVal(TrueVal())
+
+  ELSIF (name = "ENTRY") OR (name = "RENTRY") THEN
+    (* Moves the named atoms from the package's internal oblist to its
+       external one (RENTRY: to the root oblist), i.e. exports them. With
+       one flat table every atom is already globally visible, so there is
+       nothing to move. The original also validates that the atoms really
+       are on the internal oblist — a check that has no meaning here. *)
+    RETURN MkVal(TrueVal())
+
+  ELSIF name = "COMPILING?" THEN
+    (* Always true in the original too — zilf is a compiler, never an
+       interpreter running the game. *)
     RETURN MkVal(TrueVal())
 
   ELSIF name = "DELAY-DEFINITION" THEN
@@ -835,6 +927,85 @@ END ApplyObject;
    `Eval*` below is a thin wrapper (`EvalImpl(z, FALSE)`) kept as the
    stable public entry point so every existing caller/test harness is
    unaffected. *)
+(* Finds and loads a source file: the original's PerformLoadFile, shared by
+   INSERT-FILE/FLOAD/XFLOAD and by USE/INCLUDE (which load a package's file
+   when the package isn't defined yet). Resolves `fileName` against
+   currentDir first, then each configured library path, trying the name as
+   given, then with .zil/.mud appended, then the same three lowercased —
+   real ZIL source (e.g. zilf's own sample/zork1/zork1.zil) commonly names
+   an UPPERCASE file that is lowercase on disk, and the original's
+   GetIncludeFileNameVariants does the same lowercase fallback for the same
+   reason. Sets `found` FALSE, without touching the error state, when no
+   candidate opened, so a caller like USE can report its own message.
+
+   Calls EvalImpl on every form it reads, and EvalImpl calls back here —
+   ordinary mutual recursion, which this transpiler supports (see the
+   correction in Notes/zilf_port_plan.md; earlier phases of this port
+   wrongly believed it didn't and inlined code like this into EvalImpl to
+   avoid it). *)
+PROCEDURE LoadFile(fileName: ARRAY OF CHAR; what: ARRAY OF CHAR; VAR found: BOOLEAN): ZResult;
+VAR rd: ZilRead.Reader;
+    z: ZilObj.Zo;
+    r, result: ZResult;
+    ok, done, isTerm, opened: BOOLEAN;
+    termCh, base, try: INTEGER;
+    nm, cand, savedDir, msg: ARRAY 512 OF CHAR;
+BEGIN
+  opened := FALSE;
+  base := -1;   (* -1 means currentDir; 0.. index into includePaths *)
+  WHILE ~opened & (base < nIncludePaths) DO
+    Strings.Copy(fileName, nm);
+    FOR try := 0 TO 5 DO
+      IF ~opened THEN
+        IF base < 0 THEN Strings.Copy(currentDir, cand)
+        ELSE Strings.Copy(includePaths[base], cand) END;
+        Strings.Append(nm, cand);
+        IF try MOD 3 = 1 THEN Strings.Append(".zil", cand)
+        ELSIF try MOD 3 = 2 THEN Strings.Append(".mud", cand) END;
+        IF ZilRead.Open(rd, cand) THEN opened := TRUE END
+      END;
+      IF try = 2 THEN Strings.ToLower(nm) END
+    END;
+    INC(base)
+  END;
+  found := opened;
+  IF ~opened THEN RETURN MkVal(FalseVal()) END;
+
+  Strings.Copy(currentDir, savedDir);
+  DirOf(cand, currentDir);
+
+  result := MkVal(ZilObj.NewString("DONE"));
+  LOOP
+    z := ZilRead.ReadOne(rd, ok, done, isTerm, termCh);
+    IF ~ok THEN
+      Strings.Copy(what, msg); Strings.Append(": read error in ", msg);
+      Strings.Append(cand, msg); Strings.Append(": ", msg);
+      Strings.Append(rd.errMsg, msg);
+      IF evalErrFlag THEN
+        Strings.Append(" (", msg); Strings.Append(evalErrMsg, msg); Strings.Append(")", msg)
+      END;
+      result := Err(msg); EXIT
+    END;
+    IF done THEN EXIT END;
+    IF isTerm THEN
+      Strings.Copy(what, msg); Strings.Append(": stray terminator in included file", msg);
+      result := Err(msg); EXIT
+    END;
+    r := EvalImpl(z, FALSE);
+    IF r.outcome # OValue THEN result := r; EXIT END;
+    (* An evaluation error is reported through evalErrFlag, not through the
+       outcome (Err returns a FALSE value), so without this check an
+       included file kept evaluating after its first error and every later
+       form failed in some confusing derived way — e.g. a failed
+       <CONSTANT WORD-SIZE ...> turning into "expected FIX args" hundreds of
+       lines later. Stop where the error actually is. *)
+    IF evalErrFlag THEN result := r; EXIT END
+  END;
+  ZilRead.Close(rd);
+  Strings.Copy(savedDir, currentDir);
+  RETURN result
+END LoadFile;
+
 PROCEDURE EvalImpl(z: ZilObj.Zo; qq: BOOLEAN): ZResult;
 VAR
   head, n, resultHead, resultTail, cell, clause, body: ZilObj.Zo;
@@ -868,6 +1039,8 @@ VAR
   insOk, insDone, insIsTerm, insOpened: BOOLEAN;
   insBase: INTEGER;
   insMsg: ARRAY 512 OF CHAR;
+  (* USE / INCLUDE *)
+  usePos: INTEGER; useFound: BOOLEAN; useName: ARRAY 64 OF CHAR;
   insTermCh: INTEGER;
   insZ: ZilObj.Zo;
   insResult: ZResult;
@@ -1588,76 +1761,59 @@ BEGIN
       END;
 
       IF (name = "INSERT-FILE") OR (name = "FLOAD") OR (name = "XFLOAD") THEN
-        (* Ported from Subrs.Meta.cs's INSERT-FILE/PerformLoadFile: finds
-           the named file and recursively runs the same read-eval loop on
-           it in the current context, then continues where the includer
-           left off. This port resolves the name only relative to
-           currentDir, trying it as given, then with .zil/.mud appended —
-           no configurable IncludePaths list (see currentDir's own
-           comment) since nothing has needed one yet. Has to be inlined
-           here rather than an ApplySubr case since it needs to call
-           EvalImpl on each form it reads — same forward-reference reason
-           as PROG and function/macro application. *)
+        (* Ported from Subrs.Meta.cs's INSERT-FILE/PerformLoadFile — the
+           finding-and-loading itself is LoadFile above, shared with
+           USE/INCLUDE. Stays here rather than in ApplySubr only because
+           ApplySubr is the "doesn't call Eval" half of the dispatch. *)
         IF (nargs < 1) OR (args[0].kind # ZilObj.KString) THEN
           RETURN Err("INSERT-FILE: expected a STRING filename")
         END;
-
-        (* Try the name as given, then with .zil/.mud appended, then the
-           same three lowercased — real ZIL source (e.g. zilf's own
-           sample/zork1/zork1.zil) commonly INSERT-FILEs an UPPERCASE name
-           for a lowercase real filename; the original's own
-           GetIncludeFileNameVariants does this same lowercase fallback
-           for the same reason. *)
-        insOpened := FALSE;
-        insBase := -1;   (* -1 means currentDir; 0.. index into includePaths *)
-        WHILE ~insOpened & (insBase < nIncludePaths) DO
-          Strings.Copy(args[0].strBuf^, insName);
-          FOR insTry := 0 TO 5 DO
-            IF ~insOpened THEN
-              IF insBase < 0 THEN Strings.Copy(currentDir, insCand)
-              ELSE Strings.Copy(includePaths[insBase], insCand) END;
-              Strings.Append(insName, insCand);
-              IF insTry MOD 3 = 1 THEN Strings.Append(".zil", insCand)
-              ELSIF insTry MOD 3 = 2 THEN Strings.Append(".mud", insCand) END;
-              IF ZilRead.Open(insRd, insCand) THEN insOpened := TRUE END
-            END;
-            IF insTry = 2 THEN Strings.ToLower(insName) END
-          END;
-          INC(insBase)
-        END;
+        r := LoadFile(args[0].strBuf^, "INSERT-FILE", insOpened);
         IF ~insOpened THEN RETURN ErrAtom("INSERT-FILE: file not found:", args[0]) END;
+        RETURN r
 
-        Strings.Copy(currentDir, insSavedDir);
-        DirOf(insCand, currentDir);
+      ELSIF (name = "USE") OR (name = "INCLUDE") OR (name = "USE-WHEN") OR (name = "INCLUDE-WHEN") THEN
+        (* Ported from Subrs.Packages.cs's PerformUse. The original adds each
+           named package's external oblist to the current lookup path,
+           loading the package from a file first if it isn't defined yet.
+           With one flat atom table (see PACKAGE in ApplySubr for why) the
+           path manipulation is a no-op and only the LOADING matters — which
+           is the part real source actually depends on: <USE "LIBMSG"> is
+           how zillib/parser.zil pulls in libmsg.zil at all.
 
-        insResult := MkVal(ZilObj.NewString("DONE"));
-        LOOP
-          insZ := ZilRead.ReadOne(insRd, insOk, insDone, insIsTerm, insTermCh);
-          IF ~insOk THEN
-            Strings.Copy("INSERT-FILE: read error in ", insMsg);
-            Strings.Append(insCand, insMsg); Strings.Append(": ", insMsg);
-            Strings.Append(insRd.errMsg, insMsg);
-            IF evalErrFlag THEN
-              Strings.Append(" (", insMsg); Strings.Append(evalErrMsg, insMsg); Strings.Append(")", insMsg)
-            END;
-            insResult := Err(insMsg); EXIT
-          END;
-          IF insDone THEN EXIT END;
-          IF insIsTerm THEN insResult := Err("INSERT-FILE: stray terminator in included file"); EXIT END;
-          r := EvalImpl(insZ, FALSE);
-          IF r.outcome # OValue THEN insResult := r; EXIT END;
-          (* An evaluation error is reported through evalErrFlag, not
-             through the outcome (Err returns a FALSE value), so without
-             this check an included file kept evaluating after its first
-             error and every later form failed in some confusing derived
-             way — e.g. a failed <CONSTANT WORD-SIZE ...> turning into
-             "expected FIX args" hundreds of lines later. Stop where the
-             error actually is. *)
-          IF evalErrFlag THEN insResult := r; EXIT END
+           USE-WHEN/INCLUDE-WHEN take a leading condition and do nothing
+           when it's false. INCLUDE differs from USE only in requiring a
+           DEFINITIONS-type rather than PACKAGE-type package, a distinction
+           that needs the per-oblist PACKAGE property this port doesn't
+           keep; treated as a synonym. Has to live here rather than in
+           ApplySubr because loading a package means evaluating its
+           contents. *)
+        usePos := 0;
+        IF (name = "USE-WHEN") OR (name = "INCLUDE-WHEN") THEN
+          IF nargs < 1 THEN RETURN Err("USE-WHEN: expected a condition") END;
+          IF ~IsTrue(args[0]) THEN RETURN MkVal(args[0]) END;
+          usePos := 1
         END;
-        ZilRead.Close(insRd);
-        Strings.Copy(insSavedDir, currentDir);
-        RETURN insResult
+        WHILE usePos < nargs DO
+          IF args[usePos].kind # ZilObj.KString THEN
+            RETURN Err("USE/INCLUDE: expected STRING package names")
+          END;
+          Strings.Copy(args[usePos].strBuf^, useName);
+          IF ~PackageDefined(useName) & ~BuiltinPackage(useName) THEN
+            r := LoadFile(useName, "USE", useFound);
+            IF ~useFound THEN
+              RETURN ErrAtom("USE: unrecognized package (no such package or file):", args[usePos])
+            END;
+            IF (r.outcome # OValue) OR evalErrFlag THEN RETURN r END;
+            IF ~PackageDefined(useName) THEN
+              (* the file loaded but never declared the package — the
+                 original reports the same thing as "unrecognized package" *)
+              RETURN ErrAtom("USE: file loaded but defines no such package:", args[usePos])
+            END
+          END;
+          INC(usePos)
+        END;
+        RETURN MkVal(TrueVal())
 
       ELSIF (name = "EVAL") OR (name = "EVAL-IN-SEGMENT") THEN
         (* <EVAL expr [environment]>: evaluates the (already-once-
@@ -1718,10 +1874,67 @@ BEGIN
   RETURN r.value
 END ReadTimeEval;
 
+(* The globals and constants the interpreter itself provides before any
+   source is read — the original's Context.InitConstants. Library source
+   really reads these: zillib/parser.zil opens with
+   <SETG ZILLIB-VERSION ,ZIL-VERSION>, and verbs.zil prints ,ZIL-VERSION in
+   its VERSION verb, so without them the library can't even be loaded.
+
+   The compile-time ones are plain globals; the three runtime ones
+   (TRUE-VALUE/FALSE-VALUE/FATAL-VALUE) and the part-of-speech bit values
+   are ZIL CONSTANTs in the original (AddZConstant), so they are registered
+   with ZilModel too and will be emitted as assembly symbols by ZilCompile.
+   The part-of-speech values are the PartOfSpeech enum's own bit values,
+   copied exactly — the vocabulary tables that consume them aren't emitted
+   yet, but the constants are referenced by library source long before
+   that. GLK and CORNERSTONE are always false here: both are targets this
+   port doesn't emit for. *)
+PROCEDURE InitPredefined;
+
+  PROCEDURE DefGlobal(name: ARRAY OF CHAR; value: ZilObj.Zo);
+  VAR atom: ZilObj.Zo;
+  BEGIN atom := ZilObj.Intern(name); atom.globalVal := value END DefGlobal;
+
+  PROCEDURE DefConst(name: ARRAY OF CHAR; value: INTEGER);
+  VAR atom, v: ZilObj.Zo;
+  BEGIN
+    atom := ZilObj.Intern(name); v := ZilObj.NewFix(value);
+    atom.globalVal := v;
+    ZilModel.AddConstant(atom, v)
+  END DefConst;
+
+BEGIN
+  DefGlobal("ZILCH", TrueVal());
+  DefGlobal("ZILF", TrueVal());
+  DefGlobal("ZIL-VERSION", ZilObj.NewString("ZILF 0.9 (Oberon port)"));
+  DefGlobal("PREDGEN", TrueVal());
+  DefGlobal("PLUS-MODE", BoolVal(ZilModel.zversion > 3));
+  DefGlobal("SIBREAKS", ZilObj.NewString(',."'));
+  DefGlobal("GLK", FalseVal());
+  DefGlobal("CORNERSTONE", FalseVal());
+
+  DefConst("TRUE-VALUE", 1);
+  DefConst("FALSE-VALUE", 0);
+  DefConst("FATAL-VALUE", 2);
+
+  (* PartOfSpeech bit values, copied from the original's enum *)
+  DefConst("P1?OBJECT", 0);      (* there is no ObjectFirst *)
+  DefConst("P1?VERB", 1);
+  DefConst("P1?ADJECTIVE", 2);
+  DefConst("P1?DIRECTION", 3);
+  DefConst("PS?BUZZ-WORD", 4);
+  DefConst("PS?PREPOSITION", 8);
+  DefConst("PS?DIRECTION", 16);
+  DefConst("PS?ADJECTIVE", 32);
+  DefConst("PS?VERB", 64);
+  DefConst("PS?OBJECT", 128)
+END InitPredefined;
+
 PROCEDURE InitBuiltins*;
 VAR tAtom: ZilObj.Zo;
 BEGIN
   ZilRead.evalHook := ReadTimeEval;
+  nPackages := 0;
   Register("QUOTE", TRUE); Register("COND", TRUE); Register("AND", TRUE); Register("OR", TRUE);
   Register("QUASIQUOTE", TRUE);
   Register("PROG", TRUE); Register("REPEAT", TRUE); Register("BIND", TRUE);
@@ -1754,6 +1967,13 @@ BEGIN
   Register("DELAY-DEFINITION", FALSE);
   Register("DEFAULT-DEFINITION", TRUE); Register("REPLACE-DEFINITION", TRUE);
   Register("VERSION", FALSE); Register("CHECK-VERSION?", FALSE); Register("FILE-FLAGS", FALSE);
+  Register("PACKAGE", FALSE); Register("ZPACKAGE", FALSE); Register("ZZPACKAGE", FALSE);
+  Register("DEFINITIONS", FALSE); Register("ZSECTION", FALSE); Register("ZZSECTION", FALSE);
+  Register("ENDPACKAGE", FALSE); Register("END-DEFINITIONS", FALSE); Register("ENDSECTION", FALSE);
+  Register("BLOCK", FALSE); Register("ENDBLOCK", FALSE);
+  Register("ENTRY", FALSE); Register("RENTRY", FALSE); Register("COMPILING?", FALSE);
+  Register("USE", FALSE); Register("INCLUDE", FALSE);
+  Register("USE-WHEN", FALSE); Register("INCLUDE-WHEN", FALSE);
   Register("VERSION?", TRUE); Register("GDECL", TRUE);
 
   tAtom := ZilObj.Intern("T");
@@ -1761,7 +1981,10 @@ BEGIN
 
   enclosingProgAtom := ZilObj.Intern("LPROG ");
   currentDir[0] := 0X;
-  ZilModel.Reset
+  ZilModel.Reset;
+  (* after the Reset, since InitPredefined registers ZIL CONSTANTs into
+     ZilModel and the Reset would otherwise throw them straight away *)
+  InitPredefined
 END InitBuiltins;
 
 END ZilEval.

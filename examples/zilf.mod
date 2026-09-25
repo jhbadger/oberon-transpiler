@@ -112,8 +112,10 @@ BEGIN
 
   IF ~haveIn THEN Usage; OS.Exit(1) END;
 
+  (* InitBuiltins resets ZilModel itself and then registers the predefined
+     ZIL constants (TRUE-VALUE, the PS?/P1? part-of-speech values, ...) into
+     it, so don't Reset again afterwards — that would throw them away. *)
   ZilEval.InitBuiltins;
-  ZilModel.Reset;
 
   IF ~ZilRead.Open(rd, inFile) THEN Fail("cannot open", inFile) END;
   DirOf(inFile, dir);

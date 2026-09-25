@@ -1789,6 +1789,101 @@ biggest blocker at 11 files.
 **Tested**: all six end-to-end programs re-run with identical output;
 transpiler regression suite, 138 files, same 3 pre-existing-only failures.
 
+## What's done: the package system (`PACKAGE`/`USE`/`ENTRY`), and the interpreter's predefined globals
+
+The plan named the qualified-OBLIST/package cluster as the next major piece
+of work and the single biggest blocker (11 corpus files). It turned out to
+be much smaller than feared, for a reason worth recording.
+
+**Read the originals in full first** (`Interpreter/Subrs.Packages.cs`,
+`Interpreter/ObList.cs`, `ZilAtom.Parse`, `Context.PushObPath`/`PopObPath`/
+`MakeObList`/`InitConstants`) and then, crucially, **surveyed what the
+corpus actually uses**: across all of `zillib/` and `sample/`, the entire
+package system amounts to **4 `PACKAGE` declarations, 4 `ENDPACKAGE`s, 3
+`ENTRY`s and 14 `USE`s**, with five qualified `FOO!-BAR` atom names. Not
+the pervasive mechanism the phase-1 and phase-3a notes had assumed.
+
+**Why one flat oblist is enough.** The original gives each package an
+internal and an external OBLIST and pushes a three-deep lookup path
+(internal, external, root), so an unqualified name written inside a package
+resolves to that package's own atom and only `ENTRY`'d names escape. This
+port has a single global atom table (phase 1's deliberate simplification),
+which makes every name visible everywhere. That is **strictly more
+permissive**: any name the original would have resolved still resolves
+here. What it gives up is *isolation* — two packages each defining a
+different `FOO` would collide here where the original keeps them apart —
+and real library and game source is written so that exported names don't
+collide anyway. So the package declarations reduce to bookkeeping:
+
+- **`PACKAGE`/`ZPACKAGE`/`ZZPACKAGE`/`DEFINITIONS`/`ZSECTION`/`ZZSECTION`**
+  record that the package exists (which is what `USE` checks) and return
+  its name atom. `DEFINITIONS` differs from `PACKAGE` only in the oblist
+  path it builds — exactly the part that doesn't apply.
+- **`ENDPACKAGE`/`END-DEFINITIONS`/`ENDSECTION`/`BLOCK`/`ENDBLOCK`** pop or
+  push an oblist path that doesn't exist here: no-ops returning T.
+- **`ENTRY`/`RENTRY`** move atoms from a package's internal oblist to its
+  external one (or to root), i.e. export them. Everything is already
+  globally visible: no-ops.
+- **`USE`/`INCLUDE`/`USE-WHEN`/`INCLUDE-WHEN`** are the part that carries
+  real weight, and it isn't the oblist manipulation — it's the **loading**.
+  `PerformUse` loads a package from a file when it isn't defined yet, and
+  that is how `zillib/parser.zil` pulls in `libmsg.zil` at all. Ported
+  faithfully: load if not already defined, error if the file is missing or
+  if it loads without declaring the package (both "unrecognized package" in
+  the original), skip if already loaded. `USE-WHEN`/`INCLUDE-WHEN` take a
+  leading condition. `INCLUDE`'s only real difference is requiring a
+  `DEFINITIONS`-type package, a distinction that needs the per-oblist
+  PACKAGE property this port doesn't keep, so it's a synonym.
+- **`COMPILING?`** returns T, as in the original.
+- **Built-in packages**: `<USE "QQ">` must NOT try to load `zillib/qq.mud`.
+  That file is a full MDL implementation of quasiquote using `NEWTYPE`/
+  `MAPF`/`CHTYPE`/`APPLY`/`MAKE-PREFIX-MACRO`, none of which this port has
+  — while phase 2d ported quasiquote directly into the evaluator. So the
+  requirement really is satisfied, not skipped. `READER-MACROS`,
+  `NEWSTRUC`, `ZILCH` and `ZIL` are empty placeholder packages created by
+  `Context.InitPackages` in the original, and are treated the same way.
+
+**`LoadFile` factored out.** `USE` and `INSERT-FILE` need identical
+find-and-load-and-evaluate behaviour, so it became its own procedure — and
+`LoadFile` calls `EvalImpl` while `EvalImpl` calls `LoadFile`, i.e. the
+first place in this port to actually use the mutual recursion the earlier
+phases wrongly believed was impossible (see the correction section above).
+It works; the corpus results were byte-identical across the refactor before
+any package code was added.
+
+**The interpreter's predefined globals** (`Context.InitConstants`) turned
+out to be the very next blocker once `USE` worked, because
+`zillib/parser.zil` opens with `<SETG ZILLIB-VERSION ,ZIL-VERSION>`.
+Ported: the compile-time globals `ZILCH`, `ZILF`, `ZIL-VERSION`, `PREDGEN`,
+`PLUS-MODE`, `SIBREAKS`, `GLK`, `CORNERSTONE`, and as real ZIL CONSTANTs
+(registered with ZilModel, so ZilCompile emits them as assembly symbols)
+`TRUE-VALUE`/`FALSE-VALUE`/`FATAL-VALUE` and the ten `P1?`/`PS?`
+part-of-speech bit values copied from the original's `PartOfSpeech` enum.
+`PLUS-MODE` is updated by `VERSION` as well as at init, matching
+`SetZVersion`.
+
+**An initialisation-order bug this surfaced**: `InitBuiltins` ends with
+`ZilModel.Reset`, so registering the predefined constants at the *start* of
+it silently threw them away — `,TRUE-VALUE` compiled to "undefined
+constant" with no other symptom. `InitPredefined` now runs after that
+Reset, and the driver no longer Resets again afterwards.
+
+**Tested end-to-end**: a two-file program — a real `mathlib.zil` package
+(`PACKAGE`/`ENTRY`/`CONSTANT`/`ROUTINE`/`ENDPACKAGE`) in a separate library
+directory, pulled in by the main file with `<USE "MATHLIB">` (twice, to
+confirm it isn't loaded twice) alongside `<USE "QQ">` — compiled, assembled
+and run: printed `triple=42` (a routine called across the package
+boundary), `base=100` (a constant likewise) and `true=1` (a predefined
+constant). `<USE "NOSUCHPACKAGE">` is correctly rejected.
+
+**Measured effect on the corpus** (52 files): the `USE`/`PACKAGE`/
+`ADD-TELL-TOKENS` cluster is **gone from the failure list entirely**, and
+**16 files now reach code generation**. The new top blocker is
+`COMPILATION-FLAG-DEFAULT` (7 files, including `advent.zil`).
+
+**Tested**: all seven end-to-end programs; transpiler regression suite, 138
+files, same 3 pre-existing-only failures.
+
 ## Corpus gap analysis: exactly what blocks compiling a real game
 
 Running the new driver over all 52 corpus files makes the remaining gap
@@ -1833,17 +1928,13 @@ qualified-OBLIST investigation and should stay one task.
    (compile → `zapf` → `zmachine.mod`, checking the printed values). Also
    re-run the transpiler's own full `Modules/*.mod`+`examples/*.mod`
    regression suite (138 files, 3 pre-existing failures).
-2. **The qualified-OBLIST / package cluster (`USE`, `PACKAGE`, `ENTRY`,
-   `ENDPACKAGE`, `ADD-TELL-TOKENS`, `DEFAULT-LIBRARY-MESSAGES`)** is now
-   unambiguously the single biggest blocker: 11 corpus files, including
-   every cloak-family game, stop there and nothing else comes close. It has
-   been deferred since phase 1 (which flattened the OBLIST hierarchy into
-   one global table) and investigated once in phase 3a. It is not a quick
-   slice — `ObList.cs` is a moderate data-structure change, and
-   `ZilRead.mod` doesn't parse `!-`-qualified atom names at all — but it
-   is now the thing standing between this port and reading a real game
-   end to end. Treat it as this port's next major piece of work, not as
-   another one-SUBR widening.
+2. **`COMPILATION-FLAG-DEFAULT`/`COMPILATION-FLAG`/`COMPILATION-FLAG-VALUE`/
+   `IFFLAG`** (`Subrs.Meta.cs`) is now the top blocker at 7 files,
+   `advent.zil` among them, and the library's `IF-DEBUG`/
+   `IF-DEBUGGING-VERBS` are `DEFMAC`s built on `IFFLAG`, so they should
+   fall out too. The original keeps the flags on their own oblist; with
+   this port's flat table they are just a name-to-value map, so this
+   should be another small, well-scoped registration.
 3. Then the remaining phase-3b codegen widenings, roughly in value order:
    a. **`AND`/`OR` and the loop constructs**: read `Compilation.Loops.cs`
       (896 lines, still not read). `COND`'s condition fallback already
