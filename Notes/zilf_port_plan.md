@@ -2393,6 +2393,93 @@ same 3 pre-existing-only failures.
 `cloak_test` now evaluate the entire zillib — parser, library messages and
 all — and stop at `DEFSTRUCT`; `advent` stops at `STRING`.
 
+## MILESTONE 4: `zillib` evaluates end to end — `DEFSTRUCT` and the last interpreter gaps
+
+**`sample/cloak/cloak.zil` now evaluates completely** — the whole of
+`zillib`: the 4,000-line parser, the library-message system with its
+per-category oblists, pronouns, the DEFSTRUCT records, the package system,
+the compilation flags — and reaches **code generation**. That was the goal
+`DEFSTRUCT` was blocking.
+
+### Parsing source from a string (`ZilRead.OpenString`)
+
+The original builds generated definitions by writing ZIL source as text and
+parsing it (`Program.Parse(ctx, template, ...)`), which is how `DEFSTRUCT`
+makes its accessors. `ZilRead` could only read files; it now also reads from
+a string, so this port can use the same approach instead of assembling macro
+bodies out of cons cells by hand.
+
+### `DEFSTRUCT` (`Subrs.Defstruct.cs`)
+
+`<DEFSTRUCT NAME BASE (FIELD DECL options...) ...>` defines a record over a
+TABLE or VECTOR. BASE is a type atom or a list of option clauses
+(`('NTH fn) ('PUT fn) ('START-OFFSET n)`); each field may override
+`'NTH`/`'PUT` and give an explicit `'OFFSET`, otherwise the offset
+auto-increments.
+
+- **Accessors** are generated from the original's own template and
+  evaluated. The original has three, differing only in how much DECL
+  checking they wrap around the access; this port skips DECL checking
+  entirely, so its `SNoCheckTemplate` — no wrapping at all — is exactly
+  right, and the other two would only add machinery that does nothing.
+- **`MAKE-<NAME>`** is implemented natively rather than as the original's
+  (very large) generated macro, which would have needed `CHTYPE`,
+  `IVECTOR` and `SPLICE` just to construct a record. All three call shapes
+  are supported, distinguished as the original's macro does by inspecting
+  the **raw** first argument: fill an existing object
+  (`<MAKE-FOO 'FOO obj 'FIELD v ...>`), build one by field name, or build
+  one positionally. A field's element index is its offset measured from the
+  structure's own start offset.
+- Not ported: `'CONSTRUCTOR`, `'INIT-ARGS`, `'PRINTTYPE`, and per-field
+  default values — none is used by the corpus. `'NODECL`/`'NOTYPE` are
+  accepted and do nothing, there being no DECL checking or type registry to
+  suppress.
+
+### The interpreter gaps `zillib` needed after that
+
+- **`<BYTE n>` / `<WORD n>`** mark a table element's width. The original
+  CHTYPEs the value to the BYTE type; with no type system here the width is
+  recorded as a property on the value, and `CompileTables` honours it
+  per element — so `<TABLE 0 0 <BYTE 0> <BYTE 0>>` really emits two words
+  then two bytes.
+- **`CHTYPE`**, restricted to the conversions that can mean anything here:
+  the structural ones between LIST/FORM and VECTOR (quasiquote's own
+  implementation does `<CHTYPE .X FORM>`). Retyping to anything else
+  returns the value unchanged, which is the right answer precisely because
+  nothing downstream inspects a type tag.
+- **`MEMQ`/`MEMBER`**, **`ASCII`** (both directions), **`MIN`/`MAX`**,
+  **`ABS`**, **`GBOUND?`/`BOUND?`**, **`SET-SOURCE-INFO`** (a no-op here,
+  this port tracking no source lines).
+- **`MAPRET`/`MAPSTOP` with more than one value.** `pronouns.zil` really
+  does `<MAPRET a b c>` to contribute three statements per iteration. A
+  ZResult carries one value, so the rest ride in a module-level list the
+  enclosing `MAPF` drains.
+- **An empty ROUTINE body is legal.** `zillib` generates routines whose
+  whole body is spliced in from a `MAPF`, and that list is legitimately
+  empty when the game defined none of whatever it enumerates —
+  `pronouns.zil`'s `V-PRONOUNS` for a game with no `<PRONOUN>` definitions.
+  The compiler emits `RTRUE` for such a routine.
+
+### A diagnostics fix that was worth more than it looks: **the first error wins**
+
+An error's result is an ordinary value (the atom `FALSE`), not a distinct
+outcome, so a failure doesn't stop the surrounding evaluation by itself —
+callers keep going, fail again on the bad value, and **overwrite the message
+that actually explained what went wrong**. Chasing `cloak.zil` produced
+"SEGMENT: expected a structured value to splice, got FALSE", which was the
+*second* error; the real one was a missing `ASCII`. `Err` now keeps the
+first message, and the splice paths check the error flag directly. Every
+subsequent blocker in this session was diagnosed in one step instead of
+several.
+
+**Tested**: sixteen end-to-end programs, all passing; `beer`, `mandelbrot`
+and `name` all still compile, assemble and run (`name` re-checked
+interactively, still answering 37); transpiler regression suite, 138 files,
+same 3 pre-existing-only failures.
+
+**Corpus**: `cloak` reaches code generation and stops on a table element it
+can't render; `advent` stops at `BIT-SYNONYM`.
+
 ## Corpus gap analysis: exactly what blocks compiling a real game
 
 Running the new driver over all 52 corpus files makes the remaining gap

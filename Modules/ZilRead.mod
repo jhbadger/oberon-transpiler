@@ -65,6 +65,12 @@ TYPE
        after B instead) whenever a bang-prefixed token followed some
        whitespace. -1 = slot empty. *)
     heldChar, heldChar2: INTEGER;
+    (* An in-memory source, used instead of the file when srcText # NIL.
+       The original generates ZIL source as text and parses it —
+       Program.Parse(ctx, template, ...) — which is how DEFSTRUCT builds
+       its accessor macros; OpenString is the equivalent entry point. *)
+    srcText: POINTER TO ARRAY OF CHAR;
+    srcPos: INTEGER;
     err*: BOOLEAN;
     errMsg*: ARRAY 256 OF CHAR;
     sawPercent*: BOOLEAN;    (* set whenever a '%' construct was parsed but not evaluated *)
@@ -78,6 +84,7 @@ PROCEDURE Open*(VAR rd: Reader; filename: ARRAY OF CHAR): BOOLEAN;
 BEGIN
   rd.f := Files.Old(filename);
   IF rd.f = NIL THEN RETURN FALSE END;
+  rd.srcText := NIL;
   Files.Set(rd.r, rd.f, 0);
   Strings.Copy(filename, rd.filename);
   rd.line := 1;
@@ -87,8 +94,30 @@ BEGIN
   RETURN TRUE
 END Open;
 
+(* Reads from a string in memory instead of a file — the equivalent of the
+   original's Program.Parse(ctx, "<source text>"), which is how it builds
+   generated definitions such as DEFSTRUCT's accessor macros. *)
+PROCEDURE OpenString*(VAR rd: Reader; text: ARRAY OF CHAR);
+VAR i, n: INTEGER;
+BEGIN
+  rd.f := NIL;
+  n := Strings.Length(text);
+  NEW(rd.srcText, n + 1);
+  FOR i := 0 TO n - 1 DO rd.srcText^[i] := text[i] END;
+  rd.srcText^[n] := 0X;
+  rd.srcPos := 0;
+  Strings.Copy("<generated>", rd.filename);
+  rd.line := 1;
+  rd.heldChar := -1; rd.heldChar2 := -1;
+  rd.err := FALSE; rd.errMsg[0] := 0X;
+  rd.sawPercent := FALSE; rd.sawChtype := FALSE
+END OpenString;
+
 PROCEDURE Close*(VAR rd: Reader);
-BEGIN IF rd.f # NIL THEN Files.Close(rd.f); rd.f := NIL END END Close;
+BEGIN
+  IF rd.f # NIL THEN Files.Close(rd.f); rd.f := NIL END;
+  rd.srcText := NIL
+END Close;
 
 PROCEDURE SetErr(VAR rd: Reader; msg: ARRAY OF CHAR);
 BEGIN rd.err := TRUE; Strings.Copy(msg, rd.errMsg) END SetErr;
@@ -98,6 +127,12 @@ VAR b: BYTE; c: INTEGER;
 BEGIN
   IF rd.heldChar >= 0 THEN
     c := rd.heldChar; rd.heldChar := rd.heldChar2; rd.heldChar2 := -1; RETURN c
+  END;
+  IF rd.srcText # NIL THEN
+    IF rd.srcText^[rd.srcPos] = 0X THEN RETURN -1 END;
+    c := ORD(rd.srcText^[rd.srcPos]); INC(rd.srcPos);
+    IF c = 10 THEN INC(rd.line) END;
+    RETURN c
   END;
   IF rd.r.eof THEN RETURN -1 END;
   Files.Read(rd.r, b);

@@ -40,6 +40,8 @@ CONST
   MaxPackages = 128;
   MaxFlags = 256;
   MaxOblists = 256;
+  MaxStructs = 64;
+  MaxStructFields = 32;
   OValue* = 0;
   OReturn* = 1;
   OAgain*  = 2;
@@ -115,6 +117,9 @@ VAR
      macro's RESULT is what's being asked for unevaluated. *)
   expandOnlyPending: BOOLEAN;
 
+  (* extra values from a <MAPRET a b c>, drained by the enclosing MAPF *)
+  mapRetList: ZilObj.Zo;
+
   oblists: ARRAY MaxOblists OF ZilObj.Zo;
   nOblists: INTEGER;
 
@@ -131,8 +136,17 @@ BEGIN RETURN r.outcome # OValue END ShouldPass;
 
 PROCEDURE Err(msg: ARRAY OF CHAR): ZResult;
 BEGIN
-  evalErrFlag := TRUE;
-  Strings.Copy(msg, evalErrMsg);
+  (* The FIRST error wins. An error's result value is an ordinary OValue
+     (the atom FALSE), not a distinct outcome, so a failure does not stop
+     the surrounding evaluation by itself — callers keep going and often
+     fail again on the bad value, overwriting the message that actually
+     explained what went wrong. Keeping the first message is what turns
+     "expected a structured value to splice, got FALSE" back into the real
+     cause. *)
+  IF ~evalErrFlag THEN
+    evalErrFlag := TRUE;
+    Strings.Copy(msg, evalErrMsg)
+  END;
   RETURN MkVal(ZilObj.Intern("FALSE"))
 END Err;
 
@@ -477,6 +491,58 @@ BEGIN
   RETURN MkVal(tab)
 END PerformITable;
 
+(* ---------------- DEFSTRUCT ----------------
+   <DEFSTRUCT NAME BASE (FIELD DECL options...) ...> defines a record type
+   over a TABLE or VECTOR: an accessor macro per field, and a MAKE-NAME
+   constructor. Ported from Subrs.Defstruct.cs, which builds both by
+   generating ZIL source and evaluating it — the same approach here, now
+   that ZilRead can parse from a string.
+
+   BASE is either a bare type atom or a list whose head is the type atom
+   followed by option clauses: ('NTH fn) ('PUT fn) ('START-OFFSET n). Each
+   field may override 'NTH/'PUT and give an explicit 'OFFSET; otherwise the
+   offset auto-increments from the start offset.
+
+   The original has three accessor templates, differing only in how much
+   DECL checking they wrap around the access. This port skips DECL checking
+   entirely (a phase-1 decision), so its SNoCheckTemplate — the one with no
+   wrapping at all — is exactly right and the other two would only add
+   machinery that does nothing:
+
+       <DEFMAC FIELD ('S "OPT" 'NV)
+           <COND (<ASSIGNED? NV> <FORM PUTFN .S OFFSET .NV>)
+                 (T             <FORM NTHFN .S OFFSET>)>>
+
+   Not ported: 'CONSTRUCTOR (a custom constructor argspec), 'INIT-ARGS,
+   'PRINTTYPE, 'NODECL/'NOTYPE (no-ops here, since there is no DECL or type
+   registry to suppress), and per-field default values — none is used by
+   the corpus. *)
+
+TYPE
+  StructRec = RECORD
+    name*: ARRAY 64 OF CHAR;
+    baseIsVector*: BOOLEAN;
+    startOffset*: INTEGER;
+    nFields*: INTEGER;
+    fieldName*: ARRAY MaxStructFields OF ARRAY 64 OF CHAR;
+    fieldOffset*: ARRAY MaxStructFields OF INTEGER
+  END;
+
+VAR
+  structs: ARRAY MaxStructs OF StructRec;
+  nStructs: INTEGER;
+
+PROCEDURE FindStruct(name: ARRAY OF CHAR): INTEGER;
+VAR i: INTEGER;
+BEGIN
+  i := 0;
+  WHILE i < nStructs DO
+    IF structs[i].name = name THEN RETURN i END;
+    INC(i)
+  END;
+  RETURN -1
+END FindStruct;
+
 (* ---------------- OBLISTs as compile-time data ----------------
    Name RESOLUTION in this port uses one flat atom table (phase 1's
    simplification, and the package work confirmed it is enough). But
@@ -533,7 +599,11 @@ END QualifiedName;
 
 PROCEDURE IsStructured*(z: ZilObj.Zo): BOOLEAN;
 BEGIN
-  IF z = NIL THEN RETURN FALSE END;
+  (* NIL is how this port spells "no value at all", which arises from
+     evaluating an empty form; every operation that treats FALSE as an empty
+     structure should treat it the same way, and StructLength/StructNth
+     already do. *)
+  IF z = NIL THEN RETURN TRUE END;
   RETURN (z.kind = ZilObj.KList) OR (z.kind = ZilObj.KForm) OR (z.kind = ZilObj.KVector)
          OR (z.kind = ZilObj.KString) OR (z.kind = ZilObj.KFalse) OR (z.kind = ZilObj.KTable)
 END IsStructured;
@@ -599,6 +669,21 @@ BEGIN
   RETURN p
 END StructRest;
 
+(* Replaces the i'th element (1-based) of a flat structure. Only the array
+   shapes are mutable here, which is all DEFSTRUCT's constructor needs — a
+   cons chain would need its cell rewritten in place and nothing asks for
+   that. *)
+PROCEDURE StructPut*(z: ZilObj.Zo; i: INTEGER; v: ZilObj.Zo): BOOLEAN;
+BEGIN
+  IF (z = NIL) OR (i < 1) THEN RETURN FALSE END;
+  IF (z.kind = ZilObj.KVector) OR (z.kind = ZilObj.KTable) THEN
+    IF i > z.vecLen THEN RETURN FALSE END;
+    z.vecItems[i - 1] := v;
+    RETURN TRUE
+  END;
+  RETURN FALSE
+END StructPut;
+
 (* The type NAME of a value, as TYPE returns it and TYPE? matches against. *)
 PROCEDURE TypeName*(z: ZilObj.Zo; VAR s: ARRAY OF CHAR);
 BEGIN
@@ -659,6 +744,7 @@ END ParseZVersion;
 PROCEDURE ApplySubr*(name: ARRAY OF CHAR; args: ARRAY OF ZilObj.Zo; n: INTEGER): ZResult;
 VAR sum, i, len, synKind: INTEGER; s: ARRAY 4096 OF CHAR; ind: ZilObj.Zo;
     msgBuf: ARRAY 512 OF CHAR;
+    resultHead, resultTail: ZilObj.Zo;
 BEGIN
   IF (name = "SET") OR (name = "SETG") OR (name = "GLOBAL") OR (name = "CONSTANT") THEN
     (* The originals for GLOBAL/CONSTANT are FSUBRs (name unevaluated,
@@ -972,6 +1058,114 @@ BEGIN
                  & ((args[0].kind = ZilObj.KSubr) OR (args[0].kind = ZilObj.KFSubr)
                     OR (args[0].kind = ZilObj.KFunction) OR (args[0].kind = ZilObj.KMacro))))
 
+  ELSIF (name = "MEMQ") OR (name = "MEMBER") THEN
+    (* <MEMQ x struct> finds x among the elements and returns the REST of
+       the structure starting there (so it doubles as a predicate, being
+       FALSE when absent). MEMQ compares by identity/value, MEMBER
+       structurally; this port's ValuesEqual is the same test for both,
+       since the values real source searches for are atoms and FIXes. *)
+    IF n < 2 THEN RETURN Err("MEMQ/MEMBER: expected a value and a structure") END;
+    len := StructLength(args[1]);
+    FOR i := 1 TO len DO
+      IF ValuesEqual(StructNth(args[1], i), args[0]) THEN
+        RETURN MkVal(StructRest(args[1], i - 1))
+      END
+    END;
+    RETURN MkVal(FalseVal())
+
+  ELSIF name = "ASCII" THEN
+    (* <ASCII n> is the CHARACTER with that code, and <ASCII !\c> is that
+       character's code — MDL's one primitive converts both ways depending
+       on what it is handed. *)
+    IF n < 1 THEN RETURN Err("ASCII: expected a FIX or CHARACTER") END;
+    IF args[0].kind = ZilObj.KFix THEN RETURN MkVal(ZilObj.NewChar(args[0].fixVal)) END;
+    IF args[0].kind = ZilObj.KChar THEN RETURN MkVal(ZilObj.NewFix(args[0].charVal)) END;
+    RETURN Err("ASCII: expected a FIX or CHARACTER")
+
+  ELSIF (name = "MIN") OR (name = "MAX") THEN
+    IF n < 1 THEN RETURN Err("MIN/MAX: expected at least one FIX") END;
+    IF args[0].kind # ZilObj.KFix THEN RETURN Err("MIN/MAX: expected FIX args") END;
+    sum := args[0].fixVal;
+    FOR i := 1 TO n - 1 DO
+      IF args[i].kind # ZilObj.KFix THEN RETURN Err("MIN/MAX: expected FIX args") END;
+      IF name = "MIN" THEN
+        IF args[i].fixVal < sum THEN sum := args[i].fixVal END
+      ELSE
+        IF args[i].fixVal > sum THEN sum := args[i].fixVal END
+      END
+    END;
+    RETURN MkVal(ZilObj.NewFix(sum))
+
+  ELSIF (name = "ABS") THEN
+    IF (n < 1) OR (args[0].kind # ZilObj.KFix) THEN RETURN Err("ABS: expected a FIX") END;
+    IF args[0].fixVal < 0 THEN RETURN MkVal(ZilObj.NewFix(-args[0].fixVal)) END;
+    RETURN MkVal(args[0])
+
+  ELSIF (name = "GBOUND?") OR (name = "BOUND?") THEN
+    (* "is this atom's global (resp. local) value assigned" — the same
+       question GASSIGNED?/ASSIGNED? answer, under the names MDL code tends
+       to use when asking about a binding rather than a value. *)
+    IF (n < 1) OR (args[0].kind # ZilObj.KAtom) THEN RETURN MkVal(FalseVal()) END;
+    IF name = "GBOUND?" THEN RETURN MkVal(BoolVal(args[0].globalVal # NIL)) END;
+    RETURN MkVal(BoolVal(args[0].localVal # NIL))
+
+  ELSIF name = "SET-SOURCE-INFO" THEN
+    (* Copies source-line information from one value to another and returns
+       the first. This port tracks no source lines at all (diagnostics name
+       the file, not the line), so there is nothing to copy — returning the
+       value unchanged is the whole of its observable behaviour here. *)
+    IF n < 1 THEN RETURN Err("SET-SOURCE-INFO: expected a value") END;
+    RETURN MkVal(args[0])
+
+  ELSIF name = "CHTYPE" THEN
+    (* <CHTYPE value TYPE> reinterprets a value as another type. This port
+       has no type system, so the only CHTYPEs that can mean anything are
+       the STRUCTURAL ones — between the cons-chain kinds (LIST/FORM) and
+       VECTOR — and those really are used: quasiquote's own implementation
+       does <CHTYPE .X FORM> to turn a captured list into a callable form.
+       Retyping to anything else (a DEFSTRUCT name, BYTE, ADECL) returns the
+       value unchanged, which is the right answer here precisely because
+       nothing downstream inspects a type tag. *)
+    IF (n < 2) OR (args[1].kind # ZilObj.KAtom) THEN
+      RETURN Err("CHTYPE: expected a value and a type ATOM")
+    END;
+    Strings.Copy(args[1].atomText, s);
+    IF (s = "LIST") OR (s = "FORM") THEN
+      IF s = "LIST" THEN i := ZilObj.KList ELSE i := ZilObj.KForm END;
+      IF (args[0] # NIL) & (args[0].kind = i) THEN RETURN MkVal(args[0]) END;
+      IF ~IsStructured(args[0]) THEN RETURN Err("CHTYPE: expected a structured value") END;
+      len := StructLength(args[0]);
+      resultHead := NIL; resultTail := NIL;
+      FOR sum := 1 TO len DO
+        ind := ZilObj.Cons(i, StructNth(args[0], sum), NIL);
+        IF resultHead = NIL THEN resultHead := ind ELSE resultTail.rest := ind END;
+        resultTail := ind
+      END;
+      IF resultHead = NIL THEN RETURN MkVal(ZilObj.NewEmpty(i)) END;
+      RETURN MkVal(resultHead)
+    ELSIF s = "VECTOR" THEN
+      IF (args[0] # NIL) & (args[0].kind = ZilObj.KVector) THEN RETURN MkVal(args[0]) END;
+      IF ~IsStructured(args[0]) THEN RETURN Err("CHTYPE: expected a structured value") END;
+      len := StructLength(args[0]);
+      ind := ZilObj.NewVectorN(len);
+      FOR sum := 1 TO len DO ind.vecItems[sum - 1] := StructNth(args[0], sum) END;
+      RETURN MkVal(ind)
+    END;
+    RETURN MkVal(args[0])
+
+  ELSIF (name = "BYTE") OR (name = "WORD") THEN
+    (* <BYTE n> inside a TABLE marks that element as one byte wide rather
+       than a word (and <WORD n> says so explicitly). The original does it
+       by CHTYPEing the value to the BYTE type; this port has no type
+       system, so the width is recorded as a property on the value itself,
+       which is where ZilCompile's table emitter looks for it. *)
+    IF (n < 1) OR (args[0].kind # ZilObj.KFix) THEN
+      RETURN Err("BYTE/WORD: expected a FIX")
+    END;
+    ind := ZilObj.NewFix(args[0].fixVal);
+    ZilObj.PutProp(ind, ZilObj.Intern("WIDTH "), ZilObj.Intern(name));
+    RETURN MkVal(ind)
+
   ELSIF name = "STRING" THEN
     (* <STRING a b ...> concatenates its arguments into one STRING: a
        STRING contributes its text and a CHARACTER its character, which is
@@ -1261,9 +1455,11 @@ BEGIN
   END;
   argSpecList := rest.first;
   bodyList := rest.rest;
-  IF (bodyList = NIL) OR (bodyList.first = NIL) THEN
-    RETURN Err("ROUTINE: empty body")
-  END;
+  (* An empty body is legal: zillib generates routines whose whole body is
+     spliced in from a MAPF, and that list is legitimately empty when the
+     game defined none of whatever it enumerates (pronouns.zil's
+     V-PRONOUNS, for a game with no <PRONOUN> definitions). The compiler
+     emits RTRUE for such a routine. *)
 
   ZilModel.AddRoutine(nameAtom, actAtom, argSpecList, bodyList);
   RETURN MkVal(nameAtom)
@@ -1437,6 +1633,18 @@ VAR
   tellToks, tellTail: ZilObj.Zo;
   (* SEGMENT splicing *)
   segLen, segI: INTEGER;
+  (* DEFSTRUCT *)
+  dsName, dsBase, dsNth, dsPut, dsTag, dsFieldName, dsFNth, dsFPut: ARRAY 64 OF CHAR;
+  dsNum, dsQ: ARRAY 16 OF CHAR;
+  dsSrc: ARRAY 1024 OF CHAR;
+  dsOffset, dsFOffset, dsIdx: INTEGER;
+  dsGotOffset: BOOLEAN;
+  dsOpt, dsClause, dsVal: ZilObj.Zo;
+  (* MAKE-<struct> *)
+  mkName, mkField: ARRAY 64 OF CHAR;
+  mkIdx, mkPos, mkI: INTEGER;
+  mkByTag: BOOLEAN;
+  mkExisting, mkTarget: ZilObj.Zo;
   (* MAPF / MAPR / APPLY *)
   mapArgs: ARRAY MaxArgs OF ZilObj.Zo;
   mapStructs: ARRAY MaxArgs OF ZilObj.Zo;
@@ -1588,8 +1796,9 @@ BEGIN
       IF nFirst.kind = ZilObj.KSegment THEN
         r := EvalImpl(nFirst.segForm, FALSE);
         IF ShouldPass(r) THEN RETURN r END;
+        IF evalErrFlag THEN RETURN r END;
         IF ~IsStructured(r.value) THEN
-          RETURN Err("SEGMENT: expected a structured value to splice")
+          RETURN ErrAtom("SEGMENT: expected a structured value to splice, got", r.value)
         END;
         segLen := StructLength(r.value);
         FOR segI := 1 TO segLen DO
@@ -1644,7 +1853,92 @@ BEGIN
         END;
         flagVal := NIL;
         IF ifFlagName[0] # 0X THEN flagVal := FlagValue(ifFlagName) END;
-        IF flagVal = NIL THEN RETURN ErrAtom("calling unassigned atom:", zFirst) END;
+
+        IF flagVal = NIL THEN
+          (* <MAKE-FOO ...>, the constructor DEFSTRUCT defines for structure
+             FOO. The original generates it as a (very large) macro; here it
+             is recognized by name and built directly, which avoids needing
+             CHTYPE, IVECTOR and SPLICE just to construct a record.
+
+             Three call shapes, distinguished exactly as the original's
+             macro does, by looking at the RAW first argument:
+               <MAKE-FOO 'FOO obj 'FIELD v ...>  fill an existing object
+               <MAKE-FOO 'FIELD v ...>           new object, by field name
+               <MAKE-FOO v1 v2 ...>              new object, positionally *)
+          Strings.Copy(zFirst.atomText, mkName);
+          mkIdx := -1;
+          IF (mkName[0] = "M") & (mkName[1] = "A") & (mkName[2] = "K")
+             & (mkName[3] = "E") & (mkName[4] = "-") THEN
+            Strings.Delete(mkName, 0, 5);
+            mkIdx := FindStruct(mkName)
+          END;
+          IF mkIdx < 0 THEN RETURN ErrAtom("calling unassigned atom:", zFirst) END;
+
+          n := z.rest;
+          mkExisting := NIL;
+          (* a leading <QUOTE structname> means "fill this existing object" *)
+          IF (n # NIL) & (n.first # NIL) & (n.first.kind = ZilObj.KForm)
+             & (ZilObj.ListLength(n.first) = 2)
+             & ZilObj.IsAtomNamed(n.first.first, "QUOTE")
+             & (n.first.rest.first.kind = ZilObj.KAtom)
+             & (n.first.rest.first.atomText = mkName) THEN
+            n := n.rest;
+            IF (n = NIL) OR (n.first = NIL) THEN
+              RETURN Err("MAKE-: expected an object after the structure name")
+            END;
+            r := EvalImpl(n.first, FALSE);
+            IF ShouldPass(r) THEN RETURN r END;
+            mkExisting := r.value;
+            n := n.rest
+          END;
+
+          mkByTag := (n # NIL) & (n.first # NIL) & (n.first.kind = ZilObj.KForm)
+                     & (ZilObj.ListLength(n.first) = 2)
+                     & ZilObj.IsAtomNamed(n.first.first, "QUOTE");
+
+          IF mkExisting # NIL THEN
+            mkTarget := mkExisting
+          ELSE
+            (* a fresh structure of the base type, one element per field *)
+            mkTarget := ZilObj.NewVectorN(structs[mkIdx].nFields);
+            IF ~structs[mkIdx].baseIsVector THEN mkTarget.kind := ZilObj.KTable END;
+            FOR mkI := 0 TO structs[mkIdx].nFields - 1 DO
+              mkTarget.vecItems[mkI] := ZilObj.NewFix(0)
+            END
+          END;
+
+          mkPos := 0;
+          WHILE (n # NIL) & (n.first # NIL) DO
+            IF mkByTag THEN
+              IF (n.first.kind # ZilObj.KForm) OR (ZilObj.ListLength(n.first) # 2)
+                 OR ~ZilObj.IsAtomNamed(n.first.first, "QUOTE")
+                 OR (n.first.rest.first.kind # ZilObj.KAtom) THEN
+                RETURN Err("MAKE-: expected a quoted field name")
+              END;
+              Strings.Copy(n.first.rest.first.atomText, mkField);
+              mkPos := -1;
+              FOR mkI := 0 TO structs[mkIdx].nFields - 1 DO
+                IF structs[mkIdx].fieldName[mkI] = mkField THEN mkPos := mkI END
+              END;
+              IF mkPos < 0 THEN RETURN Err("MAKE-: unknown field name") END;
+              (* the field's element index is its offset measured from the
+                 structure's own start offset *)
+              mkPos := structs[mkIdx].fieldOffset[mkPos] - structs[mkIdx].startOffset;
+              n := n.rest;
+              IF (n = NIL) OR (n.first = NIL) THEN
+                RETURN Err("MAKE-: expected a value after a field name")
+              END
+            END;
+            r := EvalImpl(n.first, FALSE);
+            IF ShouldPass(r) THEN RETURN r END;
+            IF ~StructPut(mkTarget, mkPos + 1, r.value) THEN
+              RETURN Err("MAKE-: field index is outside the structure")
+            END;
+            IF ~mkByTag THEN INC(mkPos) END;
+            n := n.rest
+          END;
+          RETURN MkVal(mkTarget)
+        END;
 
         IF IsTrue(flagVal) = ifFlagNeg THEN RETURN MkVal(FalseVal()) END;
         body := z.rest;
@@ -2092,6 +2386,155 @@ BEGIN
       END;
       RETURN MkVal(ZilObj.NewFunction(n.first, fnActivation, n.rest))
 
+    ELSIF isFSubr & (name = "DEFSTRUCT") THEN
+      n := z.rest;
+      IF (n = NIL) OR (n.first = NIL) OR (n.first.kind # ZilObj.KAtom) THEN
+        RETURN Err("DEFSTRUCT: expected a structure name")
+      END;
+      Strings.Copy(n.first.atomText, dsName);
+      n := n.rest;
+      IF (n = NIL) OR (n.first = NIL) THEN
+        RETURN Err("DEFSTRUCT: expected a base type")
+      END;
+
+      (* base type, plus the option clauses that may accompany it *)
+      Strings.Copy("NTH", dsNth); Strings.Copy("PUT", dsPut); dsOffset := 1;
+      IF n.first.kind = ZilObj.KAtom THEN
+        Strings.Copy(n.first.atomText, dsBase)
+      ELSIF n.first.kind = ZilObj.KList THEN
+        IF (n.first.first = NIL) OR (n.first.first.kind # ZilObj.KAtom) THEN
+          RETURN Err("DEFSTRUCT: the base-type list must start with a type atom")
+        END;
+        Strings.Copy(n.first.first.atomText, dsBase);
+        dsOpt := n.first.rest;
+        WHILE (dsOpt # NIL) & (dsOpt.first # NIL) DO
+          IF (dsOpt.first.kind # ZilObj.KList) OR (dsOpt.first.first = NIL) THEN
+            RETURN Err("DEFSTRUCT: base-type options must be lists")
+          END;
+          dsClause := dsOpt.first;
+          (* each clause reads ('TAG value), i.e. <QUOTE TAG> then a value *)
+          IF (dsClause.first.kind # ZilObj.KForm) OR (ZilObj.ListLength(dsClause.first) # 2)
+             OR ~ZilObj.IsAtomNamed(dsClause.first.first, "QUOTE")
+             OR (dsClause.first.rest.first.kind # ZilObj.KAtom) THEN
+            RETURN Err("DEFSTRUCT: a base-type option must start with a quoted atom")
+          END;
+          Strings.Copy(dsClause.first.rest.first.atomText, dsTag);
+          dsVal := NIL;
+          IF dsClause.rest # NIL THEN dsVal := dsClause.rest.first END;
+          IF dsTag = "NTH" THEN
+            IF (dsVal = NIL) OR (dsVal.kind # ZilObj.KAtom) THEN
+              RETURN Err("DEFSTRUCT: 'NTH expects an atom") END;
+            Strings.Copy(dsVal.atomText, dsNth)
+          ELSIF dsTag = "PUT" THEN
+            IF (dsVal = NIL) OR (dsVal.kind # ZilObj.KAtom) THEN
+              RETURN Err("DEFSTRUCT: 'PUT expects an atom") END;
+            Strings.Copy(dsVal.atomText, dsPut)
+          ELSIF dsTag = "START-OFFSET" THEN
+            IF (dsVal = NIL) OR (dsVal.kind # ZilObj.KFix) THEN
+              RETURN Err("DEFSTRUCT: 'START-OFFSET expects a FIX") END;
+            dsOffset := dsVal.fixVal
+          ELSIF (dsTag = "NODECL") OR (dsTag = "NOTYPE") THEN
+            (* nothing to suppress: this port has no DECL checking or type
+               registry in the first place *)
+          ELSE
+            RETURN Err("DEFSTRUCT: unsupported base-type option (only 'NTH/'PUT/'START-OFFSET)")
+          END;
+          dsOpt := dsOpt.rest
+        END
+      ELSE
+        RETURN Err("DEFSTRUCT: expected a base type or a base-type list")
+      END;
+
+      IF nStructs >= MaxStructs THEN RETURN Err("DEFSTRUCT: too many structures") END;
+      dsIdx := nStructs; INC(nStructs);
+      Strings.Copy(dsName, structs[dsIdx].name);
+      structs[dsIdx].baseIsVector := dsBase = "VECTOR";
+      structs[dsIdx].startOffset := dsOffset;
+      structs[dsIdx].nFields := 0;
+
+      (* field definitions *)
+      n := n.rest;
+      WHILE (n # NIL) & (n.first # NIL) DO
+        IF (n.first.kind # ZilObj.KList) OR (n.first.first = NIL)
+           OR (n.first.first.kind # ZilObj.KAtom) THEN
+          RETURN Err("DEFSTRUCT: each field must be a list starting with its name")
+        END;
+        Strings.Copy(n.first.first.atomText, dsFieldName);
+        Strings.Copy(dsNth, dsFNth); Strings.Copy(dsPut, dsFPut);
+        dsFOffset := dsOffset; dsGotOffset := FALSE;
+
+        (* skip the field's DECL, then read its option clauses, which are a
+           flat 'TAG value sequence rather than lists *)
+        dsOpt := n.first.rest;
+        IF (dsOpt # NIL) & (dsOpt.first # NIL) THEN dsOpt := dsOpt.rest END;
+        WHILE (dsOpt # NIL) & (dsOpt.first # NIL) DO
+          dsClause := dsOpt.first;
+          IF (dsClause.kind = ZilObj.KForm) & (ZilObj.ListLength(dsClause) = 2)
+             & ZilObj.IsAtomNamed(dsClause.first, "QUOTE")
+             & (dsClause.rest.first.kind = ZilObj.KAtom) THEN
+            Strings.Copy(dsClause.rest.first.atomText, dsTag);
+            dsOpt := dsOpt.rest;
+            dsVal := NIL;
+            IF (dsOpt # NIL) & (dsOpt.first # NIL) THEN dsVal := dsOpt.first END;
+            IF dsTag = "NTH" THEN
+              IF (dsVal = NIL) OR (dsVal.kind # ZilObj.KAtom) THEN
+                RETURN Err("DEFSTRUCT: 'NTH expects an atom") END;
+              Strings.Copy(dsVal.atomText, dsFNth); dsOpt := dsOpt.rest
+            ELSIF dsTag = "PUT" THEN
+              IF (dsVal = NIL) OR (dsVal.kind # ZilObj.KAtom) THEN
+                RETURN Err("DEFSTRUCT: 'PUT expects an atom") END;
+              Strings.Copy(dsVal.atomText, dsFPut); dsOpt := dsOpt.rest
+            ELSIF dsTag = "OFFSET" THEN
+              IF (dsVal = NIL) OR (dsVal.kind # ZilObj.KFix) THEN
+                RETURN Err("DEFSTRUCT: 'OFFSET expects a FIX") END;
+              dsFOffset := dsVal.fixVal; dsGotOffset := TRUE; dsOpt := dsOpt.rest
+            ELSIF dsTag = "NONE" THEN
+              (* "this field has no default" — nothing to record, since
+                 per-field defaults aren't ported *)
+            ELSE
+              RETURN Err("DEFSTRUCT: unsupported field option (only 'NTH/'PUT/'OFFSET/'NONE)")
+            END
+          ELSE
+            (* a bare value is the field's default, which isn't ported *)
+            dsOpt := dsOpt.rest
+          END
+        END;
+
+        IF structs[dsIdx].nFields >= MaxStructFields THEN
+          RETURN Err("DEFSTRUCT: too many fields")
+        END;
+        Strings.Copy(dsFieldName, structs[dsIdx].fieldName[structs[dsIdx].nFields]);
+        structs[dsIdx].fieldOffset[structs[dsIdx].nFields] := dsFOffset;
+        INC(structs[dsIdx].nFields);
+
+        IF ~dsGotOffset THEN INC(dsOffset) END;
+
+        (* generate and evaluate this field's accessor macro *)
+        Strings.Copy("<DEFMAC ", dsSrc);
+        Strings.Append(dsFieldName, dsSrc);
+        Strings.Append(" ('S ", dsSrc);
+        dsQ[0] := '"'; dsQ[1] := 0X;
+        Strings.Append(dsQ, dsSrc); Strings.Append("OPT", dsSrc); Strings.Append(dsQ, dsSrc);
+        Strings.Append(" 'NV) <COND (<ASSIGNED? NV> <FORM ", dsSrc);
+        Strings.Append(dsFPut, dsSrc); Strings.Append(" .S ", dsSrc);
+        Strings.IntToStr(dsFOffset, dsNum); Strings.Append(dsNum, dsSrc);
+        Strings.Append(" .NV>) (T <FORM ", dsSrc);
+        Strings.Append(dsFNth, dsSrc); Strings.Append(" .S ", dsSrc);
+        Strings.Append(dsNum, dsSrc); Strings.Append(">)>>", dsSrc);
+
+        ZilRead.OpenString(insRd, dsSrc);
+        insZ := ZilRead.ReadOne(insRd, insOk, insDone, insIsTerm, insTermCh);
+        ZilRead.Close(insRd);
+        IF ~insOk OR insDone THEN
+          RETURN Err("DEFSTRUCT: could not parse a generated accessor macro")
+        END;
+        r := EvalImpl(insZ, FALSE);
+        IF (r.outcome # OValue) OR evalErrFlag THEN RETURN r END;
+
+        n := n.rest
+      END;
+      RETURN MkVal(ZilObj.Intern(dsName))
+
     ELSIF isFSubr & (name = "GDECL") THEN
       (* <GDECL (ATOM ATOM ...) decl ...> attaches DECL type constraints to
          globals. This port skips DECL checking entirely (an explicit
@@ -2395,8 +2838,9 @@ BEGIN
              to build a form from a computed list of body statements *)
           r := EvalImpl(n.first.segForm, FALSE);
           IF ShouldPass(r) THEN RETURN r END;
+          IF evalErrFlag THEN RETURN r END;
           IF ~IsStructured(r.value) THEN
-            RETURN Err("SEGMENT: expected a structured value to splice")
+            RETURN ErrAtom("SEGMENT: expected a structured value to splice, got", r.value)
           END;
           segLen := StructLength(r.value);
           FOR segI := 1 TO segLen DO
@@ -2476,11 +2920,26 @@ BEGIN
            them. More than one value isn't supported — the original lets
            MAPRET/MAPSTOP contribute any number, but real source only ever
            uses zero or one, and a ZResult carries one value. *)
-        IF nargs > 1 THEN
-          RETURN Err("MAPRET/MAPSTOP/MAPLEAVE: only zero or one value is supported here")
-        END;
         r.activation := NIL;
-        IF nargs = 1 THEN r.value := args[0] ELSE r.value := NIL END;
+        mapRetList := NIL;
+        IF nargs = 1 THEN
+          r.value := args[0]
+        ELSE
+          r.value := NIL;
+          IF nargs > 1 THEN
+            (* more than one value: a ZResult carries one, so the rest ride
+               in mapRetList, which the enclosing MAPF drains. zillib's
+               pronouns.zil really does <MAPRET a b c> to contribute three
+               statements per iteration. *)
+            resultHead := NIL; resultTail := NIL;
+            FOR mapI := 0 TO nargs - 1 DO
+              cell := ZilObj.Cons(ZilObj.KList, args[mapI], NIL);
+              IF resultHead = NIL THEN resultHead := cell ELSE resultTail.rest := cell END;
+              resultTail := cell
+            END;
+            mapRetList := resultHead
+          END
+        END;
         IF name = "MAPRET" THEN r.outcome := OMapRet
         ELSIF name = "MAPSTOP" THEN r.outcome := OMapStop
         ELSE r.outcome := OMapLeave
@@ -2526,6 +2985,17 @@ BEGIN
           END;
           r := ApplyValue(args[1], mapArgs, mapNStruct);
           IF evalErrFlag THEN RETURN r END;
+
+          IF (r.outcome = OMapRet) OR (r.outcome = OMapStop) THEN
+            (* drain any extra values the map form supplied *)
+            WHILE (mapRetList # NIL) & (mapRetList.first # NIL) DO
+              cell := ZilObj.Cons(ZilObj.KList, mapRetList.first, NIL);
+              IF mapHead = NIL THEN mapHead := cell ELSE mapTail.rest := cell END;
+              mapTail := cell;
+              mapRetList := mapRetList.rest
+            END;
+            mapRetList := NIL
+          END;
 
           IF r.outcome = OMapLeave THEN
             IF r.value = NIL THEN RETURN MkVal(FalseVal()) END;
@@ -2891,9 +3361,13 @@ BEGIN
   Register("SPNAME", FALSE); Register("PNAME", FALSE); Register("PARSE", FALSE);
   Register("ERROR", FALSE);
   Register("STRING", FALSE); Register("VECTOR", FALSE);
+  Register("BYTE", FALSE); Register("WORD", FALSE); Register("CHTYPE", FALSE); Register("SET-SOURCE-INFO", FALSE);
+  Register("GBOUND?", FALSE); Register("BOUND?", FALSE);
+  Register("MEMQ", FALSE); Register("MEMBER", FALSE); Register("ASCII", FALSE); Register("MIN", FALSE); Register("MAX", FALSE);
+  Register("ABS", FALSE);
   Register("MOBLIST", FALSE); Register("ROOT", FALSE); Register("OBLIST?", FALSE);
   Register("LOOKUP", FALSE); Register("INSERT", FALSE);
-  Register("FUNCTION", TRUE);
+  Register("FUNCTION", TRUE); Register("DEFSTRUCT", TRUE);
   Register("APPLY", FALSE); Register("APPLY-MACRO", FALSE);
   Register("MAPF", FALSE); Register("MAPR", FALSE);
   Register("MAPRET", FALSE); Register("MAPSTOP", FALSE); Register("MAPLEAVE", FALSE);

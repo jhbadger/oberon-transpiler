@@ -1814,9 +1814,6 @@ BEGIN
   rt := ZilModel.routines[idx];
 
   bp := rt.body;
-  IF (bp = NIL) OR (bp.first = NIL) THEN
-    Err("CompileRoutine: empty body"); RETURN FALSE
-  END;
 
   (* ---- the argument spec ----
      <ROUTINE NAME (REQ... "OPT" (O 1) O2 "AUX" (A <expr>) A2) body...>.
@@ -1943,6 +1940,12 @@ BEGIN
      sample/beer ended in frotz's "Fatal error: Illegal opcode" for exactly
      this reason. *)
   IF isEntry & ~termFlag THEN W("	QUIT"); WLn END;
+  (* A routine with no statements at all still has to return something —
+     see ZilEval's ROUTINE for why an empty body is legal in the first
+     place. *)
+  IF ~isEntry & ((rt.body = NIL) OR (rt.body.first = NIL)) THEN
+    W("	RTRUE"); WLn
+  END;
   nBlocks := 0;
   EndBuffer;
   IF errFlag THEN RETURN FALSE END;
@@ -2110,7 +2113,7 @@ END CompileGlobals;
    compiler wrongly believed was pure still works. *)
 PROCEDURE CompileTables(): BOOLEAN;
 VAR i, j: INTEGER; label, text, errBuf: ARRAY 256 OF CHAR;
-    t: ZilObj.Zo; isByte: BOOLEAN; width: ARRAY 8 OF CHAR;
+    t, elemWidth: ZilObj.Zo; isByte: BOOLEAN; width: ARRAY 8 OF CHAR;
 BEGIN
   i := 0;
   WHILE i < ZilModel.nTables DO
@@ -2134,7 +2137,14 @@ BEGIN
         Strings.Append(" of a table is not a compilable constant", errBuf);
         Err(errBuf); RETURN FALSE
       END;
-      W(width); W(text); WLn;
+      (* an element written <BYTE n> or <WORD n> overrides the table's own
+         default width for that element alone — see ZilEval's BYTE/WORD *)
+      elemWidth := ZilObj.GetProp(t.vecItems[j], ZilObj.Intern("WIDTH "));
+      IF elemWidth = NIL THEN W(width)
+      ELSIF elemWidth.atomText = "BYTE" THEN W("	.BYTE ")
+      ELSE W("	.WORD ")
+      END;
+      W(text); WLn;
       INC(j)
     END;
 
