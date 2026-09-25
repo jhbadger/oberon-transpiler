@@ -100,6 +100,17 @@ TYPE
   END;
 
 VAR
+  (* The Z-machine version the program targets, set by <VERSION ...> (see
+     ZilEval's VERSION subr) — the original's ZEnvironment.ZVersion, which
+     likewise defaults to 3 when the source never says. Read by ZilCompile
+     for every version-dependent emission decision. *)
+  zversion*: INTEGER;
+
+  (* Set by <VERSION ZIP TIME>: V3's optional "time" status line instead of
+     the score/moves one. Recorded for completeness (the original's
+     ZEnvironment.TimeStatusLine); nothing reads it yet. *)
+  timeStatusLine*: BOOLEAN;
+
   routines*: ARRAY MaxRoutines OF RoutineRec;
   nRoutines*: INTEGER;
 
@@ -239,9 +250,12 @@ END AddPropDefSpec;
 
 PROCEDURE Reset*;
 BEGIN
+  zversion := 3; timeStatusLine := FALSE;
   nRoutines := 0; nObjects := 0; nGlobals := 0; nConstants := 0; nTables := 0;
   nSyntaxes := 0; nSynonyms := 0; nDirections := 0; nBuzzwords := 0;
   nPropDefaults := 0; nPropDefSpecs := 0
 END Reset;
 
+BEGIN
+  Reset
 END ZilModel.

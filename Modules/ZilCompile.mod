@@ -356,7 +356,7 @@ END SpillToTemp;
 PROCEDURE CompileOperand(z: ZilObj.Zo; VAR opText: ARRAY OF CHAR): BOOLEAN;
 VAR leftText, rightText: ARRAY 64 OF CHAR; opcode: ARRAY 16 OF CHAR;
     headName: ARRAY 64 OF CHAR; argTexts: ARRAY 3, 64 OF CHAR;
-    ok, spilled: BOOLEAN; nArgs, i, nSpills: INTEGER; ap, ap2: ZilObj.Zo;
+    ok, spilled: BOOLEAN; nArgs, i, nSpills, maxArgs: INTEGER; ap, ap2: ZilObj.Zo;
 BEGIN
   IF z = NIL THEN Err("CompileOperand: NIL expression"); RETURN FALSE END;
 
@@ -457,10 +457,11 @@ BEGIN
          EmitCall, which for zversion < 4 always emits CALL and pops the
          result with FSTACK when it isn't wanted (see CompileStmt for that
          void case). *)
+      IF ZilModel.zversion < 4 THEN maxArgs := 3 ELSE maxArgs := 7 END;
       nArgs := 0; nSpills := 0; ap := z.rest;
       WHILE (ap # NIL) & (ap.first # NIL) DO
-        IF nArgs >= 3 THEN
-          Err("CompileOperand: V3 allows at most 3 call arguments"); RETURN FALSE
+        IF nArgs >= maxArgs THEN
+          Err("CompileOperand: too many call arguments for this Z-machine version"); RETURN FALSE
         END;
         (* every argument must be fully compiled BEFORE the CALL line starts
            being written: an argument can be a compound expression that emits
@@ -485,7 +486,17 @@ BEGIN
         INC(nArgs); ap := ap.rest
       END;
       WHILE nSpills > 0 DO FreeTemp; DEC(nSpills) END;
-      W("	CALL "); W(headName);
+      (* V1-3 have only CALL; V4 splits it by argument count into
+         CALL1/CALL2/CALL/XCALL — the same switch as the original's
+         EmitCall. (V5+, which would also use the non-storing ICALL forms,
+         isn't emitted yet; CompileProgram refuses those versions.) *)
+      IF ZilModel.zversion < 4 THEN Strings.Copy("CALL", opcode)
+      ELSIF nArgs = 0 THEN Strings.Copy("CALL1", opcode)
+      ELSIF nArgs = 1 THEN Strings.Copy("CALL2", opcode)
+      ELSIF nArgs <= 3 THEN Strings.Copy("CALL", opcode)
+      ELSE Strings.Copy("XCALL", opcode)
+      END;
+      W("	"); W(opcode); W(" "); W(headName);
       i := 0;
       WHILE i < nArgs DO
         W(","); W(argTexts[i]); INC(i)
@@ -1004,7 +1015,13 @@ BEGIN
   i := 0;
   WHILE i < ZilModel.nGlobals DO taken[i] := FALSE; INC(i) END;
   n := 0;
-  TakeFirst("HERE"); TakeFirst("SCORE"); TakeFirst("MOVES");
+  (* V3 only, exactly as in the original's FinishGlobals: the V3 status line
+     is drawn by the interpreter from variables 16/17/18, so HERE, SCORE and
+     MOVES have to be the first three .GVARs declared. V4+ draws its status
+     line from game code instead, so the order is free. *)
+  IF ZilModel.zversion < 4 THEN
+    TakeFirst("HERE"); TakeFirst("SCORE"); TakeFirst("MOVES")
+  END;
   i := 0;
   WHILE i < ZilModel.nGlobals DO
     IF ~taken[i] THEN order[n] := i; INC(n) END;
@@ -1044,18 +1061,27 @@ END CompileGlobals;
    this keeps the header's OBJECT and VOCAB pointers valid rather than
    aiming them at whatever byte happens to follow. *)
 PROCEDURE EmitEmptyObjectAndVocab;
-VAR i: INTEGER;
+VAR i, nDefaults, entryLen: INTEGER; n: ARRAY 16 OF CHAR;
 BEGIN
+  (* property defaults: 31 words in V1-3, 63 in V4+ (the Z-machine spec's
+     fixed sizes); dictionary entry: 4 z-word bytes in V1-3, 6 in V4+, plus
+     3 data bytes either way — the same two numbers the original computes in
+     FinishSyntax as `zversion < 4 ? 4 : 6` plus the entry data size *)
+  IF ZilModel.zversion < 4 THEN nDefaults := 31; entryLen := 7
+  ELSE nDefaults := 63; entryLen := 9
+  END;
+
   W("OBJECT:: .TABLE"); WLn;
   i := 0;
-  WHILE i < 31 DO W("	.WORD 0"); WLn; INC(i) END;
+  WHILE i < nDefaults DO W("	.WORD 0"); WLn; INC(i) END;
   W("	.ENDT"); WLn; WLn;
 
   W("IMPURE::"); WLn; WLn;
 
   W("VOCAB:: .TABLE"); WLn;
   W("	.BYTE 0"); WLn;      (* no self-inserting break characters *)
-  W("	.BYTE 7"); WLn;      (* entry length: 4 z-word bytes + 3 data *)
+  Strings.IntToStr(entryLen, n);
+  W("	.BYTE "); W(n); WLn; (* entry length *)
   W("	.WORD 0"); WLn;      (* entry count *)
   W("	.ENDT"); WLn; WLn;
 
@@ -1069,7 +1095,7 @@ END EmitEmptyObjectAndVocab;
    a GO routine around it). `entryName` names the routine the header's
    START:: label goes on — pass "GO" for the ZIL default. *)
 PROCEDURE CompileProgram*(entryName: ARRAY OF CHAR): BOOLEAN;
-VAR i, entryIdx: INTEGER; ok: BOOLEAN;
+VAR i, entryIdx: INTEGER; ok: BOOLEAN; verText: ARRAY 16 OF CHAR;
 BEGIN
   ClearErr;
   labelCounter := 0;
@@ -1079,8 +1105,19 @@ BEGIN
     Err("CompileProgram: entry routine not defined"); RETURN FALSE
   END;
 
+  (* zapf auto-generates the 64-byte header for V1-4; a V5+ story file has
+     to lay its header out by hand with ordinary data directives (see
+     ZapfAsm.WriteHeader's own comment, and the top of a real V5 .zap such
+     as ~/cloak_plus.zap). Emitting that by hand is its own slice, so say
+     so rather than producing a file that assembles into a broken story. *)
+  IF (ZilModel.zversion < 3) OR (ZilModel.zversion > 4) THEN
+    Err("CompileProgram: only Z-machine versions 3 and 4 are emitted yet (V5+ needs a hand-built header)");
+    RETURN FALSE
+  END;
+
   W("	; compiled by ZilCompile (Oberon port of zilf)"); WLn;
-  W("	.NEW 3"); WLn; WLn;
+  Strings.IntToStr(ZilModel.zversion, verText);
+  W("	.NEW "); W(verText); WLn; WLn;
 
   CompileConstants;
   ok := CompileGlobals();

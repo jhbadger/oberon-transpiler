@@ -1637,6 +1637,92 @@ so no spill is emitted where one isn't wanted.
 **Tested**: corpus (52 files, zero parse failures) and the full transpiler
 regression suite (138 files, same 3 pre-existing-only failures).
 
+## What's done (phase 3b continued: VERSION, VERSION?, FILE-FLAGS, GDECL)
+
+The gap analysis's four cheap registrations, plus making `VERSION` actually
+mean something in the emitter rather than just being accepted.
+
+Read the originals first (`Subrs.ZModel.cs`'s `VERSION`/`ParseZVersion`/
+`CHECK-VERSION?`/`VERSION_P`, `Subrs.Meta.cs`'s `FILE_FLAGS`,
+`Subrs.Atoms.cs`'s `GDECL`) — all four are small, and three of them reduce
+further in this port because it doesn't have the state they write to.
+
+**`Modules/ZilModel.mod`**: added `zversion` (default 3, reset by `Reset`,
+and the module now has an initialisation body that calls `Reset` so the
+default holds even if a driver never does) and `timeStatusLine` — the
+original's `ZEnvironment.ZVersion` and `.TimeStatusLine`.
+
+**`Modules/ZilEval.mod`**:
+
+- **`ParseZVersion`** — direct port, accepting `ZIP`/`EZIP`/`XZIP`/`YZIP`
+  as an atom or a string, or a plain number 3-8; the `GLULX` case is
+  dropped (a different VM target, already out of scope).
+- **`VERSION`** — sets `ZilModel.zversion`, handles the optional trailing
+  `TIME` atom (V3 only, as in the original), returns the version number.
+- **`CHECK-VERSION?`** — came free once `ParseZVersion` existed.
+- **`VERSION?`** — an FSUBR, `COND`-shaped but testing each clause's
+  condition as a version specifier (or `T`/`ELSE`) against the target
+  version instead of evaluating it. Kept the original's exact result rule:
+  the matching clause's last body value, or the condition itself when the
+  clause has no body, or FALSE when nothing matched.
+- **`FILE-FLAGS`** — validates the six flag names (so a typo is still an
+  error, as in the original) and otherwise does nothing: the only flag with
+  downstream meaning for code generation is `CLEAN-STACK?`, and ZilCompile
+  already pops every discarded call result unconditionally.
+- **`GDECL`** — accepts and discards its arguments, returning T. This is
+  the faithful reduction rather than a stub: the original's only effect is
+  to attach DECL constraints to global bindings, and this port skips DECL
+  checking entirely (an explicit phase-1 simplification).
+
+**`Modules/ZilCompile.mod`** now reads the version for every
+version-dependent decision, instead of assuming V3 everywhere:
+
+- `.NEW <version>` in the emitted header.
+- The `HERE`/`SCORE`/`MOVES`-first global ordering is applied **only** for
+  V3 (as in the original's `FinishGlobals`) — V4+ draws its status line
+  from game code, so the order is free there.
+- Object-table property defaults: 31 words in V1-3, 63 in V4+; dictionary
+  entry length 7 in V1-3, 9 in V4+ (the original's `zversion < 4 ? 4 : 6`
+  z-word bytes plus 3 data bytes).
+- Routine calls: V1-3 have only `CALL` and a 3-argument limit; V4 splits by
+  argument count into `CALL1`/`CALL2`/`CALL`/`XCALL` with a 7-argument
+  limit — the same switch as the original's `EmitCall`.
+- **V5+ is refused with an explicit error.** zapf auto-generates the
+  64-byte header only for V1-4; a V5+ story file has to lay its header out
+  by hand with data directives (see `ZapfAsm.WriteHeader`'s own comment and
+  the top of `~/cloak_plus.zap`). That's its own slice. Both games this
+  port is ultimately aiming at — `advent.zil` and `zork1.zil` — are
+  `<VERSION ZIP>`, i.e. V3, so this isn't on the critical path.
+
+**Tested end-to-end**: a program using all four directives, with
+`<CONSTANT WHICH <VERSION? (ZIP 3) (EZIP 4) (ELSE 99)>>`, compiled,
+assembled and run — printed `version=3`; changing its `<VERSION ZIP>` to
+`<VERSION EZIP>` produced a `.NEW 4` header, assembled to a `.z4`, and
+printed `version=4`, confirming the version really drives emission and not
+just the header byte; changing it to `<VERSION XZIP>` was refused with the
+V5 message. All five earlier end-to-end programs re-run with identical
+output.
+
+**Measured effect on the corpus** (52 files): evaluation failures 40 → 35,
+and — more informative than the count — `advent.zil` itself now gets
+through `VERSION`, its `CONSTANT`/`PTABLE` declarations and its scoring
+setup before stopping at `COMPILATION-FLAG-DEFAULT`, where before it
+stopped on its eighth line. The remaining frontier, by first failure:
+
+| Missing | Files |
+|---|---|
+| `USE` / `PACKAGE` / `ADD-TELL-TOKENS` (the qualified-OBLIST cluster) | 13 |
+| `INSERT-FILE "parser"` not found — the games include library files from `zillib/`, and this port resolves an INSERT-FILE only against the including file's own directory. **A library/include search path is the fix, and it is small** | 5 |
+| `ITABLE` keyword argument shapes (`<ITABLE NONE n>`, `<ITABLE BYTE ...>`) | 3 |
+| `COMPILATION-FLAG-DEFAULT` / `IF-DEBUG` / `IFFLAG` family | 4 |
+| `DEFSTRUCT`, `GUNASSIGN`, `STRING`, `STATUS-LINE-SECTION` | 4 |
+| forward references across files (`ZORK-NUMBER`, `INITIAL-PLAYER-MAX-HP`) | 3 |
+| SEGMENT splicing inside a LIST | 1 |
+| arithmetic on non-FIX values (`sample/rascal`) | 2 |
+
+**Tested**: transpiler regression suite, 138 files, same 3 pre-existing-only
+failures.
+
 ## Corpus gap analysis: exactly what blocks compiling a real game
 
 Running the new driver over all 52 corpus files makes the remaining gap
@@ -1659,11 +1745,16 @@ SUBRs (count = files blocked at that point, first failure only):
 | arithmetic on non-FIX | 2 | `sample/rascal` — probably a real evaluator gap worth a look |
 | unassigned atom at eval time | 2 | `INITIAL-PLAYER-MAX-HP`, `ZORK-NUMBER` — forward references across files |
 
-The useful conclusion: **`VERSION` + `FILE-FLAGS` + `GDECL` + `VERSION?`
-are four small, self-contained registrations that between them unblock the
-top level of 19 of the 40 failing files**, and are the cheapest next step
-by a wide margin. The `PACKAGE`/`USE`/`ADD-TELL-TOKENS` cluster (11 files)
-is the known qualified-OBLIST investigation and should stay one task.
+The useful conclusion: `VERSION` + `FILE-FLAGS` + `GDECL` + `VERSION?` are
+four small, self-contained registrations and the cheapest next step by a
+wide margin. **Read the counts as "what each file hits first", not "files
+this would finish"** — the table counts first failures only, so
+implementing the top entry mostly moves each file on to whatever it hits
+next rather than completing it (see the measured result in the section
+below, where implementing all four took the failure count from 40 to 35,
+while moving several files substantially further through their source).
+The `PACKAGE`/`USE`/`ADD-TELL-TOKENS` cluster is the known
+qualified-OBLIST investigation and should stay one task.
 
 ## Suggested order for the next session
 
@@ -1676,9 +1767,14 @@ is the known qualified-OBLIST investigation and should stay one task.
    (compile → `zapf` → `zmachine.mod`, checking the printed values). Also
    re-run the transpiler's own full `Modules/*.mod`+`examples/*.mod`
    regression suite (138 files, 3 pre-existing failures).
-2. **The four cheap registrations** — `VERSION`, `FILE-FLAGS`, `GDECL`,
-   `VERSION?` — see the corpus gap analysis above. Highest files-unblocked
-   per line of work of anything left.
+2. **A library/include search path** — five corpus files, including every
+   real game, stop at `INSERT-FILE "parser"`, because this port resolves an
+   INSERT-FILE only against the including file's own directory and the
+   library lives in `zillib/`. The original has a configurable include-path
+   list; `ZilEval.SetCurrentDir`'s own comment already notes this port
+   dropped it only because there was no CLI to configure it from — and now
+   there is (`examples/zilf.mod`). Small, and on the critical path for
+   compiling any real game.
 3. Then the remaining phase-3b codegen widenings, roughly in value order:
    a. **`AND`/`OR` and the loop constructs**: read `Compilation.Loops.cs`
       (896 lines, still not read). `COND`'s condition fallback already

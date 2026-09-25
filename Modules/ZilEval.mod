@@ -338,6 +338,32 @@ BEGIN
   RETURN MkVal(tab)
 END PerformITable;
 
+(* Parses a Z-machine version specifier: one of the historical Infocom
+   interpreter names (ZIP/EZIP/XZIP/YZIP), given either as an atom or a
+   string, or a plain number 3..8. Direct port of the original's own
+   ParseZVersion (Subrs.ZModel.cs), minus the GLULX case (a different VM
+   target, skipped for this port per the plan's scope decisions). Returns 0
+   for anything unrecognized. *)
+PROCEDURE ParseZVersion*(z: ZilObj.Zo): INTEGER;
+VAR text: ARRAY 64 OF CHAR;
+BEGIN
+  IF z = NIL THEN RETURN 0 END;
+  IF z.kind = ZilObj.KFix THEN
+    IF (z.fixVal >= 3) & (z.fixVal <= 8) THEN RETURN z.fixVal END;
+    RETURN 0
+  END;
+  IF z.kind = ZilObj.KAtom THEN Strings.Copy(z.atomText, text)
+  ELSIF z.kind = ZilObj.KString THEN Strings.Copy(z.strBuf^, text)
+  ELSE RETURN 0
+  END;
+  IF text = "ZIP" THEN RETURN 3
+  ELSIF text = "EZIP" THEN RETURN 4
+  ELSIF text = "XZIP" THEN RETURN 5
+  ELSIF text = "YZIP" THEN RETURN 6
+  END;
+  RETURN 0
+END ParseZVersion;
+
 PROCEDURE ApplySubr*(name: ARRAY OF CHAR; args: ARRAY OF ZilObj.Zo; n: INTEGER): ZResult;
 VAR sum, i, len, synKind: INTEGER; s: ARRAY 4096 OF CHAR; ind: ZilObj.Zo;
 BEGIN
@@ -553,6 +579,50 @@ BEGIN
     FOR i := 0 TO n - 1 DO ZilModel.AddBuzzword(args[i]) END;
     RETURN MkVal(TrueVal())
 
+  ELSIF name = "VERSION" THEN
+    (* <VERSION ZIP> / <VERSION XZIP> / <VERSION 5>, optionally followed by
+       the atom TIME (V3's alternative "time" status line). Sets the target
+       Z-machine version for the whole program — the original's own VERSION
+       subr, which likewise just calls ctx.SetZVersion and returns the
+       number. A plain evaluated-args SUBR there and here: a bare atom
+       self-evaluates, so the version name arrives intact. *)
+    IF n < 1 THEN RETURN Err("VERSION: expected a version specifier") END;
+    i := ParseZVersion(args[0]);
+    IF i = 0 THEN
+      RETURN ErrAtom("VERSION: unrecognized version specifier (want ZIP/EZIP/XZIP/YZIP or 3-8):", args[0])
+    END;
+    ZilModel.zversion := i;
+    IF (n >= 2) & (args[1].kind = ZilObj.KAtom) & (args[1].atomText = "TIME") THEN
+      IF i # 3 THEN RETURN Err("VERSION: TIME is only meaningful in version 3") END;
+      ZilModel.timeStatusLine := TRUE
+    END;
+    RETURN MkVal(ZilObj.NewFix(i))
+
+  ELSIF name = "CHECK-VERSION?" THEN
+    IF n < 1 THEN RETURN Err("CHECK-VERSION?: expected a version specifier") END;
+    RETURN MkVal(BoolVal(ParseZVersion(args[0]) = ZilModel.zversion))
+
+  ELSIF name = "FILE-FLAGS" THEN
+    (* Per-file compiler flags (Subrs.Meta.cs): CLEAN-STACK?, MDL-ZIL?,
+       SENTENCE-ENDS?, KEEP-ROUTINES?, UNUSED-ROUTINES? and the ignored
+       ZAP-TO-SOURCE-DIRECTORY?. None of them changes anything this port
+       does — the only one with downstream meaning for code generation is
+       CLEAN-STACK?, and ZilCompile already pops every discarded call
+       result unconditionally — so this validates the flag names (so a
+       typo is still caught, as in the original) and otherwise does
+       nothing. *)
+    FOR i := 0 TO n - 1 DO
+      IF args[i].kind # ZilObj.KAtom THEN
+        RETURN Err("FILE-FLAGS: expected flag atoms")
+      END;
+      IF (args[i].atomText # "CLEAN-STACK?") & (args[i].atomText # "MDL-ZIL?")
+         & (args[i].atomText # "ZAP-TO-SOURCE-DIRECTORY?") & (args[i].atomText # "SENTENCE-ENDS?")
+         & (args[i].atomText # "KEEP-ROUTINES?") & (args[i].atomText # "UNUSED-ROUTINES?") THEN
+        RETURN ErrAtom("FILE-FLAGS: unrecognized file flag:", args[i])
+      END
+    END;
+    RETURN MkVal(TrueVal())
+
   ELSIF name = "DELAY-DEFINITION" THEN
     (* Part of the "hooks" system (Subrs.Meta.cs) library files use to let
        a game override a default definition before it's ever encountered:
@@ -734,6 +804,8 @@ VAR
   nargs, i: INTEGER;
   name: ARRAY 64 OF CHAR;
   isFSubr: BOOLEAN;
+  (* VERSION? *)
+  cond: ZilObj.Zo; matched: BOOLEAN; ver: INTEGER;
   (* QUASIQUOTE walk mode (see the dedicated comment below) *)
   qqResult, qqTail, qqElem, qqInner, qqCell, qqSpliceP, qqVec: ZilObj.Zo;
   qqStop: BOOLEAN;
@@ -1131,6 +1203,55 @@ BEGIN
         n := n.rest
       END;
       RETURN r
+
+    ELSIF isFSubr & (name = "VERSION?") THEN
+      (* Version-conditional compilation: COND-shaped, but each clause's
+         condition is a version specifier (or T/ELSE) tested against the
+         program's target version rather than evaluated. Direct port of the
+         original's VERSION_P (Subrs.ZModel.cs), including its result rule:
+         the matching clause's last body value, or the condition itself
+         when the clause has no body, or FALSE when nothing matched. *)
+      r := MkVal(FalseVal());
+      n := z.rest;
+      WHILE (n # NIL) & (n.first # NIL) DO
+        clause := n.first;
+        IF (clause.kind # ZilObj.KList) OR ZilObj.IsEmpty(clause) THEN
+          RETURN Err("VERSION?: each clause must be a non-empty list")
+        END;
+        cond := clause.first;
+        matched := (cond # NIL) & (cond.kind = ZilObj.KAtom)
+                   & ((cond.atomText = "T") OR (cond.atomText = "ELSE"));
+        IF ~matched THEN
+          ver := ParseZVersion(cond);
+          IF ver = 0 THEN
+            RETURN Err("VERSION?: clause condition must be a version specifier, T or ELSE")
+          END;
+          matched := ver = ZilModel.zversion
+        END;
+        IF matched THEN
+          r := MkVal(cond);
+          body := clause.rest;
+          WHILE (body # NIL) & (body.first # NIL) DO
+            r := EvalImpl(body.first, FALSE);
+            IF ShouldPass(r) THEN RETURN r END;
+            body := body.rest
+          END;
+          RETURN r
+        END;
+        n := n.rest
+      END;
+      RETURN r
+
+    ELSIF isFSubr & (name = "GDECL") THEN
+      (* <GDECL (ATOM ATOM ...) decl ...> attaches DECL type constraints to
+         globals. This port skips DECL checking entirely (an explicit
+         simplification from phase 1 — see the plan doc), so the original's
+         only effect here, storing the DECL on each global's binding, has
+         nothing to store it for. An FSUBR that accepts and discards its
+         arguments, returning T, is therefore the faithful reduction rather
+         than a stub: source that uses GDECL compiles, and nothing that
+         depends on the result is affected. *)
+      RETURN MkVal(TrueVal())
 
     ELSIF isFSubr & (name = "AND") THEN
       r := MkVal(TrueVal());
@@ -1554,6 +1675,8 @@ BEGIN
   Register("DIRECTIONS", FALSE); Register("BUZZ", FALSE); Register("VOC", FALSE);
   Register("DELAY-DEFINITION", FALSE);
   Register("DEFAULT-DEFINITION", TRUE); Register("REPLACE-DEFINITION", TRUE);
+  Register("VERSION", FALSE); Register("CHECK-VERSION?", FALSE); Register("FILE-FLAGS", FALSE);
+  Register("VERSION?", TRUE); Register("GDECL", TRUE);
 
   tAtom := ZilObj.Intern("T");
   tAtom.globalVal := tAtom;  (* T is self-valued *)
