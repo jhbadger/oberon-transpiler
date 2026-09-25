@@ -155,72 +155,128 @@ in a sitting" task even now that phase 1 exists.
   exported module-level `VAR` names distinctive; this doesn't affect
   `RECORD` field names (those are fine, as seen throughout `ZilObj.mod`).
 
-## What phase 2 needs to cover (Interpreter core)
+## What's done (phase 2) — files, and what's tested
 
-Read `Zilf/Interpreter/*.cs` (not just `Values/`) in full before starting.
-At minimum, phase 2 needs:
+**`Modules/ZilEval.mod`**, plus binding/property-list fields added to
+`ZilObj.ZoDesc` (`globalVal`, `localVal` on atoms; a per-object `assoc`
+linked list for `PUTPROP`/`GETPROP` — see the file for why these live
+directly on the value's own record rather than in a separate table keyed
+by object identity, which is what the original does).
 
-1. **`Context`** (the ZIL interpreter's global state — distinct from, but
-   analogous in spirit to, zapf's `ZapfAsm.Context`): global value table
-   (`GVAL`), local/lexical value table (`LVAL`) with environment chaining
-   for `PROG`/routine-call scoping, the `OBLIST` special variable, property
-   lists (`PUTPROP`/`GETPROP`, used heavily for e.g. object flags),
-   `StdAtom` well-known-atom table (the original's `StdAtom.cs`, 374 lines
-   — an enum of every special atom the interpreter/compiler hard-codes
-   checks against, e.g. `GVAL`, `LVAL`, `QUOTE`, `ELSE`, `FLAGS`, `DESC`
-   — port this incrementally, adding entries as builtins need them rather
-   than all 374 up front).
-   **Update (confirmed this session, after the plan above was written):**
-   found them. They're partial-class files directly in `Zilf/Interpreter/`
-   (not a subdirectory): `Subrs.cs` (104, the dispatch table itself) +
-   `Subrs.{Atoms,Conditionals,DefStruct,Functions,Loops,Map,Math,Meta,
-   Output,Packages,Structures,Types,ZModel}.cs` = **7,272 lines total**,
-   biggest being `Subrs.ZModel.cs` (1,672 — object/room/table builtins
-   evaluated at *interpret* time, not to be confused with the *compiler's*
-   `Compiler/Builtins`), `Subrs.DefStruct.cs` (920), `Subrs.Meta.cs` (710),
-   `Subrs.Atoms.cs` (685), `Subrs.Structures.cs` (640). The remaining core
-   infra (everything else directly in `Zilf/Interpreter/`, non-`Subrs`,
-   non-`Values`) is **5,193 lines**, dominated by `Context.cs` (1,457,
-   **the** file to read first for phase 2 — global/local value storage,
-   OBLIST, property lists all likely live here) and `ArgSpec.cs` (970 —
-   the SUBR/FSUBR argument-list declaration & checking mini-DSL, e.g. how
-   a builtin declares "1 required FIX, up to 3 optional ATOMs"). Also
-   present and worth reading early: `ZilResult.cs` (225 — confirms the
-   "explicit signal value, no exceptions" design guessed above),
-   `LocalEnvironment.cs` (173), `ObList.cs` (145, the *real* package
-   hierarchy this port's `ZilObj.Intern` currently flattens away),
-   `IStructure.cs`/`StructureExtensions.cs` (115+233 — the generic
-   sequence-operation interface `ZilString`/`ZilVector`/`ZilAdecl` all
-   implement, referenced throughout `Values/` in phase 1's reading).
+**A key semantic fact, verified against `Subrs.Atoms.cs` before writing
+any of this and worth restating because it's easy to get backwards: a
+bare ATOM is self-evaluating in ZIL, not a variable reference.**
+`<SET X 5>` works because evaluating `X` (as SET's already-evaluated SUBR
+argument) just yields the atom `X` itself; real variable dereference is
+always explicit (`.X`/`<LVAL X>` for locals, `,X`/`<GVAL X>` for globals).
+`ZilForm.EvalImpl`'s head-atom lookup (global-then-local, in that priority
+order — also verified, and non-obvious) is the *only* place a bare atom's
+value is actually consulted, and only to decide what to call.
 
-2. **`LocalEnvironment`/activation frames** for routine/PROG calls with
-   proper dynamic extent and `RETURN`/`AGAIN` non-local exit (the original
-   uses `ZilResult` as a discriminated "value or control-flow signal"
-   return type threaded through everything — `EvalImpl` returns `ZilResult`
-   precisely so a `RETURN`/`AGAIN`/exception-like signal can propagate up
-   without real exceptions; Oberon has no exceptions either, so this
-   `ZilResult`-as-explicit-signal pattern actually translates *naturally*
-   — don't try to use HALT or error-flag tricks here, model `ZilResult`
-   directly as a tagged value/signal, matching the original's own design
-   rather than fighting it).
-3. **SUBR/FSUBR/macro dispatch**: `ZilForm.EvalImpl` (already read in
-   full, in this session, for context — see `Zilf/Interpreter/Values/
-   ZilForm.cs`) looks up the head atom's global or local value; if it's a
-   `ZilSubr`/`ZilFSubr` (built-in procedures — FSUBR gets unevaluated
-   args, SUBR gets evaluated args), it calls into a big dispatch table of
-   native implementations (`Zilf/Interpreter/Subrs/*.cs` — **note**: this
-   directory wasn't in the top-level listing surveyed this session; find
-   and size it before starting phase 2, it's likely where much of the
-   16,868-line `Interpreter` total actually lives beyond `Values/`).
-   `ZilEvalMacro`/`DEFMAC`-defined macros expand via `ZilForm.Expand`
-   (also already read).
+Implemented and working:
+- `ZResult` (the `Outcome`-tagged value/signal type — `OValue`/`OReturn`/
+  `OAgain`, matching the original's `ZilResult` design exactly; only
+  `OValue` is actually produced yet, since nothing needing `RETURN`/`AGAIN`
+  targets — i.e. `PROG`/routine calls — exists yet).
+- `Eval`, self-recursive (same reason as `ZilRead.ReadOne` — no `FORWARD`),
+  handling: self-evaluating ATOM/FIX/STRING/CHARACTER/VECTOR/FALSE/SUBR/
+  FSUBR; ADECL (evaluates its first part, DECL check skipped); SEGMENT
+  (errors — only valid spliced into a structure, not implemented); LIST
+  (evaluates each element into a new list — no SEGMENT-splicing yet,
+  errors if one appears); FORM (the real "apply" logic: global-then-local
+  head lookup, then FSUBR args-unevaluated vs SUBR args-evaluated-first
+  dispatch).
+- FSUBRs (inlined into `Eval` itself, for the same forward-reference
+  reason SUBR dispatch isn't): `QUOTE`, `COND`, `AND`, `OR`.
+- SUBRs (factored into `ApplySubr`, which — unlike the FSUBRs — never
+  calls `Eval` itself, so it *can* be declared separately without hitting
+  the forward-reference restriction): `SET`, `SETG`/`GLOBAL`, `LVAL`,
+  `GVAL`, `GASSIGNED?`, `ASSIGNED?`, `PUTPROP`, `GETPROP`, `+`, `-`, `*`,
+  `/`, `MOD`, `1+`, `1-`, `=?`/`EQUAL?`/`==?`, `N=?`/`N==?`, `L?`, `G?`,
+  `L=?`, `G=?`, `NOT`, `PRINC`, `PRIN1`, `PRINT`, `CRLF`.
+- **Tested**: `/private/tmp/.../scratchpad/sample2.zil` + `evaltest.mod` —
+  18 top-level forms covering every SUBR/FSUBR above, including the exact
+  milestone from this doc's previous revision (`<SET X <+ 1 2>>` → `3`).
+  **All 18 produced the correct result**, cross-checked by hand (arithmetic,
+  `COND` branch selection, `PUTPROP`/`GETPROP` round-trip, atom
+  self-evaluation and identity comparison via `=?`). Re-run this before
+  trusting any refactor of `ZilObj.mod`/`ZilEval.mod`, same caveat as
+  phase 1's reader test — no automated harness yet.
+
+### New Oberon-specific gotcha found this session
+
+- **A single-character string literal (e.g. `"+"`) is inferred as `CHAR`
+  by this transpiler**, even in a context comparing it against a `ARRAY OF
+  CHAR` variable — `name = "+"` silently mistranslates to a `strcmp` call
+  with a raw `char` argument and fails at the **C compilation** stage, not
+  at the Oberon-parsing stage (confusing pointer/int-conversion error).
+  Fix: compare length-then-first-char instead, exactly as this transpiler's
+  own examples do for genuine `CHAR` comparisons — see `ZilEval.mod`'s
+  `IsOp` helper. Only bites *single-character* string literals; multi-char
+  ones (`"ADD"`, `"SUB"`, etc.) are unaffected.
+- Hit the `n.e.text`-style pointer-chain bug from zapf *again*
+  (`z.first.kind`, `z.rest.first`, etc. — any `.field` chained through a
+  second pointer-typed field in one expression). Same fix as before:
+  assign the intermediate pointer to a local variable first, then access
+  the second field off *that*. Given this has now bitten twice independently,
+  **audit for this pattern as a matter of course whenever writing a chained
+  field access through more than one pointer**, don't wait to hit the C
+  compile error.
+
+## What's still needed for a complete phase 2 (Interpreter core)
+
+Read `Zilf/Interpreter/Context.cs` in full before starting (not done yet —
+this session worked from `ZilResult.cs`, `LocalEnvironment.cs`,
+`ObList.cs`, and targeted greps into `Context.cs`/`Subrs.Atoms.cs`/
+`Subrs.Functions.cs`/`Subrs.Conditionals.cs`/`Subrs.Math.cs`, not a full
+read of `Context.cs`'s 1,457 lines — there is certainly more in there than
+what got surfaced by grepping for specific method names).
+
+1. **PROG/routine application** — the biggest remaining piece. Needs:
+   argument binding (evaluate call args, bind them to the callee's
+   parameter atoms), the shallow-binding **push/pop** machinery this
+   session deliberately deferred (see `ZilEval.mod`'s header comment) —
+   entering a `PROG`/routine call must save each bound atom's current
+   `localVal`, set the new one, and restore the saved value on exit (even
+   if exiting via a `RETURN`/`AGAIN` signal, i.e. push/pop must happen in
+   a `finally`-equivalent, not just on normal fall-through) — and `OReturn`/
+   `OAgain` actually being produced and consumed (a `RETURN` inside a PROG
+   should unwind exactly to that PROG's activation and no further; this
+   needs each PROG activation to have an identity a `ZResult.activation`
+   can reference and compare against, `ZilActivation` in the original).
+2. **`ObList.cs`** (145 lines, read this session) confirms the real
+   package/OBLIST hierarchy this port's `ZilObj.Intern` flattens away is
+   just a name→atom hash table per oblist, same shape as the flat one
+   already implemented — extending to multiple named oblists later (if it
+   turns out to matter) should be a moderate, not a rearchitecting, change.
+3. **`StdAtom` table** (`Language/StdAtom.cs`, 374 lines) — an enum of
+   every special atom the interpreter/compiler hard-codes checks against.
+   Still being ported incrementally on demand (this session only needed
+   `LVAL`/`GVAL`/`QUOTE`/`SET`/`SETG`/etc. as plain interned-string
+   comparisons, no enum yet) — keep doing that rather than porting all 374
+   up front; revisit if the on-demand string-comparison approach starts
+   feeling unwieldy once dozens of builtins exist.
 4. **CHTYPE / type system**: `PrimType` (ATOM/FIX/STRING/LIST/VECTOR — the
    "primitive representation" every ZIL type ultimately reduces to) and
    the `BuiltinType`/`ChtypeMethod` attribute-driven coercion machinery.
-   Needed to make `#TYPE (...)` from phase 1 actually work.
-5. Once 1-4 exist, **go back and fix phase 1's two stubs** (`%` and
-   `#TYPE`) to call the real evaluator/CHTYPE instead of passing through
-   unevaluated.
+   Needed to make phase 1's `#TYPE (...)` stub actually retype values.
+5. **`DEFMAC`/macro expansion** (`ZilForm.Expand`, already read in phase 1
+   — see `Zilf/Interpreter/Values/ZilForm.cs`) — needed before real ZIL
+   library/game source can be evaluated, since most such source leans on
+   author- or library-defined macros.
+6. **`ArgSpec.cs`/`ArgDecoder.cs`** (970+253 lines) — the original's
+   generic, reflection/attribute-driven SUBR argument-list declaration and
+   checking DSL. **Deliberately not being ported as a generic system** —
+   this session's `ApplySubr` just hand-checks each builtin's own arg
+   count/types inline (same philosophy as zapf's `HandleInstruction`
+   checking operand counts directly rather than through a schema). Keep
+   doing this for new builtins; only reconsider if the number of builtins
+   grows large enough that the per-builtin boilerplate becomes the
+   bottleneck (unlikely before Compiler/Builtins-scale work starts).
+7. Once 1-6 exist, **go back and fix phase 1's two remaining stubs** (`%`
+   compile-time eval and `#TYPE` CHTYPE in `ZilRead.mod`) to call the real
+   evaluator/CHTYPE instead of passing their argument through unevaluated/
+   unretyped.
 
 ## What phase 3+ needs to cover (Compiler / ZModel / Emit.Zap)
 
@@ -251,19 +307,29 @@ Before starting:
 
 ## Suggested order for the next session
 
-1. Re-run phase 1's read/print round-trip test on `sample1.zil` (and maybe
-   a real excerpt from an actual `.zil` file, if one is findable in this
-   machine's zilf checkout or a public ZIL sample) to confirm nothing
-   regressed.
-2. Read `Zilf/Interpreter/Context.cs` (1,457 lines) and `ZilResult.cs`,
-   `LocalEnvironment.cs`, `ObList.cs`, `ArgSpec.cs` in full — all found
-   and sized already (see the "phase 2" section above), just not read yet.
-3. Design `ZilCtx.mod` (global/local value tables, OBLIST special var,
-   property lists, StdAtom-so-far) and `ZilEval.mod` (the `ZilResult`
-   signal type, `Eval`/`Expand`, SUBR/FSUBR dispatch for a *small* starter
-   set: `SET`, `GET`, `PUT`, `+`/`-`/`*`/`/`, `COND`, `PROG`, `DEFINE`/
-   `ROUTINE` recognition, `QUOTE`/`GVAL`/`LVAL` evaluation). Get a trivial
-   ZIL expression like `<SET X <+ 1 2>>` evaluating correctly end to end
-   before trying to cover more builtins — same "narrow vertical slice,
-   fully working, then widen" strategy that made zapf tractable.
+1. Re-run phase 1's reader test (`sample1.zil`) and phase 2's eval test
+   (`sample2.zil` + `evaltest.mod`) to confirm nothing regressed. (Both
+   live under the session's scratchpad, which may not survive between
+   machine sessions — if gone, they're small and quick to recreate from
+   this doc's descriptions of what they cover.)
+2. Read `Zilf/Interpreter/Context.cs` in full (still not done — see "What's
+   still needed" above). This is where `PROG`/routine-call environment
+   push/pop almost certainly lives (`PushEnvironment`/`PopEnvironment`/
+   `ExecuteInEnvironment` were already spotted by name via grep, but not
+   read in context).
+3. Pick ONE of: (a) PROG/routine application (the biggest, most valuable
+   next slice — unlocks real ZIL control flow), or (b) DEFMAC/macro
+   expansion (unlocks reading real library/game source without phase-1's
+   `%`-stub mattering as much). Both are substantial; do not try both in
+   one sitting. Get a trivial end-to-end case working and tested before
+   widening — e.g. for (a): `<ROUTINE ADD1 (X) <+ .X 1>>` then somehow
+   invoking it (note: ROUTINE *definition* vs *compilation* vs *interpret-
+   time application* are three different things in the real zilf — a
+   ROUTINE is normally compiled to Z-machine code, not interpreted; check
+   whether interpret-time routine application is even a real original
+   behavior worth replicating, or whether phase 2's evaluator only ever
+   needs to run macros/FSUBRs/SUBRs and PROG, with ROUTINE bodies handed
+   to the *compiler* (phase 3) uncompiled-but-macro-expanded instead of
+   ever being `Eval`'d directly — this distinction matters and wasn't
+   nailed down this session).
 4. Update this doc's "what's done" section and commit again.

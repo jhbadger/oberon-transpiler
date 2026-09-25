@@ -40,18 +40,34 @@ CONST
   KAdecl*   = 7;
   KSegment* = 8;
   KFalse*   = 9;
+  KSubr*    = 10;    (* native procedure, evaluated args *)
+  KFSubr*   = 11;    (* native procedure, unevaluated args *)
 
   OblistBuckets = 2048;
 
 TYPE
   Zo* = POINTER TO ZoDesc;
 
+  (* A PUTPROP/GETPROP association list entry. Any Zo can carry properties
+     (matches the original's generic two-key AssociationTable), but rather
+     than a separate global table keyed by object identity, each value's
+     property list hangs directly off that value's own record — simpler,
+     and just as correct since Oberon pointers already give us identity. *)
+  AssocNode* = POINTER TO AssocNodeDesc;
+  AssocNodeDesc* = RECORD
+    indicator*: Zo;
+    value*: Zo;
+    next*: AssocNode
+  END;
+
   ZoDesc* = RECORD
     kind*: INTEGER;
 
     (* ATOM *)
-    atomText*: ARRAY 64 OF CHAR;
+    atomText*: ARRAY 64 OF CHAR;     (* also used to hold the name for KSubr/KFSubr *)
     atomNext: Zo;               (* oblist hash-bucket chain *)
+    globalVal*: Zo;             (* GVAL; NIL = unassigned *)
+    localVal*: Zo;              (* LVAL, shallow-bound — see ZilEval.mod's BindLocal/UnbindLocal *)
 
     (* FIX *)
     fixVal*: INTEGER;
@@ -76,7 +92,10 @@ TYPE
     adFirst*, adSecond*: Zo;
 
     (* SEGMENT: wraps a FORM *)
-    segForm*: Zo
+    segForm*: Zo;
+
+    (* property list (PUTPROP/GETPROP), any kind *)
+    assoc*: AssocNode
   END;
 
 VAR
@@ -177,6 +196,55 @@ BEGIN NEW(z); z.kind := KAdecl; z.adFirst := first; z.adSecond := second; RETURN
 PROCEDURE NewSegment*(form: Zo): Zo;
 VAR z: Zo;
 BEGIN NEW(z); z.kind := KSegment; z.segForm := form; RETURN z END NewSegment;
+
+PROCEDURE NewSubr*(name: ARRAY OF CHAR; isF: BOOLEAN): Zo;
+VAR z: Zo;
+BEGIN
+  NEW(z);
+  IF isF THEN z.kind := KFSubr ELSE z.kind := KSubr END;
+  Strings.Copy(name, z.atomText);
+  RETURN z
+END NewSubr;
+
+(* ------------------------------------------------------------------ *)
+(* property lists (PUTPROP/GETPROP)                                     *)
+(* ------------------------------------------------------------------ *)
+
+(* Indicator-matching for property lists: atoms (the overwhelmingly common
+   case) compare by identity (already correct thanks to interning); FIX
+   compares by value; anything else falls back to identity. *)
+PROCEDURE SameAtomOrEq(a, b: Zo): BOOLEAN;
+BEGIN
+  IF a = b THEN RETURN TRUE END;
+  IF (a = NIL) OR (b = NIL) THEN RETURN FALSE END;
+  IF (a.kind = KFix) & (b.kind = KFix) THEN RETURN a.fixVal = b.fixVal END;
+  RETURN FALSE
+END SameAtomOrEq;
+
+(* NIL value removes the association, matching <PUTPROP obj ind> (no value). *)
+PROCEDURE PutProp*(obj, indicator, value: Zo);
+VAR n, prev: AssocNode;
+BEGIN
+  n := obj.assoc; prev := NIL;
+  WHILE (n # NIL) & ~SameAtomOrEq(n.indicator, indicator) DO prev := n; n := n.next END;
+  IF value = NIL THEN
+    IF n # NIL THEN
+      IF prev = NIL THEN obj.assoc := n.next ELSE prev.next := n.next END
+    END
+  ELSIF n # NIL THEN
+    n.value := value
+  ELSE
+    NEW(n); n.indicator := indicator; n.value := value; n.next := obj.assoc; obj.assoc := n
+  END
+END PutProp;
+
+PROCEDURE GetProp*(obj, indicator: Zo): Zo;
+VAR n: AssocNode;
+BEGIN
+  n := obj.assoc;
+  WHILE (n # NIL) & ~SameAtomOrEq(n.indicator, indicator) DO n := n.next END;
+  IF n # NIL THEN RETURN n.value ELSE RETURN NIL END
+END GetProp;
 
 (* ------------------------------------------------------------------ *)
 (* accessors / predicates                                               *)
@@ -299,6 +367,10 @@ BEGIN
       PrintTo(z.adSecond, tmp); Strings.Append(tmp, s)
    |KSegment:
       Strings.Copy("!", s); PrintTo(z.segForm, tmp); Strings.Append(tmp, s)
+   |KSubr:
+      Strings.Copy("#SUBR (", s); Strings.Append(z.atomText, s); Strings.Append(")", s)
+   |KFSubr:
+      Strings.Copy("#FSUBR (", s); Strings.Append(z.atomText, s); Strings.Append(")", s)
   ELSE
     Strings.Copy("#UNKNOWN", s)
   END
