@@ -49,11 +49,22 @@ VAR
   errFlag*: BOOLEAN;
   errMsg*: ARRAY 512 OF CHAR;
 
+VAR curRoutine: ARRAY 64 OF CHAR;   (* for error messages *)
+
 PROCEDURE Err(msg: ARRAY OF CHAR);
-BEGIN errFlag := TRUE; Strings.Copy(msg, errMsg) END Err;
+BEGIN
+  IF errFlag THEN RETURN END;         (* first error wins, as in ZilEval *)
+  errFlag := TRUE;
+  Strings.Copy(msg, errMsg);
+  IF curRoutine[0] # 0X THEN
+    Strings.Append(" [in routine ", errMsg);
+    Strings.Append(curRoutine, errMsg);
+    Strings.Append("]", errMsg)
+  END
+END Err;
 
 PROCEDURE ClearErr*;
-BEGIN errFlag := FALSE; errMsg[0] := 0X END ClearErr;
+BEGIN errFlag := FALSE; errMsg[0] := 0X; curRoutine[0] := 0X END ClearErr;
 
 (* ---------------- output ----------------
    All .zap text goes through W (append to the current line) and WLn (end
@@ -88,6 +99,8 @@ VAR
   bufLines: ARRAY MaxBufLines OF LineText;
   nBufLines: INTEGER;
   tempDepth, tempMax: INTEGER;
+  tmpStack: ARRAY MaxRenames OF ARRAY 64 OF CHAR;
+  nTmpStack: INTEGER;
 
   (* The stack of enclosing PROG/REPEAT blocks (the original's
      Compilation.Blocks). RETURN and AGAIN target the innermost one — that
@@ -204,7 +217,9 @@ END CloseOutput;
    ...) and released as each instruction consumes them, so a routine only
    declares as many as its deepest expression actually needed. *)
 PROCEDURE BeginBuffer;
-BEGIN buffering := TRUE; nBufLines := 0; tempDepth := 0; tempMax := 0 END BeginBuffer;
+BEGIN
+  buffering := TRUE; nBufLines := 0; tempDepth := 0; tempMax := 0; nTmpStack := 0
+END BeginBuffer;
 
 PROCEDURE EndBuffer;
 BEGIN buffering := FALSE END EndBuffer;
@@ -223,18 +238,55 @@ BEGIN
   nBufLines := 0
 END FlushBuffer;
 
-(* Allocates the next temporary and yields its ZAP local name. *)
+(* Allocates a compiler temporary and yields its ZAP local name.
+   Temporaries come from the SAME pool as PROG/REPEAT bindings rather than a
+   separate ?TMP series, so a binding that has gone out of scope can serve
+   as a temporary and vice versa. A routine has only fifteen locals and real
+   library routines declare fourteen, so keeping two pools ran out on code
+   the original compiles fine. Named by nesting depth, so a temporary at the
+   same depth reuses the same slot. *)
 PROCEDURE AllocTemp(VAR name: ARRAY OF CHAR);
-VAR n: ARRAY 16 OF CHAR;
+VAR n, zilName: ARRAY 32 OF CHAR;
 BEGIN
   INC(tempDepth);
   IF tempDepth > tempMax THEN tempMax := tempDepth END;
   Strings.IntToStr(tempDepth, n);
-  Strings.Copy("?TMP", name); Strings.Append(n, name)
+  Strings.Copy("?TMP", zilName); Strings.Append(n, zilName);
+  IF AllocInnerLocal(zilName) THEN ResolveLocal(zilName, name)
+  ELSE Strings.Copy(zilName, name) END;
+  IF nTmpStack < MaxRenames THEN
+    Strings.Copy(name, tmpStack[nTmpStack]); INC(nTmpStack)
+  END
 END AllocTemp;
 
+(* Releases the most recently allocated temporary BY NAME rather than by
+   position in the rename stack. Position is not reliable: a temporary's
+   lifetime can straddle other allocations (a call spills several arguments
+   while compiling the ones between), and popping "the top" then releases
+   somebody else's slot and leaks this one. *)
 PROCEDURE FreeTemp;
-BEGIN DEC(tempDepth) END FreeTemp;
+VAR i, j: INTEGER;
+BEGIN
+  IF nTmpStack = 0 THEN RETURN END;
+  DEC(nTmpStack);
+  i := nRenames - 1;
+  WHILE (i >= 0) & (renZap[i] # tmpStack[nTmpStack]) DO DEC(i) END;
+  IF i >= 0 THEN
+    j := i;
+    WHILE j < nRenames - 1 DO
+      Strings.Copy(renZil[j + 1], renZil[j]);
+      Strings.Copy(renZap[j + 1], renZap[j]);
+      INC(j)
+    END;
+    DEC(nRenames)
+  END;
+  i := nParams;
+  WHILE i < nLocals DO
+    IF locName[i] = tmpStack[nTmpStack] THEN locInScope[i] := FALSE END;
+    INC(i)
+  END;
+  DEC(tempDepth)
+END FreeTemp;
 
 (* Renders a FIX as decimal text (negative numbers included, matching ZAP
    expression syntax — zapf's own expression parser accepts a leading
@@ -485,9 +537,12 @@ BEGIN
     END;
     IF ((name[0] = "P") & (name[1] = "R") & (name[2] = "?"))
        OR ((name[0] = "A") & (name[1] = "?"))
-       OR ((name[0] = "W") & (name[1] = "?")) THEN
+       OR ((name[0] = "W") & (name[1] = "?"))
+       OR ((name[0] = "A") & (name[1] = "C") & (name[2] = "T") & (name[3] = "?")) THEN
       Strings.Copy(name, propNm);
-      IF name[1] = "R" THEN Strings.Delete(propNm, 0, 3) ELSE Strings.Delete(propNm, 0, 2) END;
+      IF (name[0] = "A") & (name[1] = "C") THEN Strings.Delete(propNm, 0, 4)
+      ELSIF name[1] = "R" THEN Strings.Delete(propNm, 0, 3)
+      ELSE Strings.Delete(propNm, 0, 2) END;
       IF ZilModel.FindVocab(propNm) >= 0 THEN Strings.Copy(name, s); RETURN TRUE END
     END;
     RETURN FALSE
@@ -524,13 +579,18 @@ BEGIN
   ELSIF name = "GETP" THEN Strings.Copy("GETP", zap); nargs := 2
   ELSIF name = "GETPT" THEN Strings.Copy("GETPT", zap); nargs := 2
   ELSIF name = "NEXTP" THEN Strings.Copy("NEXTP", zap); nargs := 2
-  ELSIF name = "BAND" THEN Strings.Copy("BAND", zap); nargs := 2
-  ELSIF name = "BOR" THEN Strings.Copy("BOR", zap); nargs := 2
+  ELSIF (name = "BAND") OR (name = "ANDB") THEN Strings.Copy("BAND", zap); nargs := 2
+  ELSIF (name = "BOR") OR (name = "ORB") THEN Strings.Copy("BOR", zap); nargs := 2
   ELSIF name = "BCOM" THEN Strings.Copy("BCOM", zap); nargs := 1
   ELSIF (name = "ASH") OR (name = "ASHIFT") THEN Strings.Copy("ASHIFT", zap); nargs := 2
   ELSIF name = "SHIFT" THEN Strings.Copy("SHIFT", zap); nargs := 2
   ELSIF name = "RANDOM" THEN Strings.Copy("RANDOM", zap); nargs := 1
   ELSIF name = "LOC" THEN Strings.Copy("LOC", zap); nargs := 1
+    (* FIRST?/NEXT? both store AND branch; used as a value only the stored
+       child/sibling matters (0 when there is none), and a ZAP branch marker
+       is optional *)
+  ELSIF name = "FIRST?" THEN Strings.Copy("FIRST?", zap); nargs := 1
+  ELSIF name = "NEXT?" THEN Strings.Copy("NEXT?", zap); nargs := 1
   ELSIF name = "PTSIZE" THEN Strings.Copy("PTSIZE", zap); nargs := 1
 
   (* void *)
@@ -599,13 +659,18 @@ END ResolveLocal;
    MakeUniqueVariableName does the same, and it matters because a binding
    may legitimately shadow a parameter. *)
 PROCEDURE AllocInnerLocal(zilName: ARRAY OF CHAR): BOOLEAN;
-VAR i, k: INTEGER; cand, num: ARRAY 64 OF CHAR; taken: BOOLEAN;
+VAR i, k: INTEGER; cand: ARRAY 512 OF CHAR; num: ARRAY 64 OF CHAR; taken: BOOLEAN;
 BEGIN
   IF nRenames >= MaxRenames THEN
     Err("CompileStmt: too many nested bindings"); RETURN FALSE
   END;
 
-  (* an out-of-scope slot already created for this same name *)
+  (* Reuse an out-of-scope slot — preferring one created for this same ZIL
+     name, so the generated code stays readable, but taking ANY free inner
+     local otherwise. The ZAP name is arbitrary (the rename stack is what
+     connects it to the ZIL name), and a routine only gets fifteen locals,
+     so not reusing them runs out on real library routines. This is the
+     original's SpareLocals. *)
   i := nParams;
   WHILE i < nLocals DO
     IF ~locInScope[i] & (locZil[i] = zilName) THEN
@@ -617,9 +682,33 @@ BEGIN
     END;
     INC(i)
   END;
+  i := nParams;
+  WHILE i < nLocals DO
+    IF ~locInScope[i] THEN
+      locInScope[i] := TRUE;
+      Strings.Copy(zilName, locZil[i]);
+      Strings.Copy(zilName, renZil[nRenames]);
+      Strings.Copy(locName[i], renZap[nRenames]);
+      INC(nRenames);
+      RETURN TRUE
+    END;
+    INC(i)
+  END;
 
   IF nLocals >= MaxLocals THEN
-    Err("CompileStmt: too many locals (arguments plus bindings)"); RETURN FALSE
+    (* Report what the routine is competing for: the Z-machine allows
+       fifteen locals per routine, and a library routine can use all of
+       them for its own variables and loop counters, leaving none for a
+       compiler temporary. *)
+    Strings.Copy("out of locals (15 max) allocating ", cand);
+    Strings.Append(zilName, cand);
+    Strings.Append("; in use:", cand);
+    i := 0;
+    WHILE i < nLocals DO
+      Strings.Append(" ", cand); Strings.Append(locName[i], cand);
+      INC(i)
+    END;
+    Err(cand); RETURN FALSE
   END;
 
   Strings.Copy(zilName, cand);
@@ -680,6 +769,39 @@ BEGIN
          & (ZilObj.IsAtomNamed(z.first, "LVAL") OR ZilObj.IsAtomNamed(z.first, "GVAL"))
 END IsSimpleOperand;
 
+(* Called after BOTH operands of a binary instruction have been compiled and
+   both turned out to be on the stack. They are in the wrong order there —
+   the right one is on top — so popping it into a temporary leaves the left
+   one on top and the pair usable.
+
+   Doing the fix-up here rather than spilling the left operand speculatively
+   before the right is compiled matters: this emitter has the invariant that
+   a compiled operand leaves a value on the stack EXACTLY when it returns
+   "STACK", so "would the right operand disturb the left" is knowable
+   afterwards and only guessable before. Guessing cost a temporary on every
+   compound right operand, and a routine has only fifteen locals. *)
+PROCEDURE FixStackedPair(VAR leftText, rightText: ARRAY OF CHAR;
+                         commutative: BOOLEAN): BOOLEAN;
+VAR tmp: ARRAY 16 OF CHAR;
+BEGIN
+  IF (leftText # "STACK") OR (rightText # "STACK") THEN RETURN TRUE END;
+  (* For a COMMUTATIVE operation the reversed order is the same answer, so
+     no fix-up and no temporary is needed at all. That matters beyond
+     tidiness: zillib's MATCH-NOUN-PHRASE already uses all fifteen locals
+     for its own variables and two nested loop counters, so a temporary it
+     doesn't need is the difference between compiling and not. *)
+  IF commutative THEN RETURN TRUE END;
+  AllocTemp(tmp);
+  IF nLocals > MaxLocals THEN
+    Err("out of locals: FixStackedPair");
+    RETURN FALSE
+  END;
+  W("	SET '"); W(tmp); W(",STACK"); WLn;   (* pops the RIGHT operand *)
+  Strings.Copy(tmp, rightText);
+  FreeTemp;
+  RETURN TRUE
+END FixStackedPair;
+
 (* Moves an operand already sitting on the stack into a fresh temporary, so
    a later operand of the same instruction can use the stack without the two
    coming back off it in the wrong order. Returns FALSE (with the error set)
@@ -688,8 +810,8 @@ PROCEDURE SpillToTemp(VAR text: ARRAY OF CHAR): BOOLEAN;
 VAR tmp: ARRAY 16 OF CHAR;
 BEGIN
   AllocTemp(tmp);
-  IF tempMax > MaxLocals THEN
-    Err("expression needs more compiler temporaries than a routine has locals");
+  IF nLocals > MaxLocals THEN
+    Err("out of locals: SpillToTemp");
     RETURN FALSE
   END;
   W("	SET '"); W(tmp); W(",STACK"); WLn;
@@ -724,7 +846,7 @@ END IsPredicateBuiltin;
 PROCEDURE IsStatementBuiltin(name: ARRAY OF CHAR): BOOLEAN;
 BEGIN
   RETURN (name = "COND") OR (name = "PROG") OR (name = "REPEAT") OR (name = "BIND")
-      OR (name = "DO")
+      OR (name = "DO") OR (name = "MAP-CONTENTS")
       OR (name = "TELL") OR (name = "SET") OR (name = "SETG")
       OR (name = "RETURN") OR (name = "AGAIN") OR (name = "QUIT")
       OR (name = "RTRUE") OR (name = "RFALSE")
@@ -741,9 +863,9 @@ END IsStatementBuiltin;
    procedure throughout this port (ZilRead.ReadOne, ZilEval.EvalImpl). *)
 PROCEDURE CompileOperand(z: ZilObj.Zo; VAR opText: ARRAY OF CHAR): BOOLEAN;
 VAR leftText, rightText: ARRAY 64 OF CHAR; opcode: ARRAY 16 OF CHAR;
-    headName: ARRAY 64 OF CHAR; argTexts: ARRAY 7, 64 OF CHAR; errBuf: ARRAY 256 OF CHAR;
+    headName: ARRAY 64 OF CHAR; argTexts: ARRAY 9, 64 OF CHAR; errBuf: ARRAY 256 OF CHAR;
     andTmp, andEnd: ARRAY 16 OF CHAR;
-    ok, spilled, simpleStore: BOOLEAN;
+    ok, spilled, simpleStore, restDefault: BOOLEAN;
     nArgs, i, nSpills, maxArgs, simpleN: INTEGER; ap, ap2: ZilObj.Zo;
 BEGIN
   IF z = NIL THEN Err("CompileOperand: NIL expression"); RETURN FALSE END;
@@ -762,6 +884,12 @@ BEGIN
        `<SET OK <>>` in real source arrives here still shaped as an empty
        FORM — both spellings have to compile to 0. *)
     Strings.Copy("0", opText); RETURN TRUE
+
+  ELSIF z.kind = ZilObj.KString THEN
+    (* a STRING used as an operand is its packed address — the pool gives
+       it a symbol, and .GSTR gives that symbol a value *)
+    IF ConstantText(z, opText) THEN RETURN TRUE END;
+    Err("CompileOperand: could not intern a string constant"); RETURN FALSE
 
   ELSIF z.kind = ZilObj.KTable THEN
     (* a TABLE value used directly as an operand — which happens once macro
@@ -815,46 +943,69 @@ BEGIN
       RETURN CompileStmt(z, TRUE, opText)
 
     ELSIF IsPredicateBuiltin(headName) THEN
-      (* materialise the branch as a value: assume true, and clear it on
-         the path where the condition doesn't hold *)
-      AllocTemp(andTmp);
-      IF tempMax > MaxLocals THEN
-        Err("CompileOperand: a predicate used as a value needs more temporaries than a routine has locals");
-        RETURN FALSE
-      END;
-      NewLabel(andEnd);
-      W("	SET '"); W(andTmp); W(",1"); WLn;
-      ok := CompileCondition(z, andEnd, TRUE);
+      (* Materialise the branch as a value ON THE STACK, the same shape
+         COND uses, rather than in a temporary: a routine has only fifteen
+         locals and real library routines declare fourteen, so a predicate
+         in value position must not cost one. *)
+      NewLabel(andTmp); NewLabel(andEnd);
+      ok := CompileCondition(z, andTmp, TRUE);
       IF ~ok THEN RETURN FALSE END;
-      W("	SET '"); W(andTmp); W(",0"); WLn;
+      W("	PUSH 0"); WLn;
+      EmitBranch(andEnd);
+      W(andTmp); W(":"); WLn;
+      W("	PUSH 1"); WLn;
       W(andEnd); W(":"); WLn;
-      FreeTemp;
-      Strings.Copy(andTmp, opText);
+      Strings.Copy("STACK", opText);
       RETURN TRUE
 
     ELSIF (headName = "+") OR (headName = "-") OR (headName = "*") OR (headName = "/")
-       OR (headName = "MOD") THEN
-      IF (z.rest = NIL) OR (z.rest.first = NIL) OR (z.rest.rest = NIL) OR (z.rest.rest.first = NIL) THEN
-        Err("CompileOperand: arithmetic op expects 2 args"); RETURN FALSE
+       OR (headName = "MOD") OR (headName = "REST") OR (headName = "ZREST")
+       OR (headName = "BACK") OR (headName = "ZBACK") THEN
+      (* N-ARY, folded left: <+ a b c> is (a+b)+c, which is what real source
+         expects and what the original produces. One argument is special in
+         two ways — <- x> is negation, and <REST t>/<BACK t> default their
+         offset to 1 — and anything else with one argument is just that
+         argument. *)
+      IF (z.rest = NIL) OR (z.rest.first = NIL) THEN
+        Err("CompileOperand: arithmetic op expects at least 1 arg"); RETURN FALSE
       END;
-      ok := CompileOperand(z.rest.first, leftText);
-      IF ~ok THEN RETURN FALSE END;
-      spilled := (leftText = "STACK") & ~IsSimpleOperand(z.rest.rest.first);
-      IF spilled THEN
-        ok := SpillToTemp(leftText);
-        IF ~ok THEN RETURN FALSE END
-      END;
-      ok := CompileOperand(z.rest.rest.first, rightText);
-      IF ~ok THEN RETURN FALSE END;
-      IF spilled THEN FreeTemp END;
-      IF headName = "+" THEN Strings.Copy("ADD", opcode)
-      ELSIF headName = "-" THEN Strings.Copy("SUB", opcode)
+      IF (headName = "+") OR (headName = "REST") OR (headName = "ZREST") THEN
+        Strings.Copy("ADD", opcode)
+      ELSIF (headName = "-") OR (headName = "BACK") OR (headName = "ZBACK") THEN
+        Strings.Copy("SUB", opcode)
       ELSIF headName = "*" THEN Strings.Copy("MUL", opcode)
       ELSIF headName = "MOD" THEN Strings.Copy("MOD", opcode)
       ELSE Strings.Copy("DIV", opcode)
       END;
-      W("	"); W(opcode); W(" "); W(leftText);
-      W(","); W(rightText); W(" >STACK"); WLn;
+
+      ok := CompileOperand(z.rest.first, leftText);
+      IF ~ok THEN RETURN FALSE END;
+      ap := z.rest.rest;
+
+      IF (ap = NIL) OR (ap.first = NIL) THEN
+        IF headName = "-" THEN
+          W("	SUB 0,"); W(leftText); W(" >STACK"); WLn;
+          Strings.Copy("STACK", opText); RETURN TRUE
+        END;
+        IF (headName = "REST") OR (headName = "ZREST")
+           OR (headName = "BACK") OR (headName = "ZBACK") THEN
+          W("	"); W(opcode); W(" "); W(leftText); W(",1 >STACK"); WLn;
+          Strings.Copy("STACK", opText); RETURN TRUE
+        END;
+        Strings.Copy(leftText, opText); RETURN TRUE
+      END;
+
+      WHILE (ap # NIL) & (ap.first # NIL) DO
+        ok := CompileOperand(ap.first, rightText);
+        IF ~ok THEN RETURN FALSE END;
+        ok := FixStackedPair(leftText, rightText,
+                             (opcode = "ADD") OR (opcode = "MUL"));
+        IF ~ok THEN RETURN FALSE END;
+        W("	"); W(opcode); W(" "); W(leftText);
+        W(","); W(rightText); W(" >STACK"); WLn;
+        Strings.Copy("STACK", leftText);
+        ap := ap.rest
+      END;
       Strings.Copy("STACK", opText); RETURN TRUE
 
     ELSIF (headName = "AND") OR (headName = "OR") THEN
@@ -868,8 +1019,8 @@ BEGIN
         RETURN TRUE
       END;
       AllocTemp(andTmp);
-      IF tempMax > MaxLocals THEN
-        Err("CompileOperand: AND/OR needs more compiler temporaries than a routine has locals");
+      IF nLocals > MaxLocals THEN
+        Err("out of locals: AND/OR as a value");
         RETURN FALSE
       END;
       NewLabel(andEnd);
@@ -947,6 +1098,42 @@ BEGIN
         IF i = 0 THEN W(" ") ELSE W(",") END;
         W(argTexts[i]); INC(i)
       END;
+      W(" >STACK"); WLn;
+      Strings.Copy("STACK", opText); RETURN TRUE
+
+    ELSIF (headName = "APPLY") OR (headName = "CALL") OR (headName = "ZAPPLY") THEN
+      (* <APPLY routine-expr args...> calls a routine whose address is
+         computed rather than named, which is the same CALL instruction with
+         its first operand compiled like any other. *)
+      IF (z.rest = NIL) OR (z.rest.first = NIL) THEN
+        Err("CompileOperand: APPLY expects a routine"); RETURN FALSE
+      END;
+      IF ZilModel.zversion < 4 THEN maxArgs := 4 ELSE maxArgs := 8 END;
+      nArgs := 0; nSpills := 0; ap := z.rest;
+      WHILE (ap # NIL) & (ap.first # NIL) DO
+        IF nArgs >= maxArgs THEN
+          Err("CompileOperand: too many APPLY arguments for this Z-machine version"); RETURN FALSE
+        END;
+        ok := CompileOperand(ap.first, argTexts[nArgs]);
+        IF ~ok THEN RETURN FALSE END;
+        IF argTexts[nArgs] = "STACK" THEN
+          spilled := FALSE; ap2 := ap.rest;
+          WHILE (ap2 # NIL) & (ap2.first # NIL) DO
+            IF ~IsSimpleOperand(ap2.first) THEN spilled := TRUE END;
+            ap2 := ap2.rest
+          END;
+          IF spilled THEN
+            ok := SpillToTemp(argTexts[nArgs]);
+            IF ~ok THEN RETURN FALSE END;
+            INC(nSpills)
+          END
+        END;
+        INC(nArgs); ap := ap.rest
+      END;
+      WHILE nSpills > 0 DO FreeTemp; DEC(nSpills) END;
+      W("	CALL "); W(argTexts[0]);
+      i := 1;
+      WHILE i < nArgs DO W(","); W(argTexts[i]); INC(i) END;
       W(" >STACK"); WLn;
       Strings.Copy("STACK", opText); RETURN TRUE
 
@@ -1056,9 +1243,10 @@ END EmitPredInstr;
 PROCEDURE CompileCondition(z: ZilObj.Zo; label: ARRAY OF CHAR; polarity: BOOLEAN): BOOLEAN;
 VAR headName: ARRAY 64 OF CHAR; leftText, rightText, opText, empty: ARRAY 64 OF CHAR;
     skipLabel: ARRAY 16 OF CHAR; c: ZilObj.Zo; ok, spilled, isLast: BOOLEAN;
-    extraText: ARRAY 2, 64 OF CHAR; nExtra, nE2: INTEGER;
+    extraText: ARRAY 3, 64 OF CHAR; nExtra, nE2, nCondBinds: INTEGER;
+    condBody, condItem: ZilObj.Zo;
 BEGIN
-  empty[0] := 0X;
+  empty[0] := 0X; skipLabel[0] := 0X; spilled := FALSE;
   IF z = NIL THEN Err("CompileCondition: NIL condition"); RETURN FALSE END;
 
   IF (z.kind = ZilObj.KAtom) & ((z.atomText = "T") OR (z.atomText = "ELSE")) THEN
@@ -1089,14 +1277,12 @@ BEGIN
       END;
       ok := CompileOperand(z.rest.first, leftText);
       IF ~ok THEN RETURN FALSE END;
-      spilled := (leftText = "STACK") & ~IsSimpleOperand(z.rest.rest.first);
-      IF spilled THEN
-        ok := SpillToTemp(leftText);
-        IF ~ok THEN RETURN FALSE END
-      END;
       ok := CompileOperand(z.rest.rest.first, rightText);
       IF ~ok THEN RETURN FALSE END;
-      IF spilled THEN FreeTemp END;
+      ok := FixStackedPair(leftText, rightText,
+                           (headName = "EQUAL?") OR (headName = "=?") OR (headName = "==?")
+                           OR (headName = "N==?") OR (headName = "N=?") OR (headName = "BTST"));
+      IF ~ok THEN RETURN FALSE END;
       EmitPredInstr("BTST", leftText, rightText, label, polarity);
       RETURN TRUE
 
@@ -1109,14 +1295,12 @@ BEGIN
       END;
       ok := CompileOperand(z.rest.first, leftText);
       IF ~ok THEN RETURN FALSE END;
-      spilled := (leftText = "STACK") & ~IsSimpleOperand(z.rest.rest.first);
-      IF spilled THEN
-        ok := SpillToTemp(leftText);
-        IF ~ok THEN RETURN FALSE END
-      END;
       ok := CompileOperand(z.rest.rest.first, rightText);
       IF ~ok THEN RETURN FALSE END;
-      IF spilled THEN FreeTemp END;
+      ok := FixStackedPair(leftText, rightText,
+                           (headName = "EQUAL?") OR (headName = "=?") OR (headName = "==?")
+                           OR (headName = "N==?") OR (headName = "N=?") OR (headName = "BTST"));
+      IF ~ok THEN RETURN FALSE END;
       EmitPredInstr(headName, leftText, rightText, label, polarity);
       RETURN TRUE
 
@@ -1142,14 +1326,12 @@ BEGIN
       END;
       ok := CompileOperand(z.rest.first, leftText);
       IF ~ok THEN RETURN FALSE END;
-      spilled := (leftText = "STACK") & ~IsSimpleOperand(z.rest.rest.first);
-      IF spilled THEN
-        ok := SpillToTemp(leftText);
-        IF ~ok THEN RETURN FALSE END
-      END;
       ok := CompileOperand(z.rest.rest.first, rightText);
       IF ~ok THEN RETURN FALSE END;
-      IF spilled THEN FreeTemp END;
+      ok := FixStackedPair(leftText, rightText,
+                           (headName = "EQUAL?") OR (headName = "=?") OR (headName = "==?")
+                           OR (headName = "N==?") OR (headName = "N=?") OR (headName = "BTST"));
+      IF ~ok THEN RETURN FALSE END;
       IF headName = "G=?" THEN EmitPredInstr("LESS?", leftText, rightText, label, ~polarity)
       ELSE EmitPredInstr("GRTR?", leftText, rightText, label, ~polarity)
       END;
@@ -1173,14 +1355,12 @@ BEGIN
       END;
       ok := CompileOperand(z.rest.first, leftText);
       IF ~ok THEN RETURN FALSE END;
-      spilled := (leftText = "STACK") & ~IsSimpleOperand(z.rest.rest.first);
-      IF spilled THEN
-        ok := SpillToTemp(leftText);
-        IF ~ok THEN RETURN FALSE END
-      END;
       ok := CompileOperand(z.rest.rest.first, rightText);
       IF ~ok THEN RETURN FALSE END;
-      IF spilled THEN FreeTemp END;
+      ok := FixStackedPair(leftText, rightText,
+                           (headName = "EQUAL?") OR (headName = "=?") OR (headName = "==?")
+                           OR (headName = "N==?") OR (headName = "N=?") OR (headName = "BTST"));
+      IF ~ok THEN RETURN FALSE END;
       EmitPredInstr("EQUAL?", leftText, rightText, label, ~polarity);
       RETURN TRUE
 
@@ -1190,34 +1370,63 @@ BEGIN
       END;
       ok := CompileOperand(z.rest.first, leftText);
       IF ~ok THEN RETURN FALSE END;
-      spilled := (leftText = "STACK") & ~IsSimpleOperand(z.rest.rest.first);
-      IF spilled THEN
-        ok := SpillToTemp(leftText);
-        IF ~ok THEN RETURN FALSE END
-      END;
       ok := CompileOperand(z.rest.rest.first, rightText);
       IF ~ok THEN RETURN FALSE END;
-      IF spilled THEN FreeTemp END;
+      ok := FixStackedPair(leftText, rightText,
+                           (headName = "EQUAL?") OR (headName = "=?") OR (headName = "==?")
+                           OR (headName = "N==?") OR (headName = "N=?") OR (headName = "BTST"));
+      IF ~ok THEN RETURN FALSE END;
       IF headName = "L?" THEN EmitPredInstr("LESS?", leftText, rightText, label, polarity)
       ELSIF headName = "G?" THEN EmitPredInstr("GRTR?", leftText, rightText, label, polarity)
       ELSE
-        (* EQUAL? takes 2-4 arguments, matching the first against ANY of the
-           rest — one Z-machine instruction with up to three comparands, as
-           in the original. *)
-        c := z.rest.rest.rest;
+        (* One EQUAL? instruction matches its first operand against up to
+           THREE comparands. Real source goes well past that — zillib's
+           MAIN-LOOP tests a word against a dozen — so the comparands are
+           emitted in groups of three, chained:
+
+             branch-if-any-match: every group branches to the label
+             branch-if-none-match: every group branches PAST the label, and
+               a jump to the label follows the last group
+
+           With more than one group the left operand is used repeatedly, so
+           it cannot be left on the stack. *)
+        c := z.rest.rest;
         nExtra := 0;
-        WHILE (c # NIL) & (c.first # NIL) DO
-          IF nExtra >= 2 THEN
-            Err("CompileCondition: EQUAL? takes at most 4 arguments"); RETURN FALSE
-          END;
-          ok := CompileOperand(c.first, extraText[nExtra]);
+        WHILE (c # NIL) & (c.first # NIL) DO INC(nExtra); c := c.rest END;
+        IF (nExtra > 3) & (leftText = "STACK") THEN
+          ok := SpillToTemp(leftText);
           IF ~ok THEN RETURN FALSE END;
-          INC(nExtra); c := c.rest
+          spilled := TRUE
         END;
-        W("	EQUAL? "); W(leftText); W(","); W(rightText);
-        FOR nE2 := 0 TO nExtra - 1 DO W(","); W(extraText[nE2]) END;
-        IF polarity THEN W(" /") ELSE W(" \") END;
-        W(label); WLn
+        IF ~polarity & (nExtra > 3) THEN NewLabel(skipLabel) END;
+
+        c := z.rest.rest;
+        WHILE (c # NIL) & (c.first # NIL) DO
+          (* one instruction per group of three comparands *)
+          nE2 := 0;
+          WHILE (nE2 < 3) & (c # NIL) & (c.first # NIL) DO
+            ok := CompileOperand(c.first, extraText[nE2]);
+            IF ~ok THEN RETURN FALSE END;
+            INC(nE2); c := c.rest
+          END;
+          W("	EQUAL? "); W(leftText);
+          FOR nExtra := 0 TO nE2 - 1 DO W(","); W(extraText[nExtra]) END;
+          IF polarity THEN
+            W(" /"); W(label)
+          ELSIF (c # NIL) & (c.first # NIL) THEN
+            W(" /"); W(skipLabel)
+          ELSIF skipLabel[0] # 0X THEN
+            W(" /"); W(skipLabel)
+          ELSE
+            W(" \"); W(label)
+          END;
+          WLn
+        END;
+        IF ~polarity & (skipLabel[0] # 0X) THEN
+          EmitBranch(label);
+          W(skipLabel); W(":"); WLn
+        END;
+        IF spilled THEN FreeTemp END
       END;
       RETURN TRUE
 
@@ -1237,6 +1446,56 @@ BEGIN
       Strings.Copy("'", opText); Strings.Append(leftText, opText);
       EmitPredInstr(headName, opText, rightText, label, polarity);
       RETURN TRUE
+
+    ELSIF (headName = "PROG") OR (headName = "BIND") THEN
+      (* A block in CONDITION position: compile its bindings, then all but
+         the last body statement as statements, and the LAST as a condition.
+         Compiling it as a value instead would materialise a 1/0 that is
+         immediately tested away — and cost a compiler temporary, which real
+         library routines cannot spare (zillib's MATCH-NOUN-PHRASE declares
+         thirteen locals of its own). *)
+      c := z.rest;
+      IF (c # NIL) & (c.first # NIL) & (c.first.kind = ZilObj.KAtom) THEN c := c.rest END;
+      IF (c = NIL) OR (c.first = NIL) OR (c.first.kind # ZilObj.KList) THEN
+        Err("CompileCondition: PROG/BIND expects a binding list"); RETURN FALSE
+      END;
+      nCondBinds := 0;
+      condBody := c.first;
+      WHILE (condBody # NIL) & (condBody.first # NIL) DO
+        condItem := condBody.first;
+        IF condItem.kind = ZilObj.KAtom THEN
+          IF ~AllocInnerLocal(condItem.atomText) THEN RETURN FALSE END;
+          INC(nCondBinds)
+        ELSIF (condItem.kind = ZilObj.KList) & (condItem.first # NIL)
+              & (condItem.first.kind = ZilObj.KAtom) & (condItem.rest # NIL)
+              & (condItem.rest.first # NIL) THEN
+          ok := CompileOperand(condItem.rest.first, opText);
+          IF ~ok THEN RETURN FALSE END;
+          IF ~AllocInnerLocal(condItem.first.atomText) THEN RETURN FALSE END;
+          INC(nCondBinds);
+          ResolveLocal(condItem.first.atomText, leftText);
+          W("	SET '"); W(leftText); W(","); W(opText); WLn
+        ELSE
+          Err("CompileCondition: a PROG binding must be an atom or (atom value)");
+          RETURN FALSE
+        END;
+        condBody := condBody.rest
+      END;
+
+      condBody := c.rest;
+      IF (condBody = NIL) OR (condBody.first = NIL) THEN
+        PopInnerLocals(nCondBinds);
+        IF polarity THEN EmitBranch(label) END;   (* an empty block is true *)
+        RETURN TRUE
+      END;
+      WHILE (condBody.rest # NIL) & (condBody.rest.first # NIL) DO
+        ok := CompileStmt(condBody.first, FALSE, opText);
+        IF ~ok THEN PopInnerLocals(nCondBinds); RETURN FALSE END;
+        condBody := condBody.rest
+      END;
+      ok := CompileCondition(condBody.first, label, polarity);
+      PopInnerLocals(nCondBinds);
+      RETURN ok
 
     ELSIF (headName = "AND") OR (headName = "OR") THEN
       (* Short-circuit branching, and no value is materialised at all — the
@@ -1486,6 +1745,11 @@ BEGIN
     pi := 0;
     WHILE (pi < ZilModel.nTellPatterns) & ~handled DO
       IF MatchTellPattern(pi, ap, consumed, output) THEN
+        (* A pattern's output can itself contain macro calls — zillib's
+           IFELSE token expands to <PRINT-IF-ELSE ...>, a DEFMAC. The body
+           was expanded before compilation began, but this form is being
+           built now, so it needs expanding too. *)
+        output := ZilEval.ExpandTree(output);
         ok := CompileStmt(output, FALSE, dummy);
         IF ~ok THEN RETURN FALSE END;
         FOR i := 1 TO consumed DO ap := ap.rest END;
@@ -1544,6 +1808,114 @@ BEGIN
   RETURN TRUE
 END CompileTell;
 
+(* Compiles `z` and leaves its value in the VARIABLE `dest`, rather than on
+   the stack. This is the original's `CompileAsOperand(rb, value, src,
+   dest)` — a destination hint — and it matters for two reasons beyond
+   tidier output:
+
+     - it removes a whole instruction per assignment: <SET X <+ .A .B>>
+       becomes `ADD A,B >X` instead of `ADD A,B >STACK` then `SET 'X,STACK`
+     - AND/OR and predicates need somewhere to accumulate a value that a
+       test won't consume, and with a destination they can use it instead
+       of allocating a compiler temporary. A routine only has fifteen
+       locals, and real library routines declare fourteen of them.
+
+   Falls back to compiling normally and copying, so it is always correct;
+   the special cases are purely an improvement. *)
+PROCEDURE CompileOperandTo(z: ZilObj.Zo; dest: ARRAY OF CHAR): BOOLEAN;
+VAR headName, opText, leftText, rightText: ARRAY 64 OF CHAR;
+    opcode: ARRAY 16 OF CHAR; endLabel: ARRAY 16 OF CHAR;
+    ok, spilled, sStore: BOOLEAN; sN, i, nA: INTEGER; ap: ZilObj.Zo;
+    argT: ARRAY 9, 64 OF CHAR;
+BEGIN
+  IF (z # NIL) & (z.kind = ZilObj.KForm) & (z.first # NIL)
+     & (z.first.kind = ZilObj.KAtom) THEN
+    Strings.Copy(z.first.atomText, headName);
+
+    (* AND/OR accumulate into the destination *)
+    IF ((headName = "AND") OR (headName = "OR"))
+       & (z.rest # NIL) & (z.rest.first # NIL) THEN
+      NewLabel(endLabel);
+      ap := z.rest;
+      WHILE (ap # NIL) & (ap.first # NIL) DO
+        ok := CompileOperandTo(ap.first, dest);
+        IF ~ok THEN RETURN FALSE END;
+        IF (ap.rest # NIL) & (ap.rest.first # NIL) THEN
+          W("	ZERO? "); W(dest);
+          IF headName = "OR" THEN W(" \") ELSE W(" /") END;
+          W(endLabel); WLn
+        END;
+        ap := ap.rest
+      END;
+      W(endLabel); W(":"); WLn;
+      RETURN TRUE
+    END;
+
+    (* a predicate materialises into the destination *)
+    IF IsPredicateBuiltin(headName) THEN
+      NewLabel(endLabel);
+      W("	SET '"); W(dest); W(",1"); WLn;
+      ok := CompileCondition(z, endLabel, TRUE);
+      IF ~ok THEN RETURN FALSE END;
+      W("	SET '"); W(dest); W(",0"); WLn;
+      W(endLabel); W(":"); WLn;
+      RETURN TRUE
+    END;
+
+    (* two-operand arithmetic stores straight into the destination *)
+    IF ((headName = "+") OR (headName = "-") OR (headName = "*") OR (headName = "/")
+        OR (headName = "MOD"))
+       & (z.rest # NIL) & (z.rest.first # NIL)
+       & (z.rest.rest # NIL) & (z.rest.rest.first # NIL)
+       & ((z.rest.rest.rest = NIL) OR (z.rest.rest.rest.first = NIL)) THEN
+      IF headName = "+" THEN Strings.Copy("ADD", opcode)
+      ELSIF headName = "-" THEN Strings.Copy("SUB", opcode)
+      ELSIF headName = "*" THEN Strings.Copy("MUL", opcode)
+      ELSIF headName = "MOD" THEN Strings.Copy("MOD", opcode)
+      ELSE Strings.Copy("DIV", opcode)
+      END;
+      ok := CompileOperand(z.rest.first, leftText);
+      IF ~ok THEN RETURN FALSE END;
+      ok := CompileOperand(z.rest.rest.first, rightText);
+      IF ~ok THEN RETURN FALSE END;
+      ok := FixStackedPair(leftText, rightText,
+                           (opcode = "ADD") OR (opcode = "MUL"));
+      IF ~ok THEN RETURN FALSE END;
+      W("	"); W(opcode); W(" "); W(leftText); W(","); W(rightText);
+      W(" >"); W(dest); WLn;
+      RETURN TRUE
+    END;
+
+    (* a value-producing one-instruction builtin, likewise *)
+    IF SimpleBuiltin(headName, opcode, sN, sStore) & sStore THEN
+      nA := 0; ap := z.rest;
+      WHILE (ap # NIL) & (ap.first # NIL) & (nA < sN) DO
+        ok := CompileOperand(ap.first, argT[nA]);
+        IF ~ok THEN RETURN FALSE END;
+        INC(nA); ap := ap.rest
+      END;
+      IF nA = sN THEN
+        W("	"); W(opcode);
+        i := 0;
+        WHILE i < nA DO
+          IF i = 0 THEN W(" ") ELSE W(",") END;
+          W(argT[i]); INC(i)
+        END;
+        W(" >"); W(dest); WLn;
+        RETURN TRUE
+      END;
+      (* wrong arity: fall through and let CompileOperand report it *)
+    END
+  END;
+
+  ok := CompileOperand(z, opText);
+  IF ~ok THEN RETURN FALSE END;
+  IF opText # dest THEN
+    W("	SET '"); W(dest); W(","); W(opText); WLn
+  END;
+  RETURN TRUE
+END CompileOperandTo;
+
 (* Compiles `z` as a routine BODY STATEMENT — as opposed to CompileOperand
    above, which compiles it as a value-producing EXPRESSION — mirroring
    the original's own CompileForm (statements) vs CompileAsOperand
@@ -1592,6 +1964,7 @@ VAR headName: ARRAY 64 OF CHAR; opText, targetName: ARRAY 64 OF CHAR;
     blkIdx, nProgBinds: INTEGER;
     (* DO *)
     doStart, doEnd, doStep: ZilObj.Zo; doDown, doPre: BOOLEAN;
+    mapNextName: ARRAY 64 OF CHAR;
     (* simple one-instruction builtins *)
     sbOpcode: ARRAY 16 OF CHAR; sbArgs: ARRAY 7, 64 OF CHAR; sbErr: ARRAY 256 OF CHAR;
     sbStore, sbSpilled: BOOLEAN; sbN, sbCount, sbI, sbSpills: INTEGER; ap, ap2: ZilObj.Zo;
@@ -1619,9 +1992,8 @@ BEGIN
          name is honoured; SETG always means the global, and must not be
          redirected by a binding that happens to share the name. *)
       IF headName = "SET" THEN ResolveLocal(targetName, targetName) END;
-      ok := CompileOperand(z.rest.rest.first, opText);
+      ok := CompileOperandTo(z.rest.rest.first, targetName);
       IF ~ok THEN RETURN FALSE END;
-      W("	SET '"); W(targetName); W(","); W(opText); WLn;
       Strings.Copy(targetName, resultText);
       RETURN TRUE
 
@@ -1844,6 +2216,93 @@ BEGIN
 
       DEC(nBlocks);
       PopInnerLocals(1);
+      W(retLabel); W(":"); WLn;
+      IF wantResult THEN
+        W("	PUSH 0"); WLn;
+        Strings.Copy("STACK", resultText)
+      END;
+      termFlag := FALSE;
+      RETURN TRUE
+
+    ELSIF headName = "MAP-CONTENTS" THEN
+      (* <MAP-CONTENTS (VAR [NEXTVAR] container) body...> walks an object's
+         children. The three-element form binds a second variable to the
+         NEXT child before the body runs, so the body may safely move the
+         current one out — which is the whole reason that form exists.
+
+           SET VAR,<FIRST? container>   ; no children -> done
+         again:
+           [SET NEXT,<NEXT? VAR>]
+           body
+           [SET VAR,.NEXT / SET VAR,<NEXT? VAR>]  ; no more -> done
+           JUMP again
+         done: *)
+      IF (z.rest = NIL) OR (z.rest.first = NIL) OR (z.rest.first.kind # ZilObj.KList) THEN
+        Err("CompileStmt: MAP-CONTENTS expects (VAR [NEXT] container)"); RETURN FALSE
+      END;
+      progArgs := z.rest.first;
+      IF (progArgs.first = NIL) OR (progArgs.first.kind # ZilObj.KAtom)
+         OR (progArgs.rest = NIL) OR (progArgs.rest.first = NIL) THEN
+        Err("CompileStmt: MAP-CONTENTS expects (VAR [NEXT] container)"); RETURN FALSE
+      END;
+      doStep := NIL;                      (* the optional NEXT variable *)
+      doEnd := progArgs.rest.first;       (* the container, unless NEXT is present *)
+      IF (progArgs.rest.rest # NIL) & (progArgs.rest.rest.first # NIL) THEN
+        doStep := progArgs.rest.first;
+        doEnd := progArgs.rest.rest.first
+      END;
+
+      ok := CompileOperand(doEnd, opText);
+      IF ~ok THEN RETURN FALSE END;
+      IF ~AllocInnerLocal(progArgs.first.atomText) THEN RETURN FALSE END;
+      nProgBinds := 1;
+      ResolveLocal(progArgs.first.atomText, targetName);
+      IF doStep # NIL THEN
+        IF ~AllocInnerLocal(doStep.atomText) THEN RETURN FALSE END;
+        INC(nProgBinds);
+        ResolveLocal(doStep.atomText, mapNextName)
+      END;
+
+      IF nBlocks >= MaxBlocks THEN
+        Err("CompileStmt: MAP-CONTENTS nested too deeply"); RETURN FALSE
+      END;
+      NewLabel(againLabel); NewLabel(retLabel);
+      Strings.Copy(againLabel, blockAgain[nBlocks]);
+      Strings.Copy(retLabel, blockReturn[nBlocks]);
+      blockNames[nBlocks][0] := 0X;
+      blockWantResult[nBlocks] := wantResult;
+      blockReturned[nBlocks] := FALSE;
+      blockHasReturn[nBlocks] := TRUE;
+      INC(nBlocks);
+
+      W("	FIRST? "); W(opText); W(" >"); W(targetName);
+      W(" \"); W(retLabel); WLn;
+      W(againLabel); W(":"); WLn;
+      IF doStep # NIL THEN
+        W("	NEXT? "); W(targetName); W(" >"); W(mapNextName); W(" /");
+        W(againLabel); W("X"); WLn;
+        W("	SET '"); W(mapNextName); W(",0"); WLn;
+        W(againLabel); W("X:"); WLn
+      END;
+
+      bp := z.rest.rest;
+      WHILE (bp # NIL) & (bp.first # NIL) DO
+        ok := CompileStmt(bp.first, FALSE, progResult);
+        IF ~ok THEN DEC(nBlocks); PopInnerLocals(nProgBinds); RETURN FALSE END;
+        bp := bp.rest
+      END;
+
+      IF doStep # NIL THEN
+        W("	SET '"); W(targetName); W(","); W(mapNextName); WLn;
+        W("	ZERO? "); W(targetName); W(" /"); W(retLabel); WLn
+      ELSE
+        W("	NEXT? "); W(targetName); W(" >"); W(targetName);
+        W(" \"); W(retLabel); WLn
+      END;
+      EmitBranch(againLabel);
+
+      DEC(nBlocks);
+      PopInnerLocals(nProgBinds);
       W(retLabel); W(":"); WLn;
       IF wantResult THEN
         W("	PUSH 0"); WLn;
@@ -2088,6 +2547,7 @@ VAR rt: ZilModel.RoutineRec; opText: ARRAY 64 OF CHAR; n, routineAgain: ARRAY 16
     a, bp, item, dflt: ZilObj.Zo; ok, isLast: BOOLEAN; i, phase: INTEGER;
 BEGIN
   rt := ZilModel.routines[idx];
+  Strings.Copy(rt.name.atomText, curRoutine);
 
   bp := rt.body;
 
@@ -2104,6 +2564,13 @@ BEGIN
      doesn't have yet.) *)
   nParams := 0; nLocals := 0; nRenames := 0;
   phase := 0;   (* 0 = required, 1 = "OPT", 2 = "AUX" *)
+  (* The ARGUMENT SPEC needs macro expansion as much as the body does — an
+     "AUX" local's default value is ordinary code, and zillib really writes
+     <ROUTINE R (SPEC "AUX" (A <OBJSPEC-ADJ .SPEC>))>, where that default
+     is a DEFSTRUCT accessor macro. The original expands both, in this
+     order: ZilRoutine.ExpandInPlace does the arg-spec defaults first and
+     the body second. *)
+  (* already expanded by PrepareRoutines *)
   a := rt.argSpec;
   WHILE (a # NIL) & (a.first # NIL) DO
     item := a.first;
@@ -2193,7 +2660,6 @@ BEGIN
      compilation flag brings with it) is still an unexpanded FORM here. The
      original does exactly this, as the first step of compiling a routine:
      ZilRoutine.ExpandInPlace, called from Compilation.Compile.cs. *)
-  bp := ZilEval.ExpandTree(bp);
 
   WHILE (bp # NIL) & (bp.first # NIL) DO
     isLast := (bp.rest = NIL) OR (bp.rest.first = NIL);
@@ -2233,15 +2699,12 @@ BEGIN
     IF locInit[i][0] # 0X THEN W("="); W(locInit[i]) END;
     INC(i)
   END;
-  IF nLocals + tempMax > MaxLocals THEN
-    Err("CompileRoutine: too many locals (arguments, bindings and compiler temporaries)");
+  IF nLocals > MaxLocals THEN
+    Strings.Copy("CompileRoutine: too many locals: ", opText);
+    Strings.IntToStr(nLocals, n); Strings.Append(n, opText);
+    Strings.Append(" needed, 15 allowed", opText);
+    Err(opText);
     RETURN FALSE
-  END;
-  i := 1;
-  WHILE i <= tempMax DO
-    Strings.IntToStr(i, n);
-    W(",?TMP"); W(n);
-    INC(i)
   END;
   WLn;
 
@@ -2254,6 +2717,7 @@ BEGIN
 
   FlushBuffer;
   WLn;
+  curRoutine[0] := 0X;
   RETURN TRUE
 END CompileRoutine;
 
@@ -2352,7 +2816,11 @@ BEGIN
   j := 0;
   WHILE j < n DO
     i := order[j];
-    IF ZilModel.globals[i].value = NIL THEN
+    IF ZilModel.globals[i].name.atomText = "VERBS" THEN Strings.Copy("VTBL", text)
+    ELSIF ZilModel.globals[i].name.atomText = "ACTIONS" THEN Strings.Copy("ATBL", text)
+    ELSIF ZilModel.globals[i].name.atomText = "PREACTIONS" THEN Strings.Copy("PATBL", text)
+    ELSIF ZilModel.globals[i].name.atomText = "PREPOSITIONS" THEN Strings.Copy("PRTBL", text)
+    ELSIF ZilModel.globals[i].value = NIL THEN
       Strings.Copy("0", text)
     ELSIF ~ConstantText(ZilModel.globals[i].value, text) THEN
       Strings.Copy("CompileGlobals: non-constant initializer for global ", errBuf);
@@ -2363,15 +2831,6 @@ BEGIN
     W("	.GVAR "); W(ZilModel.globals[i].name.atomText);
     W("="); W(text); WLn;
     INC(j)
-  END;
-  (* The parser tables are reached through four globals that the COMPILER
-     defines, not the source — the original creates them on demand with
-     GetGlobal(...).DefaultValue = table. *)
-  IF ZilModel.nSyntaxes > 0 THEN
-    W("	.GVAR VERBS=VTBL"); WLn;
-    W("	.GVAR ACTIONS=ATBL"); WLn;
-    W("	.GVAR PREACTIONS=PATBL"); WLn;
-    W("	.GVAR PREPOSITIONS=PRTBL"); WLn
   END;
   W("	.ENDT"); WLn; WLn;
   RETURN TRUE
@@ -3042,6 +3501,75 @@ BEGIN
   RETURN TRUE
 END CompileSyntax;
 
+(* ---------------- discovering vocabulary words used only in code ----------------
+   A routine can name a dictionary word that nothing else mentions —
+   zillib compares a parsed word against W?COMMA without any object or
+   SYNTAX line ever using "comma". The original creates the word on demand
+   when the constant is referenced (DefineWord), which works there because
+   its dictionary is written at Finish time, after the routines.
+
+   Here the dictionary is emitted BEFORE the routines, because it lives in
+   static memory and they live in high memory. So the routines are prepared
+   first: each one's argument spec and body are macro-expanded (and stored
+   back, so CompileRoutine doesn't repeat the work), then scanned for
+   W?/ACT?/PR?/A? references, each of which registers its word. A word
+   found only this way gets no part of speech, exactly as DefineWord's
+   on-demand creation does. *)
+
+PROCEDURE ScanVocabRefs(z: ZilObj.Zo);
+VAR nm: ARRAY 64 OF CHAR; i, k: INTEGER;
+BEGIN
+  IF z = NIL THEN RETURN END;
+  IF z.kind = ZilObj.KAtom THEN
+    Strings.Copy(z.atomText, nm);
+    k := 0;
+    IF (nm[0] = "W") & (nm[1] = "?") THEN k := 2
+    ELSIF (nm[0] = "A") & (nm[1] = "?") THEN k := 2
+    ELSIF (nm[0] = "P") & (nm[1] = "R") & (nm[2] = "?") THEN k := 3
+    ELSIF (nm[0] = "A") & (nm[1] = "C") & (nm[2] = "T") & (nm[3] = "?") THEN k := 4
+    END;
+    IF k > 0 THEN
+      Strings.Delete(nm, 0, k);
+      IF nm[0] # 0X THEN i := ZilModel.AddVocab(nm, 0) END
+    END;
+    RETURN
+  END;
+  IF (z.kind = ZilObj.KForm) OR (z.kind = ZilObj.KList) OR (z.kind = ZilObj.KSplice) THEN
+    WHILE (z # NIL) & (z.first # NIL) DO
+      ScanVocabRefs(z.first);
+      z := z.rest
+    END;
+    RETURN
+  END;
+  IF z.kind = ZilObj.KVector THEN
+    FOR i := 0 TO z.vecLen - 1 DO ScanVocabRefs(z.vecItems[i]) END
+  END
+END ScanVocabRefs;
+
+PROCEDURE PrepareRoutines(): BOOLEAN;
+VAR i: INTEGER;
+BEGIN
+  i := 0;
+  WHILE i < ZilModel.nRoutines DO
+    ZilEval.ClearErr;
+    ZilModel.routines[i].argSpec := ZilEval.ExpandTree(ZilModel.routines[i].argSpec);
+    IF ZilEval.evalErrFlag THEN
+      Strings.Copy(ZilModel.routines[i].name.atomText, curRoutine);
+      Err(ZilEval.evalErrMsg); RETURN FALSE
+    END;
+    ZilModel.routines[i].body := ZilEval.ExpandTree(ZilModel.routines[i].body);
+    IF ZilEval.evalErrFlag THEN
+      Strings.Copy(ZilModel.routines[i].name.atomText, curRoutine);
+      Err(ZilEval.evalErrMsg); RETURN FALSE
+    END;
+    ScanVocabRefs(ZilModel.routines[i].argSpec);
+    ScanVocabRefs(ZilModel.routines[i].body);
+    INC(i)
+  END;
+  curRoutine[0] := 0X;
+  RETURN TRUE
+END PrepareRoutines;
+
 (* Emits the dictionary. Ported from GameBuilder.FinishSyntax plus
    OldParserWord.WriteToBuilder, which together define the V1-3 layout:
 
@@ -3100,6 +3628,18 @@ BEGIN
     END;
     order[j + 1] := k
   END;
+
+  (* ACT?WORD is a verb word's own number — distinct from V?ACTION, which
+     is an action index. zillib compares ,P-V against ACT?WALK. (The
+     original yields all of A?/ACT?/PR? from GetVocabConstants.) *)
+  W("	; verb word numbers"); WLn;
+  FOR i := 0 TO ZilModel.nVocab - 1 DO
+    IF (ZilModel.vocab[i].pos DIV ZilModel.PsVerb) MOD 2 = 1 THEN
+      Strings.IntToStr(ZilModel.vocab[i].verbVal, num);
+      W("	ACT?"); W(ZilModel.vocab[i].text); W("="); W(num); WLn
+    END
+  END;
+  WLn;
 
   (* V1-3 refers to an adjective by NUMBER rather than by word address, via
      an A?NAME constant — see the ADJECTIVE property in CompileObjects *)
@@ -3236,6 +3776,25 @@ BEGIN
     Err("CompileProgram: only Z-machine versions 3 and 4 are emitted yet (V5+ needs a hand-built header)");
     RETURN FALSE
   END;
+
+  (* The parser reaches its tables through four globals that the COMPILER
+     defines rather than the source (the original creates them on demand
+     with GetGlobal). Registering them in ZilModel, rather than emitting
+     four extra .GVAR lines directly, is what makes ,VERBS resolve in a
+     routine body like any other global. *)
+  IF ZilModel.nSyntaxes > 0 THEN
+    IF FindGlobalIdx("VERBS") < 0 THEN
+      ZilModel.AddGlobal(ZilObj.Intern("VERBS"), NIL);
+      ZilModel.AddGlobal(ZilObj.Intern("ACTIONS"), NIL);
+      ZilModel.AddGlobal(ZilObj.Intern("PREACTIONS"), NIL);
+      ZilModel.AddGlobal(ZilObj.Intern("PREPOSITIONS"), NIL)
+    END
+  END;
+
+  (* expand and scan every routine before any data is emitted — see
+     PrepareRoutines for why the order matters *)
+  ok := PrepareRoutines();
+  IF ~ok THEN RETURN FALSE END;
 
   W("	; compiled by ZilCompile (Oberon port of zilf)"); WLn;
   Strings.IntToStr(ZilModel.zversion, verText);

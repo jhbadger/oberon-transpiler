@@ -2585,6 +2585,114 @@ and `name` all still compile, assemble and run, `name` re-checked
 interactively; transpiler regression suite, 138 files, same 3
 pre-existing-only failures.
 
+## What's done: pushing `cloak` through code generation
+
+`cloak` now compiles **every routine in `zillib` except one**, which needs
+one more local than the Z-machine allows (see the end). Everything below was
+needed to get there, and all of it is general rather than cloak-specific.
+
+### Splicing, and where expansion has to happen
+
+- **A macro can return a SPLICE**, whose elements replace it in the
+  enclosing form rather than becoming one element. `zillib`'s
+  `LIBRARY-MESSAGE` does exactly that — `<CHTYPE <RESOLVE-MESSAGE-DEFINITION
+  ...> SPLICE>` — to expand into several `TELL` tokens at once. Added a
+  `KSplice` kind, `CHTYPE ... SPLICE`, and splicing in `ExpandTree`.
+- **A TELL pattern's output needs expanding too.** The body is expanded
+  before compilation, but a pattern's output form is built *during* it, and
+  `zillib`'s `IFELSE` token expands to a `DEFMAC`.
+- **A routine's ARGUMENT SPEC needs expanding** as much as its body: an
+  `"AUX"` default is ordinary code, and `zillib` writes
+  `<ROUTINE R (SPEC "AUX" (A <OBJSPEC-ADJ .SPEC>))>` where that default is a
+  DEFSTRUCT accessor macro. The original expands both, spec first.
+- **`VERSION?`/`IFFLAG` in a routine body** select source, so they are
+  resolved during expansion like `IF-<FLAG>` already was.
+- **An expansion failure is now reported** rather than leaving the
+  unexpanded form for the compiler to reject as "unrecognized builtin
+  `<macro name>`", which pointed at the macro instead of at what went wrong
+  inside it.
+
+### `OBJECT`/`ROOM` evaluate their property lists
+
+The original registers them as `[Subr]`s — with **evaluated** arguments —
+and that is load-bearing: `zillib` writes `<OBJECT ROOMS ... (FLAGS
+!,KNOWN-FLAGS)>`, and it is list evaluation that splices those 28 flag names
+in. Every other element of a property list self-evaluates, so nothing else
+changes.
+
+### Words referenced only from code
+
+A routine can name a dictionary word nothing else mentions (`W?COMMA`). The
+original creates it on demand, which works there because its dictionary is
+written after the routines; here the dictionary must come first, because it
+lives in static memory and routines live in high memory. So routines are now
+**prepared** before any data is emitted: each one's spec and body are
+expanded once (and stored back, so compilation doesn't repeat the work) and
+scanned for `W?`/`ACT?`/`PR?`/`A?` references.
+
+### Compiler additions
+
+- **`DO`** and **`MAP-CONTENTS`** (including its three-element form, which
+  binds the *next* child before the body so the body may move the current
+  one out).
+- **`APPLY`/`CALL`** — a call through a computed address.
+- **N-ary arithmetic**, folded left, with `<- x>` as negation and
+  `<REST t>`/`<BACK t>` defaulting their offset to 1.
+- **`EQUAL?` chained** past three comparands (real source tests a word
+  against a dozen), branching to the label from each group when matching and
+  past it when not.
+- **A destination hint** (`CompileOperandTo`), the original's
+  `CompileAsOperand(..., dest)`: `<SET X <+ .A .B>>` becomes `ADD A,B >X`
+  instead of going through the stack, and AND/OR and predicates accumulate
+  into the destination instead of a temporary.
+- **Blocks in condition position**: a `PROG`/`BIND` whose value is only
+  being tested compiles its last statement *as a condition*, materialising
+  nothing.
+- `ORB`/`ANDB` instructions, `FIRST?`/`NEXT?` as values, strings as
+  operands, `SYNONYM`/`ADJECTIVE` object properties, the parser globals
+  registered so `,VERBS` resolves like any other global.
+
+### Local-slot pressure — the interesting constraint
+
+A Z-machine routine has **fifteen locals**, and `zillib` routines routinely
+declare thirteen or fourteen. Four changes were needed before the library
+would fit:
+
+1. **One pool.** Compiler temporaries come from the same pool as
+   `PROG`/`REPEAT` bindings rather than a separate `?TMP` series, so a
+   binding that has gone out of scope can serve as a temporary.
+2. **Reuse any free slot**, not only one previously used for the same name —
+   the original's `SpareLocals`.
+3. **Predicates materialise on the stack**, the same shape `COND` uses,
+   instead of in a temporary.
+4. **Operand-order fix-ups happen after the fact, and only when needed.**
+   The old rule spilled the left operand whenever the right one *might*
+   push. The emitter actually has a stronger invariant — a compiled operand
+   leaves a value on the stack exactly when it returns `"STACK"` — so
+   whether a fix-up is needed is *knowable afterwards*: if both ended up on
+   the stack, pop the right one into a temporary, which also leaves them in
+   the right order. And for a **commutative** operation the reversed order
+   is the same answer, so no temporary at all.
+
+   Temporaries are also released **by name** rather than by position in the
+   rename stack, because a temporary's lifetime can straddle other
+   allocations (a call spills several arguments while compiling the ones
+   between) and popping "the top" then frees somebody else's slot.
+
+### What is still in the way
+
+`zillib`'s `MATCH-NOUN-PHRASE` declares thirteen locals and has two nested
+`DO` loops, so all fifteen slots are in use before any temporary — and one
+of its expressions still wants one. The remaining candidates for removing it
+are widening the destination hint further (a `RETURN <OR ...>` could
+accumulate into the return path) and giving `AND`/`OR` in value position a
+stack-only shape. After that: `PSEUDO` properties and complex-PROPDEF
+direction properties, both still skipped with a comment.
+
+**Tested**: seventeen end-to-end programs, all passing; `beer`,
+`mandelbrot` and `name` all still compile, assemble and run (`beer` and
+`name` re-checked under frotz).
+
 ## Corpus gap analysis: exactly what blocks compiling a real game
 
 Running the new driver over all 52 corpus files makes the remaining gap

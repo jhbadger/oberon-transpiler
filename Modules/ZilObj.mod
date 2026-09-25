@@ -46,6 +46,12 @@ CONST
   KFunction*   = 13; (* DEFINE/DEFINE20-defined interpreter function *)
   KMacro*      = 14; (* DEFMAC-defined macro: wraps an applicable value *)
   KTable*      = 15; (* TABLE/LTABLE/PTABLE/PLTABLE/ITABLE value *)
+  KSplice*     = 17; (* a cons chain (like LIST) whose elements are meant to
+                        be SPLICED into the form containing it, rather than
+                        inserted as one element. A macro returns one by
+                        CHTYPEing its result to SPLICE — which is how
+                        zillib's LIBRARY-MESSAGE expands to several TELL
+                        tokens at once. *)
   KOblist*     = 16; (* an OBLIST, used as a compile-time hash map — see
                         ZilEval's MOBLIST/LOOKUP/INSERT for why one is
                         needed even though name RESOLUTION uses a single

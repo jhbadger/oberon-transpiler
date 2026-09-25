@@ -634,6 +634,7 @@ BEGIN
   IF z = NIL THEN RETURN TRUE END;
   RETURN (z.kind = ZilObj.KList) OR (z.kind = ZilObj.KForm) OR (z.kind = ZilObj.KVector)
          OR (z.kind = ZilObj.KString) OR (z.kind = ZilObj.KFalse) OR (z.kind = ZilObj.KTable)
+         OR (z.kind = ZilObj.KSplice)
 END IsStructured;
 
 PROCEDURE StructLength*(z: ZilObj.Zo): INTEGER;
@@ -734,6 +735,7 @@ BEGIN
    |ZilObj.KMacro:      Strings.Copy("MACRO", s)
    |ZilObj.KTable:      Strings.Copy("TABLE", s)
    |ZilObj.KOblist:     Strings.Copy("OBLIST", s)
+   |ZilObj.KSplice:     Strings.Copy("SPLICE", s)
   ELSE Strings.Copy("ANY", s)
   END
 END TypeName;
@@ -935,7 +937,9 @@ BEGIN
     RETURN ApplyReturnOrAgain(FALSE, args, n)
 
   ELSIF name = "FORM" THEN
-    IF n < 1 THEN RETURN Err("FORM: expected at least 1 arg") END;
+    (* <FORM> with no arguments is the empty FORM, i.e. FALSE — real source
+       builds one when a conditional expansion has nothing to contribute. *)
+    IF n < 1 THEN RETURN MkVal(ZilObj.NewEmpty(ZilObj.KForm)) END;
     RETURN MkVal(BuildConsChain(ZilObj.KForm, args, n))
 
   ELSIF name = "LIST" THEN
@@ -1161,6 +1165,34 @@ BEGIN
                  & ((args[0].kind = ZilObj.KSubr) OR (args[0].kind = ZilObj.KFSubr)
                     OR (args[0].kind = ZilObj.KFunction) OR (args[0].kind = ZilObj.KMacro))))
 
+  ELSIF (name = "ORB") OR (name = "ANDB") OR (name = "XORB") THEN
+    (* MDL's bitwise operators, as distinct from the logical OR/AND. Real
+       source uses them at COMPILE time to fold flag masks — zillib's
+       parser builds search-scope bytes this way — so they are needed here
+       and not only as the BOR/BAND instructions the compiler emits. *)
+    IF n < 1 THEN RETURN Err("ORB/ANDB/XORB: expected at least one FIX") END;
+    FOR i := 0 TO n - 1 DO
+      IF args[i].kind # ZilObj.KFix THEN RETURN Err("ORB/ANDB/XORB: expected FIX args") END
+    END;
+    sum := args[0].fixVal;
+    FOR i := 1 TO n - 1 DO
+      len := 0; synKind := 1;
+      WHILE synKind # 0 DO
+        IF ((sum DIV synKind) MOD 2 = 1) OR ((args[i].fixVal DIV synKind) MOD 2 = 1) THEN
+          IF name = "ORB" THEN len := len + synKind END
+        END;
+        IF ((sum DIV synKind) MOD 2 = 1) & ((args[i].fixVal DIV synKind) MOD 2 = 1) THEN
+          IF name = "ANDB" THEN len := len + synKind END
+        END;
+        IF ((sum DIV synKind) MOD 2) # ((args[i].fixVal DIV synKind) MOD 2) THEN
+          IF name = "XORB" THEN len := len + synKind END
+        END;
+        IF synKind >= 16384 THEN synKind := 0 ELSE synKind := synKind * 2 END
+      END;
+      sum := len
+    END;
+    RETURN MkVal(ZilObj.NewFix(sum))
+
   ELSIF (name = "MEMQ") OR (name = "MEMBER") THEN
     (* <MEMQ x struct> finds x among the elements and returns the REST of
        the structure starting there (so it doubles as a predicate, being
@@ -1233,8 +1265,10 @@ BEGIN
       RETURN Err("CHTYPE: expected a value and a type ATOM")
     END;
     Strings.Copy(args[1].atomText, s);
-    IF (s = "LIST") OR (s = "FORM") THEN
-      IF s = "LIST" THEN i := ZilObj.KList ELSE i := ZilObj.KForm END;
+    IF (s = "LIST") OR (s = "FORM") OR (s = "SPLICE") THEN
+      IF s = "LIST" THEN i := ZilObj.KList
+      ELSIF s = "FORM" THEN i := ZilObj.KForm
+      ELSE i := ZilObj.KSplice END;
       IF (args[0] # NIL) & (args[0].kind = i) THEN RETURN MkVal(args[0]) END;
       IF ~IsStructured(args[0]) THEN RETURN Err("CHTYPE: expected a structured value") END;
       len := StructLength(args[0]);
@@ -1747,6 +1781,8 @@ VAR
   dsOffset, dsFOffset, dsIdx: INTEGER;
   dsGotOffset: BOOLEAN;
   dsOpt, dsClause, dsVal: ZilObj.Zo;
+  (* OBJECT / ROOM *)
+  objProps, objTail: ZilObj.Zo;
   (* MAKE-<struct> *)
   mkName, mkField: ARRAY 64 OF CHAR;
   mkIdx, mkPos, mkI: INTEGER;
@@ -2823,11 +2859,33 @@ BEGIN
     ELSIF isFSubr & (name = "ROUTINE") THEN
       RETURN ApplyRoutine(z.rest)
 
-    ELSIF isFSubr & (name = "OBJECT") THEN
-      RETURN ApplyObject(FALSE, z.rest)
+    ELSIF isFSubr & ((name = "OBJECT") OR (name = "ROOM")) THEN
+      (* The original registers OBJECT and ROOM as [Subr]s, i.e. with
+         EVALUATED arguments, and that matters: zillib writes
+         <OBJECT ROOMS ... (FLAGS !,KNOWN-FLAGS)>, and it is list evaluation
+         that splices that segment into the flag list. Every other element
+         of a property list (atoms, strings, numbers) self-evaluates, so
+         evaluating them changes nothing else.
 
-    ELSIF isFSubr & (name = "ROOM") THEN
-      RETURN ApplyObject(TRUE, z.rest)
+         They stay FSUBRs here only so the property lists can be evaluated
+         one at a time, each as a LIST — which is exactly what a SUBR's
+         argument evaluation would do, minus needing the arguments to fit in
+         the fixed argument array. *)
+      objProps := NIL; objTail := NIL;
+      n := z.rest;
+      IF (n = NIL) OR (n.first = NIL) THEN RETURN Err("OBJECT/ROOM: expected a name") END;
+      cell := ZilObj.Cons(ZilObj.KList, n.first, NIL);
+      objProps := cell; objTail := cell;
+      n := n.rest;
+      WHILE (n # NIL) & (n.first # NIL) DO
+        r := EvalImpl(n.first, FALSE);
+        IF ShouldPass(r) THEN RETURN r END;
+        IF evalErrFlag THEN RETURN r END;
+        cell := ZilObj.Cons(ZilObj.KList, r.value, NIL);
+        objTail.rest := cell; objTail := cell;
+        n := n.rest
+      END;
+      RETURN ApplyObject(name = "ROOM", objProps)
 
     ELSIF isFSubr & (name = "PROPDEF") THEN
       (* <PROPDEF name default-value [complex-spec...]>. Ported from
@@ -3152,6 +3210,14 @@ BEGIN
         END;
         RETURN ApplyValue(args[0], mapArgs, mapI)
 
+      ELSIF name = "EXPAND" THEN
+        (* <EXPAND form> expands a macro call one level and returns the
+           expansion WITHOUT evaluating it — the same distinction
+           ZilForm.Expand draws against Eval, and exactly what ExpandOnce
+           provides for compiling routine bodies. *)
+        IF nargs < 1 THEN RETURN Err("EXPAND: expected a form") END;
+        RETURN ExpandOnce(args[0])
+
       ELSIF (name = "EVAL") OR (name = "EVAL-IN-SEGMENT") THEN
         (* <EVAL expr [environment]>: evaluates the (already-once-
            evaluated, since this is a SUBR) expr a second time — the
@@ -3253,20 +3319,35 @@ END IsExpandable;
    as-is rather than substituting FALSE, so the compiler reports the real
    construct it couldn't handle instead of a mysterious 0. *)
 PROCEDURE ExpandTree*(z: ZilObj.Zo): ZilObj.Zo;
-VAR r: ZResult; head, tail, cell, p, item: ZilObj.Zo;
-    savedErr: BOOLEAN; i: INTEGER; vec: ZilObj.Zo;
+VAR r: ZResult; head, tail, cell, p, item, sp: ZilObj.Zo;
+    i: INTEGER; vec: ZilObj.Zo;
 BEGIN
   IF z = NIL THEN RETURN NIL END;
 
   IF z.kind = ZilObj.KForm THEN
     IF IsExpandable(z) THEN
-      savedErr := evalErrFlag;
       r := ExpandOnce(z);
       IF evalErrFlag OR (r.outcome # OValue) THEN
-        evalErrFlag := savedErr;   (* leave it to the compiler to complain *)
+        (* Report the expansion failure rather than leaving the unexpanded
+           form for the compiler to reject: the compiler's complaint is
+           "unrecognized builtin <name>", which points at the macro instead
+           of at whatever went wrong inside it. *)
         RETURN z
       END;
       IF r.value = z THEN RETURN z END;   (* expanded to itself: stop *)
+      IF (r.value # NIL) & (r.value.kind = ZilObj.KSplice) THEN
+        (* expand the spliced elements individually, then hand the SPLICE
+           back for the caller to splice in *)
+        head := NIL; tail := NIL; sp := r.value;
+        WHILE (sp # NIL) & (sp.first # NIL) DO
+          cell := ZilObj.Cons(ZilObj.KSplice, ExpandTree(sp.first), NIL);
+          IF head = NIL THEN head := cell ELSE tail.rest := cell END;
+          tail := cell;
+          sp := sp.rest
+        END;
+        IF head = NIL THEN RETURN ZilObj.NewEmpty(ZilObj.KSplice) END;
+        RETURN head
+      END;
       RETURN ExpandTree(r.value)
     END
   END;
@@ -3275,9 +3356,23 @@ BEGIN
     head := NIL; tail := NIL;
     p := z;
     WHILE (p # NIL) & (p.first # NIL) DO
-      cell := ZilObj.Cons(z.kind, ExpandTree(p.first), NIL);
-      IF head = NIL THEN head := cell ELSE tail.rest := cell END;
-      tail := cell;
+      item := ExpandTree(p.first);
+      IF (item # NIL) & (item.kind = ZilObj.KSplice) THEN
+        (* the element expanded to a SPLICE: its elements take its place
+           rather than the splice itself becoming one element. This is what
+           lets zillib's LIBRARY-MESSAGE expand to several TELL tokens. *)
+        sp := item;
+        WHILE (sp # NIL) & (sp.first # NIL) DO
+          cell := ZilObj.Cons(z.kind, sp.first, NIL);
+          IF head = NIL THEN head := cell ELSE tail.rest := cell END;
+          tail := cell;
+          sp := sp.rest
+        END
+      ELSE
+        cell := ZilObj.Cons(z.kind, item, NIL);
+        IF head = NIL THEN head := cell ELSE tail.rest := cell END;
+        tail := cell
+      END;
       p := p.rest
     END;
     IF head = NIL THEN RETURN ZilObj.NewEmpty(z.kind) END;
@@ -3471,7 +3566,7 @@ BEGIN
   Register("PRINTN", FALSE); Register("PRINTC", FALSE);
   Register("INSERT-FILE", FALSE); Register("FLOAD", FALSE); Register("XFLOAD", FALSE);
   Register("CONS", FALSE);
-  Register("EVAL", FALSE); Register("EVAL-IN-SEGMENT", FALSE);
+  Register("EVAL", FALSE); Register("EVAL-IN-SEGMENT", FALSE); Register("EXPAND", FALSE);
   Register("TABLE", FALSE); Register("LTABLE", FALSE); Register("PTABLE", FALSE);
   Register("PLTABLE", FALSE); Register("ITABLE", FALSE);
   Register("SYNTAX", FALSE);
@@ -3500,7 +3595,8 @@ BEGIN
   Register("STRING", FALSE); Register("VECTOR", FALSE);
   Register("BYTE", FALSE); Register("WORD", FALSE); Register("CHTYPE", FALSE); Register("SET-SOURCE-INFO", FALSE);
   Register("GBOUND?", FALSE); Register("BOUND?", FALSE);
-  Register("MEMQ", FALSE); Register("MEMBER", FALSE); Register("ASCII", FALSE); Register("MIN", FALSE); Register("MAX", FALSE);
+  Register("MEMQ", FALSE); Register("MEMBER", FALSE); Register("ASCII", FALSE);
+  Register("ORB", FALSE); Register("ANDB", FALSE); Register("XORB", FALSE); Register("MIN", FALSE); Register("MAX", FALSE);
   Register("ABS", FALSE);
   Register("MOBLIST", FALSE); Register("ROOT", FALSE); Register("OBLIST?", FALSE);
   Register("LOOKUP", FALSE); Register("INSERT", FALSE);
