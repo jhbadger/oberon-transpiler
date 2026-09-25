@@ -29,6 +29,7 @@ CONST
   MaxObjects*  = 4096;
   MaxGlobals*  = 2048;
   MaxConstants* = 2048;
+  MaxTables*   = 2048;
 
 TYPE
   RoutineRec* = RECORD
@@ -61,6 +62,14 @@ VAR
 
   constants*: ARRAY MaxConstants OF GlobalRec;
   nConstants*: INTEGER;
+
+  (* TABLE/LTABLE/PTABLE/PLTABLE/ITABLE values (a KTable Zo — see
+     ZilObj.mod's own comment on that kind) that weren't flagged
+     TEMP-TABLE — matches the original's ZEnvironment.Tables, which is
+     just a List<ZilTable> for the same reason (a TEMP-TABLE is
+     compiler-internal scratch space, never part of the final output). *)
+  tables*: ARRAY MaxTables OF ZilObj.Zo;
+  nTables*: INTEGER;
 
 PROCEDURE AddRoutine*(name, act, argSpec, body: ZilObj.Zo);
 BEGIN
@@ -101,9 +110,17 @@ BEGIN
   END
 END AddConstant;
 
+PROCEDURE AddTable*(t: ZilObj.Zo);
+BEGIN
+  IF nTables < MaxTables THEN
+    tables[nTables] := t;
+    INC(nTables)
+  END
+END AddTable;
+
 PROCEDURE Reset*;
 BEGIN
-  nRoutines := 0; nObjects := 0; nGlobals := 0; nConstants := 0
+  nRoutines := 0; nObjects := 0; nGlobals := 0; nConstants := 0; nTables := 0
 END Reset;
 
 END ZilModel.

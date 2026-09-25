@@ -42,6 +42,7 @@ CONST
 
   MaxArgs = 64;
   MaxBindings = 32;
+  MaxTableElems = 8192;
 
   APReq = 0; APOpt = 1; APAux = 2;
 
@@ -222,6 +223,105 @@ BEGIN
   IF head = NIL THEN RETURN ZilObj.NewEmpty(kind) ELSE RETURN head END
 END BuildConsChain;
 
+(* Scans a flag LIST (e.g. (BYTE LENGTH)) for the TABLE-family SUBRs
+   below into a bitmask of ZilObj.TfXXX constants. Doesn't call Eval —
+   flagList's elements are plain atoms, nothing to evaluate — so this can
+   be its own procedure. Recognizes the common real-source flags (BYTE,
+   LENGTH, PURE, PARSER-TABLE as an alias for PURE, LEXV, TEMP-TABLE);
+   deliberately not recognizing PATTERN/SEGMENT/STRING/KERNEL/WORD yet —
+   pragmatic subset, add on demand. *)
+PROCEDURE TableFlagBits(flagList: ZilObj.Zo): INTEGER;
+VAR bits: INTEGER; p: ZilObj.Zo;
+BEGIN
+  bits := 0;
+  IF flagList # NIL THEN
+    p := flagList;
+    WHILE (p # NIL) & (p.first # NIL) DO
+      IF p.first.kind = ZilObj.KAtom THEN
+        IF ZilObj.IsAtomNamed(p.first, "BYTE") THEN bits := bits + ZilObj.TfByte
+        ELSIF ZilObj.IsAtomNamed(p.first, "LENGTH") THEN bits := bits + ZilObj.TfLength
+        ELSIF ZilObj.IsAtomNamed(p.first, "PURE") THEN bits := bits + ZilObj.TfPure
+        ELSIF ZilObj.IsAtomNamed(p.first, "PARSER-TABLE") THEN bits := bits + ZilObj.TfPure
+        ELSIF ZilObj.IsAtomNamed(p.first, "LEXV") THEN bits := bits + ZilObj.TfLexv
+        ELSIF ZilObj.IsAtomNamed(p.first, "TEMP-TABLE") THEN bits := bits + ZilObj.TfTemp
+        END
+      END;
+      p := p.rest
+    END
+  END;
+  RETURN bits
+END TableFlagBits;
+
+(* Shared by TABLE/LTABLE/PTABLE/PLTABLE below: syntax is
+   <[P][L]TABLE [(flags...)] values...> — an optional leading flag LIST,
+   then the values themselves (repCount is always 1: unlike ITABLE, these
+   don't repeat their initializer). Doesn't call Eval (args are already
+   evaluated by the generic SUBR dispatch), so this can be its own
+   procedure. Registers into ZilModel unless TEMP-TABLE was given, exactly
+   matching the original's own exclusion (a TEMP-TABLE is compiler-
+   internal scratch space, never part of the final output). *)
+PROCEDURE PerformTable(pure, wantLength: BOOLEAN; args: ARRAY OF ZilObj.Zo; n: INTEGER): ZResult;
+VAR flags, valStart, i: INTEGER; tab: ZilObj.Zo; vals: ARRAY MaxArgs OF ZilObj.Zo;
+BEGIN
+  flags := 0; valStart := 0;
+  IF (n > 0) & (args[0].kind = ZilObj.KList) THEN
+    flags := TableFlagBits(args[0]); valStart := 1
+  END;
+  IF pure THEN flags := flags + ZilObj.TfPure END;
+  IF wantLength THEN flags := flags + ZilObj.TfLength END;
+  FOR i := valStart TO n - 1 DO vals[i - valStart] := args[i] END;
+  tab := ZilObj.NewTable(vals, n - valStart, 1, flags);
+  IF (flags DIV ZilObj.TfTemp) MOD 2 = 0 THEN ZilModel.AddTable(tab) END;
+  RETURN MkVal(tab)
+END PerformTable;
+
+(* <ITABLE [specifier] count [(flags...)] init...>: `count` repetitions of
+   `init` (or of a single zero, if no init values given). `init` can
+   exceed MaxArgs*count-many call-site arguments while still needing many
+   more *expanded* elements (e.g. <ITABLE 100 0> has 2 call-site args but
+   100 expanded elements), so this uses its own much larger buffer rather
+   than the shared MaxArgs-bounded one. Doesn't call Eval, so — like
+   PerformTable — this can be its own procedure. The specifier atom
+   (NONE/BYTE/WORD) is a coarser approximation here than the original's
+   separate "element type" vs "length-prefix type" distinction — pragmatic
+   subset, only BYTE is distinguished (as ZilObj.TfByte), matching the
+   overwhelmingly common real usage. *)
+PROCEDURE PerformITable(args: ARRAY OF ZilObj.Zo; n: INTEGER): ZResult;
+VAR idx, flags, count, i, initN, totalN: INTEGER; tab: ZilObj.Zo;
+    vals: ARRAY MaxTableElems OF ZilObj.Zo;
+BEGIN
+  idx := 0; flags := 0;
+  IF (n > idx) & (args[idx].kind = ZilObj.KAtom) THEN
+    IF ZilObj.IsAtomNamed(args[idx], "BYTE") THEN flags := flags + ZilObj.TfByte END;
+    INC(idx)
+  END;
+  IF (n <= idx) OR (args[idx].kind # ZilObj.KFix) THEN
+    RETURN Err("ITABLE: expected a repetition count")
+  END;
+  count := args[idx].fixVal;
+  INC(idx);
+  IF count < 1 THEN RETURN Err("ITABLE: invalid table size") END;
+
+  IF (n > idx) & (args[idx].kind = ZilObj.KList) THEN
+    flags := flags + TableFlagBits(args[idx]); INC(idx)
+  END;
+
+  initN := n - idx;
+  IF initN = 0 THEN
+    totalN := count;
+    IF totalN > MaxTableElems THEN totalN := MaxTableElems END;
+    FOR i := 0 TO totalN - 1 DO vals[i] := ZilObj.NewFix(0) END
+  ELSE
+    totalN := count * initN;
+    IF totalN > MaxTableElems THEN totalN := MaxTableElems END;
+    FOR i := 0 TO totalN - 1 DO vals[i] := args[idx + (i MOD initN)] END
+  END;
+
+  tab := ZilObj.NewTable(vals, totalN, count, flags);
+  IF (flags DIV ZilObj.TfTemp) MOD 2 = 0 THEN ZilModel.AddTable(tab) END;
+  RETURN MkVal(tab)
+END PerformITable;
+
 PROCEDURE ApplySubr*(name: ARRAY OF CHAR; args: ARRAY OF ZilObj.Zo; n: INTEGER): ZResult;
 VAR sum, i, len: INTEGER; s: ARRAY 4096 OF CHAR;
 BEGIN
@@ -391,6 +491,21 @@ BEGIN
 
   ELSIF name = "LIST" THEN
     RETURN MkVal(BuildConsChain(ZilObj.KList, args, n))
+
+  ELSIF name = "TABLE" THEN
+    RETURN PerformTable(FALSE, FALSE, args, n)
+
+  ELSIF name = "LTABLE" THEN
+    RETURN PerformTable(FALSE, TRUE, args, n)
+
+  ELSIF name = "PTABLE" THEN
+    RETURN PerformTable(TRUE, FALSE, args, n)
+
+  ELSIF name = "PLTABLE" THEN
+    RETURN PerformTable(TRUE, TRUE, args, n)
+
+  ELSIF name = "ITABLE" THEN
+    RETURN PerformITable(args, n)
 
   ELSIF name = "CONS" THEN
     (* <CONS first rest>: prepends first onto rest, a LIST — or FALSE
@@ -1162,6 +1277,24 @@ BEGIN
         Strings.Copy(insSavedDir, currentDir);
         RETURN insResult
 
+      ELSIF (name = "EVAL") OR (name = "EVAL-IN-SEGMENT") THEN
+        (* <EVAL expr [environment]>: evaluates the (already-once-
+           evaluated, since this is a SUBR) expr a second time — the
+           common real-source pattern is building a FORM at runtime (e.g.
+           via a quasiquote template or FORM/LIST) and then EVAL'ing it,
+           exactly the same "expand, then evaluate the expansion" shape
+           already used for macros. The original's EVAL takes an explicit
+           LocalEnvironment argument; this port has no first-class
+           environment objects (that concept was flattened away back in
+           phase 2 — see ZilEval.mod's own header note), so a second
+           argument, if given, is accepted but ignored — pragmatic
+           subset, matches real usage (`<EVAL .RTN>` with no environment
+           argument is by far the common case in real source). Has to be
+           inlined here rather than an ApplySubr case since it needs to
+           call EvalImpl — same forward-reference reason as INSERT-FILE. *)
+        IF nargs < 1 THEN RETURN Err("EVAL: expected at least 1 arg") END;
+        RETURN EvalImpl(args[0], FALSE)
+
       ELSE
         RETURN ApplySubr(name, args, nargs)
       END
@@ -1214,6 +1347,9 @@ BEGIN
   Register("PRINTN", FALSE); Register("PRINTC", FALSE);
   Register("INSERT-FILE", FALSE); Register("FLOAD", FALSE); Register("XFLOAD", FALSE);
   Register("CONS", FALSE);
+  Register("EVAL", FALSE); Register("EVAL-IN-SEGMENT", FALSE);
+  Register("TABLE", FALSE); Register("LTABLE", FALSE); Register("PTABLE", FALSE);
+  Register("PLTABLE", FALSE); Register("ITABLE", FALSE);
 
   tAtom := ZilObj.Intern("T");
   tAtom.globalVal := tAtom;  (* T is self-valued *)

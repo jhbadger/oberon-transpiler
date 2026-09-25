@@ -45,6 +45,14 @@ CONST
   KActivation* = 12; (* PROG/REPEAT/BIND activation identity — see ZilEval.mod *)
   KFunction*   = 13; (* DEFINE/DEFINE20-defined interpreter function *)
   KMacro*      = 14; (* DEFMAC-defined macro: wraps an applicable value *)
+  KTable*      = 15; (* TABLE/LTABLE/PTABLE/PLTABLE/ITABLE value *)
+
+  (* KTable tabFlags bits — see NewTable's own comment *)
+  TfByte*   = 1;
+  TfLength* = 2;
+  TfPure*   = 4;
+  TfLexv*   = 8;
+  TfTemp*   = 16;
 
   OblistBuckets = 2048;
 
@@ -111,7 +119,19 @@ TYPE
     funcBody*: Zo;      (* LIST of body forms *)
 
     (* MACRO (DEFMAC): wraps an applicable value (a FUNCTION) *)
-    macWrapped*: Zo
+    macWrapped*: Zo;
+
+    (* TABLE/LTABLE/PTABLE/PLTABLE/ITABLE: the (non-repeated) initializer
+       values, reusing the VECTOR fields above (same flat-array shape,
+       no need for a separate pair of fields) — vecItems/vecLen hold the
+       values as given; tabRepCount is ITABLE's repetition count (1 for
+       the plain [P][L]TABLE forms, which don't repeat); tabFlags is a
+       bitmask of the TfXXX constants above. This is a much thinner
+       representation than the original's ZilTable (no byte-level
+       encoding yet — that's phase 3b's job once a real compilation pass
+       exists to walk ZilModel's registered tables). *)
+    tabRepCount*: INTEGER;
+    tabFlags*: INTEGER
   END;
 
 VAR
@@ -247,6 +267,21 @@ END NewFunction;
 PROCEDURE NewMacro*(wrapped: Zo): Zo;
 VAR z: Zo;
 BEGIN NEW(z); z.kind := KMacro; z.macWrapped := wrapped; RETURN z END NewMacro;
+
+(* values[0..n-1] become the table's (non-repeated) initializer;
+   repCount > 1 is ITABLE's repetition count. *)
+PROCEDURE NewTable*(values: ARRAY OF Zo; n, repCount, flags: INTEGER): Zo;
+VAR z: Zo; i: INTEGER;
+BEGIN
+  NEW(z);
+  z.kind := KTable;
+  NEW(z.vecItems, n);
+  FOR i := 0 TO n - 1 DO z.vecItems[i] := values[i] END;
+  z.vecLen := n;
+  z.tabRepCount := repCount;
+  z.tabFlags := flags;
+  RETURN z
+END NewTable;
 
 (* ------------------------------------------------------------------ *)
 (* property lists (PUTPROP/GETPROP)                                     *)
@@ -419,6 +454,13 @@ BEGIN
       Strings.Copy("#FUNCTION (...)", s)
    |KMacro:
       Strings.Copy("#MACRO (...)", s)
+   |KTable:
+      Strings.Copy("#TABLE (", s);
+      FOR i := 0 TO z.vecLen - 1 DO
+        IF i > 0 THEN Strings.Append(" ", s) END;
+        PrintTo(z.vecItems[i], tmp); Strings.Append(tmp, s)
+      END;
+      Strings.Append(")", s)
   ELSE
     Strings.Copy("#UNKNOWN", s)
   END

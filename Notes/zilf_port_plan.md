@@ -977,6 +977,87 @@ identical output, confirmed via `diff`) plus the full transpiler
 regression suite (136 files now, counting the new `ZilModel.mod` itself —
 same 3 pre-existing-only failures as always) — no regressions.
 
+## What's done (phase 3a continued: EVAL, and the TABLE family) — files, and what's tested
+
+Both candidates scoped at the end of phase 3a's own section above, done
+in one slice.
+
+**`EVAL`**: added as an inlined `EvalImpl` case (same forward-reference
+reason as `INSERT-FILE` — it needs to call `EvalImpl` again on its
+argument, so it can't be a plain `ApplySubr` case). Implements the common
+real-source shape only: `<EVAL expr>` with no explicit environment
+argument — verified this is overwhelmingly the real usage pattern before
+committing to skip environments; a second (environment) argument, if
+given, is accepted but ignored, since this port has no first-class
+environment objects (flattened away back in phase 2). `EVAL-IN-SEGMENT`
+is registered as an alias (same original-source pattern as
+`INSERT-FILE`/`FLOAD`/`XFLOAD` sharing one implementation).
+
+**The TABLE family** (`TABLE`, `LTABLE`, `PTABLE`, `PLTABLE`, `ITABLE`):
+read `Subrs.ZModel.cs`'s actual implementations first (not `ZilTable.cs`
+itself, which turned out to be just the abstract value type with the real
+construction logic living in the SUBRs) and found a genuinely different
+shape than `ROUTINE`/`OBJECT`: these are **plain evaluated-args SUBRs**
+that construct a real table *value* immediately (closer to how `FORM`/
+`LIST` already work in this port than to `ROUTINE`'s "capture raw syntax
+for later" pattern) — so no forward-reference issue, and `PerformTable`/
+`PerformITable` are ordinary standalone procedures.
+
+- **`ZilObj.mod`**: new `KTable` kind. Deliberately **reuses the existing
+  `vecItems`/`vecLen` fields** from `VECTOR` rather than adding a separate
+  pair — same flat-array shape, no reason to duplicate it — plus two new
+  fields, `tabRepCount` (`ITABLE`'s repetition count; always 1 for the
+  plain `[P][L]TABLE` forms) and `tabFlags` (a bitmask of new `TfByte`/
+  `TfLength`/`TfPure`/`TfLexv`/`TfTemp` constants). This representation is
+  intentionally much thinner than the original's `ZilTable` — no byte-level
+  encoding yet, since that's phase 3b's job once a real compilation pass
+  exists to walk what's registered here.
+- **`ZilEval.mod`**: `TableFlagBits` (scans a flag LIST like `(BYTE
+  LENGTH)` into the bitmask — recognizes `BYTE`/`LENGTH`/`PURE`/
+  `PARSER-TABLE`-as-`PURE`/`LEXV`/`TEMP-TABLE`; deliberately not yet
+  `PATTERN`/`SEGMENT`/`STRING`/`KERNEL`/`WORD` — pragmatic subset, add on
+  demand), `PerformTable` (the `[P][L]TABLE` shape: optional leading flag
+  list, then values as-is, `repCount` always 1), and `PerformITable` (the
+  `ITABLE` shape: optional `BYTE`/`WORD`/`NONE` specifier atom — only
+  `BYTE` is distinguished, a coarser approximation than the original's
+  separate element-type-vs-length-prefix-type distinction — then a
+  required count, optional flag list, then an initializer that gets
+  **pre-expanded** `count` times into the table's element array). `ITABLE`
+  needed its own much larger buffer (`MaxTableElems = 8192`) independent of
+  the shared `MaxArgs = 64` used for ordinary call arguments, since e.g.
+  `<ITABLE 100 0>` has only 2 call-site arguments but 100 *expanded*
+  elements. Both register the constructed table into the new
+  `ZilModel.tables` list **unless** the `TEMP-TABLE` flag was given —
+  matching the original's own exclusion exactly (temp tables are
+  compiler-internal scratch space, never part of final output).
+- **`ZilModel.mod`**: added `tables`/`nTables`/`AddTable`, matching
+  `ZEnvironment.Tables`'s own shape (just a flat list of table values, not
+  a separate wrapper record — the `ZilObj.Zo` *is* the registered value,
+  same as the original's `List<ZilTable>`).
+
+**Tested**: `sample6.zil` — `EVAL` re-evaluating a constructed `<FORM + .X
+.X>` (`=> 42` for `X=21`); plain/`L`/`P`-prefixed tables with and without
+a flag list; `ITABLE` both with a single zero-fill initializer and a
+multi-value repeating one (`<ITABLE 2 (BYTE) 1 2> => (1 2 1 2)`); and a
+table constructed inline as a `CONSTANT`'s value (a common real pattern,
+confirming both registrations compose correctly). All 8 forms produced
+exactly the expected result. Re-ran all five existing phase-2 test
+harnesses (byte-identical output) plus the full transpiler regression
+suite (136 files, same 3 pre-existing-only failures) — no regressions.
+
+**Then re-ran the full 84-file corpus aggregate** once more: **`EVAL` (was
+269 occurrences) and the entire table family (`ITABLE`/`TABLE`/`LTABLE`/
+`PTABLE`, was 179 combined) are now completely absent from the
+histogram** — zero occurrences of any of them remain anywhere in the real
+corpus. Also directly observed on `sample/zork1/zork1.zil`: 5 of its 9
+`INSERT-FILE`d files now process end-to-end with no errors at all
+(`GMACROS`, `GGLOBALS`, `GCLOCK`, `GMAIN`, `GPARSER` — up from 3 after
+phase 3a alone). `SYNTAX` (451, completely unchanged by this slice — its
+own subsystem, per the plan) is now unambiguously the single largest
+remaining item in the histogram, with vocabulary-adjacent forms
+(`SYNONYM`/`VOC`/`VERB-SYNONYM`/`DEFAULT-DEFINITION`/etc.) and `PROPDEF`
+next after it.
+
 ## Suggested order for the next session
 
 1. Re-run all five existing phase-2 test harnesses to confirm nothing
@@ -995,40 +1076,37 @@ same 3 pre-existing-only failures as always) — no regressions.
    transpiler's own full `Modules/*.mod`+`examples/*.mod` regression suite
    (136 files — includes the new `ZilModel.mod`) if any transpiler work
    happened in between sessions.
-2. Phase 3a's own re-run of the full-corpus aggregate (its own section
-   above has the updated histogram and the exact command) is the current
-   signal for what to register next. Two clean, well-scoped candidates it
-   surfaced, in priority order:
-   a. **`EVAL`** (269 occurrences, the *SUBR* form `<EVAL expr
-      [environment]>` — distinct from this port's own internal
-      `EvalImpl`): real usage is overwhelmingly `<EVAL .SOME-FORM>` with
-      no explicit environment argument — just "evaluate this value (which
-      is itself a FORM) one more time, in the current environment". Since
-      this port has no first-class environment objects (the `LocalEnvironment`
-      concept was deliberately flattened away back in phase 2), a
-      pragmatic first cut can just implement the 1-arg case (call
-      `EvalImpl` again on the already-evaluated argument) and ignore an
-      explicit environment argument if given, documenting that as a known
-      gap. Same forward-reference constraint as `INSERT-FILE`/`PROG`/
-      function-application — has to be inlined into `EvalImpl`, not a
-      plain `ApplySubr` case, since it needs to call `EvalImpl` itself.
-   b. **The table family** (`ITABLE`/`TABLE`/`LTABLE`/`PTABLE`, 111+32+28+8
-      = 179 occurrences): register-only, the same shape as `ROUTINE`/
-      `OBJECT` — capture the raw arguments (size/flags/raw element list)
-      into a new `ZilModel.mod` table list, no compilation yet. Read
-      `ZilTable.cs` (790 lines, not yet read) first to confirm the exact
-      shape before implementing, the same discipline used for
-      `ZilModelObject`/`ZilGlobal` this session.
-   After either (or both): re-run the full 84-file aggregate again to see
-   how much further the histogram shrinks, the same way phase 3a's own
-   effect was measured.
-3. `SYNTAX`/vocabulary (451 occurrences, unchanged by phase 3a) is its own
-   large, self-contained subsystem (`Syntax.cs`, `SyntaxMatcher.cs`, the
-   whole `ZModel/Vocab/` subtree) — worth its own dedicated reading pass
-   when picked up, same as this session's phase 3 architecture read was
-   for `Compiler`/`Emit`/the rest of `ZModel`. Lower priority than (2)
-   since a lot of real routine/object/global/table content is reachable
-   and testable without it.
+2. `EVAL` and the table family are both done (see the dedicated section
+   above) and completely gone from the full-corpus histogram. **`SYNTAX`/
+   vocabulary (451 occurrences, still totally untouched) is now
+   unambiguously the largest remaining item** — it needs its own dedicated
+   reading pass before implementing, the same discipline used for the
+   Compiler/Emit/ZModel architecture pass earlier this session: read
+   `Syntax.cs` (421 lines) and `SyntaxMatcher.cs` (223 lines) first, plus
+   enough of the `ZModel/Vocab/` subtree (`IVocabFormat.cs`, and at least
+   one concrete format — `OldParser/OldParserVocabFormat.cs` is likely the
+   more relevant one for a Zap/Z-machine target than `NewParser/` or the
+   Glulx-specific format) to understand `SYNTAX`'s own registration shape
+   (verb/preposition/object/direction pattern → an action routine name)
+   *before* writing any code — don't assume it's as cheap as
+   `ROUTINE`/`OBJECT`/`TABLE` turned out to be; vocabulary/dictionary
+   encoding is a genuinely different, self-contained subsystem, not just
+   "more of the same registration pattern". `SYNONYM`/`VOC`/
+   `VERB-SYNONYM`/`DEFAULT-DEFINITION`/`REPLACE-DEFINITION`/
+   `DELAY-DEFINITION` (92+82+38+43+18+14 = 287 more occurrences) are all
+   part of the same vocabulary subsystem and would likely come along with
+   it. After implementing: re-run the full 84-file aggregate again to
+   measure the effect, the same way `INSERT-FILE`, phase 3a, and this
+   slice were each measured.
+3. `PROPDEF` (33 occurrences) is a smaller, separately-scoped candidate if
+   `SYNTAX` feels too large to start cold: the *default* directional-exit
+   `PROPDEF` pattern is already known (`Context.InitPropDefs`, read back
+   in phase 2b) and could plausibly be hard-coded for the common case,
+   deferring general custom-`PROPDEF` support (`ComplexPropDef.cs`, 1,021
+   lines, not yet read) — but confirm this is actually sufficient for real
+   source before committing to it, since several real files (`1dungeon.zil`
+   itself) define their own custom `PROPDEF`s that a hard-coded default
+   wouldn't cover.
 4. Once registration (3a and its natural continuations above) feels
    sufficiently broad, move to **phase 3b: actual code generation** — read
    `Compilation.Objects.cs` (object/property/flag table layout) and
