@@ -508,6 +508,51 @@ phase's existing tests, plus the full transpiler `Modules/*.mod`+
 Also added (needed to make the `BOTTLES` test actually runnable):
 `PRINTN`, `PRINTC` SUBRs in `ZilEval.mod`.
 
+## Milestone: the reader (phase 1) validated against the entire real corpus
+
+Per this doc's own "try another small real sample" suggestion, but scaled
+up: rather than one file at a time, wrote a generic `readfile.mod` harness
+(takes a path via `Args`, reads every top-level form, reports the count or
+the first error) and ran it over **every single `.zil` file in
+`~/lib/src/zilf/zillib/` and `~/lib/src/zilf/sample/`** — 84 files total,
+zero filtering/cherry-picking. This includes the entire core library
+(`parser.zil` — 357 top-level forms, `verbs.zil` — 274, `scope.zil`,
+`pronouns.zil`, `libmsg-defaults.zil`, every other `zillib/*.zil`) and
+every sample game (`advent.zil` — 608 forms, `cloak.zil`, `rascal/*.zil`,
+and the **complete real Zork 1 source** — `1dungeon.zil`, `1actions.zil`,
+`gparser.zil`, `gsyntax.zil`, `gmain.zil`, `gverbs.zil`, `gclock.zil`,
+`gglobals.zil`, `gmacros.zil`, `zork1.zil`).
+
+**All 84 files read with zero errors.** This is a strong, broad validation
+that phase 1 (plus phase 2d's two reader bug fixes) is solid against real,
+unmodified, production ZIL source at real-game scale — not just the small
+hand-written samples used to build each phase. Re-run this
+(`readfile.mod` — recreate from this description if the scratchpad is
+gone; it's ~25 lines) as a fast regression check after any future
+`ZilRead.mod` change, the same way the smaller phase-specific tests are
+re-run after `ZilEval.mod`/`ZilObj.mod` changes.
+
+**What this does and doesn't prove**: it proves the reader's *syntax*
+coverage is complete enough for real source. It does **not** exercise
+evaluation — `ROUTINE`/`OBJECT` bodies read as inert structured data at
+this stage (correct — see phase 2c's finding that routines are compiled,
+never interpreted) and nothing here calls `Eval` on these files' top-level
+forms. Doing that next would immediately hit unimplemented FSUBRs
+(`ROUTINE`, `OBJECT`, `GLOBAL`, `SYNTAX`, etc. aren't registered at all
+yet — phase 2's builtin set was only ever built from small hand-written
+test files, not from what real top-level game/library forms actually use)
+and wouldn't currently produce an informative signal beyond "phase 3's
+ZModel doesn't exist yet", which is already known. The next genuinely
+informative experiment along these lines would be evaluating a real
+library file's **macro *definitions*** in isolation (skipping `ROUTINE`/
+`OBJECT`/etc. top-level forms, evaluating only the `DEFINE`/`DEFMAC` ones)
+to see how much further phase 2's builtin set needs to grow before that
+works — `pronouns.zil` (read above, 12 forms) is a good candidate: it
+defines real macros using `DEFSTRUCT`, `MAPF`, `EVAL` with an explicit
+environment argument, `PARSE`, `STRING`, `VOC`, and `TYPE?` — all
+currently unimplemented — so it would surface a realistic, prioritized
+list of what phase 2 still needs, the same way `beer.zil` did for phase 2d.
+
 ## What's still needed for a complete phase 2 (Interpreter core)
 
 1. **`ObList.cs`** (145 lines, read in phase 2b) confirms the real
@@ -577,18 +622,23 @@ Before starting:
    phase 1's `sample1.zil` (`readtest.mod`), phase 2's `sample2.zil`
    (`evaltest.mod`), phase 2b's `sample3.zil` (`eval3test.mod`), phase 2c's
    `sample4.zil` (`eval4test.mod`), and phase 2d's `sample5.zil`
-   (`eval5test.mod`). (All live under the session's scratchpad, which may
-   not survive between machine sessions — if gone, they're small and quick
-   to recreate from this doc's descriptions of what they cover.) Also
-   re-run the transpiler's own full `Modules/*.mod`+`examples/*.mod`
+   (`eval5test.mod`). Also re-run `readfile.mod` (generic: takes a path via
+   `Args`) over every file in `zillib/` and `sample/` — should still be
+   zero failures out of 84. (All live under the session's scratchpad,
+   which may not survive between machine sessions — if gone, they're small
+   and quick to recreate from this doc's descriptions of what they cover.)
+   Also re-run the transpiler's own full `Modules/*.mod`+`examples/*.mod`
    regression suite if any transpiler work happened in between sessions.
-2. Phase 2d's approach — try a short real excerpt from `~/lib/src/zilf`'s
-   own samples/library before guessing what to build next — paid off well
-   (surfaced quasiquote, quoted args, *and* two real reader bugs from one
-   29-line file). Keep doing this: try another small real sample (`sample/
-   empty/empty.zil`, `sample/cloak/cloak.zil`, or a `zillib/*.zil` file
-   read in isolation) through phases 1-2d and see what it needs next,
-   rather than continuing to guess from the "what's still needed" list.
+2. With the reader now validated against the whole real corpus (see the
+   milestone section above), the next genuinely informative experiment is
+   evaluating real macro *definitions* (not `ROUTINE`/`OBJECT`/etc., which
+   need phase 3) from an actual library file. **`zillib/pronouns.zil`** is
+   already scoped as the candidate: try evaluating just its `DEFSTRUCT`/
+   `DEFINE`/`PUTPROP` forms (skip `ROUTINE`s) and see what fails first —
+   it needs `DEFSTRUCT`, `MAPF`, `EVAL` with an explicit environment arg,
+   `PARSE`, `STRING`, `VOC`, and `TYPE?`, all currently unimplemented, so
+   expect several rounds of "port the next missing thing" rather than one
+   fix — same iterative approach as phase 2d, just against a harder file.
 3. Otherwise, pick from the "what's still needed" list above — item 4
    (fixing phase 1's `%`/`#TYPE` stubs, now that `Eval`/quasiquote both
    exist) is the most likely to matter soon for reading more real source
@@ -598,6 +648,6 @@ Before starting:
    still missing), move to **phase 3** (Compiler/ZModel/Emit.Zap) — see
    that section below for where to start reading first. Note that
    `beer.zil`'s `ROUTINE GO`/`ROUTINE SING` now read fine as inert data
-   (phase 1) but can't be *run* without phase 3, since (confirmed this
-   session) `ROUTINE` bodies are compiled, never interpreted directly.
+   (phase 1) but can't be *run* without phase 3, since (confirmed in phase
+   2c) `ROUTINE` bodies are compiled, never interpreted directly.
 5. Update this doc's "what's done" section and commit again.
