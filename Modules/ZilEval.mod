@@ -188,9 +188,20 @@ END BuildConsChain;
 PROCEDURE ApplySubr*(name: ARRAY OF CHAR; args: ARRAY OF ZilObj.Zo; n: INTEGER): ZResult;
 VAR sum, i, len: INTEGER; s: ARRAY 4096 OF CHAR;
 BEGIN
-  IF (name = "SET") OR (name = "SETG") OR (name = "GLOBAL") THEN
-    IF n < 2 THEN RETURN Err("SET/SETG: expected 2 args") END;
-    IF args[0].kind # ZilObj.KAtom THEN RETURN Err("SET/SETG: first arg must be an ATOM") END;
+  IF (name = "SET") OR (name = "SETG") OR (name = "GLOBAL") OR (name = "CONSTANT") THEN
+    (* The originals for GLOBAL/CONSTANT are FSUBRs (name unevaluated,
+       value explicitly Eval'd inside the SUBR body) rather than plain
+       evaluated-args SUBRs like this — but since a bare ATOM name (the
+       overwhelmingly common case) or an ADECL name (Eval already reduces
+       to the bare atom, decl discarded, matching this port's usual
+       "DECL checking skipped" simplification) self-evaluate to exactly
+       what the FSUBR form would have bound anyway, treating them as
+       ordinary evaluated-args SUBRs here produces the same observable
+       result for real source without needing a separate FSUBR case.
+       Redefinition is always silently allowed, same simplification as
+       DEFINE/DEFMAC. *)
+    IF n < 2 THEN RETURN Err("SET/SETG/GLOBAL/CONSTANT: expected 2 args") END;
+    IF args[0].kind # ZilObj.KAtom THEN RETURN Err("SET/SETG/GLOBAL/CONSTANT: first arg must be an ATOM") END;
     IF name = "SET" THEN args[0].localVal := args[1] ELSE args[0].globalVal := args[1] END;
     RETURN MkVal(args[1])
 
@@ -1002,7 +1013,7 @@ BEGIN
   Register("RETURN", FALSE); Register("AGAIN", FALSE);
   Register("DEFINE", TRUE); Register("DEFINE20", TRUE); Register("DEFMAC", TRUE);
   Register("FORM", FALSE); Register("LIST", FALSE); Register("LENGTH?", FALSE);
-  Register("SET", FALSE); Register("SETG", FALSE); Register("GLOBAL", FALSE);
+  Register("SET", FALSE); Register("SETG", FALSE); Register("GLOBAL", FALSE); Register("CONSTANT", FALSE);
   Register("LVAL", FALSE); Register("GVAL", FALSE);
   Register("GASSIGNED?", FALSE); Register("ASSIGNED?", FALSE);
   Register("PUTPROP", FALSE); Register("GETPROP", FALSE);

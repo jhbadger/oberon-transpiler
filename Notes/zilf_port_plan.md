@@ -553,6 +553,116 @@ environment argument, `PARSE`, `STRING`, `VOC`, and `TYPE?` — all
 currently unimplemented — so it would surface a realistic, prioritized
 list of what phase 2 still needs, the same way `beer.zil` did for phase 2d.
 
+## What's done (phase 2e: CONSTANT, and a full-corpus gap analysis)
+
+Followed through on the milestone section's own suggestion: evaluated
+(not just read) `zillib/pronouns.zil`'s top-level forms with a new generic
+`evalfile.mod` harness (like `readfile.mod`, but calls `ZilEval.Eval` on
+each form and reports the result or error). Of its 12 top-level forms, 8
+already succeeded outright (`SETG`, both real `DEFINE`s, `PUTPROP`) even
+though this file needed `DEFSTRUCT`/`MAPF`/`EVAL`-with-environment/`PARSE`/
+`STRING`/`VOC`/`TYPE?` per the milestone's own prediction — because a
+`DEFINE`d function's *body* only needs those builtins when the function is
+actually *called*, and none of `pronouns.zil`'s functions are called at
+its own top level (they're defined for other files to call later). This
+revises last section's prediction: defining real library macros is easier
+than expected; only 4 forms failed (`FILE-FLAGS`, `DEFSTRUCT`, `ROUTINE`×2)
+and all 4 are legitimately phase-3 (compiler/`ZModel`) concerns, not
+phase-2 gaps.
+
+**Added `CONSTANT`** (`ZilEval.mod`): verified against `Subrs.ZModel.cs`
+that the original's `CONSTANT`/`GLOBAL` are FSUBRs (name unevaluated,
+value explicitly `Eval`'d inside the SUBR body) rather than plain
+evaluated-args SUBRs — but since a bare ATOM name (the common case) or an
+ADECL name (this port's usual "DECL checking skipped" simplification
+already reduces `Eval`uating an ADECL to its bare atom) self-evaluate to
+exactly what the FSUBR form would bind anyway, folding `CONSTANT` into the
+existing evaluated-args `SET`/`SETG`/`GLOBAL` SUBR case produces the same
+observable result for real source, with no new FSUBR case needed.
+
+**Then ran `evalfile.mod` over the entire 84-file corpus** (same set as
+the reader milestone) and aggregated every "calling unassigned atom"
+error by name, to get a real, prioritized, whole-corpus signal instead of
+one file's — this is the most important artifact of this session's work
+for planning phase 3, so the full histogram is worth keeping here
+verbatim (counts are *occurrences*, i.e. call sites, not distinct files):
+
+```
+1537 ROUTINE        92 SYNONYM        18 VERSION?
+ 479 OBJECT          82 VOC            18 REPLACE-DEFINITION
+ 450 SYNTAX          75 ITABLE         14 USE
+ 229 ROOM            73 INSERT-FILE    14 DELAY-DEFINITION
+ 192 TEST-CASE       70 DEFAULT-LIBRARY-MESSAGES   11 IF-DEBUG
+  43 DEFAULT-DEFINITION   40 VERSION    9 ADD-TELL-TOKENS
+  37 VERB-SYNONYM    37 EVAL            8 HINT, FILE-FLAGS (each)
+  33 PROPDEF         32 TABLE           7 PTABLE, DEFSTRUCT (each)
+  31 TEST-GO         28 TEST-SETUP      6 VECTOR, OBJECT-TEMPLATE (each)
+  25 LTABLE          5 COMPILATION-FLAG-DEFAULT
+  4 PRONOUN, PACKAGE, ENDPACKAGE, GDECL (each)
+  3 STATUS-LINE-SECTION, SCORING-ACHIEVEMENTS, REPLACE-LIBRARY-MESSAGES, MAPF (each)
+```
+
+**Reading this list (grouped, not in count order):**
+- **The Z-machine/`ZModel` core — by far the largest group, and
+  confirms phase 3 dominates the remaining work exactly as the original's
+  own source-size ratio predicted** (`Compiler`+`ZModel` ≈ 20,500 lines
+  vs. `Interpreter` ≈ 16,900): `ROUTINE` (1537), `OBJECT`/`ROOM` (479+229),
+  `SYNTAX` (450), `ITABLE`/`TABLE`/`LTABLE`/`PTABLE` (75+32+25+7),
+  `PROPDEF` (33), `VERSION`/`VERSION?` (40+18), `GDECL` (4),
+  `OBJECT-TEMPLATE` (6), `VECTOR`-as-a-top-level-form (6). None of this is
+  a phase-2 gap; it's what phase 3 exists to build.
+- **Parser/vocabulary table-building — also `ZModel`/`Vocab`, phase 3**:
+  `SYNONYM`/`VERB-SYNONYM` (92+37), `VOC` (82), `DEFAULT-DEFINITION`/
+  `REPLACE-DEFINITION`/`DELAY-DEFINITION` (43+18+14).
+- **zilf's own test framework, likely low-priority or skippable
+  entirely** for the "real games" goal: `TEST-CASE`/`TEST-GO`/
+  `TEST-SETUP` (192+31+28) — these support the compiler's *own* unit
+  tests, not gameplay; worth confirming this reading before investing
+  effort here, but they're a strong candidate to just skip.
+- **A cheap, high-leverage phase-1/2 candidate for next time:
+  `INSERT-FILE` (73 occurrences)** — real zilf implements it as an
+  ordinary evaluated-args **SUBR** (`Subrs.Meta.cs`, aliased to `FLOAD`/
+  `XFLOAD`), *not* a reader/parser-level construct: evaluating it finds
+  the named file (`Context.FindIncludeFile` — tries the name as-is, with
+  a `.zil`/`.mud` extension appended, and a lowercased variant, across
+  configured include paths) and recursively runs the *same* read-eval
+  loop (`Program.Evaluate`) on it in the current context, then returns
+  once exhausted. Investigated but not yet built this session — it
+  can't be a small `ApplySubr` addition, since `ApplySubr` is
+  deliberately kept free of any dependency on `Eval` (that's what lets it
+  be declared before `EvalImpl` without a forward-reference conflict);
+  `INSERT-FILE` fundamentally needs to call `EvalImpl` on each form it
+  reads from the new file, so it has to be inlined into `EvalImpl` itself,
+  the same way `PROG`/`REPEAT`/`BIND` and function/macro application are.
+  It would also need `ZilEval.mod` to `IMPORT ZilRead` (checked: no
+  circular-import risk — `ZilRead.mod` doesn't import `ZilEval`), and the
+  `Reader` type would need to track its own file's directory so a
+  relative `INSERT-FILE` reference can resolve against it (this port has
+  no `IncludePaths`/library-search-directory config at all yet — a
+  reasonable first cut would just resolve relative to the *including*
+  file's own directory, deferring a real search-path list until
+  something actually needs one). Once built, this would very likely
+  reduce many of the "library macro" errors above for free, since files
+  like `DEFAULT-LIBRARY-MESSAGES`'s definition live in a *different*
+  zillib file that a real game's own top-level source pulls in via
+  exactly this mechanism — the 84-file-independently test run this
+  session never followed that chain.
+- **Genuine remaining phase-2 (interpreter) gaps, smaller than expected**:
+  `EVAL` (37 — the *SUBR* form, `<EVAL expr [environment]>`, distinct from
+  this port's internal `EvalImpl` — not yet exposed as a callable
+  builtin), `USE`/`PACKAGE`/`ENDPACKAGE` (14+4+4 — the package/OBLIST
+  system phase 1 flattened away), `IF-DEBUG` (11), `MAPF` (3 — mapping
+  with early-exit control values, `Outcome.MapRet`/`MapLeave`/`MapStop`,
+  none of which this port's `ZResult` implements yet), `DEFSTRUCT` (7),
+  `HINT`/`ADD-TELL-TOKENS`/`STATUS-LINE-SECTION`/`SCORING-ACHIEVEMENTS`/
+  `COMPILATION-FLAG-DEFAULT`/`REPLACE-LIBRARY-MESSAGES` (single digits
+  each — likely all themselves `DEFMAC`s living in not-yet-`INSERT-FILE`d
+  library files, so investigate after `INSERT-FILE` exists, not before).
+
+**Tested**: re-ran all five existing phase test harnesses (no regressions)
+plus the full transpiler `Modules/*.mod`+`examples/*.mod` regression suite
+(135 files, same pre-existing-only failures as always).
+
 ## What's still needed for a complete phase 2 (Interpreter core)
 
 1. **`ObList.cs`** (145 lines, read in phase 2b) confirms the real
@@ -629,16 +739,26 @@ Before starting:
    and quick to recreate from this doc's descriptions of what they cover.)
    Also re-run the transpiler's own full `Modules/*.mod`+`examples/*.mod`
    regression suite if any transpiler work happened in between sessions.
-2. With the reader now validated against the whole real corpus (see the
-   milestone section above), the next genuinely informative experiment is
-   evaluating real macro *definitions* (not `ROUTINE`/`OBJECT`/etc., which
-   need phase 3) from an actual library file. **`zillib/pronouns.zil`** is
-   already scoped as the candidate: try evaluating just its `DEFSTRUCT`/
-   `DEFINE`/`PUTPROP` forms (skip `ROUTINE`s) and see what fails first —
-   it needs `DEFSTRUCT`, `MAPF`, `EVAL` with an explicit environment arg,
-   `PARSE`, `STRING`, `VOC`, and `TYPE?`, all currently unimplemented, so
-   expect several rounds of "port the next missing thing" rather than one
-   fix — same iterative approach as phase 2d, just against a harder file.
+2. Phase 2e's full-corpus gap analysis (see that section above — read it
+   in full before picking a next step, it has the complete histogram and
+   categorization) already answered "what does real source need next" far
+   more reliably than another one-file experiment would. Two concrete
+   options it surfaced, in priority order:
+   a. **`INSERT-FILE`** (73 occurrences across the corpus) — implement it
+      as described in phase 2e: an evaluated-args SUBR case inlined into
+      `EvalImpl` (can't be a plain `ApplySubr` case — it needs to call
+      `EvalImpl` on each form it reads, so it has the same
+      forward-reference constraint as `PROG`/function-application), backed
+      by `ZilEval.mod` importing `ZilRead` (no circular-import risk,
+      already checked) and the `Reader` type tracking its own file's
+      directory for relative-path resolution. Likely reduces several of
+      the smaller "missing library macro" error counts for free once
+      real games' full `INSERT-FILE` chains can actually be followed.
+   b. Only after (a): re-run the full-corpus `evalfile.mod` aggregate
+      (the exact command is in phase 2e's own writeup) again — with whole
+      library chains now reachable, the histogram will look different
+      (probably smaller and more accurate) and should drive whatever
+      comes after, rather than guessing further from this session's list.
 3. Otherwise, pick from the "what's still needed" list above — item 4
    (fixing phase 1's `%`/`#TYPE` stubs, now that `Eval`/quasiquote both
    exist) is the most likely to matter soon for reading more real source
@@ -646,7 +766,9 @@ Before starting:
    are genuinely on-demand.
 4. Once phase 2 feels solid (or once real source above exposes what's
    still missing), move to **phase 3** (Compiler/ZModel/Emit.Zap) — see
-   that section below for where to start reading first. Note that
+   that section below for where to start reading first, and phase 2e's
+   histogram above for how heavily `ROUTINE`/`OBJECT`/`SYNTAX`/table-family
+   forms dominate everything else real source actually needs. Note that
    `beer.zil`'s `ROUTINE GO`/`ROUTINE SING` now read fine as inert data
    (phase 1) but can't be *run* without phase 3, since (confirmed in phase
    2c) `ROUTINE` bodies are compiled, never interpreted directly.
