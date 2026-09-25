@@ -769,32 +769,159 @@ pre-existing-only failures as always) after both the `INSERT-FILE` and
    new builtins; only reconsider if the per-builtin boilerplate becomes
    the bottleneck.
 
-## What phase 3+ needs to cover (Compiler / ZModel / Emit.Zap)
+## Phase 3 reading pass #1 (architecture) — findings
 
-Not researched in depth yet this session beyond directory/size survey.
-Before starting:
-- Read `Zilf/Compiler`'s top-level driver file(s) first to understand the
-  overall compile pipeline shape (likely: read all top-level forms via
-  phase 1+2, sort into routines/objects/globals/constants/tables via
-  `ZModel`, then compile each routine's body to Z-machine instructions via
-  `Compiler/Builtins/*.cs`, emitting through the `Zilf.Emit` abstraction).
-- Read `Zilf.Emit` root (3,108 lines) and `Zilf.Emit/Zap` (4,548 lines)
-  together to determine whether the generic `IGameBuilder` abstraction
-  (shared across Zap/Glulx/Cornerstone) is worth porting, or whether the
-  Oberon port can have the compiler call directly into Zap-shaped
-  procedures (routine-builder, object-builder, table-builder, etc.) and
-  skip a layer of indirection that only exists to support multiple
-  backends we've already decided to drop down to one.
-- `Zilf/Compiler/Builtins` (4,439 lines within the 13,187 Compiler total)
-  is the ZIL-builtin-to-Z-machine-instruction mapping (e.g. `<TELL>` →
-  `PRINTI`/`PRINTR`, `<MOVE>` → the `MOVE` zapf instruction, `<FSET?>` →
-  `FSET?`) — this is the most directly analogous piece to zapf's
-  `Opcodes.cs`/instruction-encoding work, and probably the safest place to
-  resume concrete porting work once phases 1-2 are solid, since each
-  builtin can be ported and tested somewhat independently (compile one
-  tiny routine using it, check the emitted `.zap` text, feed it through
-  our zapf, run it in `examples/zmachine.mod`) — this mirrors exactly how
-  zapf itself was validated end-to-end.
+First real reading pass into `Zilf/Compiler`, `Zilf.Emit`, and `Zilf/ZModel`
+(previously only surveyed by directory/size). Covers the *architecture* —
+enough to plan concrete next slices — not every file; see "still not read"
+at the end for what's deliberately deferred.
+
+### The pipeline is two clearly separate phases (confirmed from `FrontEnd.cs`)
+
+1. **`EvaluateInput`**: reads and evaluates the *entire* source file(s) via
+   `Program.Evaluate` — i.e. exactly phases 1+2 this port already has.
+   `ROUTINE`/`OBJECT`/`GLOBAL`/`CONSTANT`/`TABLE`/`SYNTAX`/etc. are FSUBRs
+   that, when evaluated, do **not** compile anything — they just build a
+   `ZilRoutine`/`ZilModelObject`/`ZilGlobal`/etc. value (already confirmed
+   for `ZilRoutine` in phase 2c) and append it to a list on
+   `ctx.ZEnvironment` (`ZEnvironment.cs`, 865 lines — `Routines`,
+   `Objects`, `Globals`, `Constants`, `Tables`, `Syntaxes`, `Vocabulary`,
+   `Synonyms`, `Directions`, `Buzzwords`, `TellPatterns`,
+   `PropertyDefaults` — all plain `List<T>`/`Dictionary<K,V>`). This is
+   the **exact same shape** as this port's `DEFINE`/`DEFMAC` registering a
+   `KFunction`/`KMacro` as an atom's `globalVal` — so phase 3's
+   "registration" side (adding `ROUTINE`/`OBJECT`/`GLOBAL` as new FSUBR
+   cases) is an incremental extension of exactly what phase 2 already
+   does, not a new architecture.
+2. **`EmitCompilation`** (only if no errors from step 1): a *separate*
+   pass, `Compilation.Compile(ctx, gameBuilder)`
+   (`Compilation.Compile.cs`), that walks everything accumulated on
+   `ZEnvironment` and emits code for it.
+
+This means **phase 3 splits cleanly into two independently-testable
+halves**, the same way phase 2 built up incrementally: (3a) teach the
+evaluator to *register* `ROUTINE`/`OBJECT`/`GLOBAL`/`TABLE`/`SYNTAX`/etc.
+as data (cheap — see below), and only later (3b) actually walk that data
+and emit `.zap` text for it. 3a alone is independently useful: it would
+let real game source's *own* top-level forms stop erroring out during
+`evalfile.mod`-style testing, without yet producing any compiled output.
+
+### The `Zilf.Emit` abstraction (`IGameBuilder`/`IRoutineBuilder`/Peephole) is skippable — confirmed, not just guessed
+
+Read `IRoutineBuilder.cs` (679 lines — the interface every instruction
+"emit" call goes through) and cross-checked against `Zilf.Emit.Zap`'s own
+`RoutineBuilder.cs` implementation. Confirmed: `EmitBinary`/`EmitUnary`/
+`EmitTernary`/etc. are **thin wrappers that map an enum value
+(`BinaryOp.Add`, `BinaryOp.MoveObject`, ...) directly to a Z-machine
+opcode mnemonic string** (`"ADD"`, `"MOVE"`, `"FSET"`, `"GETP"`, ...) —
+exactly the mnemonics `ZapfOpcodes.mod` already has in its ~110-entry
+table — then builds a structured `Instruction` object, buffered in a
+`PeepholeBuffer` for a peephole optimizer (`Peephole.cs`, 1446 lines) that
+runs at `Finish()` time to produce the final `.zap` text.
+
+**This port doesn't need any of that layer.** Since we already have a
+working `zapf` assembler that reads `.zap` *text*, the Oberon phase-3
+code generator can skip the abstract interface, the `Instruction`/
+`ZapCode` object model, and the entire peephole optimizer, and just
+**emit `.zap` text lines directly** as each ZIL form is compiled — a
+`BinaryOp`-style case dispatch (`<MOVE .X .Y>` → emit the text line
+`MOVE ...,...`) with zero indirection. The peephole optimizer only
+affects output size/speed, never correctness, so skipping it is a pure
+pragmatic-subset win with no functional cost (zapf will happily assemble
+slightly less-optimal but correct code). This confirms what this doc
+already speculated before reading anything — worth having verified before
+committing to it.
+
+### The VALUE/VOID/PRED/VALUE-PRED calling convention — the central codegen concept to replicate
+
+Confirmed via `Compilation.Expressions.cs`/`Compilation.Conditions.cs`'s
+dispatch into `Builtins/ZBuiltins.cs`: every builtin call compiles one of
+**four ways**, matching the Z-machine's own instruction shapes exactly:
+- **VoidCall** — no result needed, not used as a branch condition (e.g.
+  `<MOVE .X .Y>` as a bare statement).
+- **ValueCall** — produces a value to store, not a branch (e.g. `<+ .A
+  .B>`).
+- **PredCall** — used only as a branch condition inside `COND`/`AND`/`OR`
+  (e.g. `<FSET? .X .F>` in a `COND` clause test) — no value stored.
+- **ValuePredCall** — produces a value *and* branches in one instruction
+  (several real Z-machine opcodes do both at once, e.g. object-tree
+  walks). When a builtin's *natural* shape doesn't match the context it's
+  used in (e.g. a value-only builtin used as a condition), the compiler
+  bridges the gap with small adapter logic (compute the value, then branch
+  on nonzero, etc.) — this is the one place with real, non-mechanical
+  logic worth reading `Compilation.Expressions.cs` lines ~40-140 for
+  directly when the time comes, rather than re-deriving it from scratch.
+`Builtins/ZBuiltins.cs` (3,516 lines, 237 `[Builtin(...)]`-attributed
+registrations — some builtins have multiple attributes for name aliases
+or per-platform variants) is organized as one method per builtin, each
+tagged with which of the four shapes it supports and its target platform
+(`ZMachine`/`Glulx`/`Cornerstone` — filtering to `ZMachine`-only cuts the
+237 down meaningfully, though not yet counted exactly). This is the
+single largest remaining piece, but — like `ApplySubr` and zapf's own
+opcode table before it — it's a long, *mechanical*, one-at-a-time list,
+not a hard design problem once the VALUE/VOID/PRED/VALUE-PRED shape is
+understood.
+
+### `ZModel` value shapes surveyed (quick, targeted reads — not the full 7,367 lines)
+
+- **`ZilModelObject`** (`OBJECT`/`ROOM`, 83 lines): trivially simple — a
+  name atom, an `isRoom` flag, and a **raw, unprocessed array of property
+  lists** (`(DESC "...")`, `(FLAGS LIGHTBIT)`, `(IN ROOMS)`, etc.). All
+  the real interpretation (which property is a flag list vs. a normal
+  property vs. special ones like `IN`/`LOC`) happens later, during
+  compilation (`Compilation.Objects.cs`), *not* at registration time. This
+  means registering an `OBJECT` (phase 3a) is exactly as cheap as it
+  looked from `ZilRoutine` — capture the name/flag/raw-property-list-array
+  as-is (this port's existing cons-chain `KList` representation needs no
+  new parsing at all for this).
+- **`ZilGlobal`** (`GLOBAL`, 66 lines): name + already-evaluated default
+  value + a storage-type hint (`GlobalStorageType`, not yet read). Same
+  shape this port's existing `SET`/`SETG`/`GLOBAL`/`CONSTANT` merge
+  already produces — the only gap is that this port doesn't yet *also*
+  append to a `ZEnvironment.Globals`-equivalent list the way the original
+  does (needed so the compiler can later allocate a real Z-machine global
+  variable slot and emit its default value into the header) — a small,
+  incremental addition to the existing `GLOBAL`/`CONSTANT` SUBR case, not
+  a rewrite.
+- **`ZEnvironment.cs`** (865 lines): the central registry — see the
+  pipeline section above for its field list. This is the direct model for
+  whatever Oberon module ends up holding phase 3's equivalent global
+  state (most likely a new module, `ZilModel.mod` or similar, alongside
+  `ZilObj`/`ZilRead`/`ZilEval`).
+- **Not yet read in any depth**: `ZilTable` (790 lines — `TABLE`/`ITABLE`/
+  `LTABLE`/`PTABLE`), `ComplexPropDef` (1,021 lines — custom `PROPDEF`
+  patterns; the *default* directional-exit PROPDEF is already known from
+  `Context.InitPropDefs`, read back in phase 2b, so a pragmatic first cut
+  can likely hard-code that default and skip general custom-PROPDEF
+  support), `Syntax.cs`/`SyntaxMatcher.cs`/the `Vocab/` subtree (vocabulary
+  and grammar-table encoding — a large, self-contained subsystem, probably
+  its own reading-and-porting pass later, low priority until routines/
+  objects/globals/tables work since a game with no verbs (`SYNTAX`) can't
+  do much but *does* still exercise the object/routine/table machinery).
+
+### What's still not read at all
+
+- `Compilation.Objects.cs` (762 lines — the actual property/flag/object
+  *table binary layout* algorithm — numbering, packing order, inheritance
+  of properties from a `PROPSPEC`/`DEFAULT` object). Needed before 3b can
+  emit real object tables.
+- `Compilation.Globals.cs` (463), `Compilation.Tables.cs` (142),
+  `Compilation.Operands.cs` (342), `Compilation.Strings.cs` (249 — Z-char
+  string encoding; likely closely mirrors `ZapfZChar.mod`, already built).
+- `Compilation.Routines.cs` (480), `Compilation.Loops.cs` (896),
+  `Compilation.Inlining.cs` (1,193 — **the current plan is to skip
+  inlining and reachability/dead-routine analysis entirely for the
+  pragmatic subset**: compile every registered routine unconditionally,
+  matching this port's existing philosophy of correctness-first,
+  optimization-never, and cutting ~1,200 lines of C# to port down to zero).
+- `Zilf.Emit/Zap`'s `GameBuilder.cs`/`ObjectBuilder.cs`/etc. beyond
+  `RoutineBuilder.cs`'s `EmitBinary`/`EmitTernary` (skimmed for the
+  mnemonic-mapping pattern only) — given the decision to bypass the whole
+  interface and emit text directly, these may not need reading at all,
+  only spot-checked if a specific instruction's exact `.zap` textual
+  syntax is unclear (and even then, `Modules/ZapfAsm.mod`'s own opcode
+  table/encoder, already built and tested, is the more directly useful
+  reference than the C# source).
 
 ## Suggested order for the next session
 
@@ -825,23 +952,39 @@ Before starting:
    `MAKE-NOUN-PHRASE`, etc. — several of which are Z-machine runtime
    object-tree operations that don't make sense without a real object
    tree, i.e. without phase 3) has hit diminishing returns.
-3. Given #2, **phase 3 (Compiler/ZModel/Emit.Zap) is now the most
-   valuable next slice**, not further phase-2 additions. Before writing
-   any code: read `Zilf/Compiler`'s top-level driver file(s) first (not
-   done yet in any session so far) to understand the real compile
-   pipeline shape, then `Zilf.Emit` root + `Zilf.Emit/Zap` together (see
-   the dedicated phase-3 section below, already written from a
-   directory/size survey — treat it as a starting pointer, not a
-   substitute for actually reading those files). This is a substantially
-   bigger, multi-session undertaking than any phase-2 slice so far
-   (`Compiler`+`ZModel` alone is ~20,500 lines, more than the entire
-   `Interpreter` this port has been building against) — do the reading
-   pass fully before committing to an implementation approach, the same
-   discipline that made each phase-2 slice go smoothly.
-4. If phase 3 feels too large to start cold, the smaller fallback is
-   still on the table: pick from the "what's still needed" list above —
-   item 4 (fixing phase 1's `%`/`#TYPE` stubs, now that `Eval`/quasiquote
-   both exist) is the most likely of the remaining phase-2 items to
-   matter soon; the rest are genuinely on-demand and should stay
-   deprioritized given #2's finding above.
-5. Update this doc's "what's done" section and commit again.
+3. Phase 3's *architecture* reading pass is done (see "Phase 3 reading
+   pass #1" above — read it in full first). Concrete, scoped next step:
+   **phase 3a, the registration side.** Add `ROUTINE`, `OBJECT`/`ROOM`,
+   and (upgrading the existing `GLOBAL`/`CONSTANT` SUBR case) real
+   `ZEnvironment`-equivalent list-appending, as new FSUBR cases in
+   `ZilEval.mod` — each one just captures its raw, unevaluated arguments
+   into a small Oberon record (name atom, flags, raw property/body-list —
+   confirmed cheap for `ZilModelObject`/`ZilGlobal`, and already proven
+   cheap for `ZilRoutine` back in phase 2c) and appends it to a new
+   module's global list. This is *not* compiling anything yet — it only
+   makes real game source's own top-level forms stop erroring out. Test
+   it exactly the way `INSERT-FILE` was tested: run `evalfile.mod` against
+   `sample/zork1/zork1.zil` again and confirm the "calling unassigned
+   atom: ROUTINE/OBJECT" errors are gone (replaced by silently succeeding
+   registrations), then re-run the full 84-file aggregate once more to see
+   how much of the remaining histogram shrinks for free.
+4. Only after 3a works and is tested: **phase 3b, actual code
+   generation** — read `Compilation.Objects.cs` (object/property/flag
+   table layout) and `Compilation.Routines.cs`+`ZBuiltins.cs` (routine
+   body → `.zap` text, starting with the simplest VoidCall/ValueCall
+   builtins) next, since those weren't read this session (see "what's
+   still not read" above for the full list and reasoning per file). Get
+   one trivial routine (`<ROUTINE ADD1 (X) <+ .X 1>>`, similar to phase
+   2b/2c's own "get a trivial case working first" discipline) compiling
+   to correct `.zap` text, assembling with the existing `zapf`, and
+   running in `examples/zmachine.mod` before widening to more builtins —
+   this mirrors exactly how `zapf` itself and each phase-2 slice were
+   validated end-to-end.
+5. If phase 3 feels too large to start cold even at the 3a scope, the
+   smaller fallback is still on the table: pick from phase 2's "what's
+   still needed" list — item 4 (fixing phase 1's `%`/`#TYPE` stubs, now
+   that `Eval`/quasiquote both exist) is the most likely of the remaining
+   phase-2 items to matter soon; the rest are genuinely on-demand and
+   should stay deprioritized given phase 2f's finding that phase 2's
+   interpreter core is already essentially sufficient.
+6. Update this doc's "what's done" section and commit again.
