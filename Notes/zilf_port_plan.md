@@ -2009,6 +2009,97 @@ correct.
 ahead of it are all at evaluation time); transpiler regression suite, 138
 files, same 3 pre-existing-only failures.
 
+## MILESTONE: the first real game compiled and run — `sample/beer/beer.zil`
+
+`zilf -i .../zillib beer.zil beer.zap && zapf beer.zap && frotz beer.z3`
+produces all 99 verses of *99 Bottles of Beer*, with correct singular/plural
+grammar and a clean exit. **This is the first complete, unmodified game from
+zilf's own sample set compiled by this port and run correctly end to end.**
+Verified again with the count reduced to 3 so the whole output is checkable
+at once, against the expected text exactly.
+
+`beer.zil` is a real program: a `REPEAT` loop, a `PROG` block arriving from a
+quasiquoted `DEFMAC` expansion, `DLESS?` as a loop condition, `PRINTR`,
+`PRINTC` with a CHARACTER literal, `N==?`, and a routine call. What it
+needed:
+
+### `PROG`/`REPEAT`/`BIND`, `RETURN` and `AGAIN` (`Compilation.Loops.cs`)
+
+`CompilePROG` handles all three (`REPEAT` is `PROG` with `repeat` set;
+`BIND` is `PROG` with `catchy` clear — the flag deciding whether an
+unqualified `RETURN` may target it, which has no effect here since named
+activations aren't implemented, so `BIND` compiles as `PROG`). The body is
+bracketed by two labels: an "again" label before it that `AGAIN` jumps back
+to, and a "return" label after it that `RETURN` jumps forward to, with
+`REPEAT` additionally jumping back to the again label when the body falls
+off the end — that jump is the whole of what makes it a loop.
+
+- **A stack of blocks** (`Compilation.Blocks`), not a single current block:
+  a `RETURN` inside a `COND` inside a `PROG` inside a `REPEAT` has to leave
+  the `PROG`, not the `REPEAT`.
+- **`RETURN` is block-aware now.** Inside a `PROG`/`REPEAT` it leaves the
+  *block* (push the value, branch to the block's return label); only with no
+  enclosing block does it emit a real routine return. That is exactly the
+  original's `ReturnOp`.
+- **A `REPEAT` body's own value is always discarded** — a loop only produces
+  a value by way of a `RETURN`, which is why the original passes `!repeat`
+  as the "want result" flag for the body's last statement.
+- **Unreferenced end labels aren't emitted**, and a `REPEAT` that nothing
+  ever `RETURN`s out of is marked as terminating, since control provably
+  never leaves it — so the caller doesn't emit an unreachable trailing
+  return after an infinite loop.
+- **Bindings are refused, not faked.** A non-empty binding list would need
+  extra named locals on the `.FUNCT` line with renaming where a name is
+  already in use (the original's `PushInnerLocal`/`PopInnerLocal`). The
+  extra-locals machinery exists — it is what compiler temporaries use — but
+  the scoping and renaming don't, so a non-empty binding list is an explicit
+  error rather than silently compiled into the wrong storage. `beer.zil`
+  and most real loop/grouping use is `<PROG () ...>`/`<REPEAT () ...>`.
+
+Also added `PRINTC`, `PRINTR` (print + newline + return true, one
+instruction, and it terminates) and `N==?`/`N=?` (the `EQUAL?` instruction
+with the branch polarity flipped, as in the original's `NotEqualOp`).
+
+### Two bugs the first real run exposed, both real and both now fixed
+
+**1. ZIL string literals were emitted untranslated.** In ZIL a `|` inside a
+string means a newline; the first run printed a literal `|` at every line
+break. Ported `Compilation.Strings.cs`'s `TranslateString`: the CRLF
+character (`|` by default, overridable by the `CRLF-CHARACTER` global)
+becomes a real newline; a *source* newline becomes a space so a long string
+can be wrapped across source lines, unless it directly follows a `|`, in
+which case it is dropped; a CR is dropped; and two spaces after a `.` or a
+`|` collapse to one (the original's default `CollapseAfterPeriod` mode — the
+`SENTENCE-ENDS?` and `PRESERVE-SPACES?` variants are not ported). zapf's own
+string reader accepts embedded newlines, so the translated text can go
+straight into the `.zap`.
+
+**2. The entry routine must QUIT, not return.** `GO` ended with a `RETURN`,
+and returning from the initial routine is undefined in the Z-machine —
+frotz aborted with "Fatal error: Illegal opcode" after the last verse. The
+original says so in `BuildRoutine` in as many words ("the entry point has to
+quit instead of returning"), and also never wants a result from the entry
+routine's last statement, since there is no caller to give one to. Both
+now match.
+
+### A note on interpreters
+
+`examples/zmachine.mod` **hangs** on `beer.z3` — no output at all, where
+frotz runs it correctly. Every earlier end-to-end test in this port still
+behaves identically under `zmachine.mod`, so this is specific to something
+`beer` does (most likely the volume of output and the pager, or the
+scrolling screen model), and is a `zmachine.mod` issue rather than a
+compiler one — the same story file is correct under frotz. **Verify with
+frotz when a compiled game misbehaves under `zmachine.mod`**, and treat a
+disagreement between the two as evidence about the interpreter, not
+automatically about the compiler.
+
+**Tested**: a dedicated loop program alongside `beer` — a `REPEAT` exited by
+`RETURN` from inside a `COND`, a `PROG` used for its value, a `PROG` exited
+early by `RETURN`, and an `AGAIN` loop over a global — all five printed the
+expected values. All nine earlier end-to-end programs re-run unchanged.
+Transpiler regression suite: 138 files, same 3 pre-existing-only failures.
+
 ## Corpus gap analysis: exactly what blocks compiling a real game
 
 Running the new driver over all 52 corpus files makes the remaining gap

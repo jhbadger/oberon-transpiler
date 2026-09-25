@@ -66,6 +66,7 @@ BEGIN errFlag := FALSE; errMsg[0] := 0X END ClearErr;
 CONST
   MaxBufLines = 20000;
   MaxLocals = 15;   (* the Z-machine's own per-routine limit *)
+  MaxBlocks = 32;
 
 TYPE
   LineText = POINTER TO ARRAY OF CHAR;
@@ -82,6 +83,18 @@ VAR
   bufLines: ARRAY MaxBufLines OF LineText;
   nBufLines: INTEGER;
   tempDepth, tempMax: INTEGER;
+
+  (* The stack of enclosing PROG/REPEAT blocks (the original's
+     Compilation.Blocks). RETURN and AGAIN target the innermost one — that
+     is the whole reason a stack is needed rather than a single current
+     block: a RETURN inside a COND inside a PROG inside a REPEAT has to
+     leave the PROG, not the REPEAT. `returned` records whether anything
+     actually jumped to the block's return label, so an unreferenced label
+     isn't emitted. *)
+  blockNames: ARRAY MaxBlocks OF ARRAY 64 OF CHAR;
+  blockAgain, blockReturn: ARRAY MaxBlocks OF ARRAY 16 OF CHAR;
+  blockWantResult, blockReturned: ARRAY MaxBlocks OF BOOLEAN;
+  nBlocks: INTEGER;
 
 PROCEDURE W(s: ARRAY OF CHAR);
 BEGIN Strings.Append(s, lineBuf) END W;
@@ -576,6 +589,25 @@ BEGIN
       IF ~ok THEN RETURN FALSE END;
       EmitPredInstr("ZERO?", opText, empty, label, polarity); RETURN TRUE
 
+    ELSIF (headName = "N==?") OR (headName = "N=?") THEN
+      (* not-equal: the same EQUAL? instruction with the branch polarity
+         flipped, which is what the original's own NotEqualOp does *)
+      IF (z.rest = NIL) OR (z.rest.first = NIL) OR (z.rest.rest = NIL) OR (z.rest.rest.first = NIL) THEN
+        Err("CompileCondition: N==? expects 2 args"); RETURN FALSE
+      END;
+      ok := CompileOperand(z.rest.first, leftText);
+      IF ~ok THEN RETURN FALSE END;
+      spilled := (leftText = "STACK") & ~IsSimpleOperand(z.rest.rest.first);
+      IF spilled THEN
+        ok := SpillToTemp(leftText);
+        IF ~ok THEN RETURN FALSE END
+      END;
+      ok := CompileOperand(z.rest.rest.first, rightText);
+      IF ~ok THEN RETURN FALSE END;
+      IF spilled THEN FreeTemp END;
+      EmitPredInstr("EQUAL?", leftText, rightText, label, ~polarity);
+      RETURN TRUE
+
     ELSIF (headName = "EQUAL?") OR (headName = "=?") OR (headName = "==?") OR (headName = "L?") OR (headName = "G?") THEN
       IF (z.rest = NIL) OR (z.rest.first = NIL) OR (z.rest.rest = NIL) OR (z.rest.rest.first = NIL) THEN
         Err("CompileCondition: comparison expects 2 args"); RETURN FALSE
@@ -639,6 +671,68 @@ BEGIN
   END
 END CompileCondition;
 
+(* Translates a ZIL string literal's source text into the text the
+   Z-machine should actually print — the original's
+   Compilation.Strings.cs TranslateString. Three rules, and they matter:
+
+     - the CRLF character (`|` by default, overridable by the
+       CRLF-CHARACTER global) becomes a real newline. Without this a game
+       prints a literal "|" everywhere it meant a line break, which is
+       exactly what the first compiled run of sample/beer showed.
+     - a source newline becomes a SPACE, so a long string can be wrapped
+       across lines in the source — unless it directly follows a `|`, in
+       which case it is dropped (so "...|" at end of line doesn't also
+       emit the space).
+     - a carriage return is dropped, and two spaces after a "." or a `|`
+       collapse to one (the original's CollapseAfterPeriod mode, its
+       default; the SENTENCE-ENDS? and PRESERVE-SPACES? variants are not
+       ported).
+
+   `last` deliberately tracks the SOURCE character, not the translated
+   one, matching the original's own loop. *)
+PROCEDURE TranslateZilString(text: ARRAY OF CHAR; VAR out: ARRAY OF CHAR);
+VAR i, n: INTEGER; c, last, crlf: CHAR; sawDotSpace, drop: BOOLEAN; a: ZilObj.Zo;
+BEGIN
+  crlf := "|";
+  a := ZilObj.Intern("CRLF-CHARACTER");
+  IF (a.globalVal # NIL) & (a.globalVal.kind = ZilObj.KChar) THEN
+    crlf := CHR(a.globalVal.charVal)
+  END;
+
+  n := 0; last := 0X; sawDotSpace := FALSE;
+  i := 0;
+  WHILE text[i] # 0X DO
+    c := text[i];
+    drop := FALSE;
+
+    IF ((last = ".") OR (last = crlf)) & (c = " ") THEN
+      sawDotSpace := TRUE
+    ELSIF sawDotSpace & (c = " ") THEN
+      sawDotSpace := FALSE; drop := TRUE
+    ELSE
+      sawDotSpace := FALSE
+    END;
+
+    IF ~drop THEN
+      IF c = 0DX THEN
+        (* a CR is dropped, and (as in the original) doesn't even count as
+           the preceding character for the newline rule below — see the
+           `last` update at the end of the loop *)
+      ELSIF c = 0AX THEN
+        IF last # crlf THEN out[n] := " "; INC(n) END
+      ELSIF c = crlf THEN
+        out[n] := 0AX; INC(n)
+      ELSE
+        out[n] := c; INC(n)
+      END
+    END;
+
+    IF c # 0DX THEN last := c END;
+    INC(i)
+  END;
+  out[n] := 0X
+END TranslateZilString;
+
 (* ZAP strings double an embedded '"' rather than backslash-escaping it
    (confirmed against zapf's own ZapfTok.ReadString, which has no
    backslash handling at all) — re-encode a ZIL string's already-decoded
@@ -693,11 +787,15 @@ END CompileZapString;
    ELSE" default, matching the original's `EmitStore(resultStorage,
    Game.Zero)`). *)
 PROCEDURE CompileStmt(z: ZilObj.Zo; wantResult: BOOLEAN; VAR resultText: ARRAY OF CHAR): BOOLEAN;
-VAR headName: ARRAY 64 OF CHAR; opText, targetName: ARRAY 64 OF CHAR; strText: ARRAY 4096 OF CHAR;
+VAR headName: ARRAY 64 OF CHAR; opText, targetName: ARRAY 64 OF CHAR;
+    strText, transText: ARRAY 4096 OF CHAR;
     ok: BOOLEAN;
     (* COND *)
     nextLabel, endLabel: ARRAY 16 OF CHAR;
     elsePart, isLastClauseStmt, hasMoreClauses, clauseTerminated: BOOLEAN;
+    (* PROG / REPEAT / BIND *)
+    againLabel, retLabel: ARRAY 16 OF CHAR; progResult: ARRAY 64 OF CHAR;
+    progRepeat, progTerm: BOOLEAN; progArgs: ZilObj.Zo;
     c, cond, body, bp: ZilObj.Zo; clauseResult: ARRAY 64 OF CHAR;
 BEGIN
   termFlag := FALSE;
@@ -731,17 +829,120 @@ BEGIN
       Strings.Copy(targetName, resultText);
       RETURN TRUE
 
+    ELSIF (headName = "PROG") OR (headName = "REPEAT") OR (headName = "BIND") THEN
+      (* Ported from Compilation.Loops.cs's CompilePROG, which handles all
+         three (REPEAT is PROG with `repeat` set, BIND is PROG with
+         `catchy` clear — the flag that decides whether a RETURN with no
+         explicit block name may target it; this port doesn't implement
+         named activations yet, so that distinction has no effect and BIND
+         is compiled as PROG).
+
+         Shape: an optional leading activation atom, then a binding list,
+         then the body. The body is bracketed by two labels — an "again"
+         label before it that AGAIN jumps back to, and a "return" label
+         after it that RETURN jumps forward to — and REPEAT additionally
+         jumps back to the again label when the body falls off the end,
+         which is what makes it a loop. *)
+      progRepeat := headName = "REPEAT";
+      progArgs := z.rest;
+      IF (progArgs # NIL) & (progArgs.first # NIL) & (progArgs.first.kind = ZilObj.KAtom) THEN
+        (* an activation atom naming the block, so a nested RETURN can
+           target it explicitly — accepted and recorded, but nothing
+           references a block by name yet *)
+        progArgs := progArgs.rest
+      END;
+      IF (progArgs = NIL) OR (progArgs.first = NIL) OR (progArgs.first.kind # ZilObj.KList) THEN
+        Err("CompileStmt: PROG/REPEAT/BIND expects a binding list"); RETURN FALSE
+      END;
+      IF ~ZilObj.IsEmpty(progArgs.first) THEN
+        (* Bindings would have to become extra named locals on the .FUNCT
+           line, with renaming where a name is already in use (the
+           original's PushInnerLocal/PopInnerLocal). The machinery for
+           extra locals exists — it's what compiler temporaries use — but
+           the scoping and renaming don't; refuse rather than silently
+           compiling a binding into the wrong storage. *)
+        Err("CompileStmt: PROG/REPEAT bindings are not implemented yet (only an empty binding list)");
+        RETURN FALSE
+      END;
+      IF nBlocks >= MaxBlocks THEN
+        Err("CompileStmt: PROG/REPEAT nested too deeply"); RETURN FALSE
+      END;
+
+      NewLabel(againLabel); NewLabel(retLabel);
+      Strings.Copy(againLabel, blockAgain[nBlocks]);
+      Strings.Copy(retLabel, blockReturn[nBlocks]);
+      blockNames[nBlocks][0] := 0X;
+      blockWantResult[nBlocks] := wantResult;
+      blockReturned[nBlocks] := FALSE;
+      INC(nBlocks);
+
+      W(againLabel); W(":"); WLn;
+
+      (* A REPEAT's body value is always discarded — the loop only produces
+         a value by way of a RETURN — so only a non-repeating PROG's last
+         statement is compiled wanting a result (the original passes
+         `!repeat` for exactly this). *)
+      bp := progArgs.rest;
+      Strings.Copy("1", progResult);
+      progTerm := FALSE;
+      WHILE (bp # NIL) & (bp.first # NIL) DO
+        isLastClauseStmt := (bp.rest = NIL) OR (bp.rest.first = NIL);
+        ok := CompileStmt(bp.first, wantResult & ~progRepeat & isLastClauseStmt, progResult);
+        IF ~ok THEN DEC(nBlocks); RETURN FALSE END;
+        progTerm := termFlag;
+        bp := bp.rest
+      END;
+
+      IF progRepeat THEN
+        EmitBranch(againLabel)
+      ELSIF wantResult & ~progTerm & (progResult # "STACK") THEN
+        (* a PROG's own value and a RETURN's both have to arrive at the end
+           label the same way, and RETURN leaves its value on the stack *)
+        W("	PUSH "); W(progResult); WLn
+      END;
+
+      DEC(nBlocks);
+      IF blockReturned[nBlocks] THEN
+        W(retLabel); W(":"); WLn;
+        termFlag := FALSE
+      ELSE
+        (* Nothing jumped to the end label. For a REPEAT that means the loop
+           has no exit at all, so control provably never leaves it and the
+           caller must not emit a trailing return; for a PROG it means the
+           body's own termination decides. *)
+        IF progRepeat THEN termFlag := TRUE ELSE termFlag := progTerm END
+      END;
+      IF wantResult THEN Strings.Copy("STACK", resultText) END;
+      RETURN TRUE
+
+    ELSIF headName = "AGAIN" THEN
+      IF nBlocks = 0 THEN
+        Err("CompileStmt: AGAIN outside any PROG/REPEAT block"); RETURN FALSE
+      END;
+      EmitBranch(blockAgain[nBlocks - 1]);
+      Strings.Copy("1", resultText); termFlag := TRUE;
+      RETURN TRUE
+
     ELSIF headName = "RETURN" THEN
-      (* <RETURN> with no argument returns T, matching the original (the
-         no-argument RETURN is only really meaningful inside a PROG/REPEAT
-         block, which this slice doesn't compile yet). *)
+      (* <RETURN> with no argument yields T. Inside a PROG/REPEAT it leaves
+         the BLOCK, not the routine — the original's ReturnOp picks the
+         innermost block and branches to its return label, falling back to
+         a real routine return only when there is no enclosing block. *)
       IF (z.rest = NIL) OR (z.rest.first = NIL) THEN
         Strings.Copy("1", opText)
       ELSE
         ok := CompileOperand(z.rest.first, opText);
         IF ~ok THEN RETURN FALSE END
       END;
-      W("	RETURN "); W(opText); WLn;
+      IF nBlocks > 0 THEN
+        IF blockWantResult[nBlocks - 1] & (opText # "STACK") THEN
+          W("	PUSH "); W(opText); WLn
+        END;
+        EmitBranch(blockReturn[nBlocks - 1]);
+        blockReturned[nBlocks - 1] := TRUE
+      ELSE
+        W("	RETURN "); W(opText); WLn
+      END;
       Strings.Copy(opText, resultText); termFlag := TRUE;
       RETURN TRUE
 
@@ -763,7 +964,8 @@ BEGIN
       IF (z.rest = NIL) OR (z.rest.first = NIL) OR (z.rest.first.kind # ZilObj.KString) THEN
         Err("CompileStmt: PRINTI expects a literal STRING"); RETURN FALSE
       END;
-      CompileZapString(z.rest.first.strBuf^, strText);
+      TranslateZilString(z.rest.first.strBuf^, transText);
+      CompileZapString(transText, strText);
       W("	PRINTI "); W(strText); WLn;
       Strings.Copy("1", resultText);
       RETURN TRUE
@@ -771,6 +973,29 @@ BEGIN
     ELSIF headName = "CRLF" THEN
       W("	CRLF"); WLn;
       Strings.Copy("1", resultText);
+      RETURN TRUE
+
+    ELSIF headName = "PRINTC" THEN
+      IF (z.rest = NIL) OR (z.rest.first = NIL) THEN
+        Err("CompileStmt: PRINTC expects 1 arg"); RETURN FALSE
+      END;
+      ok := CompileOperand(z.rest.first, opText);
+      IF ~ok THEN RETURN FALSE END;
+      W("	PRINTC "); W(opText); WLn;
+      Strings.Copy("1", resultText);
+      RETURN TRUE
+
+    ELSIF headName = "PRINTR" THEN
+      (* print a literal string, then a newline, then return true — one
+         Z-machine instruction (print_ret), and it leaves the routine, so
+         like RETURN it terminates the statement sequence *)
+      IF (z.rest = NIL) OR (z.rest.first = NIL) OR (z.rest.first.kind # ZilObj.KString) THEN
+        Err("CompileStmt: PRINTR expects a literal STRING"); RETURN FALSE
+      END;
+      TranslateZilString(z.rest.first.strBuf^, transText);
+      CompileZapString(transText, strText);
+      W("	PRINTR "); W(strText); WLn;
+      Strings.Copy("1", resultText); termFlag := TRUE;
       RETURN TRUE
 
     ELSIF headName = "PRINTN" THEN
@@ -896,9 +1121,12 @@ BEGIN
   BeginBuffer;
   WHILE (bp # NIL) & (bp.first # NIL) DO
     isLast := (bp.rest = NIL) OR (bp.rest.first = NIL);
-    ok := CompileStmt(bp.first, isLast, opText);
+    (* The entry routine never wants a result: it has no caller to return
+       one to. The original writes exactly this — CompileStmt(rb, stmt,
+       !entryPoint && i == BodyLength) in BuildRoutine. *)
+    ok := CompileStmt(bp.first, isLast & ~isEntry, opText);
     IF ~ok THEN EndBuffer; FlushBuffer; RETURN FALSE END;
-    IF isLast & ~termFlag THEN
+    IF isLast & ~isEntry & ~termFlag THEN
       (* no implicit fall-through return exists anywhere in the original
          either — every routine explicitly returns its last value, unless
          that last statement already left the routine on its own *)
@@ -906,6 +1134,12 @@ BEGIN
     END;
     bp := bp.rest
   END;
+  (* "the entry point has to quit instead of returning" (BuildRoutine's own
+     comment): returning from the initial routine is undefined in the
+     Z-machine, and really does abort — the first compiled run of
+     sample/beer ended in frotz's "Fatal error: Illegal opcode" for exactly
+     this reason. *)
+  IF isEntry & ~termFlag THEN W("	QUIT"); WLn END;
   EndBuffer;
   IF errFlag THEN RETURN FALSE END;
 
@@ -1150,5 +1384,6 @@ BEGIN
 END CompileProgram;
 
 BEGIN
-  outIsFile := FALSE; buffering := FALSE; nBufLines := 0; lineBuf[0] := 0X
+  outIsFile := FALSE; buffering := FALSE; nBufLines := 0; nBlocks := 0;
+  lineBuf[0] := 0X
 END ZilCompile.
