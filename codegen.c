@@ -362,8 +362,9 @@ static Node *xmod_node_alloc(NodeKind kind) {
     return n;
 }
 
-/* Forward declaration */
+/* Forward declarations */
 static Node *xmod_copy_typetree(Node *t);
+static int is_builtin_type_name(const char *n);
 
 static Node *xmod_copy_nodelist(Node *head) {
     Node *result = NULL, *tail = NULL;
@@ -412,6 +413,64 @@ static Node *xmod_copy_typetree(Node *t) {
     return n;
 }
 
+/* Qualifies every bare (unqualified, non-builtin) ND_TNAME reference found
+ * anywhere within a cross-module type tree with its origin module, turning
+ * e.g. "NodeDesc" into "ModC_NodeDesc" so a THIRD module resolving through
+ * an already-cross-module type (e.g. ModB using ModC.Node, whose own field
+ * type points back to ModC's own NodeDesc) can still find it via
+ * find_type_decl()'s "already-mangled name" fallback.
+ *
+ * Must run on a tree already produced by xmod_copy_typetree() (a private
+ * deep copy) — it mutates nodes in place, which would corrupt the origin
+ * module's own AST if run on the original tree instead of the copy.
+ *
+ * Before this existed, only two narrow special cases were handled ad hoc
+ * (a TRECORD's own base-type name in collect_xmod_type_decls, and a
+ * top-level VAR's TNAME type in collect_xmod_var_decls); any other nested
+ * occurrence — most commonly a POINTER TO LocalRecordName alias, which is
+ * an extremely common pattern (Foo* = POINTER TO FooDesc) — was left
+ * unqualified. That silently broke type resolution one hop further removed
+ * (expr_type() would fail to find the target record and return NULL),
+ * which in turn made field-access codegen fall back to "." instead of "->"
+ * for a pointer-typed base, producing C that fails to compile. */
+static void qualify_xmod_type_tree(Node *t, const char *modname) {
+    if (!t) return;
+    switch (t->kind) {
+    case ND_TNAME:
+        if (t->str[0] && !is_builtin_type_name(t->str) &&
+            !strchr(t->str, '.') && !strchr(t->str, '_')) {
+            char qualified[MAX_IDENT];
+            snprintf(qualified, sizeof(qualified), "%s_%s", modname, t->str);
+            strncpy(t->str, qualified, MAX_IDENT-1);
+            t->str[MAX_IDENT-1] = '\0';
+        }
+        break;
+    case ND_TPOINTER:
+        qualify_xmod_type_tree(t->c0, modname);
+        break;
+    case ND_TARRAY:
+        qualify_xmod_type_tree(t->c1, modname);
+        break;
+    case ND_TRECORD:
+        if (t->str[0] && !strchr(t->str, '.') && !strchr(t->str, '_')) {
+            char qualified[MAX_IDENT];
+            snprintf(qualified, sizeof(qualified), "%s_%s", modname, t->str);
+            strncpy(t->str, qualified, MAX_IDENT-1);
+            t->str[MAX_IDENT-1] = '\0';
+        }
+        for (Node *f = t->c0; f; f = f->next)
+            if (f->kind == ND_FIELD) qualify_xmod_type_tree(f->c1, modname);
+        break;
+    case ND_TPROC:
+        for (Node *fp = t->c0; fp; fp = fp->next)
+            qualify_xmod_type_tree(fp->c1, modname);
+        qualify_xmod_type_tree(t->c1, modname);
+        break;
+    default:
+        break;
+    }
+}
+
 /* Collect type declarations from a library module into the persistent table.
  * Types are keyed by "RealModuleName_TypeName" so find_type_decl() can resolve
  * qualified references like "Alias.TypeName" via import_realname(). */
@@ -423,15 +482,12 @@ static void collect_xmod_type_decls(Node *decls, const char *modname) {
         if (!td) break;
         snprintf(td->str, MAX_IDENT, "%s_%s", modname, d->str);
         td->c0 = xmod_copy_typetree(d->c0);
-        /* Qualify unqualified base type names in TRECORD nodes.
-         * e.g. WindowRec = RECORD (ViewRec) stores "ViewRec" in str, but
-         * cross-module lookup needs "TUI_ViewRec". */
-        if (td->c0 && td->c0->kind == ND_TRECORD && td->c0->str[0]
-                && !strchr(td->c0->str, '.') && !strchr(td->c0->str, '_')) {
-            char qualified[MAX_IDENT];
-            snprintf(qualified, sizeof(qualified), "%s_%s", modname, td->c0->str);
-            strncpy(td->c0->str, qualified, MAX_IDENT-1);
-        }
+        /* Qualify every bare local type name anywhere in the tree (RECORD
+         * base type, POINTER target, field types, ...) so a later lookup
+         * from a third module can still resolve it — see
+         * qualify_xmod_type_tree()'s comment for why this must be general,
+         * not just the RECORD-base-name special case it used to be. */
+        qualify_xmod_type_tree(td->c0, modname);
         g_xmod_typedecls[g_n_xmod_typedecls++] = td;
     }
 }
@@ -469,18 +525,11 @@ static void collect_xmod_var_decls(Node *decls, const char *modname) {
             if (g_n_xmod_vardecls >= MAX_XMOD_VARDECLS) break;
             XModVarDecl *vd = &g_xmod_vardecls[g_n_xmod_vardecls++];
             snprintf(vd->name, sizeof(vd->name), "%s_%s", modname, id->str);
-            /* Qualify local TNAME so the caller can resolve it via find_type_decl.
-             * Direct TPOINTER nodes already satisfy bt->kind==ND_TPOINTER, so only
-             * TNAME aliases (like View = POINTER TO …) need this treatment. */
-            Node *t = d->c1;
-            if (t && t->kind == ND_TNAME && !is_builtin_type_name(t->str)
-                                         && !strchr(t->str, '_')) {
-                Node *n = xmod_node_alloc(ND_TNAME);
-                if (n) { snprintf(n->str, MAX_IDENT, "%s_%s", modname, t->str); }
-                vd->type = n ? n : xmod_copy_typetree(t);
-            } else {
-                vd->type = xmod_copy_typetree(t);
-            }
+            /* Qualify every bare local type name in the tree (not just a
+             * top-level TNAME alias) so a later lookup through this var's
+             * type can still resolve, same as collect_xmod_type_decls. */
+            vd->type = xmod_copy_typetree(d->c1);
+            qualify_xmod_type_tree(vd->type, modname);
         }
     }
 }
@@ -977,7 +1026,16 @@ static void emit_builtin(CG *g, const char *name, Node *args) {
                     if (alias && alias->c0 && alias->c0->kind==ND_TPOINTER &&
                         alias->c0->c0 && alias->c0->c0->kind==ND_TNAME) {
                         const char *dot = strchr(pt->str, '.');
-                        if (dot) {
+                        /* alias->c0->c0->str comes from the cross-module type
+                         * table, where qualify_xmod_type_tree() already
+                         * qualifies every bare local name with its origin
+                         * module ("WindowRec" -> "TUI_WindowRec"). Only apply
+                         * the modalias prefix here if it ISN'T already
+                         * qualified (no '.' or '_'), else this double-prefixes
+                         * ("TUI_TUI_WindowRec"). */
+                        int already_qualified = strchr(alias->c0->c0->str, '.') != NULL ||
+                                                 strchr(alias->c0->c0->str, '_') != NULL;
+                        if (dot && !already_qualified) {
                             char modalias[MAX_IDENT];
                             int modlen = (int)(dot - pt->str);
                             if (modlen >= MAX_IDENT) modlen = MAX_IDENT - 1;
@@ -989,6 +1047,7 @@ static void emit_builtin(CG *g, const char *name, Node *args) {
                             is_xmod_rec = 1;
                         } else {
                             recname = alias->c0->c0->str;
+                            is_xmod_rec = dot != NULL;
                         }
                     }
                 }
@@ -1571,12 +1630,21 @@ static void emit_expr(CG *g, Node *e) {
     case ND_AND: emit(g,"("); emit_expr(g,e->c0); emit(g,"&&"); emit_expr(g,e->c1); emit(g,")"); break;
     case ND_OR:  emit(g,"("); emit_expr(g,e->c0); emit(g,"||"); emit_expr(g,e->c1); emit(g,")"); break;
     case ND_EQ: {
-        /* Multi-char ARRAY OF CHAR comparison → strcmp(...)==0 */
+        /* Multi-char ARRAY OF CHAR comparison → strcmp(...)==0.
+         * A 1-char STRING literal (e.g. "+") only counts as "the string
+         * side" here if the OTHER operand isn't itself forcing a CHAR
+         * comparison — but once strcmp() is chosen, BOTH operands must be
+         * emitted as proper C strings, never as the 'x' char literal
+         * emit_expr() folds a 1-char STRING to (see emit_as_string's own
+         * comment — this is exactly the case it exists for, just not
+         * applied here before): otherwise "name = \"+\"" mistranslates to
+         * strcmp(name, '+'), a char argument where strcmp expects
+         * const char*, which fails at the C-compile stage. */
         Node *lt = expr_type(e->c0);
         int lhs_str = (e->c0->kind==ND_STRING && strlen(e->c0->str)>1);
         int rhs_str = (e->c1->kind==ND_STRING && strlen(e->c1->str)>1);
         if (is_char_array(lt) || lhs_str || rhs_str) {
-            emit(g,"(strcmp("); emit_expr(g,e->c0); emit(g,","); emit_expr(g,e->c1); emit(g,")==0)");
+            emit(g,"(strcmp("); emit_as_string(g,e->c0); emit(g,","); emit_as_string(g,e->c1); emit(g,")==0)");
         } else {
             emit(g,"("); emit_expr(g,e->c0); emit(g,"=="); emit_expr(g,e->c1); emit(g,")");
         }
@@ -1587,7 +1655,7 @@ static void emit_expr(CG *g, Node *e) {
         int lhs_str = (e->c0->kind==ND_STRING && strlen(e->c0->str)>1);
         int rhs_str = (e->c1->kind==ND_STRING && strlen(e->c1->str)>1);
         if (is_char_array(lt) || lhs_str || rhs_str) {
-            emit(g,"(strcmp("); emit_expr(g,e->c0); emit(g,","); emit_expr(g,e->c1); emit(g,")!=0)");
+            emit(g,"(strcmp("); emit_as_string(g,e->c0); emit(g,","); emit_as_string(g,e->c1); emit(g,")!=0)");
         } else {
             emit(g,"("); emit_expr(g,e->c0); emit(g,"!="); emit_expr(g,e->c1); emit(g,")");
         }
@@ -1601,7 +1669,7 @@ static void emit_expr(CG *g, Node *e) {
         if (is_str) {
             const char *op = e->kind==ND_LT ? "<0" : e->kind==ND_LE ? "<=0"
                            : e->kind==ND_GT ? ">0" : ">=0";
-            emit(g,"(strcmp("); emit_expr(g,e->c0); emit(g,","); emit_expr(g,e->c1);
+            emit(g,"(strcmp("); emit_as_string(g,e->c0); emit(g,","); emit_as_string(g,e->c1);
             emit(g,")" ); emit(g,"%s)", op);
         } else {
             const char *op = e->kind==ND_LT ? "<" : e->kind==ND_LE ? "<="
@@ -3891,5 +3959,19 @@ void codegen_header(Node *module, FILE *out) {
 
     /* Module init */
     fprintf(out,"\nvoid %s_init(void);\n", module->str);
+
+    /* Undo the #define aliases before closing the header. They exist only
+     * to let expressions inside THIS header (array dimensions, enum
+     * values) refer to this module's own exported names in bare form;
+     * left active past the #include, they leak into every file that
+     * imports this module and blindly rewrite any later, unrelated use of
+     * the same bare identifier — a struct field, a local variable, another
+     * module's own export — into "ModName_name", which then fails to
+     * compile or silently binds to the wrong symbol. */
+    if (g_nmodsyms) {
+        collect_modsyms(module->c1);
+        for (int i=0; i<g_nmodsyms; i++)
+            fprintf(out,"#undef %s\n", g_modsyms[i]);
+    }
     fprintf(out,"\n#endif /* %s */\n", guard);
 }

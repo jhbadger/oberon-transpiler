@@ -644,6 +644,41 @@ static int compile_module(const char *modfile, int is_main)
             else strcat(cfile, ".c");
         }
 
+        /* Refuse to clobber a hand-written FFI CSRC file that happens to
+         * share this module's base name (e.g. Editor.mod / Editor.ffi /
+         * Editor.c — the established convention for every FFI-backed
+         * module in this tree: Parallel, Random, GLBLoad, ClojCompletion,
+         * History, Raylib, Editor, Regex all follow it). Normally such a
+         * module is only ever reached via IMPORT, which resolves its .ffi
+         * binding first and skips codegen for the .mod entirely (see the
+         * "Check for a .ffi binding" step above) — so this only fires when
+         * an FFI-backed module is compiled directly as a target, but in
+         * that case the codegen'd wrapper would silently overwrite (and a
+         * later cleanup pass would then delete) the real hand-written C
+         * implementation, with no warning, before this fix. */
+        {
+            char modbase[512];
+            strncpy(modbase, modfile, sizeof(modbase) - 1);
+            modbase[sizeof(modbase) - 1] = '\0';
+            char *bdot = strrchr(modbase, '.');
+            if (bdot) *bdot = '\0';
+            const char *slash = strrchr(modbase, '/');
+            const char *bname = slash ? slash + 1 : modbase;
+
+            char ffipath[512];
+            if (resolve_ffi_file(moddir, bname, ffipath, sizeof(ffipath))) {
+                fprintf(stderr,
+                    "obc: refusing to compile %s directly: %s declares an FFI "
+                    "binding (CSRC) that would be overwritten by the generated "
+                    "C output for this module.\n"
+                    "     Import %s from another module instead of compiling "
+                    "it as a standalone target.\n",
+                    modfile, ffipath, bname);
+                ast_free_all();
+                return 1;
+            }
+        }
+
         /* ── Generate .c file ────────────────────────────────────── */
         {
             FILE *out = fopen(cfile, "w");
