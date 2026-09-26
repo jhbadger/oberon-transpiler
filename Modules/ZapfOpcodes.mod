@@ -33,7 +33,18 @@ CONST
   FlCall*        = 128;
   FlTerminates*  = 256;
 
-  MaxOps* = 128;
+  (* Several opcode NAMES appear more than once in the table (one entry per
+     version range, e.g. COLOR's V5 and V6 forms), so this is bigger than
+     the number of distinct mnemonics. Was exactly 128 before the ICALL
+     family (ICALL1/ICALL2/ICALL/IXCALL) pushed the real count to 132 -
+     silently past the array bound, since Add has no overflow check of its
+     own, which dropped every opcode registered after the 128th Add() call
+     (XCALL among them) without any error at ALL until a V4 game happened
+     to need one of the dropped entries ("unrecognized opcode: XCALL"
+     during mandelbrot's assembly, a real regression this fix caused and
+     this same fix corrects). Left generous headroom rather than the exact
+     count, so the next opcode added here doesn't repeat the mistake. *)
+  MaxOps* = 192;
 
 TYPE
   OpEntry* = RECORD
@@ -79,6 +90,18 @@ BEGIN
   Add("CALL", "call_vs", 1, 6, 224, FlStore + FlCall, "XCALL");
   Add("CALL1", "call_1s", 4, 6, 136, FlStore + FlCall, "");
   Add("CALL2", "call_2s", 4, 6, 25, FlStore + FlCall, "");
+  (* the NON-STORING call family, V5+ only - real zilf's own EmitCall uses
+     these instead of CALL/CALL1/CALL2/XCALL + FSTACK once a version has
+     them, because FSTACK's own opcode (pop, 1-4 only) doesn't exist in V5
+     - there's no way to discard a V5 CALL's result other than never
+     storing it in the first place. Same 0/1/2-3/4+ argument-count split as
+     CALL/CALL1/CALL2/XCALL, "I"-prefixed to match the real compiler's own
+     naming (ICALL1/ICALL2/ICALL/IXCALL, confirmed against a real V5 build
+     of cloak_plus.zil). *)
+  Add("ICALL1", "call_1n", 5, 6, 143, FlCall, "");
+  Add("ICALL2", "call_2n", 5, 6, 26, FlCall, "");
+  Add("ICALL", "call_vn", 5, 6, 249, FlCall, "IXCALL");
+  Add("IXCALL", "call_vn2", 5, 6, 250, FlCall + FlExtra, "");
   Add("CATCH", "catch", 5, 6, 185, FlStore, "");
   Add("CHECKU", "check_unicode", 5, 6, 268, FlStore, "");
   Add("CLEAR", "erase_window", 4, 6, 237, 0, "");

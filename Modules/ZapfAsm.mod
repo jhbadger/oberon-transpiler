@@ -1857,8 +1857,18 @@ BEGIN
   RETURN 0
 END GetHeaderValue2;
 
-(* Auto-generates the 64-byte header for V1-4 (V5+ headers are laid out
-   manually by the source via ordinary data directives). *)
+(* Auto-generates the fixed 64-byte header. Every version's header shares
+   the SAME LAYOUT for the fields this writes (version/flags/release/
+   ENDLOD/START/VOCAB/OBJECT/GLOBAL/IMPURE/FLAGS2/serial/WORDS/length/
+   checksum); the only thing that changes at V5+ is a handful of EXTRA
+   fields past WORDS this never had a name for anyway (terminating-
+   characters/alphabet/header-extension-table pointers), which real zilf's
+   OWN hand-written V5 header leaves as zero-resolving symbols nothing in
+   an ordinary game ever defines a table under - so writing zero there
+   (which the padding loop below already does) is not a simplification,
+   it's what the real compiler's own output comes out to for any game that
+   doesn't build one of those tables. Confirmed against a real V5 compile
+   of cloak_plus.zil. *)
 PROCEDURE WriteHeader*(ctx: Context; strict: BOOLEAN);
 VAR endlod, start, impure: INTEGER; msg: ARRAY 160 OF CHAR;
 BEGIN
@@ -2147,7 +2157,6 @@ END AppendFlatten;
 
 PROCEDURE Assemble*(ctx: Context): BOOLEAN;
 VAR p: ZapfParser.Parser; i: INTEGER;
-    start, impure, endlod, vocab, obj, globals, words: INTEGER;
 BEGIN
   ZapfParser.InitParser(p, ctx.informMode, ctx.zversion);
   ctx.lineCount := 0;
@@ -2159,7 +2168,7 @@ BEGIN
   REPEAT
     ctx.measureAgain := FALSE;
     ctx.position := 0;
-    IF ctx.zversion < 5 THEN WriteHeader(ctx, FALSE) END;
+    WriteHeader(ctx, FALSE);
 
     i := 0;
     WHILE i < ctx.lineCount DO
@@ -2186,25 +2195,7 @@ BEGIN
   IF ctx.errorCount = 0 THEN
     FixOutputExtension(ctx);
     ctx.position := 0;
-    IF ctx.zversion < 5 THEN WriteHeader(ctx, TRUE) END
-  END;
-
-  IF (ctx.zversion >= 5) & (ctx.errorCount = 0) THEN
-    start := GetHeaderValue(ctx, "START", FALSE);
-    impure := GetHeaderValue(ctx, "IMPURE", FALSE);
-    endlod := GetHeaderValue(ctx, "ENDLOD", FALSE);
-    vocab := GetHeaderValue(ctx, "VOCAB", FALSE);
-    obj := GetHeaderValue(ctx, "OBJECT", FALSE);
-    globals := GetHeaderValue(ctx, "GLOBAL", FALSE);
-    words := GetHeaderValue(ctx, "WORDS", FALSE);
-    CheckHeaderFits(ctx, "START", start);
-    CheckHeaderFits(ctx, "IMPURE", impure);
-    CheckHeaderFits(ctx, "ENDLOD", endlod);
-    CheckHeaderFits(ctx, "VOCAB", vocab);
-    CheckHeaderFits(ctx, "OBJECT", obj);
-    CheckHeaderFits(ctx, "GLOBAL", globals);
-    CheckHeaderFits(ctx, "WORDS", words);
-    IF ctx.errorCount > 0 THEN RETURN FALSE END
+    WriteHeader(ctx, TRUE)
   END;
 
   WarnPackedOverflow(ctx);

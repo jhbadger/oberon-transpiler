@@ -1946,6 +1946,19 @@ BEGIN
       ind := ZilObj.NewVectorN(len);
       FOR sum := 1 TO len DO ind.vecItems[sum - 1] := StructNth(args[0], sum) END;
       RETURN MkVal(ind)
+    ELSIF s = "FALSE" THEN
+      (* Unlike a DEFSTRUCT name or BYTE/ADECL, FALSE is a real type this
+         port already has its own genuine representation for (KFalse), and
+         retyping to it is NOT a no-op: `#FALSE (...)` reads as a plain
+         empty LIST via the generic "CHTYPE just passes the value through
+         unretyped" rule above, but COND treats a clause that is truly the
+         FALSE value as one to silently SKIP (real zilf's own CompileCOND:
+         `case ZilFalse: continue;`), and a KList doesn't get that
+         treatment. zillib's own meta.zil (JIGS-UP's RESTART/RESTORE/QUIT/
+         UNDO prompt) writes exactly `#FALSE ()` as a COND clause, almost
+         certainly a %eval placeholder for "no clause here" under some
+         flag combination. *)
+      RETURN MkVal(ZilObj.NewEmpty(ZilObj.KFalse))
     END;
     RETURN MkVal(args[0])
 

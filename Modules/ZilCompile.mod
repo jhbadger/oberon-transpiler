@@ -304,13 +304,17 @@ END CloseOutput;
    sub-expression leaves its result on the Z-machine stack, so when two of
    them feed one instruction, the operands come off the stack in the
    opposite order to the one they went on. The original solves this the
-   same way (PushInnerLocal with a ?TMP atom, in ZBuiltins.cs's
+   same way (PushInnerLocal with a "?TMP" atom, e.g. ZBuiltins.cs's
    SetValueOp) — spill the earlier value into a named local so the later
-   one can have the stack to itself. `SET '?TMPn,STACK` is the spill: the
+   one can have the stack to itself. `SET 'T-TMPn,STACK` is the spill: the
    Z-machine store instruction reads its value operand from the stack,
-   popping it. Temporaries are allocated by nesting depth (?TMP1, ?TMP2,
+   popping it. Temporaries are allocated by nesting depth (T-TMP1, T-TMP2,
    ...) and released as each instruction consumes them, so a routine only
-   declares as many as its deepest expression actually needed. *)
+   declares as many as its deepest expression actually needed. Named
+   "T-TMPn" rather than the original's own "?TMP" spelling — see
+   AllocTemp's own comment on why a leading "?" doesn't survive this
+   port's own ZAP text emission the way it does the original's binary
+   emitter API. *)
 PROCEDURE BeginBuffer;
 BEGIN
   buffering := TRUE; nBufLines := 0; tempDepth := 0; tempMax := 0; nTmpStack := 0
@@ -335,18 +339,33 @@ END FlushBuffer;
 
 (* Allocates a compiler temporary and yields its ZAP local name.
    Temporaries come from the SAME pool as PROG/REPEAT bindings rather than a
-   separate ?TMP series, so a binding that has gone out of scope can serve
+   separate TMP series, so a binding that has gone out of scope can serve
    as a temporary and vice versa. A routine has only fifteen locals and real
    library routines declare fourteen, so keeping two pools ran out on code
    the original compiles fine. Named by nesting depth, so a temporary at the
-   same depth reuses the same slot. *)
+   same depth reuses the same slot.
+
+   The fallback name (used when there is no out-of-scope PROG/REPEAT slot to
+   reuse — a routine with no bindings of its own, like cloak_plus's
+   SAVE-PARSER-RESULT) must not start with "?": ZAP's own syntax uses a
+   leading "?" for LOCAL LABELS (the branch targets this port's own codegen
+   writes as "?L4:"), and zapf's parser reads a "?"-prefixed token as one of
+   those regardless of where it appears — including a plain variable
+   position like `SET '?TMP1,x` or a .FUNCT's own local-name list. The
+   result isn't a clean "duplicate label" error; it's zapf's function-scope
+   tracking going wrong from that point on, reported many lines later as a
+   cascade of "local labels not allowed outside a function" errors that
+   don't obviously point back here. Confirmed by renaming and re-assembling:
+   V1-4 games happened never to hit this exact shape (no bindings AND a
+   spill needed), but V5's cloak_plus does the moment UNDO support compiles
+   in real save/restore-state routines. *)
 PROCEDURE AllocTemp(VAR name: ARRAY OF CHAR);
 VAR n, zilName: ARRAY 32 OF CHAR;
 BEGIN
   INC(tempDepth);
   IF tempDepth > tempMax THEN tempMax := tempDepth END;
   Strings.IntToStr(tempDepth, n);
-  Strings.Copy("?TMP", zilName); Strings.Append(n, zilName);
+  Strings.Copy("T-TMP", zilName); Strings.Append(n, zilName);
   IF AllocInnerLocal(zilName) THEN ResolveLocal(zilName, name)
   ELSE Strings.Copy(zilName, name) END;
   IF nTmpStack < MaxRenames THEN
@@ -754,7 +773,7 @@ END BuiltinMinArgs;
    instruction. *)
 PROCEDURE IsValuePredBuiltin(name: ARRAY OF CHAR): BOOLEAN;
 BEGIN
-  RETURN (name = "FIRST?") OR (name = "NEXT?")
+  RETURN (name = "FIRST?") OR (name = "NEXT?") OR (name = "INTBL?")
 END IsValuePredBuiltin;
 
 (* Writes the ` \?Lnn` that follows such an instruction, plus the label line
@@ -791,7 +810,15 @@ BEGIN
        is optional *)
   ELSIF name = "FIRST?" THEN Strings.Copy("FIRST?", zap); nargs := 1
   ELSIF name = "NEXT?" THEN Strings.Copy("NEXT?", zap); nargs := 1
+  ELSIF name = "INTBL?" THEN Strings.Copy("INTBL?", zap); nargs := 3
   ELSIF name = "PTSIZE" THEN Strings.Copy("PTSIZE", zap); nargs := 1
+    (* ISAVE/IRESTORE (save_undo/restore_undo, V5+): store a result - 2 if a
+       save just succeeded and this is the continuation after IRESTORE
+       resumes it, 1/0 for ordinary save success/failure - and take no
+       operands at all. cloak_plus's PARSER routine uses ISAVE directly for
+       its <UNDO> command, gated on the USE-UNDO? flag ZIP-OPTIONS sets. *)
+  ELSIF name = "ISAVE" THEN Strings.Copy("ISAVE", zap); nargs := 0
+  ELSIF name = "IRESTORE" THEN Strings.Copy("IRESTORE", zap); nargs := 0
 
   (* void *)
   ELSE
@@ -1029,7 +1056,7 @@ BEGIN
      OR (nm = "BCOM") OR (nm = "ASH") OR (nm = "ASHIFT") OR (nm = "SHIFT")
      OR (nm = "GET") OR (nm = "NTH") OR (nm = "ZGET") OR (nm = "GETB") OR (nm = "ZGETB")
      OR (nm = "GETP") OR (nm = "GETPT") OR (nm = "NEXTP") OR (nm = "PTSIZE")
-     OR (nm = "LOC") OR (nm = "FIRST?") OR (nm = "NEXT?")
+     OR (nm = "LOC") OR (nm = "FIRST?") OR (nm = "NEXT?") OR (nm = "INTBL?")
      OR (nm = "REST") OR (nm = "ZREST") OR (nm = "BACK") OR (nm = "ZBACK")
      OR (nm = "ZERO?") OR (nm = "0?") OR (nm = "1?")
      OR (nm = "EQUAL?") OR (nm = "=?") OR (nm = "==?")
@@ -1477,9 +1504,20 @@ BEGIN
     Strings.Copy(z.rest.first.atomText, headName);
     IF FindGlobalIdx(headName) >= 0 THEN Strings.Copy(headName, opText); RETURN TRUE END;
     IF ConstantText(z.rest.first, opText) THEN RETURN TRUE END;
-    Strings.Copy("CompileOperand: GVAL of an undefined global/constant/routine/object: ", errBuf);
-    Strings.Append(headName, errBuf);
-    Err(errBuf); RETURN FALSE
+    (* Real zilf's own GvalOp doesn't error here either - it falls back to
+       compiling ,NAME as if it had been written .NAME (a bare LVAL is never
+       validated at this level anyway; see LVAL's own comment just above -
+       both trust zapf to catch a name that turns out not to be a real
+       local), with only a warning ("no such global variable 'X', using the
+       local instead"). Real library source relies on this: zillib's own
+       status.zil has a PROG-bound local H referenced as ,H instead of .H
+       (STATUS-LINE-SECTION?TIME-12H, a copy-paste bug that's been there for
+       years) - erroring here instead of warning would make every V4+ game
+       that pulls in status.zil (anything inserting "parser") fail to
+       compile over a mistake in the library, not the game. *)
+    Out.ErrString("zilf: warning: no such global variable '"); Out.ErrString(headName);
+    Out.ErrString("', using the local instead"); Out.ErrLn;
+    ResolveLocal(headName, opText); RETURN TRUE
 
   ELSIF z.kind = ZilObj.KForm THEN
     IF (z.first = NIL) OR (z.first.kind # ZilObj.KAtom) THEN
@@ -1865,6 +1903,30 @@ BEGIN
       ok := CompileOperand(z.rest.first, leftText);
       IF ~ok THEN RETURN FALSE END;
       W("	"); W(headName); W(" "); W(leftText); W(" >STACK");
+      IF polarity THEN W(" /") ELSE W(" \") END;
+      W(label); WLn;
+      RETURN TRUE
+
+    ELSIF headName = "INTBL?" THEN
+      (* <INTBL? value table n> — the Z-machine's scan_table: searches the
+         first n entries of table for value, storing the matching entry's
+         address (or 0) and branching on whether it found one. Same
+         store-AND-branch shape as FIRST?/NEXT?, just with three operands
+         instead of one — this is cloak_plus's REFERS-PSEUDO?, the first
+         game so far to need it (INTBL? is V4+ only). *)
+      IF (z.rest = NIL) OR (z.rest.first = NIL) OR (z.rest.rest = NIL)
+         OR (z.rest.rest.first = NIL) OR (z.rest.rest.rest = NIL)
+         OR (z.rest.rest.rest.first = NIL) THEN
+        Err("CompileCondition: INTBL? expects 3 args"); RETURN FALSE
+      END;
+      ok := CompileOperand(z.rest.first, leftText);
+      IF ~ok THEN RETURN FALSE END;
+      ok := CompileOperand(z.rest.rest.first, rightText);
+      IF ~ok THEN RETURN FALSE END;
+      ok := CompileOperand(z.rest.rest.rest.first, opText);
+      IF ~ok THEN RETURN FALSE END;
+      W("	INTBL? "); W(leftText); W(","); W(rightText); W(","); W(opText);
+      W(" >STACK");
       IF polarity THEN W(" /") ELSE W(" \") END;
       W(label); WLn;
       RETURN TRUE
@@ -3262,6 +3324,17 @@ BEGIN
       c := z.rest;
 
       WHILE (c # NIL) & (c.first # NIL) & ~elsePart DO
+        IF c.first.kind = ZilObj.KFalse THEN
+          (* A clause that is ITSELF the FALSE value is never true and
+             contributes nothing at all - matches real zilf's own
+             CompileCOND exactly (`case ZilFalse: continue;`). Needed
+             because #FALSE () now reads as a genuine FALSE-kind value
+             (see ZilRead's own comment on why), and real zillib source
+             (meta.zil's JIGS-UP, almost certainly a %eval placeholder for
+             "no clause here" under some flag combination) puts one
+             directly in a COND's own clause list. *)
+          c := c.rest
+        ELSE
         IF (c.first.kind # ZilObj.KList) OR (c.first.first = NIL) THEN
           Err("CompileStmt: each COND clause must be a non-empty list"); RETURN FALSE
         END;
@@ -3305,6 +3378,7 @@ BEGIN
         W(nextLabel); W(":"); WLn;
         IF ~elsePart THEN NewLabel(nextLabel) END;
         c := c.rest
+        END
       END;
 
       IF wantResult & ~elsePart THEN
@@ -3343,10 +3417,40 @@ BEGIN
       RETURN TRUE
 
     ELSIF ~wantResult & (FindRoutineIdx(headName) >= 0) THEN
-      (* A routine call whose value is discarded. V3's only CALL opcode
-         always stores, so the original pops the unwanted result with
-         FSTACK (EmitCall, zversion < 4 branch) rather than leaving it to
-         accumulate on the stack — do the same. *)
+      (* A routine call whose value is discarded. V1-4 have only storing
+         CALL opcodes, so the original pops the unwanted result with
+         FSTACK (EmitCall's zversion < 4 branch) rather than leaving it to
+         accumulate on the stack. V5+ can't do that: FSTACK's own opcode
+         (pop) was removed from the Z-machine at V5 (V6 replaces it with
+         pop_stack, not emitted here either), so there is no way to
+         discard a V5+ CALL's result other than never storing it — the
+         real compiler's own EmitCall switches to the non-storing ICALL
+         family (ICALL1/ICALL2/ICALL/IXCALL, the same 0/1/2-3/4+
+         argument-count split as CALL1/CALL2/CALL/XCALL) for exactly this
+         case, confirmed against a real V5 build of cloak_plus.zil. Found
+         by bisecting an "outside a function" cascade all the way down to
+         a single CALL+FSTACK pair — FSTACK, with no matching opcode for
+         this version, wasn't cleanly rejected; it silently corrupted
+         zapf's own function-scope tracking from that point on. *)
+      IF ZilModel.zversion >= 5 THEN
+        sbN := 7;
+        ok := CompileArgs(z.rest, sbN, sbArgs, sbCount, sbSpills);
+        IF ~ok THEN
+          IF ~errFlag THEN Err("CompileStmt: too many call arguments for this Z-machine version") END;
+          RETURN FALSE
+        END;
+        IF sbCount = 0 THEN Strings.Copy("ICALL1", sbOpcode)
+        ELSIF sbCount = 1 THEN Strings.Copy("ICALL2", sbOpcode)
+        ELSIF sbCount <= 3 THEN Strings.Copy("ICALL", sbOpcode)
+        ELSE Strings.Copy("IXCALL", sbOpcode)
+        END;
+        W("	"); W(sbOpcode); W(" "); WSym(headName);
+        sbI := 0;
+        WHILE sbI < sbCount DO W(","); W(sbArgs[sbI]); INC(sbI) END;
+        WLn;
+        WHILE sbSpills > 0 DO FreeTemp; DEC(sbSpills) END;
+        RETURN TRUE
+      END;
       ok := CompileOperand(z, opText);
       IF ~ok THEN RETURN FALSE END;
       IF opText = "STACK" THEN W("	FSTACK"); WLn END;
@@ -5260,13 +5364,24 @@ BEGIN
     Err("CompileProgram: entry routine not defined"); RETURN FALSE
   END;
 
-  (* zapf auto-generates the 64-byte header for V1-4; a V5+ story file has
-     to lay its header out by hand with ordinary data directives (see
-     ZapfAsm.WriteHeader's own comment, and the top of a real V5 .zap such
-     as ~/cloak_plus.zap). Emitting that by hand is its own slice, so say
-     so rather than producing a file that assembles into a broken story. *)
-  IF (ZilModel.zversion < 3) OR (ZilModel.zversion > 4) THEN
-    Err("CompileProgram: only Z-machine versions 3 and 4 are emitted yet (V5+ needs a hand-built header)");
+  (* zapf's own WriteHeader auto-generates the fixed 64-byte header
+     (version/flags/release/ENDLOD/START/VOCAB/OBJECT/GLOBAL/IMPURE/
+     FLAGS2/serial/WORDS/length/checksum, zero-padded to 64 bytes) the
+     same way for every version - confirmed against a real compile of
+     cloak_plus.zil (V5): the real compiler's own hand-written V5 header
+     ALSO leaves every field past WORDS (the V5+-only terminating-
+     characters/alphabet/header-extension-table pointers) as a
+     zero-resolving symbol nothing in the game ever defines a table
+     under, so the two headers come out byte-identical regardless of
+     which one writes the zeros explicitly and which one just pads them.
+     V5's other structural differences from V3 (63 properties/48
+     attributes, the ×4 packed-address multiplier, 14-byte object rows,
+     6-byte/9-Z-character dictionary keys, SAVE/RESTORE as a 0OP STORE
+     instead of a 0OP branch) are already shared with V4, which already
+     works, so V5 needed no separate codegen path at all - just this
+     version-range check widened to admit it. *)
+  IF (ZilModel.zversion < 3) OR (ZilModel.zversion > 5) THEN
+    Err("CompileProgram: only Z-machine versions 3-5 are emitted yet");
     RETURN FALSE
   END;
 

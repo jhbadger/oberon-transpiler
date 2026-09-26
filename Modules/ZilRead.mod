@@ -532,6 +532,18 @@ BEGIN
       IF spliceHead = NIL THEN RETURN ZilObj.NewEmpty(ZilObj.KSplice) END;
       RETURN spliceHead
     END;
+    IF (ty # NIL) & (ty.kind = ZilObj.KAtom) & (ty.atomText = "FALSE") THEN
+      (* #FALSE (...) is a CHTYPE to FALSE, real ZIL's own way of writing
+         the value <> as a data literal rather than an empty FORM. Dropping
+         the type the way every other #TYPE is dropped here would leave an
+         ordinary LIST, and this port's COND compiler treats a genuine
+         FALSE-kind clause as one to silently skip (matching real zilf's
+         own CompileCOND) but a KList clause as an error - zillib's
+         meta.zil writes `#FALSE ()` as a COND clause (almost certainly a
+         %eval placeholder for "no clause here"), so keeping the type here
+         is what makes that compile at all instead of erroring. *)
+      RETURN ZilObj.NewEmpty(ZilObj.KFalse)
+    END;
     IF (ty # NIL) & (ty.kind = ZilObj.KAtom) & (ty.atomText = "DECL") THEN
       inner := ZilObj.Cons(ZilObj.KForm, inner, NIL);
       inner := ZilObj.Cons(ZilObj.KForm, ZilObj.Intern("QUOTE"), inner)
