@@ -307,10 +307,32 @@ END ReadHex;
    - isTerm=TRUE: the next thing was a closing bracket (returned in
      termChar), which the caller (an enclosing structure reader) should
      check and consume. *)
+(* Adds one just-read element to a structure being collected.
+
+   NOTE: this does NOT splice a KSplice-kind element automatically, even
+   though `#SPLICE (...)` (CHTYPE to SPLICE) can produce one right here. Two
+   real uses of `#SPLICE` sit at the same syntactic depth and need OPPOSITE
+   treatment: `<VERSION? (ZIP #SPLICE ()) ...>`'s clause body must keep its
+   `#SPLICE ()` as ONE element (VERSION?'s own clause-body list, tested for
+   emptiness by VERSION? itself) — flattening it here silently drops it and
+   leaves the clause looking like it has NO body, which makes VERSION? fall
+   back to returning the version tag atom instead of evaluating anything.
+   The bug this caused: `%<VERSION? (ZIP #SPLICE ()) (ELSE ...)>` used as a
+   SYNONYM word list evaluated to the atom ZIP, which was then added as a
+   literal dictionary word named "zip" to every V3 object using the idiom.
+   Splicing belongs at the point a SPLICE-typed VALUE is CONSUMED (an
+   evaluated argument list, an object's property values, ExpandTree's
+   routine-body walk), not at the point one is merely READ as a literal. *)
+PROCEDURE AddItem(VAR items: ARRAY OF ZilObj.Zo; VAR n: INTEGER; inner: ZilObj.Zo);
+BEGIN
+  IF n < LEN(items) THEN items[n] := inner; INC(n) END
+END AddItem;
+
 PROCEDURE ReadOne*(VAR rd: Reader; VAR ok, done, isTerm: BOOLEAN; VAR termChar: INTEGER): ZilObj.Zo;
 VAR
   c, c2, n, i, innerTermCh: INTEGER;
   z, z2, inner, ty, result, v: ZilObj.Zo;
+  spliceHead, spliceTail, spliceCell, spliceP: ZilObj.Zo;
   okInner, innerDone, innerTerm, run: BOOLEAN;
   items: ARRAY MaxStructItems OF ZilObj.Zo;
   atomName: ARRAY 16 OF CHAR;
@@ -340,7 +362,7 @@ BEGIN
         IF innerTermCh # ORD(")") THEN SetErr(rd, "mismatched closing bracket in list"); ok := FALSE; RETURN NIL END;
         run := FALSE
       ELSE
-        IF n < MaxStructItems THEN items[n] := inner; INC(n) END
+        AddItem(items, n, inner)
       END
     END;
     result := ZilObj.NewEmpty(ZilObj.KList);
@@ -359,7 +381,7 @@ BEGIN
         IF innerTermCh # ORD(">") THEN SetErr(rd, "mismatched closing bracket in form"); ok := FALSE; RETURN NIL END;
         run := FALSE
       ELSE
-        IF n < MaxStructItems THEN items[n] := inner; INC(n) END
+        AddItem(items, n, inner)
       END
     END;
     result := ZilObj.NewEmpty(ZilObj.KForm);
@@ -377,7 +399,7 @@ BEGIN
         IF innerTermCh # ORD("]") THEN SetErr(rd, "mismatched closing bracket in vector"); ok := FALSE; RETURN NIL END;
         run := FALSE
       ELSE
-        IF n < MaxStructItems THEN items[n] := inner; INC(n) END
+        AddItem(items, n, inner)
       END
     END;
     v := ZilObj.NewVectorN(n);
@@ -495,6 +517,21 @@ BEGIN
        (<OR !<LIST ATOM ANY> FALSE>). Reading it as <QUOTE (...)> gives it
        the self-evaluating behaviour without needing a type system, and the
        value is discarded in every position a decl can appear. *)
+    IF (ty # NIL) & (ty.kind = ZilObj.KAtom) & (ty.atomText = "SPLICE") THEN
+      (* #SPLICE (...) is a CHTYPE to SPLICE: the elements stand in for the
+         splice wherever it appears in a structure. Keep the type, because
+         dropping it leaves an ordinary LIST that cannot splice. *)
+      spliceHead := NIL; spliceTail := NIL; spliceP := inner;
+      WHILE (spliceP # NIL) & (spliceP.first # NIL) DO
+        spliceCell := ZilObj.Cons(ZilObj.KSplice, spliceP.first, NIL);
+        IF spliceHead = NIL THEN spliceHead := spliceCell
+        ELSE spliceTail.rest := spliceCell END;
+        spliceTail := spliceCell;
+        spliceP := spliceP.rest
+      END;
+      IF spliceHead = NIL THEN RETURN ZilObj.NewEmpty(ZilObj.KSplice) END;
+      RETURN spliceHead
+    END;
     IF (ty # NIL) & (ty.kind = ZilObj.KAtom) & (ty.atomText = "DECL") THEN
       inner := ZilObj.Cons(ZilObj.KForm, inner, NIL);
       inner := ZilObj.Cons(ZilObj.KForm, ZilObj.Intern("QUOTE"), inner)

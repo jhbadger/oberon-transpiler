@@ -52,6 +52,12 @@ CONST
                         CHTYPEing its result to SPLICE — which is how
                         zillib's LIBRARY-MESSAGE expands to several TELL
                         tokens at once. *)
+  KRoutine*    = 18; (* a reference to a compiled ROUTINE. Only ever the ZVAL
+                        of a routine's name: the library asks
+                        <TYPE? <GETPROP .R ZVAL> ROUTINE> to decide whether a
+                        name it built really names a routine, so that value
+                        has to have type ROUTINE and not merely be truthy.
+                        `first` holds the routine's name atom. *)
   KOblist*     = 16; (* an OBLIST, used as a compile-time hash map — see
                         ZilEval's MOBLIST/LOOKUP/INSERT for why one is
                         needed even though name RESOLUTION uses a single
@@ -242,6 +248,13 @@ BEGIN NEW(z); z.kind := KAdecl; z.adFirst := first; z.adSecond := second; RETURN
 PROCEDURE NewSegment*(form: Zo): Zo;
 VAR z: Zo;
 BEGIN NEW(z); z.kind := KSegment; z.segForm := form; RETURN z END NewSegment;
+
+PROCEDURE NewRoutineRef*(nameAtom: Zo): Zo;
+VAR z: Zo;
+BEGIN
+  NEW(z); z.kind := KRoutine; z.first := nameAtom; z.rest := NIL;
+  RETURN z
+END NewRoutineRef;
 
 PROCEDURE NewSubr*(name: ARRAY OF CHAR; isF: BOOLEAN): Zo;
 VAR z: Zo;

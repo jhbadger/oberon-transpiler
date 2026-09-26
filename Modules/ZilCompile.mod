@@ -50,6 +50,12 @@ VAR
   errMsg*: ARRAY 512 OF CHAR;
 
 VAR curRoutine: ARRAY 64 OF CHAR;   (* for error messages *)
+    (* the CURRENTLY COMPILING routine's own explicit activation atom name,
+       e.g. the MSN in <ROUTINE MAP-SCOPE-NEXT MSN ("AUX" ...) ...> — empty
+       when the routine has none. A <RETURN value .NAME> naming THIS atom
+       means "return from the routine", the one case FindNamedBlock cannot
+       answer since the routine itself is never pushed as a numbered block. *)
+    curRoutineAct: ARRAY 64 OF CHAR;
     curStmt: ARRAY 512 OF CHAR;
 
 PROCEDURE Err(msg: ARRAY OF CHAR);
@@ -520,13 +526,23 @@ END IsTableForm;
 (* Object flags and properties are registered by CompileObjects; these two
    read that registration back, and are declared here because ConstantText
    (above the object code) needs them. *)
+(* Looks a flag name up, following a <BIT-SYNONYM> alias to the flag it shares
+   a bit with. Resolving here rather than at every call site is what keeps an
+   alias from claiming a second bit — V3 has only 32. *)
 PROCEDURE FindFlagIdx*(name: ARRAY OF CHAR): INTEGER;
-VAR i: INTEGER;
+VAR i: INTEGER; target: ARRAY 64 OF CHAR;
 BEGIN
   i := 0;
   WHILE i < nFlagNames DO
     IF flagNameTab[i] = name THEN RETURN i END;
     INC(i)
+  END;
+  IF ZilModel.BitSynonymOf(name, target) THEN
+    i := 0;
+    WHILE i < nFlagNames DO
+      IF flagNameTab[i] = target THEN RETURN i END;
+      INC(i)
+    END
   END;
   RETURN -1
 END FindFlagIdx;
@@ -619,6 +635,10 @@ BEGIN
   ELSIF z.kind = ZilObj.KString THEN
     TranslateZilString(z.strBuf^, strTmp);
     RETURN InternString(strTmp, s)
+  ELSIF (z.kind = ZilObj.KRoutine) & (z.first # NIL) THEN
+    (* a ROUTINE reference (an atom's ZVAL) used as an operand is its address,
+       which is the routine's own label *)
+    Strings.Copy(z.first.atomText, s); RETURN TRUE
   ELSIF z.kind = ZilObj.KAtom THEN
     Strings.Copy(z.atomText, name);
     IF name = "T" THEN Strings.Copy("1", s); RETURN TRUE END;
@@ -1318,6 +1338,37 @@ BEGIN
        & (z.first # NIL) & (z.first.kind = ZilObj.KAtom)
        & ((z.first.atomText = "LVAL") OR (z.first.atomText = "GVAL"))
 END IsVarRefForm;
+
+(* Finds the innermost open block whose activation atom is `name`, for a
+   named <AGAIN .NAME> / <RETURN value .NAME> — MDL's way of targeting an
+   OUTER loop from inside a nested one, rather than the reflexive "innermost
+   block" AGAIN/RETURN default to. Searches innermost-first, matching lexical
+   shadowing: an inner block reusing an outer activation atom's name (legal,
+   if unusual) should win. *)
+PROCEDURE FindNamedBlock(name: ARRAY OF CHAR): INTEGER;
+VAR i: INTEGER;
+BEGIN
+  i := nBlocks - 1;
+  WHILE (i >= 0) & ((blockNames[i][0] = 0X) OR (blockNames[i] # name)) DO DEC(i) END;
+  RETURN i
+END FindNamedBlock;
+
+(* The block-name argument AGAIN/RETURN accept, written `.NAME` (an LVAL of
+   the activation atom) in real source. Returns "" (no target requested)
+   when `z` isn't shaped like one, so the caller can fall back to "innermost"
+   exactly as before. *)
+PROCEDURE BlockTargetName(z: ZilObj.Zo; VAR name: ARRAY OF CHAR): BOOLEAN;
+BEGIN
+  name[0] := 0X;
+  IF (z = NIL) OR (z.kind # ZilObj.KForm) OR (ZilObj.ListLength(z) # 2)
+     OR (z.first = NIL) OR (z.first.kind # ZilObj.KAtom)
+     OR (z.first.atomText # "LVAL") OR (z.rest.first = NIL)
+     OR (z.rest.first.kind # ZilObj.KAtom) THEN
+    RETURN FALSE
+  END;
+  Strings.Copy(z.rest.first.atomText, name);
+  RETURN TRUE
+END BlockTargetName;
 
 PROCEDURE IsLowCore(z: ZilObj.Zo): BOOLEAN;
 BEGIN
@@ -2488,7 +2539,8 @@ VAR headName: ARRAY 64 OF CHAR; opText, targetName: ARRAY 64 OF CHAR;
     (* PROG / REPEAT / BIND *)
     againLabel, retLabel: ARRAY 16 OF CHAR; progResult: ARRAY 64 OF CHAR;
     progRepeat, progTerm: BOOLEAN; progArgs, item: ZilObj.Zo;
-    blkIdx, nProgBinds: INTEGER;
+    blkIdx, nProgBinds: INTEGER; progActName, tgtName: ARRAY 64 OF CHAR;
+    errBuf: ARRAY 256 OF CHAR;
     (* DO *)
     doStart, doEnd, doStep, endClause: ZilObj.Zo; doDown, doPre: BOOLEAN;
     exhLabel: ARRAY 16 OF CHAR;
@@ -2553,10 +2605,15 @@ BEGIN
       progRepeat := headName = "REPEAT";
       progArgs := z.rest;
       IF (progArgs # NIL) & (progArgs.first # NIL) & (progArgs.first.kind = ZilObj.KAtom) THEN
-        (* an activation atom naming the block, so a nested RETURN can
-           target it explicitly — accepted and recorded, but nothing
-           references a block by name yet *)
+        (* an activation atom naming the block, so a nested AGAIN/RETURN can
+           target it explicitly instead of the innermost block — see
+           FindNamedBlock. MATCH-NOUN-PHRASE's <PROG BITS-SET () ...> needs
+           this: it is written so a nested MAP-SCOPE's own (unnamed) REPEAT
+           can <AGAIN .BITS-SET> to restart the OUTER PROG, not itself. *)
+        Strings.Copy(progArgs.first.atomText, progActName);
         progArgs := progArgs.rest
+      ELSE
+        progActName[0] := 0X
       END;
       IF (progArgs = NIL) OR (progArgs.first = NIL) OR (progArgs.first.kind # ZilObj.KList) THEN
         Err("CompileStmt: PROG/REPEAT/BIND expects a binding list"); RETURN FALSE
@@ -2600,7 +2657,7 @@ BEGIN
       NewLabel(againLabel); NewLabel(retLabel);
       Strings.Copy(againLabel, blockAgain[nBlocks]);
       Strings.Copy(retLabel, blockReturn[nBlocks]);
-      blockNames[nBlocks][0] := 0X;
+      Strings.Copy(progActName, blockNames[nBlocks]);
       blockWantResult[nBlocks] := wantResult;
       blockReturned[nBlocks] := FALSE;
       blockHasReturn[nBlocks] := TRUE;
@@ -3014,7 +3071,24 @@ BEGIN
       IF nBlocks = 0 THEN
         Err("CompileStmt: AGAIN outside any PROG/REPEAT block"); RETURN FALSE
       END;
-      EmitBranch(blockAgain[nBlocks - 1]);
+      (* <AGAIN .NAME> restarts a NAMED enclosing block, which need not be
+         the innermost one — MATCH-NOUN-PHRASE's <PROG BITS-SET () ...>
+         relies on this: a nested (unnamed) REPEAT from MAP-SCOPE's own
+         expansion sits between the AGAIN and its real target, so defaulting
+         to "innermost" would restart the wrong loop. *)
+      blkIdx := nBlocks - 1;
+      IF (z.rest # NIL) & (z.rest.first # NIL) & BlockTargetName(z.rest.first, tgtName) THEN
+        IF (curRoutineAct[0] # 0X) & (tgtName = curRoutineAct) THEN
+          Err("CompileStmt: AGAIN cannot target the routine itself"); RETURN FALSE
+        END;
+        blkIdx := FindNamedBlock(tgtName);
+        IF blkIdx < 0 THEN
+          Strings.Copy("CompileStmt: AGAIN target not found: ", errBuf);
+          Strings.Append(tgtName, errBuf);
+          Err(errBuf); RETURN FALSE
+        END
+      END;
+      EmitBranch(blockAgain[blkIdx]);
       Strings.Copy("1", resultText); termFlag := TRUE;
       RETURN TRUE
 
@@ -3022,19 +3096,43 @@ BEGIN
       (* <RETURN> with no argument yields T. Inside a PROG/REPEAT it leaves
          the BLOCK, not the routine — the original's ReturnOp picks the
          innermost block and branches to its return label, falling back to
-         a real routine return only when there is no enclosing block. *)
+         a real routine return only when there is no enclosing block.
+         <RETURN value .NAME> targets a NAMED enclosing block instead of the
+         innermost one — see AGAIN's identical mechanism and FindNamedBlock
+         for why this matters (zillib's SCOPE-EXIT macro: <RETURN -1
+         .SCOPE-STAGE-ACTIVATION> must leave the scope-stage ROUTINE even
+         from inside a nested loop, not whatever loop happens to be
+         innermost at the call site). *)
       IF (z.rest = NIL) OR (z.rest.first = NIL) THEN
         Strings.Copy("1", opText)
       ELSE
         ok := CompileOperand(z.rest.first, opText);
         IF ~ok THEN RETURN FALSE END
       END;
-      (* The innermost block that can actually be returned FROM. The
-         routine's own block has an again label but no return label — the
-         original gives it ReturnLabel = null for exactly this reason, so a
-         RETURN with no enclosing PROG/REPEAT leaves the routine. *)
+      (* The innermost block that can actually be returned FROM, unless a
+         second argument names a specific one. The routine's own block has
+         an again label but no return label — the original gives it
+         ReturnLabel = null for exactly this reason, so a RETURN with no
+         enclosing PROG/REPEAT (or one aimed past all of them) leaves the
+         routine. *)
       blkIdx := nBlocks - 1;
-      WHILE (blkIdx >= 0) & ~blockHasReturn[blkIdx] DO DEC(blkIdx) END;
+      IF (z.rest # NIL) & (z.rest.rest # NIL) & (z.rest.rest.first # NIL)
+         & BlockTargetName(z.rest.rest.first, tgtName) THEN
+        IF (curRoutineAct[0] # 0X) & (tgtName = curRoutineAct) THEN
+          (* the routine's OWN activation atom: leave the routine, exactly
+             as an unqualified RETURN with no enclosing block would *)
+          blkIdx := -1
+        ELSE
+          blkIdx := FindNamedBlock(tgtName);
+          IF blkIdx < 0 THEN
+            Strings.Copy("CompileStmt: RETURN target not found: ", errBuf);
+            Strings.Append(tgtName, errBuf);
+            Err(errBuf); RETURN FALSE
+          END
+        END
+      ELSE
+        WHILE (blkIdx >= 0) & ~blockHasReturn[blkIdx] DO DEC(blkIdx) END
+      END;
       IF blkIdx >= 0 THEN
         IF blockWantResult[blkIdx] & (opText # "STACK") THEN
           W("	PUSH "); W(opText); WLn
@@ -3230,6 +3328,8 @@ VAR rt: ZilModel.RoutineRec; opText: ARRAY 64 OF CHAR; n, routineAgain: ARRAY 16
 BEGIN
   rt := ZilModel.routines[idx];
   Strings.Copy(rt.name.atomText, curRoutine); curStmt[0] := 0X;
+  IF rt.act # NIL THEN Strings.Copy(rt.act.atomText, curRoutineAct)
+  ELSE curRoutineAct[0] := 0X END;
 
   bp := rt.body;
 
@@ -3649,10 +3749,14 @@ PROCEDURE MaxFlags(): INTEGER;
 BEGIN IF ZilModel.zversion < 4 THEN RETURN 32 ELSE RETURN 48 END END MaxFlags;
 
 PROCEDURE RegisterFlag(name: ARRAY OF CHAR): INTEGER;
-VAR i: INTEGER;
+VAR i: INTEGER; real: ARRAY 64 OF CHAR;
 BEGIN
   i := FindFlagIdx(name);
   IF i >= 0 THEN RETURN i END;
+  (* an alias names its target's bit, so registering it registers the target *)
+  IF ZilModel.BitSynonymOf(name, real) THEN
+    Strings.Copy(real, name)
+  END;
   IF nFlagNames >= MaxFlagNames THEN RETURN -1 END;
   Strings.Copy(name, flagNameTab[nFlagNames]);
   INC(nFlagNames);
@@ -3676,6 +3780,25 @@ PROCEDURE IsPseudoProperty(name: ARRAY OF CHAR): BOOLEAN;
 BEGIN
   RETURN (name = "DESC") OR (name = "IN") OR (name = "LOC") OR (name = "FLAGS")
 END IsPseudoProperty;
+
+(* Whether this (IN ...) or (LOC ...) is the object's LOCATION rather than a
+   property. IN is both a pseudo-property and one of zillib's directions, so
+   the name alone cannot say which: (IN ROOMS) is a parent, (IN TO CAVE) and
+   (IN SORRY "...") are exits. The original keeps the two uses apart the same
+   way, by whether the body matches the direction pattern — and notes that IN
+   is where this comes up in practice.
+
+   Getting it wrong both ways round: treating (IN SORRY "...") as a location
+   rejects it as a non-constant property value, and treating (IN ROOMS) as a
+   property emits an IN exit on every object whose data is really its parent's
+   object number. *)
+PROCEDURE IsLocationProperty(name: ARRAY OF CHAR; body: ZilObj.Zo): BOOLEAN;
+BEGIN
+  RETURN ((name = "IN") OR (name = "LOC"))
+       & (body # NIL) & (body.first # NIL) & (body.first.kind = ZilObj.KAtom)
+       & ((body.rest = NIL) OR (body.rest.first = NIL))
+       & (FindObjectIdx(body.first.atomText) >= 0)
+END IsLocationProperty;
 
 (* SYNONYM and ADJECTIVE are real properties, but their values are
    DICTIONARY WORDS rather than ordinary constants, so they are emitted by
@@ -3969,6 +4092,20 @@ BEGIN
       W("	FX?"); W(flagNameTab[i]); W("="); W(text); WLn;
       INC(i)
     END;
+    (* A <BIT-SYNONYM> alias gets its own pair of symbols equal to the flag
+       it shares, so code and object rows written with either name assemble.
+       The original does the same, as DefineFlagAlias adding a Constants
+       entry pointing at the original's flag builder. *)
+    j := 0;
+    WHILE j < ZilModel.nBitSynonyms DO
+      IF FindFlagIdx(ZilModel.bitSynTarget[j]) >= 0 THEN
+        W("	"); WSym(ZilModel.bitSynAlias[j]);
+        W("="); WSym(ZilModel.bitSynTarget[j]); WLn;
+        W("	FX?"); WSym(ZilModel.bitSynAlias[j]);
+        W("=FX?"); WSym(ZilModel.bitSynTarget[j]); WLn
+      END;
+      INC(j)
+    END;
     WLn
   END;
 
@@ -4058,13 +4195,21 @@ BEGIN
     W(","); W(flagsWord[0]);
     W(","); W(flagsWord[1]);
     IF ZilModel.zversion >= 4 THEN W(","); W(flagsWord[2]) END;
-    IF objParent[i] >= 0 THEN W(","); W(ZilModel.objects[objParent[i]].name.atomText)
+    (* Parent/sibling/child are object references and go through WSym just
+       like the .OBJECT name itself - a name with a character ZAP disallows
+       in a bare symbol (advent has IN-AWKWARD-SLOPING-E/W-CANYON) sanitizes
+       to the SAME spelling wherever it is written, which is what makes the
+       reference resolve. Leaving these three raw was a real bug: the row
+       DEFINING that object sanitized its own name, but every OTHER row
+       that named it as a sibling did not, so the two spellings disagreed
+       and zapf reported "undefined symbol". *)
+    IF objParent[i] >= 0 THEN W(","); WSym(ZilModel.objects[objParent[i]].name.atomText)
     ELSE W(",0") END;
-    IF objSibling[i] >= 0 THEN W(","); W(ZilModel.objects[objSibling[i]].name.atomText)
+    IF objSibling[i] >= 0 THEN W(","); WSym(ZilModel.objects[objSibling[i]].name.atomText)
     ELSE W(",0") END;
-    IF objChild[i] >= 0 THEN W(","); W(ZilModel.objects[objChild[i]].name.atomText)
+    IF objChild[i] >= 0 THEN W(","); WSym(ZilModel.objects[objChild[i]].name.atomText)
     ELSE W(",0") END;
-    W(",?PTBL?"); W(o.name.atomText); WLn;
+    W(",?PTBL?"); WSym(o.name.atomText); WLn;
     INC(i)
   END;
   W("	.ENDT"); WLn; WLn;
@@ -4075,7 +4220,7 @@ BEGIN
   i := 0;
   WHILE i < ZilModel.nObjects DO
     o := ZilModel.objects[i];
-    W("?PTBL?"); W(o.name.atomText); W(":: .TABLE"); WLn;
+    W("?PTBL?"); WSym(o.name.atomText); W(":: .TABLE"); WLn;
 
     haveDesc := FALSE;
     p := o.props;
@@ -4102,12 +4247,14 @@ BEGIN
         IF (p.first.kind = ZilObj.KList) & (p.first.first # NIL)
            & (p.first.first.kind = ZilObj.KAtom)
            & (p.first.first.atomText = propNameTab[k]) THEN
-        IF IsDirectionProperty(p.first.rest) & ~IsPseudoProperty(propNameTab[k]) THEN
+        IF IsDirectionProperty(p.first.rest) THEN
           (* a direction property is laid out by the DIRECTIONS PROPDEF, not
              by its value list *)
           IF ~EmitDirectionProp(propNameTab[k], p.first.rest, o.name.atomText) THEN
             RETURN FALSE
           END
+        ELSIF IsLocationProperty(propNameTab[k], p.first.rest) THEN
+          (* the object's parent, already recorded in the .OBJECT row *)
         ELSE
           body := p.first.rest;
           nOwnProps := 0; v := body;
@@ -4128,9 +4275,18 @@ BEGIN
               v := body;
               WHILE (v # NIL) & (v.first # NIL) DO
                 IF v.first.kind # ZilObj.KAtom THEN
-                  Err("CompileObjects: ADJECTIVE values must be atoms"); RETURN FALSE
+                  Strings.Copy("CompileObjects: ADJECTIVE values must be atoms, in object ", errBuf);
+                  Strings.Append(o.name.atomText, errBuf);
+                  Strings.Append(": ", errBuf);
+                  ZilObj.PrintTo(v.first, nm); Strings.Append(nm, errBuf);
+                  Err(errBuf); RETURN FALSE
                 END;
-                W("	.BYTE A?"); W(v.first.atomText); WLn;
+                (* the word part goes through WSym, matching how the A?WORD
+                   constant itself is defined (EmitVocabTable's own A?
+                   emission) - a word with a character ZAP disallows bare
+                   (advent's "pirate's") needs the SAME sanitized spelling
+                   on both sides or the reference does not resolve. *)
+                W("	.BYTE A?"); WSym(v.first.atomText); WLn;
                 v := v.rest
               END
             ELSE
@@ -4139,11 +4295,37 @@ BEGIN
               v := body;
               WHILE (v # NIL) & (v.first # NIL) DO
                 IF v.first.kind # ZilObj.KAtom THEN
-                  Err("CompileObjects: SYNONYM values must be atoms"); RETURN FALSE
+                  Strings.Copy("CompileObjects: SYNONYM values must be atoms, in object ", errBuf);
+                  Strings.Append(o.name.atomText, errBuf);
+                  Strings.Append(": ", errBuf);
+                  ZilObj.PrintTo(v.first, nm); Strings.Append(nm, errBuf);
+                  Err(errBuf); RETURN FALSE
                 END;
                 W("	.WORD W?"); WSym(v.first.atomText); WLn;
                 v := v.rest
               END
+            END
+          ELSIF (propNameTab[k] = "GLOBAL") & (ZilModel.zversion = 3) THEN
+            (* On V3 an object number fits in one byte, and GLOBAL is a list
+               of object references — so the original stores it one BYTE per
+               object rather than the generic two. Without this, a room with
+               five GLOBAL objects (advent has several) needs 10 bytes, over
+               V3's 8-byte property limit; at one byte each it fits in 5. V4+
+               widens object numbers to a word, so it just takes the generic
+               path below like any other list-of-objects property. *)
+            FixText(nOwnProps, text);
+            W("	.PROP "); W(text); W(",P?"); W(propNameTab[k]); WLn;
+            v := body;
+            WHILE (v # NIL) & (v.first # NIL) DO
+              IF (v.first.kind # ZilObj.KAtom) OR (FindObjectIdx(v.first.atomText) < 0) THEN
+                Strings.Copy("CompileObjects: GLOBAL values must be objects, in object ", errBuf);
+                Strings.Append(o.name.atomText, errBuf);
+                Strings.Append(": ", errBuf);
+                ZilObj.PrintTo(v.first, nm); Strings.Append(nm, errBuf);
+                Err(errBuf); RETURN FALSE
+              END;
+              W("	.BYTE "); WSym(v.first.atomText); WLn;
+              v := v.rest
             END
           ELSE
           FixText(nOwnProps * 2, text);
@@ -4254,7 +4436,17 @@ BEGIN
   nActions := 0;
   FOR i := 0 TO ZilModel.nSyntaxes - 1 DO
     IF ZilModel.syntaxes[i].action[0] # 0X THEN
-      ConstNameOf(ZilModel.syntaxes[i].action, text);
+      IF ZilModel.syntaxes[i].actionName[0] # 0X THEN
+        (* an explicit action name: used as written, with V? prefixed unless
+           it is already there *)
+        Strings.Copy(ZilModel.syntaxes[i].actionName, text);
+        IF ~((text[0] = "V") & (text[1] = "?")) THEN
+          Strings.Copy("V?", text);
+          Strings.Append(ZilModel.syntaxes[i].actionName, text)
+        END
+      ELSE
+        ConstNameOf(ZilModel.syntaxes[i].action, text)
+      END;
       act := ActionIdx(text);
       IF act < 0 THEN
         IF nActions >= MaxActions THEN
@@ -4481,6 +4673,112 @@ BEGIN
   END;
   RETURN TRUE
 END ScanInlineTables;
+
+(* A property NAME can carry a PROPSPEC: a function that rewrites the whole
+   property list before anything is compiled. zillib uses it for THINGS
+   (pseudo-objects, in advent's scenery) and for PRONOUN. The function is
+   called with the property list and returns a LIST whose REST replaces the
+   property's body - the returned list's own first element is a placeholder
+   standing in for the property name.
+
+   It has to run before everything else, because a PROPSPEC may DEFINE new
+   routines and build new tables as it goes (THINGS-PROPSPEC does both), and
+   those have to be expanded, scanned and emitted with all the others. The
+   original applies it in PreBuildObject for the same reason.
+
+   The property list is passed QUOTEd. Handing it over bare would evaluate
+   its elements, and a property list is data: (THINGS <> (HILL BUMP INCLINE)
+   "...") names words, not values. *)
+(* Splices any top-level SPLICE-typed member of a property's value list into
+   that list, one level deep. `#SPLICE (...)` only ever reaches a property
+   list this way: as the substituted result of a `%<VERSION? ...>` read-time
+   clause, e.g. advent's
+     (SYNONYM MAGAZINES ZINES ISSUES TODAY
+         %<VERSION? (ZIP #SPLICE ()) (ELSE #SPLICE (MAGAZINE ZINE ...))>)
+   `%<...>` substitutes its evaluated result in place of ONE list element at
+   READ time (see ZilRead's own comment on why the READER must not do this
+   flattening itself), so by the time a property list reaches here it may
+   contain a raw SPLICE value sitting where several words, or none, belong.
+   This is the one place that value gets consumed as real data, so this is
+   where it gets flattened - mirroring ExpandTree's identical one-level
+   splice-flatten for routine bodies. *)
+PROCEDURE FlattenSpliceMembers(list: ZilObj.Zo): ZilObj.Zo;
+VAR head, tail, cell, p, sp: ZilObj.Zo;
+BEGIN
+  head := NIL; tail := NIL;
+  p := list;
+  WHILE (p # NIL) & (p.first # NIL) DO
+    IF p.first.kind = ZilObj.KSplice THEN
+      sp := p.first;
+      WHILE (sp # NIL) & (sp.first # NIL) DO
+        cell := ZilObj.Cons(ZilObj.KList, sp.first, NIL);
+        IF head = NIL THEN head := cell ELSE tail.rest := cell END;
+        tail := cell;
+        sp := sp.rest
+      END
+    ELSE
+      cell := ZilObj.Cons(ZilObj.KList, p.first, NIL);
+      IF head = NIL THEN head := cell ELSE tail.rest := cell END;
+      tail := cell
+    END;
+    p := p.rest
+  END;
+  IF head = NIL THEN RETURN ZilObj.NewEmpty(ZilObj.KList) END;
+  RETURN head
+END FlattenSpliceMembers;
+
+PROCEDURE ApplyPropSpecs(): BOOLEAN;
+VAR i: INTEGER; p, spec, call, r: ZilObj.Zo; nm: ARRAY 64 OF CHAR;
+    errBuf: ARRAY 512 OF CHAR; res: ZilEval.ZResult;
+BEGIN
+  i := 0;
+  WHILE i < ZilModel.nObjects DO
+    p := ZilModel.objects[i].props;
+    WHILE (p # NIL) & (p.first # NIL) DO
+      IF (p.first.kind = ZilObj.KList) & (p.first.first # NIL)
+         & (p.first.first.kind = ZilObj.KAtom) THEN
+        p.first.rest := FlattenSpliceMembers(p.first.rest);
+        Strings.Copy(p.first.first.atomText, nm);
+        spec := ZilObj.GetProp(p.first.first, ZilObj.Intern("PROPSPEC"));
+        (* <PUTPROP THINGS PROPSPEC THINGS-PROPSPEC> stores the NAME here,
+           because a bare atom self-evaluates in this port (see ZilEval's
+           header note) where MDL would have yielded its GVAL. Follow it. *)
+        IF (spec # NIL) & (spec.kind = ZilObj.KAtom) THEN
+          spec := spec.globalVal
+        END;
+        IF (spec # NIL)
+           & ((spec.kind = ZilObj.KFunction) OR (spec.kind = ZilObj.KMacro)
+              OR (spec.kind = ZilObj.KSubr) OR (spec.kind = ZilObj.KFSubr)) THEN
+          call := ZilObj.Cons(ZilObj.KForm, p.first, NIL);
+          call := ZilObj.Cons(ZilObj.KForm, ZilObj.Intern("QUOTE"), call);
+          call := ZilObj.Cons(ZilObj.KForm, call, NIL);
+          call := ZilObj.Cons(ZilObj.KForm, spec, call);
+          ZilEval.ClearErr;
+          Strings.Copy(ZilModel.objects[i].name.atomText, curRoutine);
+          res := ZilEval.Eval(call);
+          curRoutine[0] := 0X;
+          IF ZilEval.evalErrFlag THEN Err(ZilEval.evalErrMsg); RETURN FALSE END;
+          r := res.value;
+          IF (r = NIL) OR (r.kind # ZilObj.KList) OR (r.rest = NIL)
+             OR (r.rest.first = NIL) THEN
+            Strings.Copy("ApplyPropSpecs: the PROPSPEC for ", errBuf);
+            Strings.Append(nm, errBuf);
+            Strings.Append(" of object ", errBuf);
+            Strings.Append(ZilModel.objects[i].name.atomText, errBuf);
+            Strings.Append(" returned a bad value: ", errBuf);
+            ZilObj.PrintTo(r, nm); Strings.Append(nm, errBuf);
+            Err(errBuf); RETURN FALSE
+          END;
+          (* the rest of the returned list becomes the property's new body *)
+          p.first.rest := r.rest
+        END
+      END;
+      p := p.rest
+    END;
+    INC(i)
+  END;
+  RETURN TRUE
+END ApplyPropSpecs;
 
 PROCEDURE PrepareRoutines(): BOOLEAN;
 VAR i: INTEGER;
@@ -4741,6 +5039,11 @@ BEGIN
       ZilModel.AddGlobal(ZilObj.Intern("PREPOSITIONS"), NIL)
     END
   END;
+
+  (* PROPSPECs first: they rewrite object properties and may define routines
+     and tables that everything below has to see *)
+  ok := ApplyPropSpecs();
+  IF ~ok THEN RETURN FALSE END;
 
   (* expand and scan every routine before any data is emitted — see
      PrepareRoutines for why the order matters *)

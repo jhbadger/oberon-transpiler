@@ -33,6 +33,7 @@ CONST
   MaxSyntaxes* = 2048;
   MaxSynonyms* = 2048;
   MaxDirections* = 64;
+  MaxBitSynonyms* = 64;
   MaxBuzzwords*  = 512;
   MaxPropDefaults* = 512;
   MaxPropDefSpecs* = 128;
@@ -103,6 +104,12 @@ TYPE
     find1*, find2*: ARRAY 64 OF CHAR;
     opts1*, opts2*: INTEGER;
     action*, preAction*: ARRAY 64 OF CHAR;
+    (* the optional THIRD value after '=', which names the action explicitly
+       instead of deriving it from the action routine. advent needs it:
+       <SYNTAX WATER OBJECT (FIND SPONGEBIT) = V-POUR-LIQUID PRE-WATER WATER>
+       shares one routine between several verbs but wants V?WATER, not
+       V?POUR-LIQUID. Empty means "derive it". *)
+    actionName*: ARRAY 64 OF CHAR;
     actionIdx*: INTEGER      (* index into the action table *)
   END;
 
@@ -201,6 +208,14 @@ VAR
   directions*: ARRAY MaxDirections OF ZilObj.Zo;
   nDirections*: INTEGER;
 
+  (* <BIT-SYNONYM FIRST ALIAS...> makes each ALIAS another name for the
+     object flag FIRST, sharing its bit rather than claiming a new one -
+     which matters, because V3 has only 32 flags. Kept as two parallel name
+     arrays rather than a map: there are never many. *)
+  bitSynAlias*: ARRAY MaxBitSynonyms OF ARRAY 64 OF CHAR;
+  bitSynTarget*: ARRAY MaxBitSynonyms OF ARRAY 64 OF CHAR;
+  nBitSynonyms*: INTEGER;
+
   buzzwords*: ARRAY MaxBuzzwords OF ZilObj.Zo;
   nBuzzwords*: INTEGER;
 
@@ -217,8 +232,31 @@ VAR
   nVocab*: INTEGER;
   nextVerb*, nextPrep*, nextAdj*, nextBuzz*: INTEGER;
 
+(* A later <ROUTINE NAME ...> for an already-defined NAME replaces the
+   earlier definition rather than adding a second one with the same name.
+   MDL only allows this inside <BIND ((REDEFINE T)) ...> and throws
+   otherwise; this port takes the same "redefinition is always silently
+   allowed" simplification already used for SET/SETG/GLOBAL/CONSTANT and
+   DEFINE/DEFMAC (see ZilEval's own SET/SETG/GLOBAL/CONSTANT comment) rather
+   than tracking the REDEFINE local and rejecting an unguarded one.
+
+   advent.zil relies on this for real: it wraps its own V-QUIT and
+   V-THINK-ABOUT in <BIND ((REDEFINE T)) ...> to override zillib's. Without
+   replacing in place, both definitions were emitted as two `.FUNCT` bodies
+   under the same name, which zapf rejects as "function redefined". *)
 PROCEDURE AddRoutine*(name, act, argSpec, body: ZilObj.Zo);
+VAR i: INTEGER;
 BEGIN
+  i := 0;
+  WHILE i < nRoutines DO
+    IF routines[i].name = name THEN
+      routines[i].act := act;
+      routines[i].argSpec := argSpec;
+      routines[i].body := body;
+      RETURN
+    END;
+    INC(i)
+  END;
   IF nRoutines < MaxRoutines THEN
     routines[nRoutines].name := name;
     routines[nRoutines].act := act;
@@ -274,6 +312,7 @@ BEGIN
   syntaxes[nSyntaxes].find1[0] := 0X; syntaxes[nSyntaxes].find2[0] := 0X;
   syntaxes[nSyntaxes].opts1 := 240; syntaxes[nSyntaxes].opts2 := 240;
   syntaxes[nSyntaxes].action[0] := 0X; syntaxes[nSyntaxes].preAction[0] := 0X;
+  syntaxes[nSyntaxes].actionName[0] := 0X;
   syntaxes[nSyntaxes].actionIdx := -1;
   INC(nSyntaxes);
   RETURN nSyntaxes - 1
@@ -292,6 +331,38 @@ END AddSynonym;
 (* DIRECTIONS replaces the whole set rather than adding to it, matching the
    original's Directions.Clear() — a game that redefines the library's list
    must not end up with both. *)
+(* The flag an alias stands for, or an empty string when `name` is not an
+   alias. Aliases are resolved transitively at registration time, so one hop
+   is always enough here. *)
+PROCEDURE BitSynonymOf*(name: ARRAY OF CHAR; VAR target: ARRAY OF CHAR): BOOLEAN;
+VAR i: INTEGER;
+BEGIN
+  i := 0;
+  WHILE i < nBitSynonyms DO
+    IF bitSynAlias[i] = name THEN Strings.Copy(bitSynTarget[i], target); RETURN TRUE END;
+    INC(i)
+  END;
+  target[0] := 0X;
+  RETURN FALSE
+END BitSynonymOf;
+
+PROCEDURE AddBitSynonym*(alias, target: ARRAY OF CHAR): BOOLEAN;
+VAR chase, t: ARRAY 64 OF CHAR;
+BEGIN
+  (* aliasing an alias collapses to the original, as AddBitSynonym does.
+     NOTE: the resolved name goes in a LOCAL, not back into the `target`
+     parameter - an open ARRAY OF CHAR value parameter is a pointer in the
+     generated C, so writing to it would change the caller's string. *)
+  Strings.Copy(target, t);
+  IF BitSynonymOf(t, chase) THEN Strings.Copy(chase, t) END;
+  IF BitSynonymOf(alias, chase) THEN RETURN TRUE END;   (* already known *)
+  IF nBitSynonyms >= MaxBitSynonyms THEN RETURN FALSE END;
+  Strings.Copy(alias, bitSynAlias[nBitSynonyms]);
+  Strings.Copy(t, bitSynTarget[nBitSynonyms]);
+  INC(nBitSynonyms);
+  RETURN TRUE
+END AddBitSynonym;
+
 PROCEDURE ClearDirections*;
 BEGIN
   nDirections := 0
@@ -396,8 +467,9 @@ BEGIN
 END ShouldSetFirst;
 
 PROCEDURE AddVocab*(text: ARRAY OF CHAR; posBits: INTEGER): INTEGER;
-VAR i, firstBits: INTEGER;
+VAR i, firstBits: INTEGER; clearFirst: BOOLEAN;
 BEGIN
+  clearFirst := FALSE;
   i := FindVocab(text);
   IF i < 0 THEN
     IF nVocab >= MaxVocab THEN RETURN -1 END;
@@ -417,7 +489,20 @@ BEGIN
   END;
   IF (posBits DIV PsPreposition) MOD 2 = 1 THEN
     IF (vocab[i].pos DIV PsPreposition) MOD 2 = 0 THEN
-      vocab[i].prepVal := nextPrep; DEC(nextPrep)
+      vocab[i].prepVal := nextPrep; DEC(nextPrep);
+      (* a preposition's value is ALWAYS emitted first (EmitVocabTable's own
+         priority order matches the original's WriteToBuilder exactly:
+         Preposition wins over Verb/Adjective/Direction/Object regardless of
+         which was registered first), so the original's SetPreposition
+         unconditionally clears whatever First flag an earlier registration
+         set, and so must this one. Skipping this left "INVENTORY" — a word
+         that is BOTH a verb and a preposition in advent's grammar —
+         flagged VerbFirst from its earlier <SYNTAX INVENTORY = V-INVENTORY>
+         registration, so CHKWORD?'s "is this a verb?" query read the
+         PREPOSITION's value out of V1 instead of the verb's own value out
+         of V2, and "inventory" the command silently failed to parse as a
+         verb at all. *)
+      clearFirst := TRUE
     END
   END;
   IF (posBits DIV PsAdjective) MOD 2 = 1 THEN
@@ -435,7 +520,10 @@ BEGIN
   END;
   IF (posBits DIV PsBuzzword) MOD 2 = 1 THEN
     IF (vocab[i].pos DIV PsBuzzword) MOD 2 = 0 THEN
-      vocab[i].buzzVal := nextBuzz; DEC(nextBuzz)
+      vocab[i].buzzVal := nextBuzz; DEC(nextBuzz);
+      (* buzzword value comes before everything but preposition - same
+         unconditional clear as preposition, for the same reason *)
+      clearFirst := TRUE
     END
   END;
 
@@ -445,7 +533,9 @@ BEGIN
      rather than accumulate, and only the first value-recording part of
      speech ever sets them. *)
   vocab[i].pos := BitOr(vocab[i].pos, posBits);
-  IF firstBits # 0 THEN
+  IF clearFirst THEN
+    vocab[i].pos := vocab[i].pos - (vocab[i].pos MOD 4)
+  ELSIF firstBits # 0 THEN
     vocab[i].pos := vocab[i].pos - (vocab[i].pos MOD 4) + firstBits
   END;
   RETURN i
@@ -456,6 +546,7 @@ BEGIN
   zversion := 3; timeStatusLine := FALSE;
   nRoutines := 0; nObjects := 0; nGlobals := 0; nConstants := 0; nTables := 0;
   nSyntaxes := 0; nSynonyms := 0; nDirections := 0; nBuzzwords := 0;
+  nBitSynonyms := 0;
   nPropDefaults := 0; nPropDefSpecs := 0; nTellPatterns := 0;
   nVocab := 0;
   nextVerb := 255; nextPrep := 255; nextAdj := 255; nextBuzz := 255

@@ -308,6 +308,18 @@ BEGIN
   END
 END SetZVal;
 
+(* A ROUTINE's ZVAL is a value of type ROUTINE rather than the atom, because
+   pronouns.zil's PRONOUN-PROPSPEC builds a name and then asks
+   <TYPE? <GETPROP .R ZVAL> ROUTINE> to check that it really names one.
+   Storing the atom made every <PRONOUN IT HIM> definition fail with
+   NO-SUCH-PRONOUN. *)
+PROCEDURE SetZValRoutine*(atom: ZilObj.Zo);
+BEGIN
+  IF (atom # NIL) & (atom.kind = ZilObj.KAtom) THEN
+    ZilObj.PutProp(atom, ZilObj.Intern("ZVAL"), ZilObj.NewRoutineRef(atom))
+  END
+END SetZValRoutine;
+
 PROCEDURE IsTrue*(z: ZilObj.Zo): BOOLEAN;
 BEGIN RETURN (z # NIL) & (z.kind # ZilObj.KFalse) END IsTrue;
 
@@ -337,6 +349,50 @@ BEGIN
     RETURN FALSE
   END
 END ValuesEqual;
+
+(* MDL draws a distinction this port had collapsed: `==?` is EXACT equality
+   (the same object, or the same primitive value) while `=?` compares
+   STRUCTURE. Two separately built <QUOTE REPEATABLE> forms are `=?` but not
+   `==?`, and zillib's SCORING-ACHIEVEMENTS relies on precisely that — it
+   tests an unevaluated `'REPEATABLE` from its argument list against
+   `''REPEATABLE`, and with only exact equality every achievement flag was
+   rejected as UNRECOGNIZED-ACHIEVEMENT-FLAG.
+
+   TABLEs are deliberately compared by identity only: a table is a thing with
+   an address, not a value, and two tables with equal contents are not the
+   same table. *)
+PROCEDURE StructurallyEqual*(a, b: ZilObj.Zo): BOOLEAN;
+VAR i: INTEGER; pa, pb: ZilObj.Zo;
+BEGIN
+  IF ValuesEqual(a, b) THEN RETURN TRUE END;
+  IF (a = NIL) OR (b = NIL) THEN RETURN FALSE END;
+  IF a.kind # b.kind THEN RETURN FALSE END;
+  IF (a.kind = ZilObj.KList) OR (a.kind = ZilObj.KForm)
+     OR (a.kind = ZilObj.KFalse) OR (a.kind = ZilObj.KSplice) THEN
+    pa := a; pb := b;
+    WHILE (pa # NIL) & (pa.first # NIL) & (pb # NIL) & (pb.first # NIL) DO
+      IF ~StructurallyEqual(pa.first, pb.first) THEN RETURN FALSE END;
+      pa := pa.rest; pb := pb.rest
+    END;
+    (* equal only if BOTH ran out at the same point *)
+    RETURN ((pa = NIL) OR (pa.first = NIL)) & ((pb = NIL) OR (pb.first = NIL))
+  END;
+  IF a.kind = ZilObj.KVector THEN
+    IF a.vecLen # b.vecLen THEN RETURN FALSE END;
+    FOR i := 0 TO a.vecLen - 1 DO
+      IF ~StructurallyEqual(a.vecItems[i], b.vecItems[i]) THEN RETURN FALSE END
+    END;
+    RETURN TRUE
+  END;
+  IF a.kind = ZilObj.KAdecl THEN
+    RETURN StructurallyEqual(a.adFirst, b.adFirst)
+         & StructurallyEqual(a.adSecond, b.adSecond)
+  END;
+  IF a.kind = ZilObj.KSegment THEN
+    RETURN StructurallyEqual(a.segForm, b.segForm)
+  END;
+  RETURN FALSE
+END StructurallyEqual;
 
 (* ------------------------------------------------------------------ *)
 (* SUBR dispatch (already-evaluated args) — does not itself call Eval,   *)
@@ -481,7 +537,43 @@ VAR idx, flags, count, i, initN, totalN: INTEGER; tab: ZilObj.Zo;
 BEGIN
   idx := 0; flags := 0;
   IF (n > idx) & (args[idx].kind = ZilObj.KAtom) THEN
-    IF ZilObj.IsAtomNamed(args[idx], "BYTE") THEN flags := flags + ZilObj.TfByte END;
+    (* The original's own comment on this argument: "specifier controls the
+       LENGTH MARKER. BYTE specifier makes the length marker a byte (but the
+       table is still a word table unless changed with a flag)." NONE/BYTE/
+       WORD, and only NONE means "no length prefix at all" - BYTE and WORD
+       both mean "prepend one length word/byte, pre-filled with the element
+       count", making the table ONE ELEMENT LARGER than `count`, not `count`
+       elements exactly.
+
+       Getting this wrong is silent and severe: zillib's SCOPE-CURRENT-STAGES
+       is <ITABLE WORD ,SCOPE-CURRENT-STAGES-SIZE> - a table of N routine
+       references PLUS a leading count word the scope-crawl machinery reads
+       and writes directly (GET/PUT index 0). Treating WORD as a no-op (as
+       this port used to) allocates a table with only N words total instead
+       of N+1, so the library's own PUT of the count into "slot 0" is really
+       overwriting DATA SLOT 0, and reading past the last data slot the
+       library actually filled walks off the end of the table into whatever
+       memory follows it in the story file - read there long enough (which
+       "take" an out-of-scope object does, via the scope-stage fallback that
+       widens to every stage) and eventually a CALL is made through a
+       Z-machine-valid-looking but PACKED-ADDRESS-garbage value: "call to a
+       non-routine". Confirmed against a real build of zilf's own compiler:
+       it emits `SCOPE-CURRENT-STAGES:: .TABLE 16` for this exact call - 16
+       bytes, i.e. 8 words for a table of 7 elements, one more than `count`.
+
+       This port ties the length prefix's width to the same TfByte flag that
+       governs element width by default (rather than tracking them as
+       independent bits, as the original's TableFormat.ByteLength/WordLength
+       do) - a simplification that happens to be exact for every real use in
+       this corpus: the one BYTE-specifier table (verbs.zil's TREE-INDENT)
+       tags every element with its own <BYTE n>, which overrides the table's
+       default width regardless, and the one WORD-specifier table (this one)
+       has no elements narrower than a word to begin with. *)
+    IF ZilObj.IsAtomNamed(args[idx], "BYTE") THEN
+      flags := flags + ZilObj.TfLength + ZilObj.TfByte
+    ELSIF ZilObj.IsAtomNamed(args[idx], "WORD") THEN
+      flags := flags + ZilObj.TfLength
+    END;
     INC(idx)
   END;
   IF (n <= idx) OR (args[idx].kind # ZilObj.KFix) THEN
@@ -906,6 +998,26 @@ BEGIN
   RETURN v
 END WithWidth;
 
+(* The element at a word or byte offset, or NIL when the offset falls inside
+   an element rather than on its boundary. *)
+PROCEDURE TableGetWord*(t: ZilObj.Zo; wordIdx: INTEGER): ZilObj.Zo;
+VAR i: INTEGER;
+BEGIN
+  IF (t = NIL) OR (t.kind # ZilObj.KTable) OR (wordIdx < 0) THEN RETURN NIL END;
+  i := TableElemAt(t, wordIdx * 2);
+  IF (i < 0) OR (TableElemWidth(t, i) # 2) THEN RETURN NIL END;
+  RETURN t.vecItems[i]
+END TableGetWord;
+
+PROCEDURE TableGetByte*(t: ZilObj.Zo; byteIdx: INTEGER): ZilObj.Zo;
+VAR i: INTEGER;
+BEGIN
+  IF (t = NIL) OR (t.kind # ZilObj.KTable) OR (byteIdx < 0) THEN RETURN NIL END;
+  i := TableElemAt(t, byteIdx);
+  IF (i < 0) OR (TableElemWidth(t, i) # 1) THEN RETURN NIL END;
+  RETURN t.vecItems[i]
+END TableGetByte;
+
 PROCEDURE TablePutWord*(t: ZilObj.Zo; wordIdx: INTEGER; v: ZilObj.Zo): BOOLEAN;
 VAR i, k: INTEGER;
 BEGIN
@@ -944,11 +1056,21 @@ BEGIN
 END TablePutByte;
 
 PROCEDURE StructPut*(z: ZilObj.Zo; i: INTEGER; v: ZilObj.Zo): BOOLEAN;
+VAR p: ZilObj.Zo; k: INTEGER;
 BEGIN
   IF (z = NIL) OR (i < 1) THEN RETURN FALSE END;
   IF (z.kind = ZilObj.KVector) OR (z.kind = ZilObj.KTable) THEN
     IF i > z.vecLen THEN RETURN FALSE END;
     z.vecItems[i - 1] := v;
+    RETURN TRUE
+  END;
+  (* a cons chain: MDL's PUT works on a LIST as well as a VECTOR *)
+  IF (z.kind = ZilObj.KList) OR (z.kind = ZilObj.KForm)
+     OR (z.kind = ZilObj.KFalse) OR (z.kind = ZilObj.KSplice) THEN
+    p := z; k := 1;
+    WHILE (p # NIL) & (p.first # NIL) & (k < i) DO p := p.rest; INC(k) END;
+    IF (p = NIL) OR (p.first = NIL) THEN RETURN FALSE END;
+    p.first := v;
     RETURN TRUE
   END;
   RETURN FALSE
@@ -975,6 +1097,7 @@ BEGIN
    |ZilObj.KFunction:   Strings.Copy("FUNCTION", s)
    |ZilObj.KMacro:      Strings.Copy("MACRO", s)
    |ZilObj.KTable:      Strings.Copy("TABLE", s)
+   |ZilObj.KRoutine:    Strings.Copy("ROUTINE", s)
    |ZilObj.KOblist:     Strings.Copy("OBLIST", s)
    |ZilObj.KSplice:     Strings.Copy("SPLICE", s)
   ELSE Strings.Copy("ANY", s)
@@ -1217,14 +1340,20 @@ BEGIN
   ELSIF (name = "=?") OR (name = "EQUAL?") OR (name = "==?") THEN
     IF n < 2 THEN RETURN Err("=?/EQUAL?: expected at least 2 args") END;
     FOR i := 1 TO n - 1 DO
-      IF ValuesEqual(args[0], args[i]) THEN RETURN MkVal(TrueVal()) END
+      IF name = "==?" THEN
+        IF ValuesEqual(args[0], args[i]) THEN RETURN MkVal(TrueVal()) END
+      ELSIF StructurallyEqual(args[0], args[i]) THEN RETURN MkVal(TrueVal())
+      END
     END;
     RETURN MkVal(FalseVal())
 
   ELSIF (name = "N=?") OR (name = "N==?") THEN
     IF n < 2 THEN RETURN Err("N=?: expected at least 2 args") END;
     FOR i := 1 TO n - 1 DO
-      IF ValuesEqual(args[0], args[i]) THEN RETURN MkVal(FalseVal()) END
+      IF name = "N==?" THEN
+        IF ValuesEqual(args[0], args[i]) THEN RETURN MkVal(FalseVal()) END
+      ELSIF StructurallyEqual(args[0], args[i]) THEN RETURN MkVal(FalseVal())
+      END
     END;
     RETURN MkVal(TrueVal())
 
@@ -1353,13 +1482,18 @@ BEGIN
       INC(i)
     END;
 
-    (* past the "=": the action, then an optional pre-action *)
+    (* past the "=": the action, then an optional pre-action, then an optional
+       explicit ACTION NAME. All three are in the original's Syntax.Parse. *)
     INC(i);
     IF (i < n) & (args[i].kind = ZilObj.KAtom) THEN
       Strings.Copy(args[i].atomText, ZilModel.syntaxes[synKind].action);
       INC(i);
       IF (i < n) & (args[i].kind = ZilObj.KAtom) THEN
-        Strings.Copy(args[i].atomText, ZilModel.syntaxes[synKind].preAction)
+        Strings.Copy(args[i].atomText, ZilModel.syntaxes[synKind].preAction);
+        INC(i);
+        IF (i < n) & (args[i].kind = ZilObj.KAtom) THEN
+          Strings.Copy(args[i].atomText, ZilModel.syntaxes[synKind].actionName)
+        END
       END
     ELSE
       RETURN Err("SYNTAX: expected an action routine name after '='")
@@ -1375,6 +1509,25 @@ BEGIN
     ELSIF name = "ADJ-SYNONYM" THEN synKind := ZilModel.SynAdj
     ELSE synKind := ZilModel.SynDir END;
     FOR i := 1 TO n - 1 DO ZilModel.AddSynonym(synKind, args[0], args[i]) END;
+    RETURN MkVal(args[0])
+
+  ELSIF name = "BIT-SYNONYM" THEN
+    (* <BIT-SYNONYM FIRST ALIAS...>: each ALIAS becomes another name for the
+       object flag FIRST and shares its bit. V3 has only 32 flags, so this is
+       how a game gives one bit several readable names (advent's SACREDBIT and
+       TREASUREBIT). Returns FIRST, as the original does. *)
+    IF n < 2 THEN RETURN Err("BIT-SYNONYM: expected a flag and at least one alias") END;
+    IF args[0].kind # ZilObj.KAtom THEN
+      RETURN Err("BIT-SYNONYM: the first argument must be an ATOM")
+    END;
+    FOR i := 1 TO n - 1 DO
+      IF args[i].kind # ZilObj.KAtom THEN
+        RETURN Err("BIT-SYNONYM: every alias must be an ATOM")
+      END;
+      IF ~ZilModel.AddBitSynonym(args[i].atomText, args[0].atomText) THEN
+        RETURN Err("BIT-SYNONYM: too many flag synonyms")
+      END
+    END;
     RETURN MkVal(args[0])
 
   ELSIF name = "DIRECTIONS" THEN
@@ -1445,6 +1598,71 @@ BEGIN
       END
     END;
     RETURN MkVal(TrueVal())
+
+  ELSIF ((name[0] = "0") OR (name[0] = "1")) & (name[1] = "?") & (name[2] = 0X) THEN
+    (* MDL's <0? x> and <1? x>: true only for that exact FIX, false for
+       anything else including a non-FIX. Compile-time predicates, distinct
+       from the compiler's own 0?/1? on Z-machine values.
+       NOTE: compared character by character. A one-character double-quoted
+       literal is a CHAR in this dialect, so `name = "0?"` would be a string
+       compare against a two-char literal - fine - but IsOp is NOT usable
+       here: it requires a one-character name and so never matches "0?". *)
+    IF n < 1 THEN RETURN Err("0?/1?: expected a value") END;
+    IF (args[0] # NIL) & (args[0].kind = ZilObj.KFix) THEN
+      IF name[0] = "0" THEN RETURN MkVal(BoolVal(args[0].fixVal = 0)) END;
+      RETURN MkVal(BoolVal(args[0].fixVal = 1))
+    END;
+    RETURN MkVal(FalseVal())
+
+  ELSIF name = "UNPARSE" THEN
+    (* <UNPARSE value> is a round-trippable printed form of the value — the
+       inverse of PARSE, and what real source uses to build a name out of a
+       number: advent writes <PARSE <STRING "ALIKE-MAZE-" <UNPARSE .DEST>>>.
+       The original's optional radix argument is not supported, as it is not
+       there either. *)
+    IF n < 1 THEN RETURN Err("UNPARSE: expected a value") END;
+    ZilObj.PrintTo(args[0], s);
+    RETURN MkVal(ZilObj.NewString(s))
+
+  ELSIF name = "PUT" THEN
+    (* <PUT struc n value>: MDL's structure setter, 1-based, returning the
+       structure. Needed at COMPILE time because a DEFSTRUCT accessor used as
+       a setter expands straight to it — zillib's <ACH-REPEATABLE? .A T>
+       becomes <PUT .A 4 T> and runs while the achievements are being
+       defined. *)
+    IF n < 3 THEN RETURN Err("PUT: expected a structure, an index and a value") END;
+    IF (args[1] = NIL) OR (args[1].kind # ZilObj.KFix) THEN
+      RETURN Err("PUT: the index must be a FIX")
+    END;
+    IF ~StructPut(args[0], args[1].fixVal, args[2]) THEN
+      RETURN Err("PUT: writing past the end of the structure")
+    END;
+    RETURN MkVal(args[0])
+
+  ELSIF (name = "ZGET") OR (name = "GETB") THEN
+    (* the width-aware TABLE readers a DEFSTRUCT over a TABLE generates.
+       ZGET counts words from the table's start, GETB counts bytes. *)
+    IF (n < 2) OR (args[0] = NIL) OR (args[0].kind # ZilObj.KTable)
+       OR (args[1] = NIL) OR (args[1].kind # ZilObj.KFix) THEN
+      RETURN Err("ZGET/GETB: expected a TABLE and a FIX index")
+    END;
+    IF name = "ZGET" THEN ind := TableGetWord(args[0], args[1].fixVal)
+    ELSE ind := TableGetByte(args[0], args[1].fixVal) END;
+    IF ind = NIL THEN RETURN Err("ZGET/GETB: index does not line up with an element") END;
+    RETURN MkVal(ind)
+
+  ELSIF (name = "ZPUT") OR (name = "PUTB") THEN
+    IF (n < 3) OR (args[0] = NIL) OR (args[0].kind # ZilObj.KTable)
+       OR (args[1] = NIL) OR (args[1].kind # ZilObj.KFix) THEN
+      RETURN Err("ZPUT/PUTB: expected a TABLE, a FIX index and a value")
+    END;
+    IF name = "ZPUT" THEN len := 0;
+      IF ~TablePutWord(args[0], args[1].fixVal, args[2]) THEN len := 1 END
+    ELSE len := 0;
+      IF ~TablePutByte(args[0], args[1].fixVal, args[2]) THEN len := 1 END
+    END;
+    IF len # 0 THEN RETURN Err("ZPUT/PUTB: index does not line up with an element") END;
+    RETURN MkVal(args[0])
 
   ELSIF (name = "NTH") OR (name = "GET-ELEMENT") THEN
     (* <NTH struct n>, 1-based. Also what <n struct> means when a FIX is
@@ -1908,7 +2126,11 @@ BEGIN
     ELSE RETURN MkVal(FalseVal()) END
 
   ELSE
-    RETURN Err("unrecognized or not-yet-implemented SUBR")
+    (* Name it. A bare "unrecognized SUBR" says nothing about which of the
+       two hundred registered names fell through to here. *)
+    Strings.Copy("unrecognized or not-yet-implemented SUBR: ", msgBuf);
+    Strings.Append(name, msgBuf);
+    RETURN Err(msgBuf)
   END
 END ApplySubr;
 
@@ -1981,7 +2203,7 @@ BEGIN
      emits RTRUE for such a routine. *)
 
   ZilModel.AddRoutine(nameAtom, actAtom, argSpecList, bodyList);
-  SetZVal(nameAtom);
+  SetZValRoutine(nameAtom);
   RETURN MkVal(nameAtom)
 END ApplyRoutine;
 
@@ -2285,12 +2507,21 @@ BEGIN
           IF r.outcome # OValue THEN
             qqStop := TRUE
           ELSE
-            qqSpliceP := r.value;
-            WHILE (qqSpliceP # NIL) & (qqSpliceP.first # NIL) DO
-              qqCell := ZilObj.Cons(z.kind, qqSpliceP.first, NIL);
+            (* Splice through the generic structure accessors, not by walking
+               .rest: the value may be a VECTOR, and a vector's elements are
+               not a cons chain. zillib's THINGS-PROPSPEC hits this — a
+               pseudo-object whose action is written ([READ EXAMINE] "text")
+               splices a VECTOR of verbs, and walking .rest spliced NOTHING,
+               leaving <VERB?> with no arguments and so <EQUAL? ,PRSA> with
+               one operand. *)
+            IF ~IsStructured(r.value) THEN
+              RETURN ErrAtom("quasiquote: expected a structured value to splice, got", r.value)
+            END;
+            segLen := StructLength(r.value);
+            FOR segI := 1 TO segLen DO
+              qqCell := ZilObj.Cons(z.kind, StructNth(r.value, segI), NIL);
               IF qqResult = NIL THEN qqResult := qqCell ELSE qqTail.rest := qqCell END;
-              qqTail := qqCell;
-              qqSpliceP := qqSpliceP.rest
+              qqTail := qqCell
             END
           END
         ELSE
@@ -2329,7 +2560,8 @@ BEGIN
   IF (z.kind = ZilObj.KAtom) OR (z.kind = ZilObj.KFix) OR (z.kind = ZilObj.KString)
      OR (z.kind = ZilObj.KChar) OR (z.kind = ZilObj.KFalse)
      OR (z.kind = ZilObj.KSubr) OR (z.kind = ZilObj.KFSubr) OR (z.kind = ZilObj.KActivation)
-     OR (z.kind = ZilObj.KFunction) OR (z.kind = ZilObj.KMacro) THEN
+     OR (z.kind = ZilObj.KFunction) OR (z.kind = ZilObj.KMacro)
+     OR (z.kind = ZilObj.KRoutine) THEN
     RETURN MkVal(z)
 
   ELSIF z.kind = ZilObj.KVector THEN
@@ -2466,7 +2698,16 @@ BEGIN
             Strings.Delete(mkName, 0, 5);
             mkIdx := FindStruct(mkName)
           END;
-          IF mkIdx < 0 THEN RETURN ErrAtom("calling unassigned atom:", zFirst) END;
+          IF mkIdx < 0 THEN
+            (* Name the whole FORM, not just the head. "calling unassigned
+               atom: PUT" could be any of hundreds of places in a library;
+               the form itself usually identifies it on sight. *)
+            Strings.Copy("calling unassigned atom: ", msgBuf2);
+            Strings.Append(zFirst.atomText, msgBuf2);
+            Strings.Append(" in ", msgBuf2);
+            ZilObj.PrintTo(z, s2); Strings.Append(s2, msgBuf2);
+            RETURN Err(msgBuf2)
+          END;
 
           n := z.rest;
           mkExisting := NIL;
@@ -4062,6 +4303,7 @@ BEGIN
   Register("SYNONYM", FALSE); Register("VERB-SYNONYM", FALSE); Register("PREP-SYNONYM", FALSE);
   Register("ADJ-SYNONYM", FALSE); Register("DIR-SYNONYM", FALSE);
   Register("DIRECTIONS", FALSE); Register("BUZZ", FALSE); Register("VOC", FALSE);
+  Register("BIT-SYNONYM", FALSE);
   Register("DELAY-DEFINITION", FALSE);
   Register("DEFAULT-DEFINITION", TRUE); Register("REPLACE-DEFINITION", TRUE);
   Register("VERSION", FALSE); Register("CHECK-VERSION?", FALSE); Register("FILE-FLAGS", FALSE);
@@ -4076,6 +4318,9 @@ BEGIN
   Register("COMPILATION-FLAG-VALUE", FALSE); Register("IFFLAG", TRUE);
   Register("ADD-TELL-TOKENS", TRUE); Register("TELL-TOKENS", TRUE);
   Register("NTH", FALSE); Register("GET-ELEMENT", FALSE); Register("REST", FALSE);
+  Register("PUT", FALSE); Register("ZGET", FALSE); Register("ZPUT", FALSE);
+  Register("UNPARSE", FALSE); Register("0?", FALSE); Register("1?", FALSE);
+  Register("GETB", FALSE); Register("PUTB", FALSE);
   Register("EMPTY?", FALSE); Register("LENGTH", FALSE); Register("SORT", FALSE);
   Register("TYPE", FALSE); Register("PRIMTYPE", FALSE); Register("TYPE?", FALSE);
   Register("STRUCTURED?", FALSE); Register("APPLICABLE?", FALSE);
