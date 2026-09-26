@@ -4068,41 +4068,93 @@ BEGIN
     p := p.rest
   END;
 
+  (* V3's exit properties (SDirectionsPropDef_V3) are BYTE-sized throughout
+     (UEXIT/NEXIT/FEXIT/CEXIT/DEXIT = 1/2/3/4/5 bytes) because a V3 object
+     number fits in one byte; V4+ (SDirectionsPropDef_V4_Plus) widens every
+     destination field to a WORD, since V4+ object numbers don't, which
+     bumps every exit kind's byte length by exactly one (2/3/4/5/6) and, for
+     CEXIT specifically, also SWAPS the trailing STRING and FLAG fields'
+     order (room,flag,string in V3 vs room,string,flag in V4+) - confirmed
+     against the original's own PROPSPEC definitions in Context.cs. cloak_plus
+     (V5) is the first game with both rooms and a V4+ target this port has
+     tried; every V3-only game already exercises the `< 4` branches below,
+     unchanged from before this split. *)
   IF perFcn # NIL THEN
     IF ~ConstantText(perFcn, text) THEN RETURN Fail("names an unknown routine") END;
-    EmitPropHead(3);
-    W("	.WORD "); W(text); WLn;
-    W("	.BYTE 0"); WLn;
+    IF ZilModel.zversion < 4 THEN
+      EmitPropHead(3);
+      W("	.WORD "); W(text); WLn;
+      W("	.BYTE 0"); WLn
+    ELSE
+      EmitPropHead(4);
+      W("	.WORD "); W(text); WLn;
+      W("	.WORD 0"); WLn
+    END;
     RETURN TRUE
   END;
 
   IF toObj = NIL THEN
     IF sorryStr = NIL THEN RETURN Fail("has no destination") END;
-    EmitPropHead(2);
-    RETURN EmitMsgWord(sorryStr)
+    IF ZilModel.zversion < 4 THEN
+      EmitPropHead(2);
+      RETURN EmitMsgWord(sorryStr)
+    END;
+    EmitPropHead(3);
+    IF ~EmitMsgWord(sorryStr) THEN RETURN FALSE END;
+    W("	.BYTE 0"); WLn;
+    RETURN TRUE
   END;
 
   IF ~ConstantText(toObj, text) THEN RETURN Fail("names an unknown room") END;
   IF ifObj = NIL THEN
-    EmitPropHead(1);
-    W("	.BYTE "); W(text); WLn;
+    IF ZilModel.zversion < 4 THEN
+      EmitPropHead(1);
+      W("	.BYTE "); W(text); WLn
+    ELSE
+      EmitPropHead(2);
+      W("	.WORD "); W(text); WLn
+    END;
     RETURN TRUE
   END;
 
-  IF isOpen THEN EmitPropHead(5) ELSE EmitPropHead(4) END;
-  W("	.BYTE "); W(text); WLn;
-  (* a CEXIT's condition is a GLOBAL, whose byte is its Z-machine variable
-     number - which is what the .GVAR-defined symbol evaluates to, and which
-     ConstantText does not look up because a global is normally reached as
-     `,NAME` instead *)
-  IF (ifObj.kind = ZilObj.KAtom) & (FindGlobalIdx(ifObj.atomText) >= 0) THEN
-    Strings.Copy(ifObj.atomText, text); SanitizePrefixed(text)
-  ELSIF ~ConstantText(ifObj, text) THEN
-    RETURN Fail("names an unknown door object or flag global")
+  IF ZilModel.zversion < 4 THEN
+    IF isOpen THEN EmitPropHead(5) ELSE EmitPropHead(4) END;
+    W("	.BYTE "); W(text); WLn;
+    (* a CEXIT's condition is a GLOBAL, whose byte is its Z-machine variable
+       number - which is what the .GVAR-defined symbol evaluates to, and
+       which ConstantText does not look up because a global is normally
+       reached as `,NAME` instead *)
+    IF (ifObj.kind = ZilObj.KAtom) & (FindGlobalIdx(ifObj.atomText) >= 0) THEN
+      Strings.Copy(ifObj.atomText, text); SanitizePrefixed(text)
+    ELSIF ~ConstantText(ifObj, text) THEN
+      RETURN Fail("names an unknown door object or flag global")
+    END;
+    W("	.BYTE "); W(text); WLn;
+    IF ~EmitMsgWord(elseStr) THEN RETURN FALSE END;
+    IF isOpen THEN W("	.BYTE 0"); WLn END;
+    RETURN TRUE
   END;
-  W("	.BYTE "); W(text); WLn;
-  IF ~EmitMsgWord(elseStr) THEN RETURN FALSE END;
-  IF isOpen THEN W("	.BYTE 0"); WLn END;
+
+  IF isOpen THEN EmitPropHead(6) ELSE EmitPropHead(5) END;
+  W("	.WORD "); W(text); WLn;
+  IF isOpen THEN
+    (* DEXIT: room, door-object, message - same field ORDER as V3, just
+       every field a word now (no trailing padding needed: 2+2+2 = 6
+       exactly). *)
+    IF ~ConstantText(ifObj, text) THEN RETURN Fail("names an unknown door object") END;
+    W("	.WORD "); W(text); WLn;
+    IF ~EmitMsgWord(elseStr) THEN RETURN FALSE END
+  ELSE
+    (* CEXIT: room, message, flag - message and flag are SWAPPED versus V3
+       (room,flag,string there; room,string,flag here), not just widened. *)
+    IF ~EmitMsgWord(elseStr) THEN RETURN FALSE END;
+    IF (ifObj.kind = ZilObj.KAtom) & (FindGlobalIdx(ifObj.atomText) >= 0) THEN
+      Strings.Copy(ifObj.atomText, text); SanitizePrefixed(text)
+    ELSIF ~ConstantText(ifObj, text) THEN
+      RETURN Fail("names an unknown door object or flag global")
+    END;
+    W("	.BYTE "); W(text); WLn
+  END;
   RETURN TRUE
 END EmitDirectionProp;
 
