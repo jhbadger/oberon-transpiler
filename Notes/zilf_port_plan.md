@@ -3075,6 +3075,70 @@ wrong behavior, then diff against a real zilf build once the shape of the
 problem (a table walked past its declared end; a word that silently
 doesn't parse as a verb) pointed at a specific mechanism.
 
+### Two more bugs, found by playing it *harder*
+
+Calling `advent.zil` "playable" after the three bugs above was premature —
+the user tried single-letter command abbreviations (`i`, `x`, `n`/`s`/`e`/
+`w`, etc.) and got "I don't understand that sentence", and pointed out
+`zilf`'s own `vocab collision` warnings as possibly relevant. Both turned
+out to be real, and related to each other only in that both are about
+`SYNONYM`/`VERB-SYNONYM`/etc. never having been wired up at all:
+
+4. **`SYNONYM` and its four variants (`VERB-`, `PREP-`, `ADJ-`, `DIR-`)
+   were recorded and never read.** `ZilEval.ApplySubr` filed every
+   `<SYNONYM ORIGINAL alias...>` into `ZilModel.synonyms[]` and stopped —
+   nothing in `ZilCompile.mod` ever consumed the list, so declaring a
+   synonym had zero effect on the compiled game. zillib's own library
+   defines every single-letter shortcut this way (`<SYNONYM NORTH N>`,
+   `<VERB-SYNONYM INVENTORY I>`, `<VERB-SYNONYM EXAMINE X>`, ...), so none
+   of them worked, in *any* game compiled by this port, not just advent.
+   Fixed by a new `ApplyVocabSynonyms` (`ZilCompile.mod`), run after
+   `CompileSyntax` has assigned every original word's verb/preposition
+   numbers, which copies the original's vocab data onto the synonym word
+   via the same `MergeVocabWord` the vocab-collision merge below also
+   uses.
+5. **V3's 6-Z-character dictionary key genuinely can't tell some of
+   advent's words apart, and the resulting duplicate rows were never
+   merged.** `BOULDER`/`BOULDERS`, `BOTTLE`/`BOTTLED`,
+   `STALAGMITE`/`STALAGTITE` and 18 others in advent all truncate to an
+   identical dictionary key; a runtime binary search on that key can land
+   on either row, so if the two rows' part-of-speech data differs (as
+   `BOTTLE`/`BOTTLED`'s does — one is an adjective, one isn't), the lookup
+   silently gets the wrong one's data. `zapf`'s own dictionary
+   sort/compare (`VocabCompare`/`VocabCompareSaved`) compared whole
+   records instead of just the key bytes, which both risked an
+   out-of-order dictionary and drastically under-reported the collision
+   warning (6 of the real 21 pairs) — fixed to compare only
+   `ctx.vocabKeySize` bytes. But fixing detection wasn't enough on its
+   own: confirmed by a head-to-head `frotz` comparison against a fully
+   real-compiled `advent.z3` that "examine bottled water" still failed
+   after that fix alone, because the two dictionary rows were still
+   emitted separately with different data — nothing actually merged them.
+   Ported the original's `PlanVocabMerges`/`PerformVocabMerges` as
+   `ApplyVocabMerges` (`ZilCompile.mod`): sorts vocab words alphabetically,
+   groups adjacent entries whose Z-char-encoded key matches (reusing
+   `ZapfZChar.Encode`, the same routine `zapf` itself uses, so this can
+   never disagree with what gets assembled), and folds every non-first
+   member of a group into the alphabetically-first survivor. A merged
+   word gets no `.ZWORD` row of its own; its `W?` symbol becomes a bare
+   alias (`W?dup=W?survivor`) emitted after `.ENDT`. Runs *before*
+   `ApplyVocabSynonyms`, matching the original's own ordering, which
+   turned up one more wrinkle: a collision that only exists between two
+   *synonym* words (advent's `LUBRICANT`/`LUBRICATE`, both synonyms of
+   `OIL`) was invisible to it, because this port used to create a synonym
+   word's vocab entry only inside `ApplyVocabSynonyms` itself — too late
+   for the merge pass to see it. Fixed by having `ZilModel.AddSynonym`
+   register that vocab entry immediately, matching the real compiler's own
+   timing (it creates the `IWord` as soon as the `SYNONYM` form is
+   evaluated, not when `Apply()` later copies data onto it).
+
+   Verified: warning count and wording now match a real zilf+zapf build of
+   advent.zil exactly (21 collisions). "examine bottled water" now answers
+   "It looks like ordinary water to me." Single-letter abbreviations
+   (`i`, `x`, `n`, `s`, `e`, `w`, ...) all parse correctly. Full sample
+   regression (`advent`, `beer`, `cloak`, `hello`, `mandelbrot`, `name`)
+   still compiles, assembles and plays clean; `cloak` still wins.
+
 ## Suggested order for the next session
 
 **Where this stands**: five complete, unmodified games compile, assemble
