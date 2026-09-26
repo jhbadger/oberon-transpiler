@@ -1229,7 +1229,7 @@ END ValFormAtom;
 
 PROCEDURE ApplySubr*(name: ARRAY OF CHAR; args: ARRAY OF ZilObj.Zo; n: INTEGER): ZResult;
 VAR sum, i, len, synKind: INTEGER; s: ARRAY 4096 OF CHAR; ind: ZilObj.Zo;
-    msgBuf: ARRAY 512 OF CHAR;
+    msgBuf: ARRAY 512 OF CHAR; opText: ARRAY 32 OF CHAR;
     resultHead, resultTail: ZilObj.Zo;
 BEGIN
   IF (name = "SET") OR (name = "SETG") OR (name = "GLOBAL") OR (name = "CONSTANT") THEN
@@ -1599,6 +1599,36 @@ BEGIN
     END;
     RETURN MkVal(TrueVal())
 
+  ELSIF name = "ZIP-OPTIONS" THEN
+    (* <ZIP-OPTIONS opt...>: each opt is one of COLOR/MOUSE/UNDO/DISPLAY/
+       SOUND/MENU/BIG. Ported from Subrs.ZModel.cs's ZIP_OPTIONS: for each
+       recognized option (BIG is accepted and silently ignored - the
+       original's own `case StdAtom.BIG: continue`), defines a
+       COMPILATION-FLAG under the option's OWN name (so <IFFLAG (UNDO ...)>
+       works) and also sets a derived global to TRUE (USE-UNDO?, USE-COLOR?,
+       USE-MOUSE?, DISPLAY-OPS?, USE-SOUND?, USE-MENUS? - the original's own
+       StdAtom spellings), which is the flag library source actually tests
+       via <GASSIGNED? USE-UNDO?> and friends. *)
+    FOR i := 0 TO n - 1 DO
+      IF args[i].kind # ZilObj.KAtom THEN RETURN Err("ZIP-OPTIONS: expected option atoms") END;
+      Strings.Copy(args[i].atomText, s);
+      IF s = "BIG" THEN
+        (* ignored *)
+      ELSE
+        IF s = "COLOR" THEN Strings.Copy("USE-COLOR?", opText)
+        ELSIF s = "MOUSE" THEN Strings.Copy("USE-MOUSE?", opText)
+        ELSIF s = "UNDO" THEN Strings.Copy("USE-UNDO?", opText)
+        ELSIF s = "DISPLAY" THEN Strings.Copy("DISPLAY-OPS?", opText)
+        ELSIF s = "SOUND" THEN Strings.Copy("USE-SOUND?", opText)
+        ELSIF s = "MENU" THEN Strings.Copy("USE-MENUS?", opText)
+        ELSE RETURN ErrAtom("ZIP-OPTIONS: unrecognized ZIP option:", args[i])
+        END;
+        DefineFlag(s, TrueVal(), TRUE);
+        ind := ZilObj.Intern(opText); ind.globalVal := TrueVal()
+      END
+    END;
+    RETURN MkVal(TrueVal())
+
   ELSIF ((name[0] = "0") OR (name[0] = "1")) & (name[1] = "?") & (name[2] = 0X) THEN
     (* MDL's <0? x> and <1? x>: true only for that exact FIX, false for
        anything else including a non-FIX. Compile-time predicates, distinct
@@ -1830,6 +1860,38 @@ BEGIN
        the file, not the line), so there is nothing to copy — returning the
        value unchanged is the whole of its observable behaviour here. *)
     IF n < 1 THEN RETURN Err("SET-SOURCE-INFO: expected a value") END;
+    RETURN MkVal(args[0])
+
+  ELSIF name = "OFFSET" THEN
+    (* <OFFSET n structure-decl [value-decl]>: a typed pointer combining an
+       index with the DECLs a structure and its element at that index must
+       match - Subrs.Structures.cs's own OFFSET. This port has no DECL
+       checking (skipped everywhere, deliberately), and the real compiler's
+       own NTH/PUT/GET/etc. always reduce an offset argument straight back
+       to its plain integer index before doing anything with it - so an
+       OFFSET value and the bare FIX index it wraps are interchangeable
+       everywhere real source can use one, and returning the index itself
+       is the whole of OFFSET's needed behavior here. zillib's status.zil
+       (cloak_plus's fancier status line) builds several of these:
+       `<SETG RSEC-RTN <OFFSET 1 RSEC ATOM>>`. *)
+    IF (n < 2) OR (args[0].kind # ZilObj.KFix) THEN
+      RETURN Err("OFFSET: expected an index FIX and a structure DECL")
+    END;
+    RETURN MkVal(args[0])
+
+  ELSIF name = "NEWTYPE" THEN
+    (* <NEWTYPE NAME PRIMTYPE [decl]>: registers NAME as a new type whose
+       underlying representation is PRIMTYPE. This port has no type
+       registry at all - TYPE?/TYPE/PRIMTYPE always report a value's
+       actual PRIMITIVE kind (TypeName), never a user-registered name, and
+       CHTYPE to anything but a structural LIST/FORM/VECTOR conversion
+       already just returns the value unretyped (see CHTYPE's own comment)
+       - so there is nothing for NEWTYPE to register that would ever be
+       consulted. Returns the name atom, matching the original, and
+       otherwise does nothing. *)
+    IF (n < 2) OR (args[0].kind # ZilObj.KAtom) OR (args[1].kind # ZilObj.KAtom) THEN
+      RETURN Err("NEWTYPE: expected a name ATOM and a primtype ATOM")
+    END;
     RETURN MkVal(args[0])
 
   ELSIF name = "CHTYPE" THEN
@@ -2455,7 +2517,7 @@ VAR
   dsGotOffset: BOOLEAN;
   dsOpt, dsClause, dsVal: ZilObj.Zo;
   (* OBJECT / ROOM *)
-  objProps, objTail: ZilObj.Zo;
+  objProps, objTail, splice: ZilObj.Zo;
   (* MAKE-<struct> *)
   mkName, mkField: ARRAY 64 OF CHAR;
   mkIdx, mkPos, mkI: INTEGER;
@@ -3652,8 +3714,28 @@ BEGIN
         r := EvalImpl(n.first, FALSE);
         IF ShouldPass(r) THEN RETURN r END;
         IF evalErrFlag THEN RETURN r END;
-        cell := ZilObj.Cons(ZilObj.KList, r.value, NIL);
-        objTail.rest := cell; objTail := cell;
+        IF (r.value # NIL) & (r.value.kind = ZilObj.KSplice) THEN
+          (* A property-list position that evaluated to a SPLICE (real
+             source: `%<VERSION? (ZIP <LIST DESC ...>) (ELSE #SPLICE ())>`
+             as one whole property, not a value inside one — parser.zil's
+             ROOMS object does exactly this) contributes its OWN members at
+             this position, not the splice marker itself; an empty splice
+             contributes none. Left unflattened, this cell held a KSplice
+             where ApplyObject expects a KList and rejected it — the
+             ADJACENT-to-a-value case (a segment spliced INTO a property's
+             value list, e.g. `(FLAGS !,KNOWN-FLAGS)`) is unaffected, since
+             that splice lives inside n.first's own evaluation, not at this
+             top level. *)
+          splice := r.value;
+          WHILE (splice # NIL) & (splice.first # NIL) DO
+            cell := ZilObj.Cons(ZilObj.KList, splice.first, NIL);
+            objTail.rest := cell; objTail := cell;
+            splice := splice.rest
+          END
+        ELSE
+          cell := ZilObj.Cons(ZilObj.KList, r.value, NIL);
+          objTail.rest := cell; objTail := cell
+        END;
         n := n.rest
       END;
       RETURN ApplyObject(name = "ROOM", objProps)
@@ -4363,6 +4445,7 @@ BEGIN
   Register("DELAY-DEFINITION", FALSE);
   Register("DEFAULT-DEFINITION", TRUE); Register("REPLACE-DEFINITION", TRUE);
   Register("VERSION", FALSE); Register("CHECK-VERSION?", FALSE); Register("FILE-FLAGS", FALSE);
+  Register("ZIP-OPTIONS", FALSE);
   Register("PACKAGE", FALSE); Register("ZPACKAGE", FALSE); Register("ZZPACKAGE", FALSE);
   Register("DEFINITIONS", FALSE); Register("ZSECTION", FALSE); Register("ZZSECTION", FALSE);
   Register("ENDPACKAGE", FALSE); Register("END-DEFINITIONS", FALSE); Register("ENDSECTION", FALSE);
@@ -4393,6 +4476,7 @@ BEGIN
   Register("ERROR", FALSE);
   Register("STRING", FALSE); Register("VECTOR", FALSE);
   Register("BYTE", FALSE); Register("WORD", FALSE); Register("CHTYPE", FALSE); Register("SET-SOURCE-INFO", FALSE);
+  Register("NEWTYPE", FALSE); Register("OFFSET", FALSE);
   Register("GBOUND?", FALSE); Register("BOUND?", FALSE);
   Register("MEMQ", FALSE); Register("MEMBER", FALSE); Register("ASCII", FALSE);
   Register("ORB", FALSE); Register("ANDB", FALSE); Register("XORB", FALSE); Register("MIN", FALSE); Register("MAX", FALSE);
