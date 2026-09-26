@@ -289,6 +289,14 @@ BEGIN
   END
 END AddSynonym;
 
+(* DIRECTIONS replaces the whole set rather than adding to it, matching the
+   original's Directions.Clear() — a game that redefines the library's list
+   must not end up with both. *)
+PROCEDURE ClearDirections*;
+BEGIN
+  nDirections := 0
+END ClearDirections;
+
 PROCEDURE AddDirection*(atom: ZilObj.Zo);
 BEGIN
   IF nDirections < MaxDirections THEN
@@ -362,8 +370,33 @@ END FindVocab;
    Returns its index. A word legitimately has several parts of speech at
    once — "north" is both a direction and a verb — which is why the parts
    accumulate rather than replace. *)
+(* Whether adding a part of speech to this word should also set its "First"
+   flag. Ported from OldParserWord.ShouldSetFirst: yes only when the word has
+   no value-recording part of speech yet, and never for a buzzword.
+
+   The First flags are the low two bits of the word's data byte, and they are
+   what tells the library which of the two value bytes to read - zillib's
+   CHKWORD? takes VOCAB-V1 when <BAND flags 3> matches the part of speech's
+   P1? constant and VOCAB-V2 otherwise. Leaving them clear is quiet and
+   fatal: every verb's number reads as 0, so the parser recognises every word
+   and then does nothing with any command.
+
+   This port has no NEW-VOC? or COMPACT-VOCABULARY?, both of which would
+   exclude some parts of speech from the test, and in V4+ ADJECTIVE records
+   no value so it would be excluded too. *)
+PROCEDURE ShouldSetFirst(i: INTEGER): BOOLEAN;
+VAR p: INTEGER;
+BEGIN
+  p := vocab[i].pos;
+  IF (p DIV PsBuzzword) MOD 2 = 1 THEN RETURN FALSE END;
+  IF zversion >= 4 THEN
+    IF (p DIV PsAdjective) MOD 2 = 1 THEN p := p - PsAdjective END
+  END;
+  RETURN p = 0
+END ShouldSetFirst;
+
 PROCEDURE AddVocab*(text: ARRAY OF CHAR; posBits: INTEGER): INTEGER;
-VAR i: INTEGER;
+VAR i, firstBits: INTEGER;
 BEGIN
   i := FindVocab(text);
   IF i < 0 THEN
@@ -375,9 +408,11 @@ BEGIN
     vocab[i].dirVal := 0; vocab[i].buzzVal := 0
   END;
 
+  firstBits := 0;
   IF (posBits DIV PsVerb) MOD 2 = 1 THEN
     IF (vocab[i].pos DIV PsVerb) MOD 2 = 0 THEN
-      vocab[i].verbVal := nextVerb; DEC(nextVerb)
+      vocab[i].verbVal := nextVerb; DEC(nextVerb);
+      IF ShouldSetFirst(i) THEN firstBits := PsVerbFirst END
     END
   END;
   IF (posBits DIV PsPreposition) MOD 2 = 1 THEN
@@ -387,7 +422,15 @@ BEGIN
   END;
   IF (posBits DIV PsAdjective) MOD 2 = 1 THEN
     IF (vocab[i].pos DIV PsAdjective) MOD 2 = 0 THEN
-      vocab[i].adjVal := nextAdj; DEC(nextAdj)
+      vocab[i].adjVal := nextAdj; DEC(nextAdj);
+      IF (zversion < 4) & (firstBits = 0) & ShouldSetFirst(i) THEN
+        firstBits := PsAdjFirst
+      END
+    END
+  END;
+  IF (posBits DIV PsDirection) MOD 2 = 1 THEN
+    IF (vocab[i].pos DIV PsDirection) MOD 2 = 0 THEN
+      IF (firstBits = 0) & ShouldSetFirst(i) THEN firstBits := PsDirFirst END
     END
   END;
   IF (posBits DIV PsBuzzword) MOD 2 = 1 THEN
@@ -397,8 +440,14 @@ BEGIN
   END;
 
   (* the parts of speech are a bit set, so adding one is a union; the
-     part-of-speech field is a single byte, hence bits 0..7 *)
+     part-of-speech field is a single byte, hence bits 0..7. The First bits
+     are not part of that union - they are a two-bit field, so they replace
+     rather than accumulate, and only the first value-recording part of
+     speech ever sets them. *)
   vocab[i].pos := BitOr(vocab[i].pos, posBits);
+  IF firstBits # 0 THEN
+    vocab[i].pos := vocab[i].pos - (vocab[i].pos MOD 4) + firstBits
+  END;
   RETURN i
 END AddVocab;
 

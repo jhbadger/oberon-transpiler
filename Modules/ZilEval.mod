@@ -288,6 +288,26 @@ END DirOf;
 (* helpers                                                              *)
 (* ------------------------------------------------------------------ *)
 
+(* Marks an atom as having been given a Z-code meaning — a routine, object,
+   global or constant. The original stores the ZRoutine/ZilModelObject/
+   ZilGlobal/ZilConstant it built under the atom's ZVAL property and the
+   library tests for it: zillib refuses to build its achievements table
+   unless MAX-SCORE has a ZVAL, and its status line checks whether the game
+   supplied a section routine the same way.
+
+   This port stores the atom itself. Existence is all the corpus tests, and
+   a constant whose value is 0 or <> must still read as defined, which
+   storing the value would not give. KNOWN GAP: pronouns.zil's
+   PRONOUN-PROPSPEC asks <TYPE? <GETPROP .R ZVAL> ROUTINE>, which needs the
+   stored value to have type ROUTINE; that helper only runs for an object
+   with a PRONOUN property, which no game this port compiles yet has. *)
+PROCEDURE SetZVal*(atom: ZilObj.Zo);
+BEGIN
+  IF (atom # NIL) & (atom.kind = ZilObj.KAtom) THEN
+    ZilObj.PutProp(atom, ZilObj.Intern("ZVAL"), atom)
+  END
+END SetZVal;
+
 PROCEDURE IsTrue*(z: ZilObj.Zo): BOOLEAN;
 BEGIN RETURN (z # NIL) & (z.kind # ZilObj.KFalse) END IsTrue;
 
@@ -525,7 +545,11 @@ TYPE
     startOffset*: INTEGER;
     nFields*: INTEGER;
     fieldName*: ARRAY MaxStructFields OF ARRAY 64 OF CHAR;
-    fieldOffset*: ARRAY MaxStructFields OF INTEGER
+    fieldOffset*: ARRAY MaxStructFields OF INTEGER;
+    (* the field's 'PUT accessor. It decides whether fieldOffset counts
+       WORDS (PUT/ZPUT) or BYTES (PUTB), which matters as soon as a
+       DEFSTRUCT over a TABLE is initialised at compile time. *)
+    fieldPut*: ARRAY MaxStructFields OF ARRAY 16 OF CHAR
   END;
 
 VAR
@@ -557,6 +581,132 @@ BEGIN
   IF name = "HELD" THEN RETURN 128 END;
   RETURN 0
 END ScopeFlagBits;
+
+(* x with every bit of `mask` cleared. Scope flags are one byte, so eight bits
+   is the whole range; this dialect has no AND NOT for INTEGERs. *)
+PROCEDURE ClearBits(x, mask: INTEGER): INTEGER;
+VAR bit, res: INTEGER;
+BEGIN
+  res := 0; bit := 1;
+  WHILE bit <= 128 DO
+    IF ((x DIV bit) MOD 2 = 1) & ((mask DIV bit) MOD 2 = 0) THEN res := res + bit END;
+    bit := bit * 2
+  END;
+  RETURN res
+END ClearBits;
+
+PROCEDURE GlobalFix(name: ARRAY OF CHAR; dflt: INTEGER): INTEGER;
+VAR a: ZilObj.Zo;
+BEGIN
+  a := ZilObj.Intern(name);
+  IF (a.globalVal # NIL) & (a.globalVal.kind = ZilObj.KFix) THEN
+    RETURN a.globalVal.fixVal
+  END;
+  RETURN dflt
+END GlobalFix;
+
+(* A library may redefine what the scope-flag names in a SYNTAX line mean, by
+   setting NEW-SFLAGS to a vector of name/value pairs. zillib does, because it
+   has always treated ON-GROUND and IN-ROOM alike (and CARRIED and HELD
+   alike), so it reuses the freed bits for EVERYWHERE and TOUCH.
+
+   Ignoring this is quiet and total. zillib's SEARCH-ALL is 24, not the
+   original default 240, and its parser tests the bits it defined; emitting
+   the built-in values instead means every syntax line's scope byte names the
+   wrong set, so no command ever finds its objects. *)
+PROCEDURE NewSflags(): ZilObj.Zo;
+VAR a: ZilObj.Zo;
+BEGIN
+  a := ZilObj.Intern("NEW-SFLAGS");
+  IF (a.globalVal # NIL) & (a.globalVal.kind = ZilObj.KVector) THEN
+    RETURN a.globalVal
+  END;
+  RETURN NIL
+END NewSflags;
+
+(* The bit value NEW-SFLAGS gives `name`, or -1 if it does not mention it.
+   A value written (+ n) marks the flag ADDITIVE: it combines with the default
+   set instead of replacing it. *)
+PROCEDURE NewSflagValue(v: ZilObj.Zo; name: ARRAY OF CHAR;
+                        VAR additive: BOOLEAN): INTEGER;
+VAR i: INTEGER; nm, val: ZilObj.Zo; t: ARRAY 64 OF CHAR;
+BEGIN
+  additive := FALSE;
+  i := 0;
+  WHILE i + 1 < v.vecLen DO
+    nm := v.vecItems[i]; val := v.vecItems[i + 1];
+    t[0] := 0X;
+    IF nm # NIL THEN
+      IF nm.kind = ZilObj.KString THEN Strings.Copy(nm.strBuf^, t)
+      ELSIF nm.kind = ZilObj.KAtom THEN Strings.Copy(nm.atomText, t)
+      END
+    END;
+    IF t = name THEN
+      (* The vector's elements are EVALUATED, so the `+` marking an additive
+         flag arrives as the addition SUBR rather than as the atom - a bare
+         atom evaluates to its global value, and `+` has one. The original
+         looks for the atom; accept either spelling, since a KSubr keeps its
+         name in the same field. *)
+      IF (val # NIL) & (val.kind = ZilObj.KList) & (val.first # NIL)
+         & (val.first.atomText = "+")
+         & ((val.first.kind = ZilObj.KAtom) OR (val.first.kind = ZilObj.KSubr)
+            OR (val.first.kind = ZilObj.KFSubr))
+         & (val.rest # NIL) & (val.rest.first # NIL) THEN
+        additive := TRUE; val := val.rest.first
+      END;
+      IF (val # NIL) & (val.kind = ZilObj.KFix) THEN RETURN val.fixVal END;
+      RETURN -1
+    END;
+    i := i + 2
+  END;
+  RETURN -1
+END NewSflagValue;
+
+(* The scope byte for one object of a SYNTAX line. `list` is the option list
+   as written, or NIL for "none given", which means the defaults. Ported from
+   the original's ScopeFlags.Parse, including the rule that the first
+   non-additive option clears the defaults. *)
+PROCEDURE ScopeFlagsParse(list: ZilObj.Zo): INTEGER;
+VAR v, p: ZilObj.Zo; res, val, dflt: INTEGER; cleared, additive: BOOLEAN;
+    nm: ARRAY 64 OF CHAR;
+BEGIN
+  v := NewSflags();
+  IF v = NIL THEN
+    IF list = NIL THEN RETURN 240 END;
+    res := 0; p := list;
+    WHILE (p # NIL) & (p.first # NIL) DO
+      IF p.first.kind = ZilObj.KAtom THEN
+        res := ZilModel.BitOr(res, ScopeFlagBits(p.first.atomText))
+      END;
+      p := p.rest
+    END;
+    RETURN res
+  END;
+
+  dflt := GlobalFix("SEARCH-ALL", 240);
+  IF list = NIL THEN RETURN dflt END;
+  res := dflt; cleared := FALSE;
+  p := list;
+  WHILE (p # NIL) & (p.first # NIL) DO
+    IF p.first.kind = ZilObj.KAtom THEN
+      Strings.Copy(p.first.atomText, nm);
+      additive := FALSE;
+      IF nm = "HAVE" THEN val := GlobalFix("SEARCH-MUST-HAVE", 0); additive := TRUE
+      ELSIF nm = "TAKE" THEN val := GlobalFix("SEARCH-DO-TAKE", 0); additive := TRUE
+      ELSIF nm = "MANY" THEN val := GlobalFix("SEARCH-MANY", 0); additive := TRUE
+      ELSE val := NewSflagValue(v, nm, additive)
+      END;
+      IF val >= 0 THEN
+        IF ~cleared & ~additive THEN
+          cleared := TRUE; res := ClearBits(res, dflt)
+        END;
+        res := ZilModel.BitOr(res, val)
+      END
+    END;
+    p := p.rest
+  END;
+  RETURN res
+END ScopeFlagsParse;
 
 (* The PartOfSpeech bit a <VOC "x" TYPE> type name selects. The names come
    in pairs (ADJ/ADJECTIVE, NOUN/OBJECT) because real source uses both. *)
@@ -702,6 +852,97 @@ END StructRest;
    shapes are mutable here, which is all DEFSTRUCT's constructor needs — a
    cons chain would need its cell rewritten in place and nothing asks for
    that. *)
+(* ---------------- width-aware TABLE element access ----------------
+   A TABLE's elements are not all the same width: the table has a default
+   (word, or byte when it was declared BYTE) and any element may override it,
+   which is how <BYTE n> works. So a byte OFFSET into a table is not an
+   element index, and a WORD index is not either. The original keeps the
+   distinction in ZilTable's GetWord/PutWord/GetByte/PutByte; these three
+   helpers are the part of that this port needs, which is writing a word into
+   a byte-wide table at compile time - exactly what zillib's PARSER-RESULT
+   does, and what makes the parser work.
+
+   Limitation: the byte offsets counted here are offsets into the ELEMENTS
+   only. A table with a LENGTH prefix or the LEXV header would need those
+   counted too; neither is ever written this way. *)
+
+PROCEDURE TableElemWidth(t: ZilObj.Zo; i: INTEGER): INTEGER;
+VAR w: ZilObj.Zo;
+BEGIN
+  w := ZilObj.GetProp(t.vecItems[i], ZilObj.Intern("WIDTH "));
+  IF w # NIL THEN
+    IF w.atomText = "BYTE" THEN RETURN 1 END;
+    RETURN 2
+  END;
+  IF (t.tabFlags DIV ZilObj.TfByte) MOD 2 = 1 THEN RETURN 1 END;
+  RETURN 2
+END TableElemWidth;
+
+(* the index of the element that STARTS at byte offset `off`, or -1 if the
+   offset falls inside an element rather than on its boundary *)
+PROCEDURE TableElemAt(t: ZilObj.Zo; off: INTEGER): INTEGER;
+VAR i, cur: INTEGER;
+BEGIN
+  i := 0; cur := 0;
+  WHILE (i < t.vecLen) & (cur < off) DO
+    cur := cur + TableElemWidth(t, i);
+    INC(i)
+  END;
+  IF (i < t.vecLen) & (cur = off) THEN RETURN i END;
+  RETURN -1
+END TableElemAt;
+
+(* Tags a value with the element width it must be emitted at. A FIX is copied
+   first: the tag lives on the value itself, so tagging a shared one would
+   change its width everywhere it appears. *)
+PROCEDURE WithWidth(v: ZilObj.Zo; isByte: BOOLEAN): ZilObj.Zo;
+VAR w: ZilObj.Zo;
+BEGIN
+  IF v = NIL THEN v := ZilObj.NewFix(0)
+  ELSIF v.kind = ZilObj.KFix THEN v := ZilObj.NewFix(v.fixVal)
+  END;
+  IF isByte THEN w := ZilObj.Intern("BYTE") ELSE w := ZilObj.Intern("WORD") END;
+  ZilObj.PutProp(v, ZilObj.Intern("WIDTH "), w);
+  RETURN v
+END WithWidth;
+
+PROCEDURE TablePutWord*(t: ZilObj.Zo; wordIdx: INTEGER; v: ZilObj.Zo): BOOLEAN;
+VAR i, k: INTEGER;
+BEGIN
+  IF (t = NIL) OR (t.kind # ZilObj.KTable) OR (wordIdx < 0) THEN RETURN FALSE END;
+  i := TableElemAt(t, wordIdx * 2);
+  IF i < 0 THEN RETURN FALSE END;
+  IF TableElemWidth(t, i) = 2 THEN
+    t.vecItems[i] := WithWidth(v, FALSE); RETURN TRUE
+  END;
+  (* two byte slots together make up this word, so they become one element *)
+  IF (i + 1 >= t.vecLen) OR (TableElemWidth(t, i + 1) # 1) THEN RETURN FALSE END;
+  t.vecItems[i] := WithWidth(v, FALSE);
+  k := i + 1;
+  WHILE k < t.vecLen - 1 DO t.vecItems[k] := t.vecItems[k + 1]; INC(k) END;
+  DEC(t.vecLen);
+  RETURN TRUE
+END TablePutWord;
+
+PROCEDURE TablePutByte*(t: ZilObj.Zo; byteIdx: INTEGER; v: ZilObj.Zo): BOOLEAN;
+VAR i, k: INTEGER;
+BEGIN
+  IF (t = NIL) OR (t.kind # ZilObj.KTable) OR (byteIdx < 0) THEN RETURN FALSE END;
+  i := TableElemAt(t, byteIdx);
+  IF i < 0 THEN RETURN FALSE END;
+  IF TableElemWidth(t, i) = 1 THEN
+    t.vecItems[i] := WithWidth(v, TRUE); RETURN TRUE
+  END;
+  (* splitting a word slot into two bytes needs room for one more element *)
+  IF t.vecLen >= LEN(t.vecItems^) THEN RETURN FALSE END;
+  k := t.vecLen;
+  WHILE k > i DO t.vecItems[k] := t.vecItems[k - 1]; DEC(k) END;
+  INC(t.vecLen);
+  t.vecItems[i] := WithWidth(v, TRUE);
+  t.vecItems[i + 1] := WithWidth(ZilObj.NewFix(0), TRUE);
+  RETURN TRUE
+END TablePutByte;
+
 PROCEDURE StructPut*(z: ZilObj.Zo; i: INTEGER; v: ZilObj.Zo): BOOLEAN;
 BEGIN
   IF (z = NIL) OR (i < 1) THEN RETURN FALSE END;
@@ -771,6 +1012,98 @@ BEGIN
   RETURN 0
 END ParseZVersion;
 
+(* ---------------- SORT ----------------
+   MDL's SORT rearranges a VECTOR in place and hands it back. zillib uses it
+   once, to put the achievement definitions back into declaration order
+   before building their table, but that one use is load-bearing: the
+   achievements table and ACHIEVEMENT-COUNT both come out of it. *)
+
+PROCEDURE TextGreater(a, b: ARRAY OF CHAR): BOOLEAN;
+VAR i: INTEGER;
+BEGIN
+  i := 0;
+  WHILE (a[i] # 0X) & (a[i] = b[i]) DO INC(i) END;
+  RETURN a[i] > b[i]
+END TextGreater;
+
+(* Answers the one question an insertion sort needs: is A greater than B?
+   The original asks its predicate twice per comparison (A>B, then B>A) to
+   build a three-way result for a general comparison sort; a stable
+   insertion sort only needs the first question, and treats "not greater"
+   as "already in order", which gives the same answer for equal keys. A
+   FALSE predicate selects the built-in ordering on FIX/CHARACTER/ATOM/
+   STRING keys, as in the original. *)
+PROCEDURE SortGreater(pred, a, b: ZilObj.Zo; VAR err: BOOLEAN): BOOLEAN;
+VAR pargs: ARRAY 2 OF ZilObj.Zo; r: ZResult;
+BEGIN
+  err := FALSE;
+  IF (pred # NIL) & IsTrue(pred) THEN
+    pargs[0] := a; pargs[1] := b;
+    r := ApplyValue(pred, pargs, 2);
+    IF evalErrFlag THEN err := TRUE; RETURN FALSE END;
+    RETURN IsTrue(r.value)
+  END;
+  IF (a = NIL) OR (b = NIL) OR (a.kind # b.kind) THEN
+    err := TRUE; RETURN FALSE
+  END;
+  IF a.kind = ZilObj.KFix THEN RETURN a.fixVal > b.fixVal
+  ELSIF a.kind = ZilObj.KChar THEN RETURN a.charVal > b.charVal
+  ELSIF a.kind = ZilObj.KAtom THEN RETURN TextGreater(a.atomText, b.atomText)
+  ELSIF a.kind = ZilObj.KString THEN RETURN TextGreater(a.strBuf^, b.strBuf^)
+  END;
+  err := TRUE; RETURN FALSE
+END SortGreater;
+
+PROCEDURE SortVector(pred, vec: ZilObj.Zo; recSize, keyOff: INTEGER): BOOLEAN;
+VAR nRec, i, j, k: INTEGER; err, gt: BOOLEAN; tmp: ZilObj.Zo;
+BEGIN
+  nRec := vec.vecLen DIV recSize;
+  i := 1;
+  WHILE i < nRec DO
+    j := i;
+    WHILE j > 0 DO
+      gt := SortGreater(pred, vec.vecItems[(j - 1) * recSize + keyOff],
+                              vec.vecItems[j * recSize + keyOff], err);
+      IF err THEN RETURN FALSE END;
+      IF ~gt THEN
+        j := 0
+      ELSE
+        FOR k := 0 TO recSize - 1 DO
+          tmp := vec.vecItems[(j - 1) * recSize + k];
+          vec.vecItems[(j - 1) * recSize + k] := vec.vecItems[j * recSize + k];
+          vec.vecItems[j * recSize + k] := tmp
+        END;
+        DEC(j)
+      END
+    END;
+    INC(i)
+  END;
+  RETURN TRUE
+END SortVector;
+
+(* `.X` and `,X` read as the two-element FORMs <LVAL X> and <GVAL X>. TYPE
+   still calls them FORMs, but TYPE? also answers LVAL/GVAL for them, and
+   CHTYPE converts between such a form and a bare ATOM. The original marks
+   these out as "hacky special cases for GVAL and LVAL"; they are
+   load-bearing all the same. zillib's library-message substitution finds the
+   placeholders in a message template with <TYPE? .STRUC LVAL> and reads the
+   name back out with <CHTYPE .STRUC ATOM>, so without them every message's
+   .OBJ / .WHOM / .POINTS survives into the generated code as a reference to
+   a local variable that the calling routine does not have.
+
+   Returns the named atom, or NIL when `z` is not a form of that shape. *)
+PROCEDURE ValFormAtom(z: ZilObj.Zo; which: ARRAY OF CHAR): ZilObj.Zo;
+BEGIN
+  IF (z # NIL) & (z.kind = ZilObj.KForm) & (z.first # NIL)
+     & (z.first.kind = ZilObj.KAtom) & (z.first.atomText = which)
+     & (z.rest # NIL) & (z.rest.first # NIL)
+     & (z.rest.first.kind = ZilObj.KAtom)
+     & ((z.rest.rest = NIL) OR (z.rest.rest.first = NIL)) THEN
+    RETURN z.rest.first
+  END;
+  RETURN NIL
+END ValFormAtom;
+
 PROCEDURE ApplySubr*(name: ARRAY OF CHAR; args: ARRAY OF ZilObj.Zo; n: INTEGER): ZResult;
 VAR sum, i, len, synKind: INTEGER; s: ARRAY 4096 OF CHAR; ind: ZilObj.Zo;
     msgBuf: ARRAY 512 OF CHAR;
@@ -796,8 +1129,8 @@ BEGIN
        Registering doesn't affect this SUBR's own observable behavior at
        all (SETG isn't registered, matching the original: only GLOBAL and
        CONSTANT go into ZEnvironment). *)
-    IF name = "GLOBAL" THEN ZilModel.AddGlobal(args[0], args[1])
-    ELSIF name = "CONSTANT" THEN ZilModel.AddConstant(args[0], args[1]) END;
+    IF name = "GLOBAL" THEN ZilModel.AddGlobal(args[0], args[1]); SetZVal(args[0])
+    ELSIF name = "CONSTANT" THEN ZilModel.AddConstant(args[0], args[1]); SetZVal(args[0]) END;
     RETURN MkVal(args[1])
 
   ELSIF name = "LVAL" THEN
@@ -976,6 +1309,10 @@ BEGIN
 
     Strings.Copy(args[0].atomText, ZilModel.syntaxes[synKind].verb);
     len := ZilModel.AddVocab(args[0].atomText, ZilModel.PsVerb);
+    (* the default scope byte, which AddSyntax cannot know: it depends on
+       whether the library redefined the flags with NEW-SFLAGS *)
+    ZilModel.syntaxes[synKind].opts1 := ScopeFlagsParse(NIL);
+    ZilModel.syntaxes[synKind].opts2 := ZilModel.syntaxes[synKind].opts1;
 
     s[0] := 0X;          (* the preposition awaiting its object *)
     i := 1;
@@ -1000,14 +1337,7 @@ BEGIN
             END
           END
         ELSE
-          (* a scope-option list replaces the default set entirely *)
-          sum := 0; ind := args[i];
-          WHILE (ind # NIL) & (ind.first # NIL) DO
-            IF ind.first.kind = ZilObj.KAtom THEN
-              sum := ZilModel.BitOr(sum, ScopeFlagBits(ind.first.atomText))
-            END;
-            ind := ind.rest
-          END;
+          sum := ScopeFlagsParse(args[i]);
           IF ZilModel.syntaxes[synKind].numObjects <= 1 THEN
             ZilModel.syntaxes[synKind].opts1 := sum
           ELSE
@@ -1048,6 +1378,7 @@ BEGIN
     RETURN MkVal(args[0])
 
   ELSIF name = "DIRECTIONS" THEN
+    ZilModel.ClearDirections;
     FOR i := 0 TO n - 1 DO
       ZilModel.AddDirection(args[i]);
       IF args[i].kind = ZilObj.KAtom THEN
@@ -1153,7 +1484,12 @@ BEGIN
     IF n < 2 THEN RETURN Err("TYPE?: expected a value and at least one type") END;
     TypeName(args[0], s);
     FOR i := 1 TO n - 1 DO
-      IF (args[i].kind = ZilObj.KAtom) & (args[i].atomText = s) THEN RETURN MkVal(args[i]) END
+      IF (args[i].kind = ZilObj.KAtom) & (args[i].atomText = s) THEN RETURN MkVal(args[i]) END;
+      IF (args[i].kind = ZilObj.KAtom)
+         & ((args[i].atomText = "LVAL") OR (args[i].atomText = "GVAL"))
+         & (ValFormAtom(args[0], args[i].atomText) # NIL) THEN
+        RETURN MkVal(args[i])
+      END
     END;
     RETURN MkVal(FalseVal())
 
@@ -1265,6 +1601,23 @@ BEGIN
       RETURN Err("CHTYPE: expected a value and a type ATOM")
     END;
     Strings.Copy(args[1].atomText, s);
+    IF (s = "LVAL") OR (s = "GVAL") THEN
+      (* <CHTYPE FOO LVAL> is the FORM .FOO, not a retagged atom *)
+      IF ValFormAtom(args[0], s) # NIL THEN RETURN MkVal(args[0]) END;
+      IF (args[0] = NIL) OR (args[0].kind # ZilObj.KAtom) THEN
+        RETURN Err("CHTYPE: converting to LVAL or GVAL requires an ATOM")
+      END;
+      ind := ZilObj.Cons(ZilObj.KForm, args[0], NIL);
+      RETURN MkVal(ZilObj.Cons(ZilObj.KForm, ZilObj.Intern(s), ind))
+    END;
+    IF s = "ATOM" THEN
+      (* and <CHTYPE .FOO ATOM> is FOO again. Anything else already is an
+         ATOM or has no ATOM to give, and falls through to the catch-all
+         below that returns the value unchanged. *)
+      ind := ValFormAtom(args[0], "LVAL");
+      IF ind = NIL THEN ind := ValFormAtom(args[0], "GVAL") END;
+      IF ind # NIL THEN RETURN MkVal(ind) END
+    END;
     IF (s = "LIST") OR (s = "FORM") OR (s = "SPLICE") THEN
       IF s = "LIST" THEN i := ZilObj.KList
       ELSIF s = "FORM" THEN i := ZilObj.KForm
@@ -1319,6 +1672,31 @@ BEGIN
       END
     END;
     RETURN MkVal(ZilObj.NewString(s))
+
+  ELSIF name = "SORT" THEN
+    (* <SORT predicate vector [record-size [key-offset]]>. The original also
+       accepts further vectors to be rearranged in step with the first; that
+       is left out, since nothing in the corpus this port targets uses it and
+       silently ignoring the extra arguments would corrupt them. *)
+    IF (n < 2) OR (args[1] = NIL) OR (args[1].kind # ZilObj.KVector) THEN
+      RETURN Err("SORT: expected a predicate and a VECTOR")
+    END;
+    len := 1; sum := 0;
+    IF (n >= 3) & (args[2] # NIL) & (args[2].kind = ZilObj.KFix) THEN len := args[2].fixVal END;
+    IF (n >= 4) & (args[3] # NIL) & (args[3].kind = ZilObj.KFix) THEN sum := args[3].fixVal END;
+    IF (len < 1) OR (sum < 0) OR (sum >= len) THEN
+      RETURN Err("SORT: expected 0 <= key offset < record size")
+    END;
+    IF args[1].vecLen MOD len # 0 THEN
+      RETURN Err("SORT: vector length must be a multiple of the record size")
+    END;
+    IF n > 4 THEN
+      RETURN Err("SORT: sorting several vectors together is not supported")
+    END;
+    IF ~SortVector(args[0], args[1], len, sum) THEN
+      RETURN Err("SORT: could not compare two keys")
+    END;
+    RETURN MkVal(args[1])
 
   ELSIF name = "VECTOR" THEN
     ind := ZilObj.NewVectorN(n);
@@ -1603,6 +1981,7 @@ BEGIN
      emits RTRUE for such a routine. *)
 
   ZilModel.AddRoutine(nameAtom, actAtom, argSpecList, bodyList);
+  SetZVal(nameAtom);
   RETURN MkVal(nameAtom)
 END ApplyRoutine;
 
@@ -1633,6 +2012,7 @@ BEGIN
   END;
 
   ZilModel.AddObject(nameAtom, isRoom, restArgs.rest);
+  SetZVal(nameAtom);
   RETURN MkVal(nameAtom)
 END ApplyObject;
 
@@ -1758,8 +2138,35 @@ BEGIN
   RETURN EvalImpl(head, FALSE)
 END ApplyValue;
 
+(* Runs a compiler hook: a global in the HOOKS package that the library
+   installs an applicable value into, which the compiler calls by name at a
+   fixed point. zillib's ADD-FINISHER chains onto the PRE-COMPILE hook this
+   way, and the achievements table (ACHIEVEMENTS / ACHIEVEMENT-COUNT) only
+   comes into existence when that hook runs.
+
+   The original keeps hooks in a dedicated `hooks` OBLIST and looks the name
+   up there; this port has one flat oblist in which an OBLIST-qualified name
+   is interned under its full NAME!-OBLIST!-OBLIST spelling, so the lookup
+   is simply the atom the library itself writes. An unset hook is not an
+   error - most programs never install one. *)
+PROCEDURE RunHook*(name: ARRAY OF CHAR): BOOLEAN;
+VAR atom, fn: ZilObj.Zo; r: ZResult; noArgs: ARRAY 1 OF ZilObj.Zo;
+    buf: ARRAY 128 OF CHAR;
+BEGIN
+  Strings.Copy(name, buf);
+  Strings.Append("!-HOOKS!-ZILF", buf);
+  atom := ZilObj.Intern(buf);
+  fn := atom.globalVal;
+  IF fn = NIL THEN RETURN TRUE END;
+  ClearErr;
+  noArgs[0] := NIL;
+  r := ApplyValue(fn, noArgs, 0);
+  RETURN ~evalErrFlag
+END RunHook;
+
 PROCEDURE EvalImpl(z: ZilObj.Zo; qq: BOOLEAN): ZResult;
 VAR
+  msgBuf2, s2: ARRAY 1024 OF CHAR;
   head, n, resultHead, resultTail, cell, clause, body: ZilObj.Zo;
   nFirst, zFirst, zRestFirst, clauseFirst: ZilObj.Zo;
   r, cr: ZResult;
@@ -1773,7 +2180,7 @@ VAR
   (* ADD-TELL-TOKENS *)
   tellToks, tellTail: ZilObj.Zo;
   (* SEGMENT splicing *)
-  segLen, segI: INTEGER;
+  segLen, segI, j: INTEGER;
   (* DEFSTRUCT *)
   dsName, dsBase, dsNth, dsPut, dsTag, dsFieldName, dsFNth, dsFPut: ARRAY 64 OF CHAR;
   dsNum, dsQ: ARRAY 16 OF CHAR;
@@ -1786,7 +2193,8 @@ VAR
   (* MAKE-<struct> *)
   mkName, mkField: ARRAY 64 OF CHAR;
   mkIdx, mkPos, mkI: INTEGER;
-  mkByTag: BOOLEAN;
+  mkByTag, mkIsByte, mkOk: BOOLEAN;
+  mkRawOff: INTEGER;
   mkExisting, mkTarget: ZilObj.Zo;
   (* MAPF / MAPR / APPLY *)
   mapArgs: ARRAY MaxArgs OF ZilObj.Zo;
@@ -1919,16 +2327,59 @@ BEGIN
   END;
 
   IF (z.kind = ZilObj.KAtom) OR (z.kind = ZilObj.KFix) OR (z.kind = ZilObj.KString)
-     OR (z.kind = ZilObj.KChar) OR (z.kind = ZilObj.KVector) OR (z.kind = ZilObj.KFalse)
+     OR (z.kind = ZilObj.KChar) OR (z.kind = ZilObj.KFalse)
      OR (z.kind = ZilObj.KSubr) OR (z.kind = ZilObj.KFSubr) OR (z.kind = ZilObj.KActivation)
      OR (z.kind = ZilObj.KFunction) OR (z.kind = ZilObj.KMacro) THEN
     RETURN MkVal(z)
+
+  ELSIF z.kind = ZilObj.KVector THEN
+    (* A VECTOR evaluates its elements, exactly as a LIST does. zillib's
+       <SETG NEW-SFLAGS ["TOUCH" (+ ,SF-TOUCH) ...]> depends on it: leaving
+       the elements alone puts unevaluated <GVAL SF-TOUCH> forms in the table
+       where the scope-flag reader wants numbers, and every SYNTAX line then
+       silently keeps the default scope byte. SEGMENTs splice, same as in a
+       list, so the result can be longer than the source. *)
+    resultHead := NIL; segI := 0;
+    FOR i := 0 TO z.vecLen - 1 DO
+      nFirst := z.vecItems[i];
+      IF (nFirst # NIL) & (nFirst.kind = ZilObj.KSegment) THEN
+        r := EvalImpl(nFirst.segForm, FALSE);
+        IF ShouldPass(r) THEN RETURN r END;
+        IF evalErrFlag THEN RETURN r END;
+        IF ~IsStructured(r.value) THEN
+          RETURN ErrAtom("SEGMENT: expected a structured value to splice, got", r.value)
+        END;
+        segI := segI + StructLength(r.value)
+      ELSE
+        INC(segI)
+      END
+    END;
+    resultHead := ZilObj.NewVectorN(segI);
+    segI := 0;
+    FOR i := 0 TO z.vecLen - 1 DO
+      nFirst := z.vecItems[i];
+      IF (nFirst # NIL) & (nFirst.kind = ZilObj.KSegment) THEN
+        r := EvalImpl(nFirst.segForm, FALSE);
+        IF ShouldPass(r) THEN RETURN r END;
+        segLen := StructLength(r.value);
+        FOR j := 1 TO segLen DO
+          resultHead.vecItems[segI] := StructNth(r.value, j); INC(segI)
+        END
+      ELSE
+        r := EvalImpl(nFirst, FALSE);
+        IF ShouldPass(r) THEN RETURN r END;
+        resultHead.vecItems[segI] := r.value; INC(segI)
+      END
+    END;
+    RETURN MkVal(resultHead)
 
   ELSIF z.kind = ZilObj.KAdecl THEN
     RETURN EvalImpl(z.adFirst, FALSE)  (* DECL check skipped *)
 
   ELSIF z.kind = ZilObj.KSegment THEN
-    RETURN Err("a SEGMENT can only be evaluated inside a structure")
+    Strings.Copy("a SEGMENT can only be evaluated inside a structure: ", msgBuf2);
+    ZilObj.PrintTo(z, s2); Strings.Append(s2, msgBuf2);
+    RETURN Err(msgBuf2)
 
   ELSIF z.kind = ZilObj.KList THEN
     IF ZilObj.IsEmpty(z) THEN RETURN MkVal(z) END;
@@ -2064,6 +2515,10 @@ BEGIN
                 IF structs[mkIdx].fieldName[mkI] = mkField THEN mkPos := mkI END
               END;
               IF mkPos < 0 THEN RETURN Err("MAKE-: unknown field name") END;
+              (* the field's RAW offset and the accessor that decides what it
+                 counts, kept for the existing-TABLE path below *)
+              mkRawOff := structs[mkIdx].fieldOffset[mkPos];
+              mkIsByte := structs[mkIdx].fieldPut[mkPos] = "PUTB";
               (* the field's element index is its offset measured from the
                  structure's own start offset *)
               mkPos := structs[mkIdx].fieldOffset[mkPos] - structs[mkIdx].startOffset;
@@ -2074,7 +2529,25 @@ BEGIN
             END;
             r := EvalImpl(n.first, FALSE);
             IF ShouldPass(r) THEN RETURN r END;
-            IF ~StructPut(mkTarget, mkPos + 1, r.value) THEN
+            IF mkByTag & (mkExisting # NIL) & (mkTarget # NIL)
+               & (mkTarget.kind = ZilObj.KTable) THEN
+              (* Writing into an EXISTING table goes through the field's own
+                 PUT accessor at the field's raw offset, because the offset
+                 is in the accessor's units: a ZPUT field counts words, a
+                 PUTB field counts bytes. Treating it as an element index
+                 instead is silently wrong for a byte-wide table -- zillib's
+                 PARSER-RESULT is <ITABLE 26 (BYTE)> with word fields, so
+                 PST-PRSOS (word 4) landed in byte slot 4 and the assembler
+                 only warned that a table address will not fit in a byte.
+                 The parser then read nonsense and answered "..." to every
+                 command. *)
+              IF mkIsByte THEN mkOk := TablePutByte(mkTarget, mkRawOff, r.value)
+              ELSE mkOk := TablePutWord(mkTarget, mkRawOff, r.value)
+              END;
+              IF ~mkOk THEN
+                RETURN Err("MAKE-: field does not line up with an element of this table")
+              END
+            ELSIF ~StructPut(mkTarget, mkPos + 1, r.value) THEN
               RETURN Err("MAKE-: field index is outside the structure")
             END;
             IF ~mkByTag THEN INC(mkPos) END;
@@ -2658,6 +3131,7 @@ BEGIN
         END;
         Strings.Copy(dsFieldName, structs[dsIdx].fieldName[structs[dsIdx].nFields]);
         structs[dsIdx].fieldOffset[structs[dsIdx].nFields] := dsFOffset;
+        Strings.Copy(dsFPut, structs[dsIdx].fieldPut[structs[dsIdx].nFields]);
         INC(structs[dsIdx].nFields);
 
         IF ~dsGotOffset THEN INC(dsOffset) END;
@@ -3024,7 +3498,22 @@ BEGIN
         ELSE
           r := EvalImpl(n.first, FALSE);
           IF ShouldPass(r) THEN RETURN r END;
-          IF nargs < MaxArgs THEN args[nargs] := r.value; INC(nargs) END
+          IF (r.value # NIL) & (r.value.kind = ZilObj.KSplice) THEN
+            (* A macro whose result is a SPLICE contributes its ELEMENTS as
+               separate arguments, not the splice itself - the same rule
+               ExpandTree applies to a routine body, and the original's for
+               any evaluated sequence. zillib relies on it outside a routine
+               too: <CONSTANT TRY-REPHRASING-CMD <LIBRARY-MESSAGE ORPHANING
+               TRY-REPHRASING>> is a STRING constant only because the
+               message's one-element SPLICE collapses into CONSTANT's second
+               argument. *)
+            segLen := StructLength(r.value);
+            FOR segI := 1 TO segLen DO
+              IF nargs < MaxArgs THEN args[nargs] := StructNth(r.value, segI); INC(nargs) END
+            END
+          ELSIF nargs < MaxArgs THEN
+            args[nargs] := r.value; INC(nargs)
+          END
         END;
         n := n.rest
       END;
@@ -3587,7 +4076,7 @@ BEGIN
   Register("COMPILATION-FLAG-VALUE", FALSE); Register("IFFLAG", TRUE);
   Register("ADD-TELL-TOKENS", TRUE); Register("TELL-TOKENS", TRUE);
   Register("NTH", FALSE); Register("GET-ELEMENT", FALSE); Register("REST", FALSE);
-  Register("EMPTY?", FALSE); Register("LENGTH", FALSE);
+  Register("EMPTY?", FALSE); Register("LENGTH", FALSE); Register("SORT", FALSE);
   Register("TYPE", FALSE); Register("PRIMTYPE", FALSE); Register("TYPE?", FALSE);
   Register("STRUCTURED?", FALSE); Register("APPLICABLE?", FALSE);
   Register("SPNAME", FALSE); Register("PNAME", FALSE); Register("PARSE", FALSE);

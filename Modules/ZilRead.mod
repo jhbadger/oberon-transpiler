@@ -486,6 +486,19 @@ BEGIN
     inner := ReadOne(rd, okInner, innerDone, innerTerm, innerTermCh);
     IF ~okInner THEN ok := FALSE; RETURN NIL END;
     IF innerDone OR innerTerm THEN SetErr(rd, "value expected after '#TYPE'"); ok := FALSE; RETURN NIL END;
+    (* `#DECL (...)` is a type declaration, and a DECL self-evaluates in the
+       original because its type is DECL rather than LIST. Dropping the type
+       tag the way every other #TYPE is dropped here would leave an ordinary
+       LIST, which a DEFINE body then EVALUATES element by element - harmless
+       by luck for a decl like ((HANDLER) APPLICABLE), but fatal for one
+       containing a SEGMENT, as zillib's GET-BINDING has
+       (<OR !<LIST ATOM ANY> FALSE>). Reading it as <QUOTE (...)> gives it
+       the self-evaluating behaviour without needing a type system, and the
+       value is discarded in every position a decl can appear. *)
+    IF (ty # NIL) & (ty.kind = ZilObj.KAtom) & (ty.atomText = "DECL") THEN
+      inner := ZilObj.Cons(ZilObj.KForm, inner, NIL);
+      inner := ZilObj.Cons(ZilObj.KForm, ZilObj.Intern("QUOTE"), inner)
+    END;
     RETURN inner
 
   ELSIF (c = ORD(")")) OR (c = ORD("]")) OR (c = ORD("}")) OR (c = ORD(">")) THEN

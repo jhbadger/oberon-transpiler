@@ -154,6 +154,14 @@ BEGIN
   END;
   ZilRead.Close(rd);
 
+  (* The library installs finishers (zillib's ADD-FINISHER) on the
+     PRE-COMPILE hook, and they build data the routines already reference —
+     the achievements table, for one. Run them before anything is compiled,
+     which is where the original calls it too (FrontEnd.EmitCompilation). *)
+  IF ~ZilEval.RunHook("PRE-COMPILE") THEN
+    Fail("pre-compile hook", ZilEval.evalErrMsg)
+  END;
+
   IF ~quiet THEN
     Out.String("zilf: read "); Out.Int(nForms, 0);
     Out.String(" top-level forms; "); Out.Int(ZilModel.nRoutines, 0);
