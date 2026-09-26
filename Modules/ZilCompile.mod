@@ -43,7 +43,7 @@ MODULE ZilCompile;
   port it).
 *)
 
-IMPORT ZilObj, ZilModel, ZilEval, Out, Files, Strings;
+IMPORT ZilObj, ZilModel, ZilEval, Out, Files, Strings, ZapfZChar;
 
 VAR
   errFlag*: BOOLEAN;
@@ -4402,6 +4402,93 @@ END CompileObjects;
    nobj's low two bits are the object count. Lines are emitted in REVERSE
    definition order within a verb, as the original does, because the parser
    matches them from the end. *)
+(* Whether words `i` and `j` Z-CHARACTER-encode to the identical dictionary
+   KEY - V3's 6 significant characters (9 in V4+) can't tell "BOTTLE" from
+   "BOTTLED" apart, and the Z-machine's own dictionary lookup only ever
+   compares those encoded bytes, never the original spelling. Reuses
+   zapf's OWN encoder (ZapfZChar.Encode, the exact routine that turns
+   `.ZWORD "text"` into dictionary bytes) rather than reimplementing Z-char
+   packing here, so this can never disagree with what actually gets
+   assembled. *)
+PROCEDURE VocabKeyEqual(i, j, nChars: INTEGER): BOOLEAN;
+VAR outBuf1, outBuf2: ARRAY 16 OF INTEGER; outLen1, outLen2, zch1, zch2, k: INTEGER;
+    s1, s2: ARRAY 64 OF CHAR;
+BEGIN
+  Strings.Copy(ZilModel.vocab[i].text, s1); Strings.ToLower(s1);
+  Strings.Copy(ZilModel.vocab[j].text, s2); Strings.ToLower(s2);
+  ZapfZChar.Encode(s1, ZapfZChar.ModeNoAbbrev, TRUE, nChars, outBuf1, outLen1, zch1);
+  ZapfZChar.Encode(s2, ZapfZChar.ModeNoAbbrev, TRUE, nChars, outBuf2, outLen2, zch2);
+  IF outLen1 # outLen2 THEN RETURN FALSE END;
+  k := 0;
+  WHILE (k < outLen1) & (outBuf1[k] = outBuf2[k]) DO INC(k) END;
+  RETURN k = outLen1
+END VocabKeyEqual;
+
+(* V3's 6-Z-character dictionary entries (9 in V4+) cannot always
+   distinguish two different ZIL words - "BOULDER" and "BOULDERS" encode to
+   the identical 4 bytes. Left alone, this port emitted BOTH as separate
+   dictionary rows: harmless when their part-of-speech data happened to
+   match too (a coincidence for a handful of plain object-synonym words),
+   but WRONG whenever it didn't - advent's "examine bottled water" needs
+   "bottled"'s ADJECTIVE data, and if the dictionary's binary search lands
+   on "bottle"'s row instead (same key, different data, ambiguous which one
+   a lookup finds), the word silently fails to parse as an adjective at
+   all. The original detects this at compile time and MERGES every
+   colliding group into its alphabetically-first member (Compilation.
+   Compile's PlanVocabMerges/PerformVocabMerges); this does the same,
+   using the shared MergeVocabWord this port's SYNONYM support already
+   needed. Ordered before ApplyVocabSynonyms because the original runs its
+   own equivalent that way too, though in practice it rarely matters (a
+   SYNONYM alias is usually too short and too distinct a word to collide
+   with anything). *)
+PROCEDURE ApplyVocabMerges(): BOOLEAN;
+VAR order: ARRAY ZilModel.MaxVocab OF INTEGER;
+    i, j, k, nChars, groupStart: INTEGER;
+    errBuf: ARRAY 256 OF CHAR;
+BEGIN
+  IF ZilModel.nVocab = 0 THEN RETURN TRUE END;
+  IF ZilModel.zversion < 4 THEN nChars := 6 ELSE nChars := 9 END;
+  ZapfZChar.Init;
+
+  (* sort word indices alphabetically by TEXT - matches the original's own
+     "orderby pair.Key.Text" before grouping by encoded key, which is what
+     decides which member of a colliding group survives (the
+     alphabetically first) *)
+  FOR i := 0 TO ZilModel.nVocab - 1 DO order[i] := i END;
+  FOR i := 1 TO ZilModel.nVocab - 1 DO
+    k := order[i]; j := i - 1;
+    WHILE (j >= 0) & (ZilModel.vocab[order[j]].text > ZilModel.vocab[k].text) DO
+      order[j + 1] := order[j]; DEC(j)
+    END;
+    order[j + 1] := k
+  END;
+
+  (* a run of ADJACENT entries (in this alphabetical order) sharing the
+     same encoded key is one collision group; everything after the first
+     merges into it *)
+  i := 1;
+  WHILE i < ZilModel.nVocab DO
+    IF VocabKeyEqual(order[i - 1], order[i], nChars) THEN
+      groupStart := i - 1;
+      WHILE (i < ZilModel.nVocab) & VocabKeyEqual(order[groupStart], order[i], nChars) DO
+        ZilModel.MergeVocabWord(order[groupStart], order[i]);
+        ZilModel.vocab[order[i]].mergedInto := order[groupStart];
+        Strings.Copy("vocab collision: ", errBuf);
+        Strings.Append(ZilModel.vocab[order[groupStart]].text, errBuf);
+        Strings.Append(" and ", errBuf);
+        Strings.Append(ZilModel.vocab[order[i]].text, errBuf);
+        Strings.Append(
+          " are indistinguishable in the dictionary and will be merged", errBuf);
+        Out.ErrString("zilf: warning: "); Out.ErrString(errBuf); Out.ErrLn;
+        INC(i)
+      END
+    ELSE
+      INC(i)
+    END
+  END;
+  RETURN TRUE
+END ApplyVocabMerges;
+
 (* <SYNONYM ORIGINAL alias...> (and VERB-/DIR-/PREP-/ADJ-SYNONYM, treated
    identically — see MergeVocabWord's own comment on why) were being
    recorded by ZilEval's ApplySubr and then never read anywhere: registering
@@ -4421,8 +4508,26 @@ BEGIN
     Strings.Copy(ZilModel.synonyms[i].original.atomText, origName);
     Strings.Copy(ZilModel.synonyms[i].synonym.atomText, synName);
     oi := ZilModel.FindVocab(origName);
+    (* follow a merged-away original to whichever word actually carries its
+       (now combined) data - ApplyVocabMerges runs first, but only touches
+       the SURVIVOR's record *)
+    WHILE (oi >= 0) & (ZilModel.vocab[oi].mergedInto >= 0) DO
+      oi := ZilModel.vocab[oi].mergedInto
+    END;
     IF oi >= 0 THEN
-      si := ZilModel.AddVocab(synName, 0);
+      (* AddSynonym (ZilModel.mod) already created this word's own vocab
+         entry back when the SYNONYM/VERB-SYNONYM/etc. form was first read,
+         specifically so ApplyVocabMerges could see it - so it normally
+         exists here already. It can ALSO have been merged away by
+         ApplyVocabMerges (advent: LUBRICANT and LUBRICATE, both synonyms of
+         OIL, collide with each other in the dictionary too), in which case
+         follow the same chain as above rather than re-declaring a dead
+         duplicate row. *)
+      si := ZilModel.FindVocab(synName);
+      WHILE (si >= 0) & (ZilModel.vocab[si].mergedInto >= 0) DO
+        si := ZilModel.vocab[si].mergedInto
+      END;
+      IF si < 0 THEN si := ZilModel.AddVocab(synName, 0) END;
       IF si < 0 THEN
         Err("ApplyVocabSynonyms: too many vocabulary words"); RETURN FALSE
       END;
@@ -4864,7 +4969,7 @@ END PrepareRoutines;
    the "First" flags able to promote one of them — that order is
    WriteToBuilder's, copied rather than reinvented. *)
 PROCEDURE EmitVocabTable;
-VAR i, j, k, entryLen, zwordBytes, pos, v1, v2, nParts: INTEGER;
+VAR i, j, k, entryLen, zwordBytes, pos, v1, v2, nParts, nEmit: INTEGER;
     order: ARRAY ZilModel.MaxVocab OF INTEGER;
     parts: ARRAY 4 OF INTEGER;
     text: ARRAY 64 OF CHAR; num: ARRAY 16 OF CHAR;
@@ -4939,6 +5044,13 @@ BEGIN
     WLn
   END;
 
+  (* a word ApplyVocabMerges folded into another gets no row of its own -
+     only the SURVIVORS are counted and emitted *)
+  nEmit := 0;
+  FOR i := 0 TO ZilModel.nVocab - 1 DO
+    IF ZilModel.vocab[i].mergedInto < 0 THEN INC(nEmit) END
+  END;
+
   W("VOCAB:: .TABLE"); WLn;
   W("	.BYTE 3"); WLn;        (* the SIBREAKS this port declares: , . " *)
   W("	.BYTE 44"); WLn;
@@ -4946,16 +5058,17 @@ BEGIN
   W("	.BYTE 34"); WLn;
   Strings.IntToStr(entryLen, num);
   W("	.BYTE "); W(num); WLn;
-  Strings.IntToStr(ZilModel.nVocab, num);
+  Strings.IntToStr(nEmit, num);
   W("	.WORD "); W(num); WLn;
 
-  IF ZilModel.nVocab > 0 THEN
+  IF nEmit > 0 THEN
     Strings.IntToStr(entryLen, num);
     W("	.VOCBEG "); W(num); W(",");
     Strings.IntToStr(zwordBytes, num); W(num); WLn;
 
     FOR i := 0 TO ZilModel.nVocab - 1 DO
       k := order[i];
+      IF ZilModel.vocab[k].mergedInto < 0 THEN
       Strings.Copy(ZilModel.vocab[k].text, text);
       W("W?"); WSym(text); W(":: .ZWORD ");
       Strings.ToLower(text);
@@ -5014,10 +5127,24 @@ BEGIN
       Strings.IntToStr(pos, num);       W("	.BYTE "); W(num);
       Strings.IntToStr(v1, num);        W(","); W(num);
       Strings.IntToStr(v2, num);        W(","); W(num); WLn
+      END
     END;
     W("	.VOCEND"); WLn
   END;
-  W("	.ENDT"); WLn; WLn
+  W("	.ENDT"); WLn; WLn;
+
+  (* every merged-away word's W? symbol aliases the survivor's - a bare
+     constant, so it goes OUTSIDE the .VOCBEG/.VOCEND table, matching where
+     the ACT?/A? constants above are written rather than inside the fixed-
+     record vocab section itself. Matches the original's own
+     PerformVocabMerges, which copies the W?/A?/ACT?/PR? constants across
+     rather than leaving the merged word's own symbols dangling. *)
+  FOR i := 0 TO ZilModel.nVocab - 1 DO
+    IF ZilModel.vocab[i].mergedInto >= 0 THEN
+      W("	W?"); WSym(ZilModel.vocab[i].text); W("=W?");
+      WSym(ZilModel.vocab[ZilModel.vocab[i].mergedInto].text); WLn
+    END
+  END
 END EmitVocabTable;
 
 PROCEDURE EmitVocab;
@@ -5102,6 +5229,8 @@ BEGIN
   ok := CompileObjects();
   IF ~ok THEN RETURN FALSE END;
   ok := CompileSyntax();
+  IF ~ok THEN RETURN FALSE END;
+  ok := ApplyVocabMerges();
   IF ~ok THEN RETURN FALSE END;
   ok := ApplyVocabSynonyms();
   IF ~ok THEN RETURN FALSE END;

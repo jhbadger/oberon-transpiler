@@ -173,7 +173,14 @@ TYPE
        a merged-in direction records which word's text to look the
        property up under instead. Empty means "use my own text", the
        ordinary case. *)
-    dirAlias*: ARRAY 64 OF CHAR
+    dirAlias*: ARRAY 64 OF CHAR;
+    (* Set by ApplyVocabMerges when this word turns out to Z-CHARACTER-encode
+       to the same dictionary key as an earlier-registered word (V3's 6
+       significant characters can't tell "BOTTLE" from "BOTTLED" apart) - the
+       index of the SURVIVING word this one was merged into, or -1 for an
+       ordinary word (or the survivor itself). A merged word gets no
+       .ZWORD row of its own; its W? symbol aliases the survivor's. *)
+    mergedInto*: INTEGER
   END;
 
 VAR
@@ -327,14 +334,30 @@ BEGIN
   RETURN nSyntaxes - 1
 END AddSyntax;
 
+(* Registers the synonym word's OWN vocab entry immediately, matching the
+   original's timing: <SYNONYM ORIGINAL alias> looks up/creates the IWord
+   for `alias` as soon as the form is evaluated, not deferred until
+   ApplyVocabSynonyms actually copies ORIGINAL's data onto it. This matters
+   for ApplyVocabMerges (ZilCompile.mod), which runs before
+   ApplyVocabSynonyms and scans the vocab table for dictionary-key
+   collisions: a synonym word created only at ApplyVocabSynonyms time (as
+   this used to do, via AddVocab there) would still be missing from the
+   table when ApplyVocabMerges looks, silently skipping any collision that
+   only exists between two synonym words (advent's LUBRICANT/LUBRICATE:
+   <SYNONYM OIL LUBRICANT> and <VERB-SYNONYM OIL GREASE LUBRICATE> both
+   encode to the same V3 dictionary key). posBits=0 is safe to pass even if
+   the atom already has vocab data (from being used directly elsewhere) —
+   AddVocab only creates a fresh entry when one doesn't already exist. *)
 PROCEDURE AddSynonym*(kind: INTEGER; original, synonym: ZilObj.Zo);
+VAR ignore: INTEGER;
 BEGIN
   IF nSynonyms < MaxSynonyms THEN
     synonyms[nSynonyms].kind := kind;
     synonyms[nSynonyms].original := original;
     synonyms[nSynonyms].synonym := synonym;
     INC(nSynonyms)
-  END
+  END;
+  ignore := AddVocab(synonym.atomText, 0)
 END AddSynonym;
 
 (* Copies EVERY part of speech `src`'s vocab entry has onto `dest`'s,
@@ -561,7 +584,8 @@ BEGIN
     Strings.Copy(text, vocab[i].text);
     vocab[i].pos := 0;
     vocab[i].verbVal := 0; vocab[i].prepVal := 0; vocab[i].adjVal := 0;
-    vocab[i].dirVal := 0; vocab[i].buzzVal := 0; vocab[i].dirAlias[0] := 0X
+    vocab[i].dirVal := 0; vocab[i].buzzVal := 0; vocab[i].dirAlias[0] := 0X;
+    vocab[i].mergedInto := -1
   END;
 
   firstBits := 0;
