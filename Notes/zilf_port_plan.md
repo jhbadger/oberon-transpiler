@@ -3242,17 +3242,77 @@ Progress checkpoint: zork1.zil now compiles all the way through
 `GVERBS` and is currently stopped inside `1ACTIONS` on the next item in
 this doc's own **Known gaps** list below: `PSEUDO` object properties
 (`GLOBAL-CHECK` in `1actions.zil` reads a room's `PSEUDO` property table
-directly). Not yet started.
+directly).
+
+### Finishing it: PSEUDO, GLOBAL redefinition, and a real parser bug
+
+Four more fixes, in the same session, got `zork1.zil` all the way to
+**genuinely playable**:
+
+- **`PSEUDO` object properties** (`(PSEUDO "WORD" ACTION-ROUTINE ...)`,
+  scenery words that only exist so a room can react to them — zork1's
+  rooms are full of these: `NAILS`, `CHASM`, `DOOR`, `GATE`, `GAS`...).
+  Ported the original's `Compilation.Objects.cs` handling exactly: each
+  STRING element registers as a vocabulary NOUN the same way a SYNONYM
+  atom does, and the property emits one WORD per element regardless of
+  shape (a word's dictionary address, or a routine's address). Also
+  resolves `LOW-DIRECTION` (an assembler symbol the real compiler always
+  writes — the smallest property number used by any direction — that
+  this port's `ConstantText` had no case for, even though `EmitObjectTable`
+  was already emitting the symbol itself; `OTHER-SIDE`/`GLOBAL-CHECK`
+  read it directly via `,LOW-DIRECTION`).
+- **`GLOBAL` redefinition.** `zork1.zil` genuinely declares `WON-FLAG`
+  and `LUCKY` as `GLOBAL` twice (once in `1dungeon.zil`/`1actions.zil`,
+  again in `gverbs.zil`) under its own `<SET REDEFINE T>` — legitimate,
+  real-zilf-tolerated ZIL, not a bug in the game. This port's `AddGlobal`
+  always appended a new entry rather than checking for an existing one
+  under the same name, so both survived into the `.zap` as two `.GVAR`s
+  of the same name, and `zapf`'s own duplicate-symbol check ("global
+  redefined") caught what registration should have. Fixed the same way
+  `AddRoutine` already handles `ROUTINE` redefinition: update in place.
+- **The real bug, found only by actually playing the compiled game**:
+  every ordinary object noun ("open mailbox", "read leaflet", "take
+  lamp"...) failed with "There seems to be a noun missing in that
+  sentence!", despite the words being correctly registered with the
+  OBJECT part-of-speech bit set. zork1's own `gparser.zil` (unlike
+  zillib's `parser.zil`, which only ever checks a word's part-of-speech
+  BIT and never reads its VALUE for a plain noun) has a `WT?` routine
+  whose return value — the dictionary word's own V1/V2 byte — its caller
+  uses directly as a boolean. This port's vocabulary emission had no
+  value at all for the OBJECT part of speech (`PartValue`'s dispatch fell
+  through to its final `RETURN 0`), so every noun-only word's value byte
+  was 0 — FALSE — and `WT?` reported every single one of them as "not an
+  object". Confirmed byte-for-byte against a real zilf+zapf build:
+  `MAILBOX`'s compiled dictionary flags/value bytes were `[128, 0, 0]` in
+  this port versus the real compiler's `[128, 1, 0]`. Real zilf's own
+  `OldParserWord.SetObject` sets exactly this — `speechValues[PartOfSpeech
+  .Object] = 1`, a fixed sentinel never read as a number anywhere, only
+  as a non-zero truth value — so `PartValue` now returns `1` for
+  `PsObject`, matching it.
+
+**Verified by playing well into the game**: the mailbox/leaflet opening
+sequence and welcome message, entering the house through the kitchen
+window, taking and lighting the brass lantern, moving the rug and opening
+the trap door, descending into the cellar (the trap door slamming shut
+and being barred behind the player, exactly as the real game does), the
+`SCORE` command ("Your score is 35 (total of 350 points)... rank of
+Amateur Adventurer"), the troll fight (the sword's glow-when-danger-
+nearby mechanic, and a real randomized combat resolution ending in "The
+troll takes a fatal blow and slumps to the floor dead."). Full sample
+regression (`advent`, `beer`, `cloak`, `hello`, `mandelbrot`, `name`,
+**`zork1`**) all compile/assemble clean; `cloak` still wins, `advent`'s
+abbreviations and "examine bottled water" still work.
 
 ## Suggested order for the next session
 
-**Where this stands**: five complete, unmodified games compile, assemble
+**Where this stands**: six complete, unmodified games compile, assemble
 and run — `sample/beer` (V3), `sample/mandelbrot` (V4, ASCII art),
 `sample/name` (V3, interactive), `sample/cloak` (V3, a full `zillib` parser
-game, playable and winnable) and **`sample/advent` (V3, Colossal Cave
-Adventure, playable)**. `sample/zork1` (V3, the real, unmodified Zork I) is
-in progress — see MILESTONE 7 above for where it currently stops. The
-pipeline:
+game, playable and winnable), **`sample/advent` (V3, Colossal Cave
+Adventure, playable)** and **`sample/zork1` (V3, the real, unmodified
+1980s Zork I — its own custom parser, not zillib's — playable well into
+the game: house, lamp, trap door, combat, scoring; see MILESTONE 7
+above)**. The pipeline:
 
 ```
 ./obc -I Modules/ examples/zilf.mod -o zilf
@@ -3275,18 +3335,20 @@ dotnet bin/Release/net10.0/zilf.dll build -q -I zillib -I <gamedir> \
    just their exit code — several of this session's worst bugs assembled
    clean and only showed up in what the program actually printed or did.
 
-2. **Try `sample/zork1` next**, or `sample/cloak_plus`/`cloak_test`/
-   `cloak_glk` for something smaller first. Expect the same two-phase
-   shape: a short chain of missing builtins to compile, then a shorter but
-   much less obvious chain of runtime-only bugs to behave — and reach for
-   the real-zilf diff the moment a symptom (wrong value, crash, silently
-   unrecognised command) doesn't point at an obvious cause in the ZIL
-   source itself.
+2. **`sample/zork1` is done (playable)** — next up is something smaller
+   like `sample/cloak_plus`/`cloak_test`/`cloak_glk`, or push zork1
+   itself further (it hasn't been played to a WIN, only well into the
+   early game — the thief, the maze, and the full treasure/trophy-case
+   scoring loop are all unexplored). Expect the same two-phase shape any
+   new game brings: a short chain of missing builtins to compile, then a
+   shorter but much less obvious chain of runtime-only bugs to behave —
+   and reach for the real-zilf diff the moment a symptom (wrong value,
+   crash, silently unrecognised command) doesn't point at an obvious
+   cause in the ZIL source itself.
 
 3. **Known gaps, in rough order of how likely a game is to hit them**:
    - V4+ direction properties (object numbers widen to words)
-   - `PSEUDO` object properties — **this is exactly where zork1.zil
-     currently stops (MILESTONE 7); pick this up first**
+   - `PSEUDO` object properties — **done, see MILESTONE 7**
    - `<COMPILATION-FLAG DEBUG T>` builds fail in `BYTE/WORD: expected a
      FIX`; the debugging verbs build tables `BYTE`/`WORD` doesn't accept
    - `SORT` with extra vectors to rearrange in step
