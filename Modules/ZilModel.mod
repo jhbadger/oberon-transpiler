@@ -292,8 +292,30 @@ BEGIN
   END
 END AddObject;
 
+(* Real zilf's own GLOBAL subr replaces an existing global's value in place
+   when <SET REDEFINE T> is in effect (erroring otherwise) rather than
+   registering a second one under the same name - exactly the same
+   redefinition idiom AddRoutine already handles for ROUTINE. zork1.zil sets
+   REDEFINE T at its very top and genuinely does redeclare WON-FLAG (once in
+   1dungeon.zil, again in gverbs.zil) and LUCKY (once in 1actions.zil, again
+   in gverbs.zil); left as two separate entries, both got emitted as two
+   `.GVAR`s of the same name, and zapf's own duplicate-symbol check ("global
+   redefined") caught what this port's own registration should have. This
+   port has no REDEFINE-flag distinction to enforce (silently allowing a
+   redefinition a real, non-REDEFINE build would have rejected is the same
+   "strictly more permissive" simplification already made elsewhere, e.g.
+   PACKAGE/OBLIST). *)
 PROCEDURE AddGlobal*(name, value: ZilObj.Zo);
+VAR i: INTEGER;
 BEGIN
+  i := 0;
+  WHILE i < nGlobals DO
+    IF globals[i].name = name THEN
+      globals[i].value := value;
+      RETURN
+    END;
+    INC(i)
+  END;
   IF nGlobals < MaxGlobals THEN
     globals[nGlobals].name := name;
     globals[nGlobals].value := value;

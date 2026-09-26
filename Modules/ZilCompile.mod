@@ -642,6 +642,13 @@ BEGIN
   ELSIF z.kind = ZilObj.KAtom THEN
     Strings.Copy(z.atomText, name);
     IF name = "T" THEN Strings.Copy("1", s); RETURN TRUE END;
+    (* LOW-DIRECTION is an assembler symbol EmitObjectTable always writes
+       (guarded only by nPropNames > 0, true for any real game), not a
+       user-registered routine/object/constant/flag/vocab word, so none of
+       the lookups below it would ever find it - zork1's OTHER-SIDE and
+       GLOBAL-CHECK both read it directly (`,LOW-DIRECTION`) to know where
+       a room's direction properties stop and its ordinary ones begin. *)
+    IF name = "LOW-DIRECTION" THEN Strings.Copy(name, s); RETURN TRUE END;
     IF FindRoutineIdx(name) >= 0 THEN Strings.Copy(name, s); RETURN TRUE END;
     IF FindObjectIdx(name) >= 0 THEN Strings.Copy(name, s); RETURN TRUE END;
     IF FindConstantIdx(name) >= 0 THEN Strings.Copy(name, s); RETURN TRUE END;
@@ -3772,11 +3779,11 @@ END CompileTables;
    still run — it would just silently disagree with every property default
    slot — so it is worth stating.
 
-   Not handled, because they need the vocabulary and the complex-PROPDEF
-   pattern machinery that aren't ported: SYNONYM, ADJECTIVE, PSEUDO, and
-   direction properties (`(NORTH TO CELLAR)`). Those are SKIPPED with a
-   comment in the emitted .zap rather than failing the compile, so a game
-   still builds and the gap is visible in the output. *)
+   SYNONYM, ADJECTIVE, PSEUDO and direction properties (`(NORTH TO
+   CELLAR)`) all need the vocabulary and/or complex-PROPDEF pattern
+   machinery, so each gets its own dedicated handling below rather than
+   going through the generic constant-value path every other property
+   uses. *)
 
 PROCEDURE MaxProps(): INTEGER;
 BEGIN IF ZilModel.zversion < 4 THEN RETURN 31 ELSE RETURN 63 END END MaxProps;
@@ -3839,12 +3846,11 @@ END IsLocationProperty;
 (* SYNONYM and ADJECTIVE are real properties, but their values are
    DICTIONARY WORDS rather than ordinary constants, so they are emitted by
    their own code below. PSEUDO (a list of word/routine pairs for scenery)
-   still needs machinery this port doesn't have. *)
+   is handled the same way, just further down (its STRING elements are
+   vocabulary words too, but its ATOM elements are ordinary routine
+   references, unlike SYNONYM/ADJECTIVE's all-atom shape). *)
 PROCEDURE IsWordProperty(name: ARRAY OF CHAR): BOOLEAN;
 BEGIN RETURN (name = "SYNONYM") OR (name = "ADJECTIVE") END IsWordProperty;
-
-PROCEDURE IsUnsupportedProperty(name: ARRAY OF CHAR): BOOLEAN;
-BEGIN RETURN name = "PSEUDO" END IsUnsupportedProperty;
 
 (* A direction property like (NORTH TO CELLAR) is a complex PROPDEF pattern,
    recognised here by the TO/PER/SORRY keywords real source uses. *)
@@ -4064,8 +4070,24 @@ BEGIN
             END;
             body := body.rest
           END
-        ELSIF ~IsPseudoProperty(nm) & ~IsUnsupportedProperty(nm)
-              & ~IsDirectionProperty(p.first.rest) THEN
+        ELSIF nm = "PSEUDO" THEN
+          (* (PSEUDO "WORD" ACTION-ROUTINE ...): scenery words that only
+             exist so a room can react to them (zork1's rooms are full of
+             these — "nails", "chasm", "gate"...). Each STRING element is a
+             vocabulary NOUN, exactly like a SYNONYM atom is, just spelled
+             as a string in source; the ATOM elements between them name
+             action routines and need no registration of their own. *)
+          k := RegisterProp(nm);
+          IF k < 0 THEN Err("CompileObjects: too many properties"); RETURN FALSE END;
+          body := p.first.rest;
+          WHILE (body # NIL) & (body.first # NIL) DO
+            IF body.first.kind = ZilObj.KString THEN
+              j := ZilModel.AddVocab(body.first.strBuf^, ZilModel.PsObject);
+              IF j < 0 THEN Err("CompileObjects: too many vocabulary words"); RETURN FALSE END
+            END;
+            body := body.rest
+          END
+        ELSIF ~IsPseudoProperty(nm) & ~IsDirectionProperty(p.first.rest) THEN
           k := RegisterProp(nm);
           IF k < 0 THEN Err("CompileObjects: too many properties"); RETURN FALSE END
         END
@@ -4363,6 +4385,29 @@ BEGIN
               W("	.BYTE "); WSym(v.first.atomText); WLn;
               v := v.rest
             END
+          ELSIF propNameTab[k] = "PSEUDO" THEN
+            (* one WORD per element regardless of shape: a STRING is its
+               vocabulary word's address (W?WORD, registered above in pass
+               1), an ATOM is its action routine's address by the ordinary
+               constant path - matching the original's own AddWord/
+               CompileConstant split exactly. *)
+            FixText(nOwnProps * 2, text);
+            W("	.PROP "); W(text); W(",P?"); W(propNameTab[k]); WLn;
+            v := body;
+            WHILE (v # NIL) & (v.first # NIL) DO
+              IF v.first.kind = ZilObj.KString THEN
+                W("	.WORD W?"); WSym(v.first.strBuf^); WLn
+              ELSIF ConstantText(v.first, text) THEN
+                W("	.WORD "); W(text); WLn
+              ELSE
+                Strings.Copy("CompileObjects: PSEUDO value is not a string or a compilable constant, in object ", errBuf);
+                Strings.Append(o.name.atomText, errBuf);
+                Strings.Append(": ", errBuf);
+                ZilObj.PrintTo(v.first, nm); Strings.Append(nm, errBuf);
+                Err(errBuf); RETURN FALSE
+              END;
+              v := v.rest
+            END
           ELSE
           FixText(nOwnProps * 2, text);
           W("	.PROP "); W(text); W(",P?"); W(propNameTab[k]); WLn;
@@ -4386,20 +4431,6 @@ BEGIN
         p := p.rest
       END;
       INC(k)
-    END;
-
-    (* note anything deliberately skipped, so the gap is visible *)
-    p := o.props;
-    WHILE (p # NIL) & (p.first # NIL) DO
-      IF (p.first.kind = ZilObj.KList) & (p.first.first # NIL)
-         & (p.first.first.kind = ZilObj.KAtom) THEN
-        Strings.Copy(p.first.first.atomText, nm);
-        IF IsUnsupportedProperty(nm) THEN
-          W("	; (skipped "); W(nm);
-          W(": needs the vocabulary/PROPDEF machinery)"); WLn
-        END
-      END;
-      p := p.rest
     END;
 
     W("	.BYTE 0"); WLn;
@@ -5015,6 +5046,16 @@ VAR i, j, k, entryLen, zwordBytes, pos, v1, v2, nParts, nEmit: INTEGER;
   PROCEDURE PartValue(w, part: INTEGER): INTEGER;
   VAR propNm: ARRAY 64 OF CHAR;
   BEGIN
+    (* OBJECT has no per-word number of its own (a SYNONYM word's meaning
+       comes from which OBJECTs list it, found by scanning, never by a
+       value read out of the dictionary) - but the value slot still has to
+       hold something other than 0, because a caller that treats a value
+       lookup's result as a boolean (zork1's own gparser.zil: WT? returns
+       exactly this byte, and <COND (<WT? .WRD ,PS?OBJECT ,P1?OBJECT> ...)>
+       reads it as true/false) would silently treat every noun-only word as
+       FALSE. Matches the real compiler's own OldParserWord.SetObject:
+       `speechValues[PartOfSpeech.Object] = 1`, a fixed sentinel, never 0. *)
+    IF part = ZilModel.PsObject THEN RETURN 1 END;
     IF part = ZilModel.PsVerb THEN RETURN ZilModel.vocab[w].verbVal END;
     IF part = ZilModel.PsPreposition THEN RETURN ZilModel.vocab[w].prepVal END;
     IF part = ZilModel.PsAdjective THEN RETURN ZilModel.vocab[w].adjVal END;
