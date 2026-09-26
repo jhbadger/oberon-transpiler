@@ -3139,13 +3139,120 @@ out to be real, and related to each other only in that both are about
    regression (`advent`, `beer`, `cloak`, `hello`, `mandelbrot`, `name`)
    still compiles, assembles and plays clean; `cloak` still wins.
 
+## MILESTONE 7: `sample/zork1` — a real interpreter bug, not just missing features
+
+Started on the full, unmodified Zork I source (`zork1.zil` plus its nine
+`INSERT-FILE`d parts — `1dungeon.zil`, `1actions.zil`, `gclock.zil`,
+`gglobals.zil`, `gmacros.zil`, `gmain.zil`, `gparser.zil`, `gsyntax.zil`,
+`gverbs.zil` — 20k+ lines total, by far the largest source tried yet).
+The very first attempt didn't fail — it **hung**, RSS climbing into the
+gigabytes with no output, which is a different and more serious class of
+problem than the missing-builtin errors every previous milestone hit.
+
+**Bisection method, since there was no error message to start from**:
+confirmed via `ps`/RSS sampling that CPU was pinned but the process was
+never going to finish (not just "slow"); killed it; then found the smallest
+failing input by truncating `zork1.zil`'s own `INSERT-FILE` chain one file
+at a time (fast — hits `CompileProgram: entry routine not defined`, since
+none of those partial programs define an entry routine), then, once
+`1dungeon.zil` alone was implicated, truncating it at successive top-level
+form boundaries (a small Python script tracking `<`/`(`/`"` nesting depth
+to find safe split points) with **a trivial stand-in `<ROUTINE GO ()
+<RTRUE>>` appended** so the partial program *would* reach the entry check
+and hang or not — the earlier bisection attempts without this trick were
+worthless false negatives, since every truncated prefix failed the SAME
+"entry routine not defined" check before ever reaching the code that
+actually hangs. That narrowed it to a single routine, then to a single
+statement: `<COND (<VERB? OPEN> ...))>`, then to a **7-line, fully
+self-contained repro with no zork1/zillib code at all**:
+
+```
+<DEFINE FOO (ATMS "AUX" (L ()))
+  <REPEAT ()
+    <COND (<EMPTY? .ATMS> <RETURN!- 999>)>
+    ...
+```
+
+**Root cause**: `PROG`/`REPEAT`/`BIND`'s body-evaluation loop
+(`ZilEval.mod`) only checked `EvalImpl`'s `outcome` field to decide whether
+to keep looping, never the separate `evalErrFlag` global this port reports
+evaluation errors through (`Err` returns an *ordinary* `OValue` of `FALSE`
+— see its own comment — specifically so a caller that forgets to check the
+flag fails soon after on the bad value instead of nowhere). Every other
+similar loop in the file (e.g. `INSERT-FILE`'s own read/eval loop) already
+had this check; `PROG`/`REPEAT`/`BIND` never did. A `REPEAT` whose body
+errors on *every* pass, rather than eventually succeeding or hitting a real
+`RETURN`, therefore never stopped — `RETURN!-` (see below) was
+permanently unassigned, so zork1's `gmacros.zil` `MULTIFROB` (the
+compile-time helper behind the `VERB?`/`PRSO?`/`PRSI?`/`ROOM?` DEFMACs,
+used constantly throughout zork1) walked its argument list down to empty
+and then called the same failing statement forever. This is the most
+significant bug found in this whole port so far: not a missing feature,
+but the interpreter's own error handling failing to stop a loop. Fixed by
+adding the missing `evalErrFlag` check (two call sites: the body loop and
+the bindings-initializer loop).
+
+Two more real gaps surfaced once the loop actually stopped erroring
+instead of hanging:
+
+- **`RETURN!-`** (and any `NAME!-` with nothing after the `-`) is MDL's
+  spelling for "NAME, looked up in the ROOT oblist specifically" —
+  confirmed against the real compiler's own `ZilAtom.Parse` (`idx ==
+  text.Length - 2` case). This port's reader already preserves `!-`
+  literally in an atom's raw text, matching the real reader's `Parser.cs`
+  exactly — the gap was in `ZilObj.Intern`, the one place every atom
+  actually gets interned, which had no equivalent normalization and so
+  treated `RETURN!-` as a permanently distinct, forever-unassigned atom
+  instead of the same `RETURN` already registered as a builtin.
+- **`PUTREST`** (destructively replace a list's own tail pointer, returning
+  the mutated list) was simply never ported. `MULTIFROB` uses it for the
+  classic MDL "build a list by mutation, walking a saved tail pointer"
+  idiom.
+
+Once `RETURN!-`/`PUTREST` worked, the compile got much further and hit a
+run of smaller, ordinary missing-feature gaps in quick succession (each
+found by just re-running the full 20k-line compile and fixing whatever it
+stopped on next — no more bisection needed once the hang itself was gone):
+
+- **`ApplyDefine`'s macro-call argument binder only recognized `"OPT"`/
+  `"AUX"`**, not their full-word synonyms `"OPTIONAL"`/`"EXTRA"` (real
+  zilf's `ArgSpec.cs` treats all four identically; this port's OWN
+  ROUTINE-argspec parser, a separate piece of code, already had both
+  pairs). `gmacros.zil`'s `PROB` macro is declared `('BASE? "OPTIONAL"
+  'LOSER?)`.
+- **A bare atom naming a GLOBAL whose value is itself a table** (`<GLOBAL
+  DEF1-RES <TABLE DEF1 0 0>>`, where `DEF1` — no comma — means "the
+  address of DEF1's own table") wasn't resolved as a compilable constant;
+  only a table VALUE reached directly was.
+- **`#DECL (...)` used as a plain STATEMENT** (rather than a value)
+  wasn't handled. The reader turns `#DECL (...)` into a literal `<QUOTE
+  (...)>` FORM on purpose, so it self-evaluates correctly in value
+  position (see `ZilRead`'s own comment) — but `gclock.zil`'s `QUEUE`
+  opens with a bare `#DECL (...)` statement, and this port has no DECL
+  checking to feed it to (a documented simplification), so a `QUOTE` in
+  statement position now just compiles to nothing.
+- **`RSTACK`** (pop the value stack and return it; zap mnemonic
+  `ret_popped`, already fully known to `ZapfOpcodes`) had no `CompileStmt`
+  case and wasn't in `IsStatementBuiltin`. `gmacros.zil`'s `RFATAL` DEFMAC
+  expands to `<PROG () <PUSH 2> <RSTACK>>`, used throughout zork1
+  whenever a command fatally fails to parse.
+
+Progress checkpoint: zork1.zil now compiles all the way through
+`GMACROS`/`GSYNTAX`/`1DUNGEON`/`GGLOBALS`/`GCLOCK`/`GMAIN`/`GPARSER`/
+`GVERBS` and is currently stopped inside `1ACTIONS` on the next item in
+this doc's own **Known gaps** list below: `PSEUDO` object properties
+(`GLOBAL-CHECK` in `1actions.zil` reads a room's `PSEUDO` property table
+directly). Not yet started.
+
 ## Suggested order for the next session
 
 **Where this stands**: five complete, unmodified games compile, assemble
 and run — `sample/beer` (V3), `sample/mandelbrot` (V4, ASCII art),
 `sample/name` (V3, interactive), `sample/cloak` (V3, a full `zillib` parser
 game, playable and winnable) and **`sample/advent` (V3, Colossal Cave
-Adventure, playable)**. The pipeline:
+Adventure, playable)**. `sample/zork1` (V3, the real, unmodified Zork I) is
+in progress — see MILESTONE 7 above for where it currently stops. The
+pipeline:
 
 ```
 ./obc -I Modules/ examples/zilf.mod -o zilf
@@ -3178,7 +3285,8 @@ dotnet bin/Release/net10.0/zilf.dll build -q -I zillib -I <gamedir> \
 
 3. **Known gaps, in rough order of how likely a game is to hit them**:
    - V4+ direction properties (object numbers widen to words)
-   - `PSEUDO` object properties
+   - `PSEUDO` object properties — **this is exactly where zork1.zil
+     currently stops (MILESTONE 7); pick this up first**
    - `<COMPILATION-FLAG DEBUG T>` builds fail in `BYTE/WORD: expected a
      FIX`; the debugging verbs build tables `BYTE`/`WORD` doesn't accept
    - `SORT` with extra vectors to rearrange in step
