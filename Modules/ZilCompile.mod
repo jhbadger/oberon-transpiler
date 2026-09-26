@@ -1304,6 +1304,21 @@ BEGIN
   RETURN TRUE
 END LowCoreRewrite;
 
+(* Whether `z` is a FORM that merely NAMES a variable - `.X` or `,X`, which
+   read as <LVAL X> and <GVAL X>. The original calls the opposite of this
+   IsNonVariableForm, and several places need the distinction: a DO loop's
+   end is a PREDICATE when it is a real form but a VALUE to compare against
+   when it is just a variable reference. Treating `<DO (I 0 .LEN) ...>`'s
+   bound as a predicate compiles to "branch out while LEN is true", which
+   runs the body zero times or forever - and zillib's COPY-TABLE is written
+   exactly that way, so nothing the parser copies between buffers arrives. *)
+PROCEDURE IsVarRefForm(z: ZilObj.Zo): BOOLEAN;
+BEGIN
+  RETURN (z # NIL) & (z.kind = ZilObj.KForm) & (ZilObj.ListLength(z) = 2)
+       & (z.first # NIL) & (z.first.kind = ZilObj.KAtom)
+       & ((z.first.atomText = "LVAL") OR (z.first.atomText = "GVAL"))
+END IsVarRefForm;
+
 PROCEDURE IsLowCore(z: ZilObj.Zo): BOOLEAN;
 BEGIN
   RETURN (z # NIL) & (z.kind = ZilObj.KForm) & (z.first # NIL)
@@ -2679,8 +2694,9 @@ BEGIN
 
       W(againLabel); W(":"); WLn;
 
-      (* a FORM end is a predicate, tested before the body *)
-      doPre := doEnd.kind = ZilObj.KForm;
+      (* a FORM end is a predicate, tested before the body — but `.X` and
+         `,X` are forms too, and those are values to compare against *)
+      doPre := (doEnd.kind = ZilObj.KForm) & ~IsVarRefForm(doEnd);
       IF doPre THEN
         ok := CompileCondition(doEnd, exhLabel, TRUE);
         IF ~ok THEN DEC(nBlocks); PopInnerLocals(1); RETURN FALSE END
@@ -2706,13 +2722,19 @@ BEGIN
 
       (* the increment *)
       IF doStep # NIL THEN
-        ok := CompileOperand(doStep, opText);
-        IF ~ok THEN DEC(nBlocks); PopInnerLocals(1); RETURN FALSE END;
         IF doDown & (doStep.kind = ZilObj.KFix) THEN
           FixText(-doStep.fixVal, opText);
           W("	SUB "); W(targetName); W(","); W(opText);
           W(" >"); W(targetName); WLn
+        ELSIF (doStep.kind = ZilObj.KForm) & ~IsVarRefForm(doStep) THEN
+          (* a FORM step computes the counter's NEXT VALUE rather than a
+             delta, so it is stored into the counter, not added to it —
+             the original's `inc.IsNonVariableForm()` branch *)
+          ok := CompileOperandTo(doStep, targetName);
+          IF ~ok THEN DEC(nBlocks); PopInnerLocals(1); RETURN FALSE END
         ELSE
+          ok := CompileOperand(doStep, opText);
+          IF ~ok THEN DEC(nBlocks); PopInnerLocals(1); RETURN FALSE END;
           W("	ADD "); W(targetName); W(","); W(opText);
           W(" >"); W(targetName); WLn
         END
@@ -3670,6 +3692,140 @@ BEGIN
   RETURN FALSE
 END IsDirectionProperty;
 
+(* Emits one direction property. Its byte layout comes from the built-in
+   DIRECTIONS PROPDEF rather than from the property list, which is why it
+   cannot go through the ordinary value path. Ported from
+   Context.InitPropDefs's SDirectionsPropDef_V3, which spells out the shapes:
+
+     (DIR TO R)                      UEXIT 1: room byte
+     (DIR SORRY S)                   NEXIT 2: string word
+     (DIR PER F)                     FEXIT 3: routine word, zero byte
+     (DIR TO R IF G ["OPT"] ELSE S)  CEXIT 4: room, global, string word
+     (DIR TO R IF D IS OPEN
+                   ["OPT"] ELSE S)   DEXIT 5: room, door, string word, zero
+     (DIR R) / (DIR S)               the bare forms of UEXIT and NEXIT
+
+   The LENGTH is what identifies the kind at run time: zillib's V-WALK
+   switches on <PTSIZE .PT> against its UEXIT/NEXIT/FEXIT/CEXIT/DEXIT
+   constants, which are exactly 1..5 in V3.
+
+   V3 layout only. V4+ widens object numbers to words and pads differently;
+   CompileProgram already refuses every version above 4, and V4 rooms with
+   exits are not covered yet. *)
+PROCEDURE EmitDirectionProp(propName: ARRAY OF CHAR; body: ZilObj.Zo;
+                            objName: ARRAY OF CHAR): BOOLEAN;
+VAR p, toObj, sorryStr, perFcn, ifObj, elseStr: ZilObj.Zo;
+    isOpen, isFirst: BOOLEAN;
+    text, errBuf: ARRAY 512 OF CHAR;
+
+  PROCEDURE Fail(what: ARRAY OF CHAR): BOOLEAN;
+  BEGIN
+    Strings.Copy("CompileObjects: ", errBuf);
+    Strings.Append(objName, errBuf); Strings.Append("'s ", errBuf);
+    Strings.Append(propName, errBuf); Strings.Append(" property ", errBuf);
+    Strings.Append(what, errBuf);
+    Err(errBuf); RETURN FALSE
+  END Fail;
+
+  PROCEDURE EmitPropHead(len: INTEGER);
+  VAR n: ARRAY 16 OF CHAR;
+  BEGIN
+    FixText(len, n);
+    W("	.PROP "); W(n); W(",P?"); WSym(propName); WLn
+  END EmitPropHead;
+
+  (* the message word of a CEXIT/DEXIT/NEXIT; an omitted "OPT" ELSE is 0 *)
+  PROCEDURE EmitMsgWord(z: ZilObj.Zo): BOOLEAN;
+  BEGIN
+    IF z = NIL THEN W("	.WORD 0"); WLn; RETURN TRUE END;
+    IF ~ConstantText(z, text) THEN
+      RETURN Fail("has a message that is not a compilable constant")
+    END;
+    W("	.WORD "); W(text); WLn;
+    RETURN TRUE
+  END EmitMsgWord;
+
+BEGIN
+  toObj := NIL; sorryStr := NIL; perFcn := NIL; ifObj := NIL; elseStr := NIL;
+  isOpen := FALSE; isFirst := TRUE;
+  p := body;
+  WHILE (p # NIL) & (p.first # NIL) DO
+    IF (p.first.kind = ZilObj.KAtom) & (p.first.atomText = "TO") THEN
+      p := p.rest;
+      IF (p = NIL) OR (p.first = NIL) THEN RETURN Fail("has TO with no room") END;
+      toObj := p.first
+    ELSIF (p.first.kind = ZilObj.KAtom) & (p.first.atomText = "SORRY") THEN
+      p := p.rest;
+      IF (p = NIL) OR (p.first = NIL) THEN RETURN Fail("has SORRY with no message") END;
+      sorryStr := p.first
+    ELSIF (p.first.kind = ZilObj.KAtom) & (p.first.atomText = "PER") THEN
+      p := p.rest;
+      IF (p = NIL) OR (p.first = NIL) THEN RETURN Fail("has PER with no routine") END;
+      perFcn := p.first
+    ELSIF (p.first.kind = ZilObj.KAtom) & (p.first.atomText = "IF") THEN
+      p := p.rest;
+      IF (p = NIL) OR (p.first = NIL) THEN RETURN Fail("has IF with no condition") END;
+      ifObj := p.first
+    ELSIF (p.first.kind = ZilObj.KAtom) & (p.first.atomText = "IS") THEN
+      p := p.rest;
+      IF (p = NIL) OR (p.first = NIL) OR (p.first.kind # ZilObj.KAtom)
+         OR (p.first.atomText # "OPEN") THEN
+        RETURN Fail("has IS without OPEN")
+      END;
+      isOpen := TRUE
+    ELSIF (p.first.kind = ZilObj.KAtom) & (p.first.atomText = "ELSE") THEN
+      p := p.rest;
+      IF (p = NIL) OR (p.first = NIL) THEN RETURN Fail("has ELSE with no message") END;
+      elseStr := p.first
+    ELSIF isFirst THEN
+      (* the bare forms, which name a room or give a message directly *)
+      IF p.first.kind = ZilObj.KString THEN sorryStr := p.first
+      ELSE toObj := p.first END
+    ELSE
+      RETURN Fail("has a part this port does not recognise")
+    END;
+    isFirst := FALSE;
+    p := p.rest
+  END;
+
+  IF perFcn # NIL THEN
+    IF ~ConstantText(perFcn, text) THEN RETURN Fail("names an unknown routine") END;
+    EmitPropHead(3);
+    W("	.WORD "); W(text); WLn;
+    W("	.BYTE 0"); WLn;
+    RETURN TRUE
+  END;
+
+  IF toObj = NIL THEN
+    IF sorryStr = NIL THEN RETURN Fail("has no destination") END;
+    EmitPropHead(2);
+    RETURN EmitMsgWord(sorryStr)
+  END;
+
+  IF ~ConstantText(toObj, text) THEN RETURN Fail("names an unknown room") END;
+  IF ifObj = NIL THEN
+    EmitPropHead(1);
+    W("	.BYTE "); W(text); WLn;
+    RETURN TRUE
+  END;
+
+  IF isOpen THEN EmitPropHead(5) ELSE EmitPropHead(4) END;
+  W("	.BYTE "); W(text); WLn;
+  (* a CEXIT's condition is a GLOBAL, whose byte is its Z-machine variable
+     number - which is what the .GVAR-defined symbol evaluates to, and which
+     ConstantText does not look up because a global is normally reached as
+     `,NAME` instead *)
+  IF (ifObj.kind = ZilObj.KAtom) & (FindGlobalIdx(ifObj.atomText) >= 0) THEN
+    Strings.Copy(ifObj.atomText, text); SanitizePrefixed(text)
+  ELSIF ~ConstantText(ifObj, text) THEN
+    RETURN Fail("names an unknown door object or flag global")
+  END;
+  W("	.BYTE "); W(text); WLn;
+  IF ~EmitMsgWord(elseStr) THEN RETURN FALSE END;
+  IF isOpen THEN W("	.BYTE 0"); WLn END;
+  RETURN TRUE
+END EmitDirectionProp;
+
 (* Emits the whole object table: the property-default words, one .OBJECT
    row per object, and a property table per object. *)
 PROCEDURE CompileObjects(): BOOLEAN;
@@ -3934,12 +4090,14 @@ BEGIN
       WHILE (p # NIL) & (p.first # NIL) DO
         IF (p.first.kind = ZilObj.KList) & (p.first.first # NIL)
            & (p.first.first.kind = ZilObj.KAtom)
-           & (p.first.first.atomText = propNameTab[k])
-           & ~IsDirectionProperty(p.first.rest) THEN
-          (* A direction property — (NORTH TO CELLAR), (SOUTH SORRY "...") —
-             has a byte layout defined by the built-in DIRECTIONS PROPDEF
-             pattern rather than being a plain value list, so it is skipped
-             here and noted below. See the plan doc for the V3 layout. *)
+           & (p.first.first.atomText = propNameTab[k]) THEN
+        IF IsDirectionProperty(p.first.rest) & ~IsPseudoProperty(propNameTab[k]) THEN
+          (* a direction property is laid out by the DIRECTIONS PROPDEF, not
+             by its value list *)
+          IF ~EmitDirectionProp(propNameTab[k], p.first.rest, o.name.atomText) THEN
+            RETURN FALSE
+          END
+        ELSE
           body := p.first.rest;
           nOwnProps := 0; v := body;
           WHILE (v # NIL) & (v.first # NIL) DO INC(nOwnProps); v := v.rest END;
@@ -3994,6 +4152,7 @@ BEGIN
             v := v.rest
           END
           END
+        END
         END;
         p := p.rest
       END;
@@ -4006,7 +4165,7 @@ BEGIN
       IF (p.first.kind = ZilObj.KList) & (p.first.first # NIL)
          & (p.first.first.kind = ZilObj.KAtom) THEN
         Strings.Copy(p.first.first.atomText, nm);
-        IF IsUnsupportedProperty(nm) OR (~IsPseudoProperty(nm) & IsDirectionProperty(p.first.rest)) THEN
+        IF IsUnsupportedProperty(nm) THEN
           W("	; (skipped "); W(nm);
           W(": needs the vocabulary/PROPDEF machinery)"); WLn
         END
