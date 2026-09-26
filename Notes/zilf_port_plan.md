@@ -2957,12 +2957,131 @@ eye.
 - `V4+` direction properties (object numbers widen to words) are not
   emitted.
 
+## MILESTONE 6: `sample/advent/advent.zil` — Colossal Cave Adventure, playable
+
+**`advent.zil` compiles, assembles, runs and is genuinely playable.**
+Movement, taking/dropping/holding objects, INVENTORY, SCORE, darkness and
+the lamp, and out-of-scope object handling ("You don't see that here.")
+all behave correctly under frotz. This is the largest and most demanding
+game in the corpus so far — a real port of the original 1977 Adventure,
+not a small demo — and it needed both a chain of missing pieces to reach a
+clean compile and, separately, three *runtime* bugs that a clean compile
+and a clean assemble gave no hint of.
+
+### The new tool that made the runtime half tractable
+
+**A real build of zilf's own C# compiler is available locally**
+(`~/lib/src/zilf`, `dotnet build src/Zilf/Zilf.csproj -c Release`, then
+`dotnet bin/Release/net10.0/zilf.dll build -q -I zillib -I <gamedir> -S
+game.zil game.zap`). When a compiled game misbehaves and the cause isn't
+obvious from reading ZIL source, **compile the same game with the real
+zilf and diff the two `.zap` outputs** (or, for a specific symbol, grep
+both for it). This is categorically faster than reasoning about MDL
+semantics from documentation and comments: it was how the `ITABLE`
+length-prefix bug below was found and confirmed, in minutes, after a long
+unproductive stretch of hand-tracing scope-crawl arithmetic. Real zilf's
+data tables land in a separate `*_data.zap` file (its own choice, not this
+port's); the routine bodies are in the main output. See
+[[project_zilf_port]] for where the checkout and build live.
+
+### Getting it to compile
+
+- `BIT-SYNONYM` (a flag alias sharing another flag's bit — V3 only has 32).
+- `=?` vs `==?`: MDL distinguishes STRUCTURAL equality from EXACT identity;
+  this port had conflated them into one exact test, which rejected every
+  achievement flag in zillib's SCORING-ACHIEVEMENTS (`'REPEATABLE` built
+  fresh each call is `=?` but not `==?` to another fresh `'REPEATABLE`).
+- The general `PROPSPEC` object-property hook (`ApplyPropSpecs`, run before
+  anything else compiles, since a PROPSPEC may itself define routines and
+  tables — zillib's THINGS-PROPSPEC and PRONOUN-PROPSPEC both do).
+- `PUT`, `ZGET`/`ZPUT`/`GETB`/`PUTB`, `UNPARSE`, `0?`/`1?` at the
+  interpreter level — needed because compile-time finisher/PROPSPEC code
+  calls them directly, not just Z-machine-runtime compiled code.
+- A ROUTINE's ZVAL is now a value of type ROUTINE, not the bare atom, so
+  pronouns.zil's `<TYPE? <GETPROP .R ZVAL> ROUTINE>` finally works.
+- `<SYNTAX ... = action preaction NAME>`: the optional third value after
+  `=`, an explicit action-constant name overriding the one derived from the
+  routine (advent shares `V-POUR-LIQUID` between WATER and POUR, and wants
+  `V?WATER` on the WATER line specifically).
+- The reader no longer auto-splices a `#SPLICE` literal into whatever
+  structure it's read into (a cloak-milestone addition that turned out to
+  be wrong — see the plan doc's own postmortem in the commit message).
+  Splicing now happens only at genuine consumption points: quasiquote
+  splicing works on VECTOR templates as well as LIST/FORM now, and a new
+  `FlattenSpliceMembers` flattens one level of SPLICE members out of every
+  object property's value list, in `ApplyPropSpecs`.
+- Direction properties and location (`IN`/`LOC`) properties, told apart by
+  the property's BODY SHAPE now (not by name — `IN` is both a zillib
+  direction and the pseudo-property naming an object's parent), and a
+  `GLOBAL` property packs one byte per object on V3 (object numbers fit in
+  a byte there), not a word — needed since some of advent's rooms have five
+  `GLOBAL` objects, over V3's 8-byte property limit at word width.
+- `AddRoutine` replaces an existing definition instead of emitting two
+  `.FUNCT`s under the same name — advent overrides `V-QUIT`/`V-THINK-ABOUT`
+  inside `<BIND ((REDEFINE T)) ...>`.
+- Several error messages now name the actual symbol or form involved
+  (`"calling unassigned atom: PUT in <PUT .A 4 T>"`, not a bare
+  `"unrecognized SUBR"`) — worth doing on sight whenever a message doesn't
+  already say enough to `grep` the source with.
+
+### Getting it to behave: three runtime bugs, invisible until played
+
+1. **Named `PROG`/`REPEAT`/`BIND` blocks.** `<PROG NAME (...) ...>`'s
+   activation atom was parsed and discarded; `<AGAIN .NAME>` /
+   `<RETURN val .NAME>` always targeted the innermost block. `MATCH-NOUN-
+   PHRASE`'s `<PROG BITS-SET () ...>` needs `<AGAIN .BITS-SET>` to work from
+   inside a nested *unnamed* `REPEAT` that `MAP-SCOPE`'s own macro expansion
+   introduces — defaulting to "innermost" restarted the wrong loop
+   entirely. A ROUTINE's own optional activation atom needs the identical
+   targeting one level further out (`<RETURN val .MSN>` inside `MAP-SCOPE-
+   NEXT` means "leave the routine"), checked as a special case first since
+   a routine is never itself pushed as a numbered block.
+2. **`<ITABLE WORD n>` / `<ITABLE BYTE n>` allocated `n` elements; they
+   need `n + 1`.** The specifier atom doesn't set the element width — it
+   requests an automatic LENGTH PREFIX (one extra word/byte, pre-filled
+   with `n`), exactly like the already-correct `TfLength` flag `LTABLE`/
+   `PLTABLE` use. zillib's `SCOPE-CURRENT-STAGES` is `<ITABLE WORD
+   ,SIZE>`: `SIZE` routine references plus a leading count word the
+   scope-crawl machinery reads and writes directly. Sized one word short,
+   the library's own bookkeeping — which deliberately writes the *full
+   declared* `SIZE` into slot 0 even when fewer stages are active, relying
+   on the unused trailing slots being the ITABLE's own zero-fill — walks
+   one slot past the table's end into whatever follows it in the story
+   file, and can end up calling whatever packed-address-shaped garbage is
+   sitting there: `Call to non-routine`, reachable the moment a player
+   tries to take or examine anything not in the current room (which widens
+   scope through every stage in turn). Confirmed character-for-character
+   against the real compiler: `SCOPE-CURRENT-STAGES:: .TABLE 16` — 16
+   bytes, 8 words, one more than the 7-element count.
+3. **A word's part-of-speech "First" flag, once set, was never cleared.**
+   `AddVocab` set `VerbFirst` (or `AdjectiveFirst`/`DirectionFirst`) the
+   first time a word gained any value-recording part of speech, but a
+   `PREPOSITION` or `BUZZWORD` registered on the word LATER always wins the
+   first value slot regardless, by the original's own fixed priority order
+   (already correctly ported into `EmitVocabTable`) — so the flag byte has
+   to agree with whichever part actually ends up first, and the original's
+   `SetPreposition`/`SetBuzzword` unconditionally clear the First bits on
+   their own first registration for exactly this reason. `AddVocab` didn't.
+   `INVENTORY` is both a verb and a preposition in advent's grammar: left
+   flagged `VerbFirst` from its earlier verb registration, `CHKWORD?`'s "is
+   this a verb?" query silently read the *preposition's* value out of the
+   wrong slot, and the parser failed to recognise "inventory" (and "score")
+   as verbs at all — with no error, no crash, just `I don't understand
+   that sentence.`
+
+**None of these three were visible in the compiled `.zap` or in whether it
+assembled.** All three were found the same way: play the game, hit the
+wrong behavior, then diff against a real zilf build once the shape of the
+problem (a table walked past its declared end; a word that silently
+doesn't parse as a verb) pointed at a specific mechanism.
+
 ## Suggested order for the next session
 
-**Where this stands**: four complete, unmodified games compile, assemble and
-run — `sample/beer` (V3), `sample/mandelbrot` (V4, ASCII art),
-`sample/name` (V3, interactive) and **`sample/cloak` (V3, a full `zillib`
-parser game, playable and winnable)**. The pipeline:
+**Where this stands**: five complete, unmodified games compile, assemble
+and run — `sample/beer` (V3), `sample/mandelbrot` (V4, ASCII art),
+`sample/name` (V3, interactive), `sample/cloak` (V3, a full `zillib` parser
+game, playable and winnable) and **`sample/advent` (V3, Colossal Cave
+Adventure, playable)**. The pipeline:
 
 ```
 ./obc -I Modules/ examples/zilf.mod -o zilf
@@ -2970,26 +3089,32 @@ parser game, playable and winnable)**. The pipeline:
 ./zapf game.zap && frotz -p game.z3 | python3 ansiscreen.py --scroll
 ```
 
-1. **Re-run the checks** first: the eighteen end-to-end programs in the
-   scratchpad, the four games, and the transpiler's own suite (171 files,
-   3 pre-existing failures: `ClojBio`, `ClojStats`, `Editor`). Then *run*
-   `loop`, `temps`, `regress`, `andor` and `tell` and read their output —
-   the two codegen bugs fixed in the cloak milestone were both invisible in
-   the `.zap` text and in whether it assembled.
+To compare against the real compiler on a specific point:
 
-2. **Try the next `zillib` game up in size.** `sample/cloak_plus`,
-   `sample/cloak_test` and `sample/cloak_glk` are the obvious steps, then
-   `sample/advent` (which needs `BIT-SYNONYM`) and `sample/zork1`. Expect
-   the same shape of work as this milestone: a short chain of missing
-   builtins to get it compiling, then a shorter chain of *silent* data-layout
-   bugs to get it behaving. Budget for both.
+```
+cd ~/lib/src/zilf && dotnet build src/Zilf/Zilf.csproj -c Release
+dotnet bin/Release/net10.0/zilf.dll build -q -I zillib -I <gamedir> \
+    -S game.zil real_game.zap   # data tables land in real_game_data.zap
+```
+
+1. **Re-run the checks** first: the eighteen end-to-end programs in the
+   scratchpad, the five games, and the transpiler's own suite (171 files,
+   3 pre-existing failures: `ClojBio`, `ClojStats`, `Editor`). *Run*
+   `loop`, `temps`, `regress`, `andor` and `tell` and read their output, not
+   just their exit code — several of this session's worst bugs assembled
+   clean and only showed up in what the program actually printed or did.
+
+2. **Try `sample/zork1` next**, or `sample/cloak_plus`/`cloak_test`/
+   `cloak_glk` for something smaller first. Expect the same two-phase
+   shape: a short chain of missing builtins to compile, then a shorter but
+   much less obvious chain of runtime-only bugs to behave — and reach for
+   the real-zilf diff the moment a symptom (wrong value, crash, silently
+   unrecognised command) doesn't point at an obvious cause in the ZIL
+   source itself.
 
 3. **Known gaps, in rough order of how likely a game is to hit them**:
-   - `BIT-SYNONYM` (where `advent` stops)
    - V4+ direction properties (object numbers widen to words)
    - `PSEUDO` object properties
-   - `<TYPE? <GETPROP .R ZVAL> ROUTINE>` — needs a ROUTINE-typed ZVAL, so
-     `PRONOUN` properties do not work
    - `<COMPILATION-FLAG DEBUG T>` builds fail in `BYTE/WORD: expected a
      FIX`; the debugging verbs build tables `BYTE`/`WORD` doesn't accept
    - `SORT` with extra vectors to rearrange in step
@@ -2997,21 +3122,26 @@ parser game, playable and winnable)**. The pipeline:
    - `ZIP-OPTIONS`, `FREQUENT-WORDS?`, `SUPPRESS-WARNINGS?`, remaining
      `ITABLE` keyword shapes, an `"OPT"` argument with a non-constant
      default, a V5+ hand-built header
+   - the `ITABLE`/`AddVocab` fixes above were found by NEED, not by
+     survey — there may well be other MDL semantics this port has subtly
+     wrong that no game exercised yet; the real-zilf diff is the fastest
+     way to find out once one is suspected
 
 **Testing discipline that has caught everything so far**: compile →
 assemble with `zapf` → actually run the story file → **read the real
 printed output through `ansiscreen.py`**. Never trust that the `.zap` text
-looks right. The `"ARGS"` constant-folding bug produced a perfectly
-plausible `.zap` that printed the wrong number; the missing entry-point
-`QUIT` produced one that ran all 99 verses and then crashed; the `DO`-loop
-and First-flag bugs produced one that assembled without a single warning and
-ignored every command.
+looks right, and never trust that it assembles cleanly either — this
+session's three runtime bugs all did. When a compiled game misbehaves,
+check it under both interpreters before assuming the compiler is at
+fault; when *that* doesn't explain it, copy `zillib` into the scratchpad
+and patch `<TELL "[dbg ...]">` markers into the routine you suspect, or —
+new this session — diff against a real local build of zilf itself.
 
-When a compiled game misbehaves, check it under both interpreters before
-assuming the compiler is at fault — and when *neither* explains it, copy
-`zillib` into the scratchpad and patch `<TELL "[dbg ...]">` markers into the
-routine you suspect. That found the last four bugs in about as many
-iterations, after a long unproductive stretch of reading generated `.zap`.
+**Diagnostics go to stderr now** (`Out.ErrString`/`ErrLn`/`ErrInt`/
+`ErrChar`, added this session). `zilf ... > game.zap` no longer risks
+putting an error message inside the file that a later `wc -l`/`zapf` call
+then treats as "compiled fine, produced *some* output" — check `$?` and
+stderr, not just whether the output file has content.
 
 **And when an error message names something that makes no sense**, suspect
 a *later* error masking the real one. That is why `Err` now keeps the first
