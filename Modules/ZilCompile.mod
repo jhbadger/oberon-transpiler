@@ -680,6 +680,16 @@ BEGIN
       ELSE Strings.Delete(propNm, 0, 2) END;
       IF ZilModel.FindVocab(propNm) >= 0 THEN Strings.Copy(name, s); RETURN TRUE END
     END;
+    (* A bare atom naming a GLOBAL whose OWN value is a table (<GLOBAL DEF1
+       <TABLE ...>>) is a forward reference to that table's address - zork1's
+       DEF1-RES table writes its first element as the plain atom DEF1 (no
+       comma), meaning "DEF1's own table, wherever it ends up", exactly the
+       KTable case just above but reached by name instead of by value. *)
+    i := FindGlobalIdx(name);
+    IF (i >= 0) & (ZilModel.globals[i].value # NIL)
+       & (ZilModel.globals[i].value.kind = ZilObj.KTable) THEN
+      RETURN ConstantTextRaw(ZilModel.globals[i].value, s)
+    END;
     RETURN FALSE
   END;
   RETURN FALSE
@@ -1382,10 +1392,10 @@ BEGIN
       OR (name = "DO") OR (name = "MAP-CONTENTS") OR (name = "MAP-DIRECTIONS")
       OR (name = "TELL") OR (name = "SET") OR (name = "SETG")
       OR (name = "RETURN") OR (name = "AGAIN") OR (name = "QUIT")
-      OR (name = "RTRUE") OR (name = "RFALSE")
+      OR (name = "RTRUE") OR (name = "RFALSE") OR (name = "RSTACK")
       OR (name = "PRINTI") OR (name = "PRINTR") OR (name = "PRINTN")
       OR (name = "PRINTC") OR (name = "CRLF")
-      OR (name = "LOWCORE") OR (name = "LOWCORE-TABLE")
+      OR (name = "LOWCORE") OR (name = "LOWCORE-TABLE") OR (name = "QUOTE")
 END IsStatementBuiltin;
 
 (* Compiles `z` as a value-producing expression, emitting whatever
@@ -2558,7 +2568,20 @@ BEGIN
   IF (z.kind = ZilObj.KForm) & (z.first # NIL) & (z.first.kind = ZilObj.KAtom) THEN
     Strings.Copy(z.first.atomText, headName);
 
-    IF (headName = "SET") OR (headName = "SETG") THEN
+    IF headName = "QUOTE" THEN
+      (* A #DECL (...) statement - a routine's own compile-time-only type
+         declaration for its locals, e.g. gclock.zil's QUEUE:
+         `#DECL ((RTN) ATOM (TICK) FIX (CINT) <PRIMTYPE VECTOR>)` as its
+         first statement. ZilRead reads `#DECL (...)` as a literal
+         <QUOTE (...)> FORM specifically so it self-evaluates correctly
+         wherever a DECL can appear as a VALUE (see ZilRead's own comment on
+         why); reaching here means one showed up in STATEMENT position
+         instead, where the original just discards it - this port has no
+         DECL checking to feed it to (ZilEval's file header lists that as a
+         deliberate simplification), so it compiles to nothing at all. *)
+      Strings.Copy("0", resultText); RETURN TRUE
+
+    ELSIF (headName = "SET") OR (headName = "SETG") THEN
       (* SET and SETG differ only in which namespace the original resolves
          the target in (VariableScopeQuirks.Local vs .Global) — SetgValueOp
          in ZBuiltins.cs literally just calls SetValueOp. In ZAP text both
@@ -3162,6 +3185,19 @@ BEGIN
       W("	"); W(headName); WLn;
       IF headName = "RTRUE" THEN Strings.Copy("1", resultText)
       ELSE Strings.Copy("0", resultText) END;
+      termFlag := TRUE;
+      RETURN TRUE
+
+    ELSIF headName = "RSTACK" THEN
+      (* Pops the Z-machine value stack and returns that value - the
+         zap mnemonic RSTACK (ret_popped, opcode 184) ZapfOpcodes already
+         knows about; this was just missing from CompileStmt's own dispatch.
+         Takes no operands, like RTRUE/RFALSE, and terminates the routine the
+         same way - gmacros.zil's RFATAL DEFMAC expands to `<PROG () <PUSH 2>
+         <RSTACK>>` (push the "fatal" RSTACK code, then return whatever was
+         just pushed). *)
+      W("	RSTACK"); WLn;
+      Strings.Copy("0", resultText);
       termFlag := TRUE;
       RETURN TRUE
 

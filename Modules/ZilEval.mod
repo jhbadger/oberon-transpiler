@@ -2915,10 +2915,12 @@ BEGIN
       WHILE (fnSpecPos # NIL) & (fnSpecPos.first # NIL) & ~fnStop DO
         fnOneSpec := fnSpecPos.first;
 
-        IF (fnOneSpec.kind = ZilObj.KString) & (fnOneSpec.strBuf^ = "OPT") THEN
+        IF (fnOneSpec.kind = ZilObj.KString)
+           & ((fnOneSpec.strBuf^ = "OPT") OR (fnOneSpec.strBuf^ = "OPTIONAL")) THEN
           fnPhase := APOpt; fnSpecPos := fnSpecPos.rest
 
-        ELSIF (fnOneSpec.kind = ZilObj.KString) & (fnOneSpec.strBuf^ = "AUX") THEN
+        ELSIF (fnOneSpec.kind = ZilObj.KString)
+              & ((fnOneSpec.strBuf^ = "AUX") OR (fnOneSpec.strBuf^ = "EXTRA")) THEN
           fnPhase := APAux; fnSpecPos := fnSpecPos.rest
 
         ELSIF (fnOneSpec.kind = ZilObj.KString)
