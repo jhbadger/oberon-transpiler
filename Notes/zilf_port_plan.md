@@ -3423,16 +3423,36 @@ descriptions, and inventory all work. Full sample regression (`advent`,
 `beer`, `cloak`, `empty`, `hello`, `mandelbrot`, `name`, `zork1`) all
 compile/assemble clean with identical behavior.
 
-**Where it stops now**: moving between rooms answers "Broken exit
-(1)." — `EmitDirectionProp` is explicitly a port of the original's
-`SDirectionsPropDef_**V3**` only (its own header comment says so), and
-V4+ needs a DIFFERENT exit-property layout with WORD-sized destination
-fields (object numbers can exceed 255 in V4+, so V3's one-byte
-destination field doesn't fit). This is the "V4+ direction properties"
-item already on the "Known gaps" list below — cloak_plus is the first
-game with both rooms AND a V4+ target, so it's the first to ever
-actually need this. Not fixed here; substantial enough to warrant its
-own session.
+### Finishing it: V4+ direction properties
+
+Moving between rooms answered "Broken exit (1)." — `EmitDirectionProp`
+was explicitly a port of the original's `SDirectionsPropDef_V3` only
+(its own header comment said so), and V4+ needs a DIFFERENT
+exit-property layout with WORD-sized destination fields (object
+numbers can exceed 255 in V4+, so V3's one-byte destination field
+doesn't fit). Ported the original's `SDirectionsPropDef_V4_Plus`
+(`Context.cs`) exactly: every exit kind's length grows by one as its
+destination widens from BYTE to WORD — `UEXIT`/`NEXIT`/`FEXIT`/
+`CEXIT`/`DEXIT` go from 1/2/3/4/5 bytes (V3) to 2/3/4/5/6 (V4+) —
+except `CEXIT`, which ALSO swaps its trailing STRING and FLAG fields'
+order (confirmed against zillib's own `verbs.zil`, whose
+`CEXIT-VAR`/`CEXIT-MSG` runtime-accessor constants only make sense in
+the new order). `DEXIT`'s field order is unchanged, just every field a
+word.
+
+**Verified**: cloak_plus now moves between every room correctly (Foyer,
+Cloakroom, Bar) — confirmed byte-for-behavior identical to a real
+zilf+zapf build of the same game, including a specific quirk ("read
+message" prompts "Are you sure you want to quit?") that turned out to
+be genuine pre-existing cloak_plus behavior, not a bug. Full sample
+regression (`advent`, `beer`, `cloak`, `empty`, `hello`, `mandelbrot`,
+`name`, `zork1`) all compile/assemble clean; `cloak` still wins,
+zork1's trap-door `DEXIT` sequence and advent's `CEXIT`-gated "examine
+bottled water" both still work, confirming the (untouched) V3 path is
+unaffected.
+
+**`cloak_plus` (MILESTONE 8) is now complete** — no further known
+blockers.
 
 ## Suggested order for the next session
 
@@ -3444,9 +3464,8 @@ Colossal Cave Adventure, playable)**, **`sample/zork1` (V3, the real,
 unmodified 1980s Zork I — its own custom parser, not zillib's — playable
 well into the game: house, lamp, trap door, combat, scoring; see
 MILESTONE 7 above)** and **`sample/cloak_plus` (**V5**, the first V5
-game this port has ever run — playable in its first room, with a live
-V5 status line; see MILESTONE 8 above for where it stops — moving
-between rooms needs V4+ direction properties, not yet implemented)**.
+game this port has ever run — genuinely playable end to end, including
+V4+ direction properties; see MILESTONE 8 above)**.
 The pipeline:
 
 ```
@@ -3470,32 +3489,31 @@ dotnet bin/Release/net10.0/zilf.dll build -q -I zillib -I <gamedir> \
    just their exit code — several of this session's worst bugs assembled
    clean and only showed up in what the program actually printed or did.
 
-2. **`sample/zork1` is done (playable)** — next up is something smaller
-   like `sample/cloak_plus`/`cloak_test`/`cloak_glk`, or push zork1
-   itself further (it hasn't been played to a WIN, only well into the
-   early game — the thief, the maze, and the full treasure/trophy-case
-   scoring loop are all unexplored). Expect the same two-phase shape any
-   new game brings: a short chain of missing builtins to compile, then a
-   shorter but much less obvious chain of runtime-only bugs to behave —
-   and reach for the real-zilf diff the moment a symptom (wrong value,
-   crash, silently unrecognised command) doesn't point at an obvious
-   cause in the ZIL source itself.
+2. **`sample/zork1` and `sample/cloak_plus` are both done (playable)** —
+   next up is something smaller like `cloak_test`/`cloak_glk` (both
+   fail on a single missing builtin — `META-VERB?` and `BLORB-PICTURE`
+   respectively), or push zork1 itself further (it hasn't been played
+   to a WIN, only well into the early game — the thief, the maze, and
+   the full treasure/trophy-case scoring loop are all unexplored).
+   Expect the same two-phase shape any new game brings: a short chain
+   of missing builtins to compile, then a shorter but much less obvious
+   chain of runtime-only bugs to behave — and reach for the real-zilf
+   diff the moment a symptom (wrong value, crash, silently unrecognised
+   command) doesn't point at an obvious cause in the ZIL source itself.
 
 3. **Known gaps, in rough order of how likely a game is to hit them**:
-   - V4+ direction properties (object numbers widen to words) —
-     **this is exactly where cloak_plus.zil currently stops (MILESTONE
-     8); pick this up first.** `EmitDirectionProp` (ZilCompile.mod) is
-     explicitly a port of the original's `SDirectionsPropDef_V3` only —
-     needs the V4+ counterpart, which uses WORD-sized destination
-     fields throughout (UEXIT/CEXIT/DEXIT/FEXIT all widen).
+   - V4+ direction properties — **done, see MILESTONE 8**
    - `PSEUDO` object properties — **done, see MILESTONE 7**
+   - `ZIP-OPTIONS`, `FREQUENT-WORDS?` — **done, see MILESTONE 7/8**
    - `<COMPILATION-FLAG DEBUG T>` builds fail in `BYTE/WORD: expected a
      FIX`; the debugging verbs build tables `BYTE`/`WORD` doesn't accept
    - `SORT` with extra vectors to rearrange in step
-   - V5+ header-extension `LOWCORE` fields (`EXTAB` indirection)
-   - `ZIP-OPTIONS`, `FREQUENT-WORDS?`, `SUPPRESS-WARNINGS?`, remaining
-     `ITABLE` keyword shapes, an `"OPT"` argument with a non-constant
-     default, a V5+ hand-built header
+   - V5+ header-extension `LOWCORE` fields (`EXTAB` indirection) — the
+     fields themselves resolve to 0 fine now (MILESTONE 8), but nothing
+     builds a real table under TCHARS/CHRSET/EXTAB yet, so a game that
+     actually wants a custom alphabet/terminator/Unicode table can't
+   - `SUPPRESS-WARNINGS?`, remaining `ITABLE` keyword shapes, an
+     `"OPT"` argument with a non-constant default
    - the `ITABLE`/`AddVocab` fixes above were found by NEED, not by
      survey — there may well be other MDL semantics this port has subtly
      wrong that no game exercised yet; the real-zilf diff is the fastest
