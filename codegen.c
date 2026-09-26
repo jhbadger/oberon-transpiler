@@ -1340,6 +1340,26 @@ static int try_emit_import(CG *g, Node *fa, Node *args) {
                                         if(a1&&a1->next) emit_expr(g,a1->next);
                                         emit(g,","); emit_expr(g,a0); emit(g,")"); return 1; }
         if (!strcmp(proc,"Flush"))   { emit(g,"fflush(stdout)"); return 1; }
+        /* The Err* variants write to stderr. A command-line tool that emits
+         * its real output on stdout cannot report diagnostics with
+         * Out.String: redirecting stdout to a file then captures the error
+         * message INSIDE that file, which makes the output look valid and a
+         * failure look like a success. */
+        if (!strcmp(proc,"ErrString")) {
+            emit(g,"fputs(");
+            if (a0 && a0->kind == ND_STRING)
+                emit_string_lit(g, a0->str);
+            else
+                emit_expr(g,a0);
+            emit(g,",stderr)");
+            return 1;
+        }
+        if (!strcmp(proc,"ErrLn"))    { emit(g,"fputc('\\n',stderr)"); return 1; }
+        if (!strcmp(proc,"ErrInt"))   {
+            if (a1) { emit(g,"fprintf(stderr,\"%%*d\",(int)("); emit_expr(g,a1); emit(g,"),(int)("); emit_expr(g,a0); emit(g,"))"); }
+            else    { emit(g,"fprintf(stderr,\"%%d\",(int)(");  emit_expr(g,a0); emit(g,"))"); }
+            return 1; }
+        if (!strcmp(proc,"ErrChar"))  { emit(g,"fputc("); emit_expr(g,a0); emit(g,",stderr)"); return 1; }
     }
     /* In module */
     if (!strcmp(mod,"In")) {

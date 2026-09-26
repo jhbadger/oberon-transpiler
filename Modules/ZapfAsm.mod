@@ -236,15 +236,21 @@ END MarkAllPhantom;
 (* error reporting                                                      *)
 (* ------------------------------------------------------------------ *)
 
+(* Diagnostics go to STDERR. The assembler writes the story file to a named
+   file rather than to stdout, so this is hygiene rather than corruption -
+   but a caller that redirects or discards one stream should still see the
+   other, and a survey script that reads stderr should see the failures. *)
 PROCEDURE Loc(file: ARRAY OF CHAR; line: INTEGER);
 BEGIN
-  IF file[0] # 0X THEN Out.String(file); Out.String(":"); Out.Int(line, 0); Out.String(": ") END
+  IF file[0] # 0X THEN
+    Out.ErrString(file); Out.ErrString(":"); Out.ErrInt(line, 0); Out.ErrString(": ")
+  END
 END Loc;
 
 PROCEDURE Warn*(ctx: Context; file: ARRAY OF CHAR; line: INTEGER; msg: ARRAY OF CHAR);
 BEGIN
   INC(ctx.warningCount);
-  Loc(file, line); Out.String("warning: "); Out.String(msg); Out.Ln
+  Loc(file, line); Out.ErrString("warning: "); Out.ErrString(msg); Out.ErrLn
 END Warn;
 
 (* Marks the current line as aborted (skip its remaining processing) and
@@ -252,7 +258,7 @@ END Warn;
 PROCEDURE Serious*(ctx: Context; file: ARRAY OF CHAR; line: INTEGER; msg: ARRAY OF CHAR);
 BEGIN
   INC(ctx.errorCount);
-  Loc(file, line); Out.String("error: "); Out.String(msg); Out.Ln;
+  Loc(file, line); Out.ErrString("error: "); Out.ErrString(msg); Out.ErrLn;
   ctx.abortLine := TRUE
 END Serious;
 
@@ -272,7 +278,7 @@ END CloseOutput;
 
 PROCEDURE Fatal*(ctx: Context; file: ARRAY OF CHAR; line: INTEGER; msg: ARRAY OF CHAR);
 BEGIN
-  Loc(file, line); Out.String("fatal error: "); Out.String(msg); Out.Ln;
+  Loc(file, line); Out.ErrString("fatal error: "); Out.ErrString(msg); Out.ErrLn;
   CloseOutput(ctx);
   HALT(2)
 END Fatal;

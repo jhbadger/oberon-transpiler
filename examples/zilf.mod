@@ -54,11 +54,16 @@ BEGIN
   Out.String("  -q, --quiet        suppress progress messages"); Out.Ln
 END Usage;
 
+(* Diagnostics go to STDERR, because the compiled `.zap` goes to stdout when
+   no -o was given. Reporting an error with Out.String put the message inside
+   the .zap instead, which made a failed compile look like a successful one -
+   and made any survey that checked stderr report the wrong thing. *)
 PROCEDURE Fail(msg, detail: ARRAY OF CHAR);
 BEGIN
-  Out.String("zilf: "); Out.String(msg);
-  IF detail # "" THEN Out.String(": "); Out.String(detail) END;
-  Out.Ln;
+  Out.Flush;
+  Out.ErrString("zilf: "); Out.ErrString(msg);
+  IF detail # "" THEN Out.ErrString(": "); Out.ErrString(detail) END;
+  Out.ErrLn;
   OS.Exit(1)
 END Fail;
 

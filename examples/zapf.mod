@@ -87,21 +87,21 @@ BEGIN
       ctx.noCreator := TRUE; ctx.creatorSpecified := TRUE
     ELSIF (arg = "-r") OR (arg = "--release") THEN
       INC(i);
-      IF i > n THEN Out.String("zapf: --release requires a value"); Out.Ln; HALT(1) END;
+      IF i > n THEN Out.ErrString("zapf: --release requires a value"); Out.ErrLn; HALT(1) END;
       Args.Get(i, arg);
       IF Strings.StrToInt(arg, v) THEN
         ctx.release := v; ctx.releaseSpecified := TRUE
       ELSE
-        Out.String("zapf: invalid --release value: "); Out.String(arg); Out.Ln; HALT(1)
+        Out.ErrString("zapf: invalid --release value: "); Out.ErrString(arg); Out.ErrLn; HALT(1)
       END
     ELSIF (arg = "-s") OR (arg = "--serial") THEN
       INC(i);
-      IF i > n THEN Out.String("zapf: --serial requires a value"); Out.Ln; HALT(1) END;
+      IF i > n THEN Out.ErrString("zapf: --serial requires a value"); Out.ErrLn; HALT(1) END;
       Args.Get(i, arg);
       Strings.Copy(arg, ctx.serial); ctx.serialSpecified := TRUE
     ELSIF (arg = "-C") OR (arg = "--creator") THEN
       INC(i);
-      IF i > n THEN Out.String("zapf: --creator requires a value"); Out.Ln; HALT(1) END;
+      IF i > n THEN Out.ErrString("zapf: --creator requires a value"); Out.ErrLn; HALT(1) END;
       Args.Get(i, arg);
       Strings.Copy(arg, ctx.creator); ctx.creatorSpecified := TRUE; ctx.noCreator := FALSE
     ELSIF (arg = "-h") OR (arg = "--help") OR (arg = "-?") THEN
@@ -111,7 +111,7 @@ BEGIN
     ELSIF ~haveOut THEN
       Strings.Copy(arg, outFile); haveOut := TRUE
     ELSE
-      Out.String("zapf: unexpected argument: "); Out.String(arg); Out.Ln; HALT(1)
+      Out.ErrString("zapf: unexpected argument: "); Out.ErrString(arg); Out.ErrLn; HALT(1)
     END;
     INC(i)
   END;

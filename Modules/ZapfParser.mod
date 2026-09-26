@@ -778,7 +778,7 @@ PROCEDURE Parse*(VAR p: Parser; filename: ARRAY OF CHAR; VAR ll: ZapfAst.LineLis
 VAR t: ZapfTok.Token; l, lbl: ZapfAst.Line; gotLabel: BOOLEAN;
 BEGIN
   IF ~ZapfTok.Open(p.tok, filename) THEN
-    Out.String("zapf: cannot open "); Out.String(filename); Out.Ln;
+    Out.ErrString("zapf: cannot open "); Out.ErrString(filename); Out.ErrLn;
     RETURN FALSE
   END;
   LOOP
