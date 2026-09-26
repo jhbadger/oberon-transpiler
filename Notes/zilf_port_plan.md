@@ -3346,25 +3346,108 @@ Three real gaps got it compiling further than any previous attempt:
   `ZilObj.PrintTo`'s `CASE` never covered `KSplice` (or `KRoutine`/
   `KOblist`) at all. Fixed the splice-handling gap.
 
-**Where it stops**: `CompileProgram: only Z-machine versions 3 and 4
-are emitted yet (V5+ needs a hand-built header)` — a real, substantial,
-already-known limitation (see "Known gaps" below), not a quick fix.
-zapf auto-generates the 64-byte header for V1–4; V5+ lays it out with
-hand-written data directives instead (object/property counts widen,
-the packed-address multiplier changes, there's a header extension
-table...). This is its own separate body of work, larger than anything
-else fixed in this session, and hasn't been started.
+### Finishing it: V5 actually runs
+
+Widening the version check to admit V5 (its other structural
+differences from V3 — 63 properties/48 attributes, the ×4 packed-
+address multiplier, 14-byte object rows, 6-byte/9-Z-character
+dictionary keys — are all already shared with V4, which already
+works) got the compile+assemble to a CLEAN SUCCESS, but the resulting
+story file crashed immediately with "Illegal opcode". Three more real
+bugs, found by actually running it:
+
+- `INTBL?` (scan_table, V4+) and `ISAVE`/`IRESTORE` (save_undo/
+  restore_undo, V5+) were simply missing — `INTBL?` needed the same
+  dual store-AND-branch handling FIRST?/NEXT? already have (three
+  operands instead of one); `ISAVE`/`IRESTORE` are zero-operand and
+  store-only.
+- **A real assembler bug**, found by bisecting an "outside a function"
+  cascade (hundreds of misleading errors) all the way down to a single
+  instruction pair: this port's own compiler-generated spill-temporary
+  names start with `"?"` (matching the real compiler's own `"?TMP"`
+  convention) — but ZAP's own syntax ALSO uses a leading `"?"` for
+  local labels, and zapf's parser reads a `"?"`-prefixed token as one
+  of those regardless of where it appears, including a plain variable
+  position (`SET '?TMP1,x`) or a `.FUNCT`'s own local-name list. V1-4
+  games happened never to hit the specific shape that triggers it (a
+  routine with no bindings of its own AND a spill needed); V5's real
+  save/restore-state routines do. Renamed the fallback prefix to
+  `"T-TMP"`.
+- **`FSTACK` doesn't exist in V5.** This port's own `EmitCall` always
+  used the storing `CALL`/`CALL1`/`CALL2`/`XCALL` opcodes plus `FSTACK`
+  to discard an unwanted result — correct for V1-4 (the only versions
+  with a storing-only CALL), but `FSTACK`'s own opcode (`pop`) was
+  removed from the Z-machine at V5. Added the non-storing `ICALL1`/
+  `ICALL2`/`ICALL`/`IXCALL` family to `ZapfOpcodes` (opcode numbers
+  confirmed against a real V5 build) and switched void-context routine
+  calls to them for V5+, matching the real compiler's own `EmitCall`.
+  Adding four opcodes also pushed `ZapfOpcodes`' fixed-size table past
+  its own 128-slot limit with **no overflow check**, silently dropping
+  every opcode registered afterward (`XCALL` among them) — a real
+  regression caught by the full sample regression (`mandelbrot`, V4,
+  uses `XCALL`). Widened the table.
+- **The real, final blocker**: the assembled header was entirely
+  zero/garbage, even though `zapf -L` showed every symbol (VOCAB/
+  OBJECT/START/etc.) resolving to its correct address — nothing had
+  actually WRITTEN those values into the file's first 64 bytes.
+  `WriteHeader` (the auto-generating 64-byte-header routine) was only
+  ever called for `zversion < 5`, on the assumption that a V5+ game's
+  own source would hand-write its header — a path this port's compiler
+  never actually implemented. Confirmed `WriteHeader`'s own logic
+  already produces a header byte-identical to the real compiler's own
+  V5 output (every V5-only field past `WORDS` resolves to zero in
+  both, since cloak_plus never builds a table under any of those
+  names), so the fix is exactly removing the `< 5` gate.
+
+Two more bugs, unrelated to V5 specifically but found by it:
+
+- **`GVAL` of an undeclared name now falls back to the local of the
+  same name, with a warning**, instead of a hard compile error —
+  matching real zilf's own `GvalOp` exactly ("no such global variable
+  'X', using the local instead"). zillib's own `status.zil` has had a
+  PROG-bound local `H` referenced as `,H` instead of `.H` for years
+  (`STATUS-LINE-SECTION?TIME-12H`) — erroring here made every V4+ game
+  that pulls in `status.zil` (anything inserting `"parser"`) fail over
+  a mistake in the library, not the game.
+- **`#FALSE ()` now retypes to this port's own real FALSE
+  representation**, and `COND` silently skips a clause that IS the
+  FALSE value (matching the real compiler's own `case ZilFalse:
+  continue;`) instead of rejecting it as "not a list". zillib's
+  `meta.zil` (the RESTART/RESTORE/QUIT/UNDO prompt) writes exactly
+  `#FALSE ()` as a COND clause — this also turned `sample/empty` from
+  a compile failure into a clean pass.
+
+**Verified past a clean compile+assemble: cloak_plus actually plays** —
+its fancier V5 status line (a live Score/Moves display), room
+descriptions, and inventory all work. Full sample regression (`advent`,
+`beer`, `cloak`, `empty`, `hello`, `mandelbrot`, `name`, `zork1`) all
+compile/assemble clean with identical behavior.
+
+**Where it stops now**: moving between rooms answers "Broken exit
+(1)." — `EmitDirectionProp` is explicitly a port of the original's
+`SDirectionsPropDef_**V3**` only (its own header comment says so), and
+V4+ needs a DIFFERENT exit-property layout with WORD-sized destination
+fields (object numbers can exceed 255 in V4+, so V3's one-byte
+destination field doesn't fit). This is the "V4+ direction properties"
+item already on the "Known gaps" list below — cloak_plus is the first
+game with both rooms AND a V4+ target, so it's the first to ever
+actually need this. Not fixed here; substantial enough to warrant its
+own session.
 
 ## Suggested order for the next session
 
-**Where this stands**: six complete, unmodified games compile, assemble
+**Where this stands**: eight complete, unmodified games compile, assemble
 and run — `sample/beer` (V3), `sample/mandelbrot` (V4, ASCII art),
 `sample/name` (V3, interactive), `sample/cloak` (V3, a full `zillib` parser
-game, playable and winnable), **`sample/advent` (V3, Colossal Cave
-Adventure, playable)** and **`sample/zork1` (V3, the real, unmodified
-1980s Zork I — its own custom parser, not zillib's — playable well into
-the game: house, lamp, trap door, combat, scoring; see MILESTONE 7
-above)**. The pipeline:
+game, playable and winnable), `sample/empty` (V3), **`sample/advent` (V3,
+Colossal Cave Adventure, playable)**, **`sample/zork1` (V3, the real,
+unmodified 1980s Zork I — its own custom parser, not zillib's — playable
+well into the game: house, lamp, trap door, combat, scoring; see
+MILESTONE 7 above)** and **`sample/cloak_plus` (**V5**, the first V5
+game this port has ever run — playable in its first room, with a live
+V5 status line; see MILESTONE 8 above for where it stops — moving
+between rooms needs V4+ direction properties, not yet implemented)**.
+The pipeline:
 
 ```
 ./obc -I Modules/ examples/zilf.mod -o zilf
@@ -3399,7 +3482,12 @@ dotnet bin/Release/net10.0/zilf.dll build -q -I zillib -I <gamedir> \
    cause in the ZIL source itself.
 
 3. **Known gaps, in rough order of how likely a game is to hit them**:
-   - V4+ direction properties (object numbers widen to words)
+   - V4+ direction properties (object numbers widen to words) —
+     **this is exactly where cloak_plus.zil currently stops (MILESTONE
+     8); pick this up first.** `EmitDirectionProp` (ZilCompile.mod) is
+     explicitly a port of the original's `SDirectionsPropDef_V3` only —
+     needs the V4+ counterpart, which uses WORD-sized destination
+     fields throughout (UEXIT/CEXIT/DEXIT/FEXIT all widen).
    - `PSEUDO` object properties — **done, see MILESTONE 7**
    - `<COMPILATION-FLAG DEBUG T>` builds fail in `BYTE/WORD: expected a
      FIX`; the debugging verbs build tables `BYTE`/`WORD` doesn't accept
