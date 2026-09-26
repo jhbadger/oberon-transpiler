@@ -164,7 +164,16 @@ TYPE
   VocabRec* = RECORD
     text*: ARRAY 64 OF CHAR;
     pos*: INTEGER;
-    verbVal*, prepVal*, adjVal*, dirVal*, buzzVal*: INTEGER
+    verbVal*, prepVal*, adjVal*, dirVal*, buzzVal*: INTEGER;
+    (* A direction word's own "value" is not a number stored here — it is
+       the PROPERTY NUMBER of the exit property registered under that
+       word's TEXT (see ZilCompile.PartValue), which only exists once
+       CompileObjects has run. A direction SYNONYM ("N" for "NORTH") needs
+       the SAME property, which is registered under "NORTH", not "N" — so
+       a merged-in direction records which word's text to look the
+       property up under instead. Empty means "use my own text", the
+       ordinary case. *)
+    dirAlias*: ARRAY 64 OF CHAR
   END;
 
 VAR
@@ -328,6 +337,81 @@ BEGIN
   END
 END AddSynonym;
 
+(* Copies EVERY part of speech `src`'s vocab entry has onto `dest`'s,
+   reusing src's OWN values rather than allocating fresh ones. This is what
+   <SYNONYM ORIGINAL alias...> (and VERB-/DIR-/PREP-/ADJ-SYNONYM, which this
+   port treats identically — see the note below) needs: "N" must carry the
+   EXACT SAME direction number as "NORTH", not a freshly allocated one,
+   since exit tables and grammar conditions were built against NORTH's
+   number specifically.
+
+   Ported from OldParserWord.Merge, but flattened: the original clears and
+   rebuilds the WHOLE word from scratch for every part it copies (so that
+   each part's own SetXxx call re-triggers the First-flag logic in a fixed
+   priority order); this does the same bookkeeping (ShouldSetFirst, and the
+   unconditional clear a new Preposition/Buzzword registration causes) in
+   one pass instead, which gives the same result for a freshly-created
+   synonym word (the only case this port creates one for) without the
+   clear-and-rebuild machinery.
+
+   NOTE ON THE FIVE SYNONYM KINDS: the original's own MakeSynonym, for the
+   OLD PARSER format this port targets (V1-3, which is the only format this
+   port's vocabulary/syntax machinery implements), IGNORES the requested
+   part of speech entirely and always does a full merge - so SYNONYM,
+   VERB-SYNONYM, DIR-SYNONYM, PREP-SYNONYM and ADJ-SYNONYM are genuinely
+   identical on V1-3, and treating them that way here is not a
+   simplification, it is what the original does too. *)
+PROCEDURE MergeVocabWord*(dest, src: INTEGER);
+VAR firstBits: INTEGER; clearFirst: BOOLEAN;
+BEGIN
+  firstBits := 0; clearFirst := FALSE;
+  IF (vocab[src].pos DIV PsVerb) MOD 2 = 1 THEN
+    IF (vocab[dest].pos DIV PsVerb) MOD 2 = 0 THEN
+      vocab[dest].verbVal := vocab[src].verbVal;
+      IF ShouldSetFirst(dest) THEN firstBits := PsVerbFirst END
+    END
+  END;
+  IF (vocab[src].pos DIV PsPreposition) MOD 2 = 1 THEN
+    IF (vocab[dest].pos DIV PsPreposition) MOD 2 = 0 THEN
+      vocab[dest].prepVal := vocab[src].prepVal;
+      clearFirst := TRUE
+    END
+  END;
+  IF (vocab[src].pos DIV PsAdjective) MOD 2 = 1 THEN
+    IF (vocab[dest].pos DIV PsAdjective) MOD 2 = 0 THEN
+      vocab[dest].adjVal := vocab[src].adjVal;
+      IF (zversion < 4) & (firstBits = 0) & ShouldSetFirst(dest) THEN
+        firstBits := PsAdjFirst
+      END
+    END
+  END;
+  IF (vocab[src].pos DIV PsDirection) MOD 2 = 1 THEN
+    IF (vocab[dest].pos DIV PsDirection) MOD 2 = 0 THEN
+      IF vocab[src].dirAlias[0] # 0X THEN
+        Strings.Copy(vocab[src].dirAlias, vocab[dest].dirAlias)
+      ELSE
+        Strings.Copy(vocab[src].text, vocab[dest].dirAlias)
+      END;
+      IF (firstBits = 0) & ShouldSetFirst(dest) THEN firstBits := PsDirFirst END
+    END
+  END;
+  IF (vocab[src].pos DIV PsBuzzword) MOD 2 = 1 THEN
+    IF (vocab[dest].pos DIV PsBuzzword) MOD 2 = 0 THEN
+      vocab[dest].buzzVal := vocab[src].buzzVal;
+      clearFirst := TRUE
+    END
+  END;
+
+  (* the part-of-speech bits merge in, but NOT src's own First-bits — dest
+     computes its own from scratch, same as AddVocab does *)
+  vocab[dest].pos := BitOr(vocab[dest].pos, vocab[src].pos - (vocab[src].pos MOD 4));
+  IF clearFirst THEN
+    vocab[dest].pos := vocab[dest].pos - (vocab[dest].pos MOD 4)
+  ELSIF firstBits # 0 THEN
+    vocab[dest].pos := vocab[dest].pos - (vocab[dest].pos MOD 4) + firstBits
+  END
+END MergeVocabWord;
+
 (* DIRECTIONS replaces the whole set rather than adding to it, matching the
    original's Directions.Clear() — a game that redefines the library's list
    must not end up with both. *)
@@ -477,7 +561,7 @@ BEGIN
     Strings.Copy(text, vocab[i].text);
     vocab[i].pos := 0;
     vocab[i].verbVal := 0; vocab[i].prepVal := 0; vocab[i].adjVal := 0;
-    vocab[i].dirVal := 0; vocab[i].buzzVal := 0
+    vocab[i].dirVal := 0; vocab[i].buzzVal := 0; vocab[i].dirAlias[0] := 0X
   END;
 
   firstBits := 0;

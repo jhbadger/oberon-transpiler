@@ -4402,6 +4402,37 @@ END CompileObjects;
    nobj's low two bits are the object count. Lines are emitted in REVERSE
    definition order within a verb, as the original does, because the parser
    matches them from the end. *)
+(* <SYNONYM ORIGINAL alias...> (and VERB-/DIR-/PREP-/ADJ-SYNONYM, treated
+   identically — see MergeVocabWord's own comment on why) were being
+   recorded by ZilEval's ApplySubr and then never read anywhere: registering
+   one had no effect on the compiled game at all. Applied here, after
+   CompileSyntax has assigned every ORIGINAL word's verb/preposition numbers
+   and CompileObjects has registered every direction property, so there is
+   something for a synonym to copy. Must run before EmitVocab, which reads
+   the final vocab table. zillib relies on this for the single-letter
+   command abbreviations real players expect - <SYNONYM NORTH N>,
+   <VERB-SYNONYM INVENTORY I>, <VERB-SYNONYM EXAMINE X>, and so on - none of
+   which worked at all before this pass existed. *)
+PROCEDURE ApplyVocabSynonyms(): BOOLEAN;
+VAR i, oi, si: INTEGER; origName, synName: ARRAY 64 OF CHAR;
+BEGIN
+  i := 0;
+  WHILE i < ZilModel.nSynonyms DO
+    Strings.Copy(ZilModel.synonyms[i].original.atomText, origName);
+    Strings.Copy(ZilModel.synonyms[i].synonym.atomText, synName);
+    oi := ZilModel.FindVocab(origName);
+    IF oi >= 0 THEN
+      si := ZilModel.AddVocab(synName, 0);
+      IF si < 0 THEN
+        Err("ApplyVocabSynonyms: too many vocabulary words"); RETURN FALSE
+      END;
+      ZilModel.MergeVocabWord(si, oi)
+    END;
+    INC(i)
+  END;
+  RETURN TRUE
+END ApplyVocabSynonyms;
+
 PROCEDURE CompileSyntax(): BOOLEAN;
 VAR i, j, k, n, act: INTEGER;
     verbDone: ARRAY ZilModel.MaxSyntaxes OF BOOLEAN;
@@ -4841,6 +4872,7 @@ VAR i, j, k, entryLen, zwordBytes, pos, v1, v2, nParts: INTEGER;
 
   (* the value byte a given part of speech contributes *)
   PROCEDURE PartValue(w, part: INTEGER): INTEGER;
+  VAR propNm: ARRAY 64 OF CHAR;
   BEGIN
     IF part = ZilModel.PsVerb THEN RETURN ZilModel.vocab[w].verbVal END;
     IF part = ZilModel.PsPreposition THEN RETURN ZilModel.vocab[w].prepVal END;
@@ -4849,9 +4881,17 @@ VAR i, j, k, entryLen, zwordBytes, pos, v1, v2, nParts: INTEGER;
     IF part = ZilModel.PsDirection THEN
       (* the parser reads a direction word's value as the PROPERTY number
          holding that exit, which is what dirIndexToPropertyOperand supplies
-         in the original *)
-      IF FindPropIdx(ZilModel.vocab[w].text) >= 0 THEN
-        RETURN MaxProps() - FindPropIdx(ZilModel.vocab[w].text)
+         in the original. A direction SYNONYM (dirAlias set by
+         MergeVocabWord) looks the property up under the ORIGINAL word's
+         text - "N"'s exit data is the NORTH property, not an "N" property,
+         which was never registered. *)
+      IF ZilModel.vocab[w].dirAlias[0] # 0X THEN
+        Strings.Copy(ZilModel.vocab[w].dirAlias, propNm)
+      ELSE
+        Strings.Copy(ZilModel.vocab[w].text, propNm)
+      END;
+      IF FindPropIdx(propNm) >= 0 THEN
+        RETURN MaxProps() - FindPropIdx(propNm)
       END;
       RETURN 0
     END;
@@ -5062,6 +5102,8 @@ BEGIN
   ok := CompileObjects();
   IF ~ok THEN RETURN FALSE END;
   ok := CompileSyntax();
+  IF ~ok THEN RETURN FALSE END;
+  ok := ApplyVocabSynonyms();
   IF ~ok THEN RETURN FALSE END;
   EmitVocab;
 
