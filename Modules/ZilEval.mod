@@ -1682,6 +1682,32 @@ BEGIN
     END;
     RETURN MkVal(StructRest(args[0], 1))
 
+  ELSIF name = "PUTREST" THEN
+    (* <PUTREST list newrest>: destructively replaces list's OWN tail
+       pointer (its first cons cell's "rest") with newrest, and returns the
+       (mutated) list. Ported from Subrs.Structures.cs's PUTREST: a bare
+       LIST/FORM newrest becomes the tail directly; anything else is wrapped
+       as a fresh one-element list first, matching the original's `list.Rest
+       = newRest as ZilList ?? new ZilList(newRest)`. zork1's own
+       gmacros.zil MULTIFROB (the compile-time helper behind VERB?/PRSO?/
+       PRSI?/ROOM?) is the reason this port needs it: it grows a FORM one
+       argument at a time by PUTREST-ing a fresh singleton list onto the
+       tail it is walking, exactly the "build by mutation, walk a saved tail
+       pointer" idiom PUTREST exists for. *)
+    IF n < 2 THEN RETURN Err("PUTREST: expected a structure and a new rest") END;
+    IF (args[0].kind # ZilObj.KList) & (args[0].kind # ZilObj.KForm) THEN
+      RETURN Err("PUTREST: expected a LIST or FORM")
+    END;
+    IF args[0].first = NIL THEN
+      RETURN Err("PUTREST: writing past end of structure")
+    END;
+    IF (args[1].kind = ZilObj.KList) OR (args[1].kind = ZilObj.KForm) THEN
+      args[0].rest := args[1]
+    ELSE
+      args[0].rest := ZilObj.Cons(ZilObj.KList, args[1], NIL)
+    END;
+    RETURN MkVal(args[0])
+
   ELSIF name = "EMPTY?" THEN
     IF n < 1 THEN RETURN Err("EMPTY?: expected a structure") END;
     RETURN MkVal(BoolVal(StructLength(args[0]) = 0))
@@ -2019,6 +2045,24 @@ BEGIN
     ind := FlagValue(s);
     IF ind = NIL THEN RETURN MkVal(FalseVal()) END;
     RETURN MkVal(ind)
+
+  ELSIF (name = "GC-MON") OR (name = "BLOAT") OR (name = "ZSTR-ON")
+        OR (name = "ZSTR-OFF") OR (name = "ENDLOAD") OR (name = "PUT-PURE-HERE")
+        OR (name = "DEFAULTS-DEFINED") OR (name = "CHECKPOINT")
+        OR (name = "BEGIN-SEGMENT") OR (name = "END-SEGMENT")
+        OR (name = "DEFINE-SEGMENT") OR (name = "FREQUENT-WORDS?")
+        OR (name = "NEVER-ZAP-TO-SOURCE-DIRECTORY?") OR (name = "ASK-FOR-PICTURE-FILE?")
+        OR (name = "PICFILE") THEN
+    (* SubrIgnored (Subrs.Meta.cs): a grab-bag of real-compiler knobs this
+       port has no use for - memory/GC tuning (GC-MON, BLOAT), string-pool
+       tuning (ZSTR-ON/OFF), the MDL file-loading protocol (ENDLOAD,
+       PUT-PURE-HERE, DEFAULTS-DEFINED, CHECKPOINT), save-file segmentation
+       (BEGIN-/END-/DEFINE-SEGMENT, used by V6 only), a Z-machine
+       optimization hint (FREQUENT-WORDS?, zork1.zil calls this), and Inform/
+       Blorb-era authoring conveniences this target format doesn't have
+       (NEVER-ZAP-TO-SOURCE-DIRECTORY?, ASK-FOR-PICTURE-FILE?, PICFILE). The
+       original always returns FALSE and does nothing else; so does this. *)
+    RETURN MkVal(FalseVal())
 
   ELSIF (name = "PACKAGE") OR (name = "ZPACKAGE") OR (name = "ZZPACKAGE")
         OR (name = "DEFINITIONS") OR (name = "ZSECTION") OR (name = "ZZSECTION") THEN
@@ -3520,7 +3564,7 @@ BEGIN
           r := EvalImpl(progInit, FALSE);
           IF (r.outcome = OReturn) & (r.activation = progAct) THEN
             r := MkVal(r.value); progStop := TRUE
-          ELSIF r.outcome # OValue THEN
+          ELSIF evalErrFlag OR (r.outcome # OValue) THEN
             progStop := TRUE
           ELSE
             progTarget.localVal := r.value
@@ -3549,7 +3593,17 @@ BEGIN
               progAgain := TRUE
             ELSIF (r.outcome = OReturn) & (r.activation = progAct) THEN
               r := MkVal(r.value); progStop := TRUE; EXIT
-            ELSIF r.outcome # OValue THEN
+            ELSIF evalErrFlag OR (r.outcome # OValue) THEN
+              (* An evaluation error is reported through evalErrFlag, not
+                 through the outcome (Err returns an ordinary OValue FALSE) -
+                 see Err's own comment. Without this check, a REPEAT whose
+                 body errors on every pass (zork1's MULTIFROB macro helper
+                 hits this: its exit condition calls the not-yet-implemented
+                 atom RETURN!- once ATMS is empty) never stops: progRepeat
+                 is TRUE and the outcome always reads back as an ordinary
+                 value, so the loop just re-runs the same failing statement
+                 forever, burning CPU and growing memory without bound
+                 instead of surfacing the error. *)
               progStop := TRUE; EXIT
             END;
             progBP := progBP.rest
@@ -4316,8 +4370,17 @@ BEGIN
   Register("USE-WHEN", FALSE); Register("INCLUDE-WHEN", FALSE);
   Register("COMPILATION-FLAG", FALSE); Register("COMPILATION-FLAG-DEFAULT", FALSE);
   Register("COMPILATION-FLAG-VALUE", FALSE); Register("IFFLAG", TRUE);
+  Register("GC-MON", FALSE); Register("BLOAT", FALSE);
+  Register("ZSTR-ON", FALSE); Register("ZSTR-OFF", FALSE);
+  Register("ENDLOAD", FALSE); Register("PUT-PURE-HERE", FALSE);
+  Register("DEFAULTS-DEFINED", FALSE); Register("CHECKPOINT", FALSE);
+  Register("BEGIN-SEGMENT", FALSE); Register("END-SEGMENT", FALSE);
+  Register("DEFINE-SEGMENT", FALSE); Register("FREQUENT-WORDS?", FALSE);
+  Register("NEVER-ZAP-TO-SOURCE-DIRECTORY?", FALSE); Register("ASK-FOR-PICTURE-FILE?", FALSE);
+  Register("PICFILE", FALSE);
   Register("ADD-TELL-TOKENS", TRUE); Register("TELL-TOKENS", TRUE);
   Register("NTH", FALSE); Register("GET-ELEMENT", FALSE); Register("REST", FALSE);
+  Register("PUTREST", FALSE);
   Register("PUT", FALSE); Register("ZGET", FALSE); Register("ZPUT", FALSE);
   Register("UNPARSE", FALSE); Register("0?", FALSE); Register("1?", FALSE);
   Register("GETB", FALSE); Register("PUTB", FALSE);

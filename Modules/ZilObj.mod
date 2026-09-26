@@ -169,17 +169,38 @@ END HashText;
 
 (* Interns an atom by name: returns the existing atom if one with this
    exact text already exists, else creates and registers a new one.
-   Atom identity (pointer equality) is what ZIL's ==? / EQ? relies on. *)
+   Atom identity (pointer equality) is what ZIL's ==? / EQ? relies on.
+
+   `NAME!-` with nothing after the "-" is MDL's spelling for "NAME, looked
+   up in the ROOT oblist specifically" (real zilf's ZilAtom.Parse: finding
+   "!-" with idx = text.Length-2 goes to ctx.RootObList, using text[..idx]
+   as the plain name - see the source's own case for `idx == text.Length -
+   2`). zillib source really does write it this way: zork1's own
+   gmacros.zil DEFMACs use `<RETURN!- x>`/`<AGAIN!- x>`/`<RETURN!->` as their
+   "leave the nearest UNNAMED enclosing block" idiom (as opposed to a bare
+   RETURN/AGAIN, which does the same thing here, or `RETURN val .NAME` for a
+   named one) - so where this port has one flat oblist standing in for every
+   real oblist, RETURN!- has to resolve to the exact same atom as plain
+   RETURN, or the macro's compile-time REPEAT loop calls a permanently
+   unassigned atom. A qualifier that actually NAMES an oblist (`NAME!-
+   OBLIST`, something after the "-") is a different case entirely and is
+   left untouched - ZilEval's own QualifiedName (the libmsg.zil OBLIST-as-
+   hashmap feature) deliberately interns exactly that shape as a genuinely
+   distinct atom per (name, oblist) pair, matching the real compiler's own
+   spelling for it. *)
 PROCEDURE Intern*(text: ARRAY OF CHAR): Zo;
-VAR z: Zo; b: INTEGER;
+VAR z: Zo; b, n: INTEGER; s: ARRAY 64 OF CHAR;
 BEGIN
-  b := HashText(text);
+  Strings.Copy(text, s);
+  n := 0; WHILE s[n] # 0X DO INC(n) END;
+  IF (n >= 2) & (s[n-2] = "!") & (s[n-1] = "-") THEN s[n-2] := 0X END;
+  b := HashText(s);
   z := oblist[b];
-  WHILE (z # NIL) & (z.atomText # text) DO z := z.atomNext END;
+  WHILE (z # NIL) & (z.atomText # s) DO z := z.atomNext END;
   IF z = NIL THEN
     NEW(z);
     z.kind := KAtom;
-    Strings.Copy(text, z.atomText);
+    Strings.Copy(s, z.atomText);
     z.atomNext := oblist[b];
     oblist[b] := z
   END;
