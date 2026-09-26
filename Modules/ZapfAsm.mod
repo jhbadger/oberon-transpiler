@@ -406,11 +406,34 @@ BEGIN
   ctx.vocabKeySize := keySize
 END EnterVocab;
 
+(* Compares two vocabulary records by their DICTIONARY KEY ONLY - the
+   encoded word bytes (vocabKeySize: 4 in V1-3, 6 in V4+) - never the flag
+   and value bytes that follow it in the record. A real Z-machine
+   dictionary is looked up at RUNTIME by binary search on exactly those key
+   bytes, so the key is what has to be sorted, and it is what defines
+   whether two entries are "the same word" for the vocab-collision check
+   below: a duplicate key is a duplicate regardless of what values happen
+   to follow it.
+
+   This used to compare the WHOLE record (through vocabRecSize), which is
+   wrong two ways at once: it can put the dictionary out of key order
+   whenever two words share a key but differ in their values (e.g. an
+   OBJECT-only word with all-zero values sorting differently against a
+   VERB/ADJECTIVE word that shares its key), and it silently missed most
+   real V3 truncation collisions in the warning below, since two SEPARATE
+   ZIL words being folded onto the same 6-Z-character key (SanitizedNAME
+   truncation, not sanitization) essentially never have byte-identical
+   value bytes too. Confirmed against advent.zil: BOTTLE/BOTTLED,
+   STREAM/STREAMBED, SHADOW/SHADOWY, DRAGON/DRAGON'S and others all encode
+   to the identical 4-byte key and are genuinely the same Z-machine
+   dictionary word, but only the handful whose value bytes ALSO happened to
+   match by coincidence (all-zero SYNONYM-only entries) were ever reported
+   or sorted correctly. *)
 PROCEDURE VocabCompare(ctx: Context; i, j: INTEGER): INTEGER;
 VAR k, a, b: INTEGER;
 BEGIN
   k := 0;
-  WHILE k < ctx.vocabRecSize DO
+  WHILE k < ctx.vocabKeySize DO
     a := ctx.vocabBuf[i * ctx.vocabRecSize + k];
     b := ctx.vocabBuf[j * ctx.vocabRecSize + k];
     IF a # b THEN RETURN a - b END;
@@ -423,7 +446,7 @@ PROCEDURE VocabCompareSaved(ctx: Context; saved: ARRAY OF INTEGER; j: INTEGER): 
 VAR k, a, b: INTEGER;
 BEGIN
   k := 0;
-  WHILE k < ctx.vocabRecSize DO
+  WHILE k < ctx.vocabKeySize DO
     a := saved[k];
     b := ctx.vocabBuf[j * ctx.vocabRecSize + k];
     IF a # b THEN RETURN a - b END;
