@@ -2755,89 +2755,263 @@ while moving several files substantially further through their source).
 The `PACKAGE`/`USE`/`ADD-TELL-TOKENS` cluster is the known
 qualified-OBLIST investigation and should stay one task.
 
+## MILESTONE 5: `sample/cloak/cloak.zil` — a real parser game, playable and winnable
+
+**`cloak.zil` compiles, assembles, runs and can be completed.** It is a
+full `zillib` game: a parser, a dictionary, syntax tables, objects with
+exits, darkness, scoring and an endgame. Playing
+
+    west / put cloak on hook / east / south / read message
+
+prints `****  You have won  ****` and `In 4 turns, you scored 2 points out
+of a possible 2.` Movement, room descriptions, the status line, the turn
+counter, GWIM (`[the cloak]`), implicit taking, the darkness messages and
+the score notification all behave.
+
+This section records what the last stretch needed, because most of it was
+*silent* — the story file assembled cleanly and then did nothing.
+
+### Code generation
+
+- **`MAP-DIRECTIONS`**, plus the `LOW-DIRECTION` constant its `DLESS?`
+  bound reads. `LOW-DIRECTION` is the smallest property number used by a
+  direction; the original takes it from the last atom in the `DIRECTIONS`
+  list, which is equivalent because property numbers count down in
+  registration order. `DIRECTIONS` now also *replaces* the set rather than
+  adding to it, matching `Directions.Clear()`.
+- **`LOWCORE`** and **`LOWCORE-TABLE`**, with the header-field table ported
+  from `ZModel/LowCoreField.cs`. `LOWCORE` is rewritten into
+  `<GET 0 offset>` / `<PUT 0 offset v>` (or the `GETB`/`PUTB` forms) so it
+  reaches every path that already knows how to place a `GET`'s result,
+  including a destination. The V5+ header-*extension* fields are
+  deliberately absent — they need `EXTAB` indirection and a reserved
+  minimum extension length, and nothing in the corpus uses them.
+- **Inline table constructors** (`<PICK-ONE-R <PLTABLE "a" "b">>`). These
+  cannot be evaluated while a routine is being compiled, because tables are
+  emitted into static memory *before* any routine body is looked at — a
+  table discovered then would get a label and no data. So they are
+  evaluated in `PrepareRoutines` and the resulting table is memoized on the
+  FORM under a private indicator, which `CompileOperand` reads back.
+- **A void-only builtin used as a value** yields TRUE, which is what the
+  original does (`CompileVoidCall(...); return Game.One`). The library
+  writes `<AND <DIROUT 2> ...>`.
+- **`FIRST?`/`NEXT?` used as values** get a branch to the next instruction.
+  They are the Z-machine's `get_child`/`get_sibling`, which both store *and*
+  branch — the original classes them as `ValuePredCall`, the one builtin
+  kind that is both — and the branch offset is part of the encoding, so it
+  cannot be omitted.
+- **`SanitizeSymbol`**, ported from `Zap/GameBuilder.cs`. ZAP symbols allow
+  letters, digits, `?`, `#` and `-`; everything else becomes `$` plus four
+  hex digits, and the four punctuation words get readable names
+  (`$PERIOD`, `$COMMA`, `$QUOTE`, `$APOSTROPHE`). This is not theoretical:
+  zillib defines the one-character words `,` `.` and `"`, `<SYNTAX \,TELL
+  ...>` makes `,TELL` a verb, and `MAXWORD/10` is an ordinary constant
+  name. A prefixed symbol sanitizes only the part after the prefix, so the
+  word `.` becomes `W?$PERIOD` in both the definition and every reference —
+  sanitizing `"W?."` whole would give `W?$002e` and never match.
+- **The LEXV table format**: a count byte, a zero byte, then word/byte/byte
+  triples. Without it the parse buffer declared zero word slots, so every
+  command parsed as empty input and the game answered `...` to everything.
+- **Direction properties**, from `SDirectionsPropDef_V3` in
+  `Context.InitPropDefs`:
+
+  | Written | Bytes | Layout |
+  |---|---|---|
+  | `(DIR TO R)` / `(DIR R)` | 1 | room |
+  | `(DIR SORRY S)` / `(DIR S)` | 2 | string word |
+  | `(DIR PER F)` | 3 | routine word, zero byte |
+  | `(DIR TO R IF G ["OPT"] ELSE S)` | 4 | room, global, string word |
+  | `(DIR TO R IF D IS OPEN ["OPT"] ELSE S)` | 5 | room, door, string word, zero |
+
+  The **length** is what identifies the kind at run time: `V-WALK` switches
+  on `<PTSIZE .PT>` against `UEXIT`/`NEXIT`/`FEXIT`/`CEXIT`/`DEXIT`, which
+  are exactly 1..5 in V3. A `CEXIT`'s condition byte is a *global's variable
+  number*, which is what the `.GVAR`-defined symbol evaluates to;
+  `ConstantText` does not look globals up (a global is normally reached as
+  `,NAME`), so that case checks `FindGlobalIdx` directly. V3 layout only —
+  V4+ widens object numbers to words.
+
+### Interpreter
+
+- **The `PRE-COMPILE` hook.** zillib's `ADD-FINISHER` chains onto a global
+  in the `HOOKS` package which the compiler calls by name before compiling;
+  that is what builds `ACHIEVEMENTS` and `ACHIEVEMENT-COUNT`. This port has
+  one flat oblist in which a qualified name interns under its full
+  `NAME!-OBLIST!-OBLIST` spelling, so the lookup is literally the atom the
+  library writes.
+- **`SORT`** (insertion sort, stable; the predicate is asked only "is A
+  greater than B?", which is all a stable insertion sort needs).
+- **`ZVAL`** on routines, objects, globals and constants. The library tests
+  it: it refuses to build the achievements table unless `MAX-SCORE` has
+  one. The atom itself is stored, because existence is all that is tested
+  and a constant whose value is `0` must still read as defined.
+- **`TYPE?`/`CHTYPE` special cases for `LVAL` and `GVAL`.** `.X` reads as
+  the FORM `<LVAL X>`; `TYPE` still calls it a FORM, but `TYPE?` also
+  answers `LVAL`, and `CHTYPE` converts between such a form and a bare
+  atom. The original marks these "hacky special cases"; they are
+  load-bearing. zillib's library-message substitution finds the
+  placeholders in a template with `<TYPE? .STRUC LVAL>` and reads the name
+  out with `<CHTYPE .STRUC ATOM>`, so without them every message's `.OBJ`
+  / `.WHOM` / `.POINTS` survived into the generated code as a reference to
+  a local the calling routine does not have — 14 undefined symbols at
+  assembly time.
+- **`#DECL` is inert.** A DECL self-evaluates in the original because its
+  *type* is DECL rather than LIST. Dropping the type tag the way every
+  other `#TYPE` is dropped left an ordinary LIST, which a `DEFINE` body
+  then evaluates element by element — harmless by luck for
+  `((HANDLER) APPLICABLE)`, fatal for `(<OR !<LIST ATOM ANY> FALSE>)`.
+  Reading it as `<QUOTE (...)>` gives the self-evaluating behaviour with no
+  type system, and the value is discarded everywhere a decl can appear.
+- **A macro's SPLICE result splices into an enclosing form's arguments**,
+  not only into a routine body. `<CONSTANT TRY-REPHRASING-CMD
+  <LIBRARY-MESSAGE ORPHANING TRY-REPHRASING>>` is a STRING constant only
+  because the message's one-element SPLICE collapses into `CONSTANT`'s
+  second argument.
+- **VECTORs evaluate their elements**, as LISTs do. `<SETG NEW-SFLAGS
+  ["TOUCH" (+ ,SF-TOUCH) ...]>` depends on it. Note that the `+` marking an
+  additive flag then arrives as the addition SUBR rather than as the atom,
+  because a bare atom evaluates to its global value; both spellings are
+  accepted.
+- **A DEFSTRUCT over a TABLE writes through the field's own accessor
+  width.** A table's elements are not all one width, so a byte offset is
+  not an element index and neither is a word index. `PARSER-RESULT` is
+  `<ITABLE 26 (BYTE)>` with `ZGET`/`ZPUT` (word) fields, so `PST-PRSOS`
+  (word 4) landed in byte slot 4 — the assembler only *warned* that a table
+  address will not fit in a byte, and the parser then read nonsense.
+  Writing a word into two adjacent byte slots now merges them into one
+  word element.
+
+### Parser data
+
+- **The part-of-speech First flags.** They are the low two bits of a word's
+  data byte, and they are what tells the library which of the two value
+  bytes to read: `CHKWORD?` takes `VOCAB-V1` when `<BAND flags 3>` matches
+  the part of speech's `P1?` constant and `VOCAB-V2` otherwise. Leaving
+  them clear is quiet and total — every verb's number reads as 0, so the
+  parser recognises every word and then does nothing with any command.
+  Ported from `OldParserWord.ShouldSetFirst`: set only when the word has no
+  value-recording part of speech yet, and never on a buzzword.
+- **`NEW-SFLAGS`.** A library may redefine what the scope-flag names in a
+  `SYNTAX` line mean. zillib does, because it has always treated
+  `ON-GROUND`/`IN-ROOM` alike and `CARRIED`/`HELD` alike, so it reuses the
+  freed bits for `EVERYWHERE` and `TOUCH`. Its `SEARCH-ALL` is **24**, not
+  the built-in default **240**. The first non-additive option clears the
+  defaults; `HAVE`, `TAKE`, `MANY` and anything written `(+ n)` are
+  additive.
+
+### The two codegen bugs that made it *look* like a parser problem
+
+1. **A `DO` loop whose end is `.X` or `,X` was treated as a predicate**,
+   because `.X` reads as a FORM. The original tests
+   `end.IsNonVariableForm()` for exactly this reason. `<DO (I 0 .LEN) ...>`
+   compiled to "branch out of the loop while LEN is true", so the body ran
+   zero times or forever — and zillib's `COPY-TABLE` is written exactly
+   that way. The parser copies each command into its EDIT buffers and then
+   switches `LEXBUF` to them *before* scanning the words, so every command
+   arrived empty and the game said `I don't know the word ""`. A FORM
+   *step* likewise computes the counter's next value and is stored, not
+   added.
+
+2. **A comparison's first comparand was compiled twice.** `CompileCondition`
+   pre-compiled the right operand for `FixStackedPair` and then the
+   `EQUAL?` group loop compiled every comparand again from the start, so
+   `<==? .I <+ ,P-P1-WN 1>>` emitted its `ADD ... >STACK` twice and leaked
+   a stack entry on every evaluation. Only `L?`/`G?` need the pre-compiled
+   pair now; the `EQUAL?` path counts the comparands and spills the left
+   operand off the stack when any of them emits anything or when there is
+   more than one group.
+
+### Tooling: reading what a story file actually prints
+
+`frotz` drives a real screen — cursor positioning, line deletion, scroll
+regions — so piping it to a file interleaves escape codes with the game's
+text and the transcript is unreadable. Several of the fixes above were
+invisible for that reason: markers were printing and could not be seen.
+`ansiscreen.py` in the scratchpad replays such a stream onto a grid and,
+with `--scroll`, keeps the lines that scrolled off, which gives a clean
+transcript:
+
+    printf 'west\nput cloak on hook\n' | timeout 30 frotz -p cloak.z3 2>&1 \
+        | python3 ansiscreen.py --scroll
+
+`examples/zmachine.mod` is also a usable second channel — it runs `cloak`
+fine (it is `beer.z3`, with its volume of output, that it hangs on), and
+its output needs much less untangling.
+
+The other technique that paid for itself: **copy `zillib` into the
+scratchpad and patch `<TELL "[dbg ...]">` markers into it**, then compile
+the game against the copy. Every remaining bug was found that way in a
+couple of iterations, after a long stretch of reading generated `.zap` by
+eye.
+
+### Where `cloak` still differs from the original's output
+
+- `<TYPE? <GETPROP .R ZVAL> ROUTINE>` in `pronouns.zil`'s
+  `PRONOUN-PROPSPEC` needs the stored ZVAL to have type ROUTINE. This port
+  stores the atom, so that helper would reject every pronoun. It only runs
+  for an object with a `PRONOUN` property, which no game compiled so far
+  has.
+- Compiling with `<COMPILATION-FLAG DEBUG T>` fails in `BYTE/WORD: expected
+  a FIX` — the debugging verbs build tables this port's `BYTE`/`WORD`
+  doesn't accept yet. Not needed for a release build.
+- `V4+` direction properties (object numbers widen to words) are not
+  emitted.
+
 ## Suggested order for the next session
 
-**Where this stands**: three complete, unmodified games compile, assemble
-and run — `sample/beer` (V3), `sample/mandelbrot` (V4, ASCII art) and
-`sample/name` (V3, interactive: reads input, prints a status line).
-**`sample/cloak` evaluates the entire `zillib`** — parser, library messages,
-pronouns, DEFSTRUCT records, packages, compilation flags — and stops inside
-code generation. The pipeline:
+**Where this stands**: four complete, unmodified games compile, assemble and
+run — `sample/beer` (V3), `sample/mandelbrot` (V4, ASCII art),
+`sample/name` (V3, interactive) and **`sample/cloak` (V3, a full `zillib`
+parser game, playable and winnable)**. The pipeline:
 
 ```
-obc --mod-path Modules examples/zilf.mod -o zilf
-./zilf -i ~/lib/src/zilf/zillib game.zil game.zap && ./zapf game.zap && frotz game.z3
+./obc -I Modules/ examples/zilf.mod -o zilf
+./zilf -q -i ~/lib/src/zilf/zillib -i <gamedir> game.zil > game.zap
+./zapf game.zap && frotz -p game.z3 | python3 ansiscreen.py --scroll
 ```
 
-1. **Re-run the checks** first: the sixteen end-to-end programs in the
-   session scratchpad (compile → `zapf` → run, checking printed values),
-   `beer`/`mandelbrot`/`name` end to end, the 52-file corpus with
-   `-i .../zillib`, and the transpiler's own suite (138 files, 3
-   pre-existing failures). The scratchpad may not survive between machine
-   sessions; each test program is described in its own section above.
+1. **Re-run the checks** first: the eighteen end-to-end programs in the
+   scratchpad, the four games, and the transpiler's own suite (171 files,
+   3 pre-existing failures: `ClojBio`, `ClojStats`, `Editor`). Then *run*
+   `loop`, `temps`, `regress`, `andor` and `tell` and read their output —
+   the two codegen bugs fixed in the cloak milestone were both invisible in
+   the `.zap` text and in whether it assembled.
 
-2. **The vocabulary and syntax tables** are now the whole remaining story
-   for a parser game, and `cloak` stops exactly there: it fails on a table
-   element that is a vocabulary word (`ENGLISH-NUM-WORDS`, a `PLTABLE` of
-   `<VOC "one" ...>` results), which needs a dictionary to point at.
+2. **Try the next `zillib` game up in size.** `sample/cloak_plus`,
+   `sample/cloak_test` and `sample/cloak_glk` are the obvious steps, then
+   `sample/advent` (which needs `BIT-SYNONYM`) and `sample/zork1`. Expect
+   the same shape of work as this milestone: a short chain of missing
+   builtins to get it compiling, then a shorter chain of *silent* data-layout
+   bugs to get it behaving. Budget for both.
 
-   **Scope, from reading the original**: `Compiler/Compilation.Syntax.cs`
-   (477 lines) and `ZModel/Syntax.cs` (421), plus the small
-   `ZModel/Vocab/*` classes. Comparable in size to the whole DEFSTRUCT +
-   MDL-layer batch, so plan it as its own session, not a slice.
-
-   **The good news, worth knowing before starting**: the hard part —
-   encoding a word into Z-characters — is already done. `zapf` implements
-   it and exposes it as the `.ZWORD "text"` directive (see
-   `Modules/ZapfZChar.mod`), so the compiler only has to emit the table
-   structure, not the encoding. From `GameBuilder.FinishSyntax`, that
-   structure is:
-
-   ```
-   VOCAB:: .TABLE
-       .BYTE <count of self-inserting break chars>
-       .BYTE <each break char>
-       .BYTE <entry length>          ; zwordBytes + dataBytes
-       .WORD <word count>
-       .VOCBEG <entry length>,<zwordBytes>   ; 4 z-word bytes in V1-3, 6 in V4+
-       W?FOO:: .ZWORD "foo"
-       <the word's data bytes: part-of-speech flags, then per-POS values>
-       ...
-       .VOCEND
-       .ENDT
-   ```
-
-   and `zapf` already parses every one of those directives — `.VOCBEG`,
-   `.VOCEND`, `.ZWORD` are all in `ZapfParser.mod`'s directive table. What
-   is missing on this side is: a vocabulary registry in `ZilModel` (word
-   text plus part of speech); registering words from `VOC`, `SYNONYM`,
-   `BUZZ`, `DIRECTIONS`, `SYNTAX` and from objects' `SYNONYM`/`ADJECTIVE`
-   properties (all of which `ZilCompile.CompileObjects` currently *skips
-   with a comment* for exactly this reason); `ConstantText` resolving a
-   vocabulary atom to its `W?NAME` symbol; and then the syntax/action
-   tables that turn `<SYNTAX TAKE OBJECT = V-TAKE>` into parser data.
-
-3. **Then the rest of what a parser game needs in the compiler**: complex
-   PROPDEF patterns (`ComplexPropDef.cs`, 1,021 lines — direction
-   properties like `(NORTH TO CELLAR)`, also skipped with a comment
-   today), and string operands with packed string tables (`.GSTR`/`.STR`)
-   so a string can be an operand and not only a `PRINTI` literal.
-
-4. **Smaller known gaps**: `BIT-SYNONYM` (where `advent` stops),
-   `ZIP-OPTIONS`, `FREQUENT-WORDS?`, `SUPPRESS-WARNINGS?`, `ITABLE`'s
-   remaining keyword argument shapes, an `"OPT"` argument with a
-   non-constant default (needs the argument-count test), and a V5+
-   hand-built header.
+3. **Known gaps, in rough order of how likely a game is to hit them**:
+   - `BIT-SYNONYM` (where `advent` stops)
+   - V4+ direction properties (object numbers widen to words)
+   - `PSEUDO` object properties
+   - `<TYPE? <GETPROP .R ZVAL> ROUTINE>` — needs a ROUTINE-typed ZVAL, so
+     `PRONOUN` properties do not work
+   - `<COMPILATION-FLAG DEBUG T>` builds fail in `BYTE/WORD: expected a
+     FIX`; the debugging verbs build tables `BYTE`/`WORD` doesn't accept
+   - `SORT` with extra vectors to rearrange in step
+   - V5+ header-extension `LOWCORE` fields (`EXTAB` indirection)
+   - `ZIP-OPTIONS`, `FREQUENT-WORDS?`, `SUPPRESS-WARNINGS?`, remaining
+     `ITABLE` keyword shapes, an `"OPT"` argument with a non-constant
+     default, a V5+ hand-built header
 
 **Testing discipline that has caught everything so far**: compile →
-assemble with `zapf` → actually run the story file → check the real printed
-output. Never trust that the `.zap` text looks right — the `"ARGS"`
-constant-folding bug produced a perfectly plausible `.zap` that printed the
-wrong number, and the missing entry-point `QUIT` produced one that ran all
-99 verses and then crashed. When a compiled game misbehaves under
-`examples/zmachine.mod`, check it under `frotz` before assuming the
-compiler is at fault (`zmachine.mod` hangs on `beer.z3`, which frotz runs
-correctly, while it renders `mandelbrot.z4` perfectly).
+assemble with `zapf` → actually run the story file → **read the real
+printed output through `ansiscreen.py`**. Never trust that the `.zap` text
+looks right. The `"ARGS"` constant-folding bug produced a perfectly
+plausible `.zap` that printed the wrong number; the missing entry-point
+`QUIT` produced one that ran all 99 verses and then crashed; the `DO`-loop
+and First-flag bugs produced one that assembled without a single warning and
+ignored every command.
+
+When a compiled game misbehaves, check it under both interpreters before
+assuming the compiler is at fault — and when *neither* explains it, copy
+`zillib` into the scratchpad and patch `<TELL "[dbg ...]">` markers into the
+routine you suspect. That found the last four bugs in about as many
+iterations, after a long unproductive stretch of reading generated `.zap`.
 
 **And when an error message names something that makes no sense**, suspect
 a *later* error masking the real one. That is why `Err` now keeps the first

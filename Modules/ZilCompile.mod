@@ -1718,7 +1718,7 @@ END EmitPredInstr;
    COND nested inside a *condition* isn't reachable from here. *)
 PROCEDURE CompileCondition(z: ZilObj.Zo; label: ARRAY OF CHAR; polarity: BOOLEAN): BOOLEAN;
 VAR headName: ARRAY 64 OF CHAR; leftText, rightText, opText, empty: ARRAY 64 OF CHAR;
-    skipLabel: ARRAY 16 OF CHAR; c: ZilObj.Zo; ok, spilled, isLast: BOOLEAN;
+    skipLabel: ARRAY 16 OF CHAR; c: ZilObj.Zo; ok, spilled, isLast, allSimple: BOOLEAN;
     extraText: ARRAY 3, 64 OF CHAR; nExtra, nE2, nCondBinds: INTEGER;
     condBody, condItem: ZilObj.Zo;
 BEGIN
@@ -1854,14 +1854,13 @@ BEGIN
       END;
       ok := CompileOperand(z.rest.first, leftText);
       IF ~ok THEN RETURN FALSE END;
-      ok := CompileOperand(z.rest.rest.first, rightText);
-      IF ~ok THEN RETURN FALSE END;
-      ok := FixStackedPair(leftText, rightText,
-                           (headName = "EQUAL?") OR (headName = "=?") OR (headName = "==?")
-                           OR (headName = "N==?") OR (headName = "N=?") OR (headName = "BTST"));
-      IF ~ok THEN RETURN FALSE END;
-      IF headName = "L?" THEN EmitPredInstr("LESS?", leftText, rightText, label, polarity)
-      ELSIF headName = "G?" THEN EmitPredInstr("GRTR?", leftText, rightText, label, polarity)
+      IF (headName = "L?") OR (headName = "G?") THEN
+        ok := CompileOperand(z.rest.rest.first, rightText);
+        IF ~ok THEN RETURN FALSE END;
+        ok := FixStackedPair(leftText, rightText, FALSE);
+        IF ~ok THEN RETURN FALSE END;
+        IF headName = "L?" THEN EmitPredInstr("LESS?", leftText, rightText, label, polarity)
+        ELSE EmitPredInstr("GRTR?", leftText, rightText, label, polarity) END
       ELSE
         (* One EQUAL? instruction matches its first operand against up to
            THREE comparands. Real source goes well past that — zillib's
@@ -1874,10 +1873,22 @@ BEGIN
 
            With more than one group the left operand is used repeatedly, so
            it cannot be left on the stack. *)
+        (* Count the comparands, and note whether any of them EMITS anything.
+           The comparands are compiled below, one group at a time, so this
+           must not compile them here as well: doing that emitted the first
+           comparand's instructions twice, which pushed a value nothing ever
+           popped. *)
         c := z.rest.rest;
-        nExtra := 0;
-        WHILE (c # NIL) & (c.first # NIL) DO INC(nExtra); c := c.rest END;
-        IF (nExtra > 3) & (leftText = "STACK") THEN
+        nExtra := 0; allSimple := TRUE;
+        WHILE (c # NIL) & (c.first # NIL) DO
+          INC(nExtra);
+          IF ~IsSimpleOperand(c.first) THEN allSimple := FALSE END;
+          c := c.rest
+        END;
+        (* The left operand is read by every group, and anything a comparand
+           pushes would bury it, so it can only stay on the stack for a single
+           group of operands that emit nothing. *)
+        IF (leftText = "STACK") & ((nExtra > 3) OR ~allSimple) THEN
           ok := SpillToTemp(leftText);
           IF ~ok THEN RETURN FALSE END;
           spilled := TRUE
