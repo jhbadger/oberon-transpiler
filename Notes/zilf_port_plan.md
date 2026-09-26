@@ -3303,6 +3303,58 @@ regression (`advent`, `beer`, `cloak`, `hello`, `mandelbrot`, `name`,
 **`zork1`**) all compile/assemble clean; `cloak` still wins, `advent`'s
 abbreviations and "examine bottled water" still work.
 
+## MILESTONE 8: `sample/cloak_plus` — stopped at a real, known limitation
+
+`cloak_plus` (a "kitchen sink" cloak-of-darkness variant exercising
+UNDO/COLOR support) is the first game tried that targets `<VERSION
+XZIP>` — Z-machine **V5**, not V3/V4 like every previous milestone.
+Three real gaps got it compiling further than any previous attempt:
+
+- **`<ZIP-OPTIONS opt...>`** (`COLOR`/`MOUSE`/`UNDO`/`DISPLAY`/`SOUND`/
+  `MENU`/`BIG`): ported `Subrs.ZModel.cs`'s `ZIP_OPTIONS` — each option
+  defines a `COMPILATION-FLAG` under its own name and sets a derived
+  global (`USE-UNDO?`, `USE-COLOR?`, etc. — the real compiler's own
+  StdAtom spellings) that library source actually branches on via
+  `<GASSIGNED? USE-UNDO?>`; `BIG` is silently accepted and ignored.
+- **`NEWTYPE`/`OFFSET`**: zillib's `status.zil` (always `INSERT-FILE`d
+  by `parser.zil`, but gated behind its own `<VERSION? (ZIP) (ELSE
+  ...)>` so every V3 game so far never reached it) builds a lightweight
+  hand-rolled "RSEC" record type for status-line sections using these.
+  Both are true no-ops here, matching this port's "no type system, no
+  DECL checking" simplification exactly: `NEWTYPE` returns its name
+  atom, `OFFSET` returns its plain index (which is what the real
+  compiler's own `NTH`/`PUT`/`GET` always reduce an offset object back
+  to before using it anyway). **Debugging detour**: this first looked
+  like a `VERSION?` bug (why would code inside a `(ZIP) ... (ELSE ...)`
+  conditional's ELSE branch run for what I initially assumed was a ZIP
+  compile?) — it wasn't; `cloak_plus.zil` genuinely declares `<VERSION
+  XZIP>`, so the ELSE branch is the CORRECT one to take. `VERSION?`'s
+  own clause-matching was never at fault; worth remembering that a
+  sample game's own declared version is the first thing to check before
+  suspecting a conditional-compilation primitive.
+- **OBJECT/ROOM property-list evaluation didn't flatten a SPLICE
+  appearing at the top level of the property list itself** (as opposed
+  to inside one property's VALUE list, which `FlattenSpliceMembers`
+  already handles for the `ApplyPropSpecs` case). zillib's `parser.zil`
+  writes exactly this shape on its `ROOMS` object — `%<VERSION? (ZIP
+  <LIST DESC ...>) (ELSE #SPLICE ())>>` as one whole property position.
+  For a non-ZIP target, the ELSE branch's empty `#SPLICE ()` should
+  contribute zero properties; this port instead wrapped the raw
+  `KSplice` value into its own cell unflattened, and object
+  registration correctly rejected it as not a list — though its
+  diagnostic printed the unhelpful "#UNKNOWN" for it, since
+  `ZilObj.PrintTo`'s `CASE` never covered `KSplice` (or `KRoutine`/
+  `KOblist`) at all. Fixed the splice-handling gap.
+
+**Where it stops**: `CompileProgram: only Z-machine versions 3 and 4
+are emitted yet (V5+ needs a hand-built header)` — a real, substantial,
+already-known limitation (see "Known gaps" below), not a quick fix.
+zapf auto-generates the 64-byte header for V1–4; V5+ lays it out with
+hand-written data directives instead (object/property counts widen,
+the packed-address multiplier changes, there's a header extension
+table...). This is its own separate body of work, larger than anything
+else fixed in this session, and hasn't been started.
+
 ## Suggested order for the next session
 
 **Where this stands**: six complete, unmodified games compile, assemble
