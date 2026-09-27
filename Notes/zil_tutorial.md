@@ -2,7 +2,7 @@
 
 ZIL (Zork Implementation Language) is a dialect of MDL (a Lisp derivative) used by Infocom in the 1980s to write classics like *Zork* and *The Hitchhiker's Guide to the Galaxy*. Today, thanks to the open-source **ZILF** project, you can write and compile ZIL code into Z-machine files playable on any modern interpreter.
 
-This tutorial covers the basics of setting up a modern ZIL workflow while using classic Infocom programming concepts. Every example in this tutorial has been compiled, assembled, and actually played through an interpreter (`frotz`) to confirm it behaves as described — see section 15 for how to do the same with your own code.
+This tutorial covers the basics of setting up a modern ZIL workflow while using classic Infocom programming concepts. Every example in this tutorial has been compiled, assembled, and actually played through an interpreter (`frotz`) to confirm it behaves as described — see section 18 for how to do the same with your own code.
 
 ## 1. Prerequisites and Setup (The Oberon Part)
 
@@ -20,7 +20,7 @@ If you have ever looked at Lisp, ZIL will look familiar, but with a unique twist
 
 * **`+ - * /`:** Standard math operators. `<+ 2 2>` evaluates to 4.
 
-* **`;"..."` (Comment):** A semicolon tells the reader to read the next form and throw it away, so `;"a comment"` vanishes completely — it is not code, just a note to yourself. This matters more than it sounds like it should: see the warning box in section 9 for what goes wrong if you write a comment as `("a comment")` instead.
+* **`;"..."` (Comment):** A semicolon tells the reader to read the next form and throw it away, so `;"a comment"` vanishes completely — it is not code, just a note to yourself. This matters more than it sounds like it should: see the warning box in section 10 for what goes wrong if you write a comment as `("a comment")` instead.
 
 ## 3. The Basic Boilerplate
 
@@ -54,7 +54,7 @@ A Simple ZIL example">
     <MAIN-LOOP>>
 ```
 
-`<SETG USE-SCORING? T>` has to come *before* `<INSERT-FILE "parser">`, because the parser library only compiles in its scoring code (`V-SCORE`, the `SCORE` command, `AWARD-POINTS`, and so on) when that flag is already set. We won't use scoring until section 11, but the flag has to be set here, at the top of the file, before the library that reads it is loaded — setting it later, next to `MAX-SCORE`, is too late and `V-SCORE` will fail to compile with an "unrecognized builtin" error.
+`<SETG USE-SCORING? T>` has to come *before* `<INSERT-FILE "parser">`, because the parser library only compiles in its scoring code (`V-SCORE`, the `SCORE` command, `AWARD-POINTS`, and so on) when that flag is already set. We won't use scoring until section 14, but the flag has to be set here, at the top of the file, before the library that reads it is loaded — setting it later, next to `MAX-SCORE`, is too late and `V-SCORE` will fail to compile with an "unrecognized builtin" error.
 
 Placing the player for the first time uses `SETG HERE`/`MOVE`/`V-LOOK` rather than the more obvious-looking `<GOTO ,START-ROOM>`. You'll see `<GOTO ...>` used for movement all over real ZIL code (it's what the parser calls internally whenever the player walks somewhere), but `GOTO` also checks whether the player's *previous* location was a vehicle — a check that makes sense for an ordinary mid-game move, but not for the very first placement, when there is no previous location yet. Using `GOTO` for the initial placement anyway (a natural thing to reach for, since it's the "move the player" function) makes the interpreter print `Warning: @test_attr called with object 0 (PC = ...) (will ignore further occurrences)` on turn one, because that vehicle check runs against object 0. It's harmless — the real Cloak of Darkness sample game initializes the player exactly this same `SETG HERE`/`MOVE`/`V-LOOK` way, specifically to avoid it — but there's no reason to have it in the transcript at all, so this tutorial does what Cloak does. `V-LOOK` still correctly triggers the room's own `ACTION` routine with `M-LOOK` (via the library's `DESCRIBE-ROOM`), so `START-ROOM-F` below behaves identically either way.
 
@@ -85,7 +85,7 @@ Now, let's put an item in the room that the player can interact with.
     (DESC "brass lantern")
     (SYNONYM LANTERN LAMP)
     (ADJECTIVE BRASS)
-    (FLAGS TAKEBIT LIGHTBIT)
+    (FLAGS TAKEBIT)
     (ACTION LANTERN-F)>
 
 <ROUTINE LANTERN-F ()
@@ -122,21 +122,128 @@ You check flags with `FSET?`, add them with `FSET`, and remove them with `FCLEAR
            <TELL "It is a heavy brass lantern, currently turned off." CR>)
 
           (<VERB? TURN-ON>
-           <COND (<FSET? ,BRASS-LANTERN ,ONBIT>
+           <COND (<FSET? ,BRASS-LANTERN ,LIGHTBIT>
                   <TELL "It is already on!" CR>)
                  (T
-                  <FSET ,BRASS-LANTERN ,ONBIT>
+                  <FSET ,BRASS-LANTERN ,LIGHTBIT>
                   <TELL "The lantern flickers to life." CR>)>)
 
           (<VERB? TURN-OFF>
-           <COND (<FSET? ,BRASS-LANTERN ,ONBIT>
-                  <FCLEAR ,BRASS-LANTERN ,ONBIT>
+           <COND (<FSET? ,BRASS-LANTERN ,LIGHTBIT>
+                  <FCLEAR ,BRASS-LANTERN ,LIGHTBIT>
                   <TELL "You turn off the lantern." CR>)
                  (T
                   <TELL "It is already off." CR>)>)>>
 ```
 
-## 8. Custom Verbs
+We're using `LIGHTBIT` itself as the "is it on" flag here, rather than a separate flag of our own invention. That's not an arbitrary choice — `LIGHTBIT` is the *same* flag the library checks everywhere it needs to know whether something is providing light, which matters a lot once a room can actually be dark. More on that next.
+
+## 8. Darkness and Light Sources
+
+So far, both of our rooms have `(FLAGS LIGHTBIT)`, so they're always lit and the lantern has never actually had to do any work. A room *without* `LIGHTBIT` is dark, and the library only considers the room lit if something with `LIGHTBIT` set is in scope — the player's own inventory included. That's exactly why section 7 had `TURN-ON`/`TURN-OFF` toggle `LIGHTBIT` directly on `BRASS-LANTERN`: it's not just recording "on" or "off" for our own messages, it's the actual flag the library's darkness check reads.
+
+Let's add a room with no light of its own, reachable from the cellar:
+
+```zil
+<ROOM START-ROOM
+    (IN ROOMS)
+    (DESC "Dusty Cellar")
+    (FLAGS LIGHTBIT)
+    (UP TO KITCHEN)
+    (DOWN TO DARK-PASSAGE)
+    (ACTION START-ROOM-F)>
+
+<ROOM DARK-PASSAGE
+    (IN ROOMS)
+    (DESC "Dark Passage")
+    (UP TO START-ROOM)
+    (ACTION DARK-PASSAGE-F)>
+
+<ROUTINE DARK-PASSAGE-F (RARG)
+    <COND (<==? .RARG ,M-LOOK>
+           <TELL "You are in a narrow passage carved out of the bare rock." CR>)>>
+
+<OBJECT SILVER-KEY
+    (IN DARK-PASSAGE)
+    (DESC "silver key")
+    (SYNONYM KEY)
+    (ADJECTIVE SILVER)
+    (FLAGS TAKEBIT TOOLBIT)>
+```
+
+(`TOOLBIT` isn't about darkness — it's set up for section 14, which is what this key is actually *for*. Ignore it for now.)
+
+Walk down into `DARK-PASSAGE` without a lit lantern and the library handles everything on its own: `LOOK` (and the room's own `DARK-PASSAGE-F`, which never even gets a chance to run) is replaced by `It is pitch black. You can't see a thing.`, and anything requiring you to see something in the room, like `TAKE KEY`, gives `It's too dark to see anything here.` No code of ours runs at all — the room's `ACTION` routine, and everything else the room might contain, is unreachable from darkness by default.
+
+Take the lantern, turn it on, and go back down, and the room description shows normally — you'll need a light source to ever find that key.
+
+### Reacting to Light Changing Mid-Turn
+
+There's one more piece: what if the player is *standing in* the dark passage and turns the lantern off, or on? The library doesn't notice this automatically — turning a device's `LIGHTBIT` on or off is just a flag change as far as it's concerned. Two helper routines, `NOW-LIT?` and `NOW-DARK?`, do the actual re-checking and print the transition message, but the *game* has to call them after anything that might have changed the light in the room. Here's the complete, final `LANTERN-F`, adding those calls to the version from section 7:
+
+```zil
+<ROUTINE LANTERN-F ()
+    <COND (<VERB? EXAMINE>
+           <COND (<FSET? ,BRASS-LANTERN ,LIGHTBIT>
+                  <TELL "It is a heavy brass lantern, currently turned on and glowing." CR>)
+                 (T
+                  <TELL "It is a heavy brass lantern, currently turned off." CR>)>)
+
+          (<VERB? TURN-ON>
+           <COND (<FSET? ,BRASS-LANTERN ,LIGHTBIT>
+                  <TELL "It is already on!" CR>)
+                 (T
+                  <FSET ,BRASS-LANTERN ,LIGHTBIT>
+                  <TELL "The lantern flickers to life." CR>
+                  "Check whether this just lit up a dark room"
+                  <NOW-LIT?>
+                  <RTRUE>)>)
+
+          (<VERB? TURN-OFF>
+           <COND (<FSET? ,BRASS-LANTERN ,LIGHTBIT>
+                  <FCLEAR ,BRASS-LANTERN ,LIGHTBIT>
+                  <TELL "You turn off the lantern." CR>
+                  "Check whether this just left the room dark"
+                  <NOW-DARK?>
+                  <RTRUE>)
+                 (T
+                  <TELL "It is already off." CR>)>)>>
+```
+
+The `<RTRUE>` at the end of each clause matters, and it's the same lesson as `TROLL-F`'s `<RFALSE>` in reverse. `NOW-LIT?` and `NOW-DARK?` only return true when they actually *did* something — if you turn the lantern on while already standing in a lit room, `NOW-LIT?` correctly does nothing and returns false. Without the `<RTRUE>` after it, that false value becomes `LANTERN-F`'s own return value, which tells the parser "I didn't handle this," and it goes on to run the library's own default `TURN ON` handler too — which doesn't know what a lantern is, and prints an unrelated `That's not something you can switch on and off.` right after the message you already printed. The `<RTRUE>` guarantees the clause always reports "handled," regardless of whether `NOW-LIT?`/`NOW-DARK?` had anything to say.
+
+### Customizing the Darkness Message (Optional)
+
+The stock `It is pitch black. You can't see a thing.` is a placeholder, not a tone. If you want the real Zork flavor (or your own), you can override the library's default with `REPLACE-DEFINITION` — but doing that for a section the library defines with `DEFAULT-DEFINITION` requires telling it *in advance*, before `<INSERT-FILE "parser">`, that you intend to replace it, with `DELAY-DEFINITION`:
+
+```zil
+<VERSION ZIP>
+<CONSTANT RELEASEID 2>
+<SETG USE-SCORING? T>
+<DELAY-DEFINITION DARKNESS-F>
+<INSERT-FILE "parser">
+```
+
+Without that line, the library inserts its own default `DARKNESS-F` the moment it's read (partway through loading `parser`), and by the time your own `REPLACE-DEFINITION` is reached later in the file, it's too late — you'll get `zilf: evaluation error: REPLACE-DEFINITION: section has already been inserted: DARKNESS-F`. With it, this works anywhere later in your file:
+
+```zil
+<REPLACE-DEFINITION DARKNESS-F
+    <ROUTINE DARKNESS-F (ARG)
+        <COND (<=? .ARG ,M-LOOK>
+               <TELL "It is pitch black. You are likely to be eaten by a grue." CR>)
+              (<=? .ARG ,M-SCOPE?>
+               <T? <SCOPE-STAGE? VEHICLE GENERIC INVENTORY GLOBALS>>)
+              (<=? .ARG ,M-NOW-DARK>
+               <TELL "It suddenly gets dark in here." CR>)
+              (<=? .ARG ,M-NOW-LIT>
+               <TELL "The darkness recedes." CR CR>
+               <RFALSE>)
+              (ELSE <RFALSE>)>>>
+```
+
+The `M-SCOPE?`/`M-NOW-LIT` clauses are copied verbatim from the library's own default (see `DEFAULT-DEFINITION DARKNESS-F` in `verbs.zil`) — only the `M-LOOK` and `M-NOW-DARK` text actually changed here. That's deliberate: `M-SCOPE?` controls which objects are still reachable in the dark, and getting it wrong (rather than just leaving it alone) can silently change what commands work while the player can't see.
+
+## 9. Custom Verbs
 
 Creating a custom verb involves two steps: defining the **grammar** using the `SYNTAX` statement, and creating the **global action routine**.
 
@@ -164,11 +271,11 @@ Objects can intercept the verb in their `ACTION` routines before the global `V-S
            <TELL "You smash the vase to pieces! It shatters all over the floor." CR>)>>
 ```
 
-## 9. Non-Player Characters (NPCs)
+## 10. Non-Player Characters (NPCs)
 
 In ZIL, an NPC is simply an `<OBJECT>` that has the `PERSONBIT` flag set. This flag tells the parser that this object is alive and can be talked to or given commands.
 
-`HELLO` isn't a verb the standard library defines on its own, so if we want the troll to respond to it we have to add the grammar for it ourselves, exactly the way section 8 added `SMASH`:
+`HELLO` isn't a verb the standard library defines on its own, so if we want the troll to respond to it we have to add the grammar for it ourselves, exactly the way section 9 added `SMASH`:
 
 ```zil
 <SYNTAX HELLO = V-HELLO>
@@ -230,7 +337,26 @@ Two more things worth testing once you've compiled this:
 * **`TELL` returns false on purpose.** The `<VERB? TELL>` clause ends with `<RFALSE>`. Without it, `TROLL-F` would report the command as fully handled, which would stop the standard library's own `V-TELL` from ever running — and it's `V-TELL` that actually sets `,WINNER` to the troll in the first place. Leave out the `<RFALSE>` and `TROLL, HELLO` will print "The troll covers his ears..." and then silently do nothing else, because the order-giving mechanism never got a chance to engage.
 * **Try it:** `TROLL, HELLO` should print *both* the "covers his ears" line (from the ordinary `TELL` handling, on the way to setting `,WINNER`) *and* "The troll growls, 'Leave me alone!'" (from the `,WINNER` branch, once the troll is actually the one being asked to say `HELLO`).
 
-## 10. Containers
+## 11. NPC Conversation Topics
+
+`TELL <person> ABOUT <topic>` is the only topic-asking grammar zillib defines out of the box (there's no `ASK ... ABOUT` unless a game adds it itself). It's a separate verb from the plain `TELL` in section 10 — `V-TELL-ABOUT` rather than `V-TELL` — so it needs its own `<VERB? TELL-ABOUT>` clause, and the topic itself arrives as `,PRSI` (the "indirect object," the same slot a preposition's object fills in verbs like `PUT X IN Y`).
+
+Add this clause to `TROLL-F`, alongside the others from section 10:
+
+```zil
+        ;"Topics the troll knows something about"
+        (<VERB? TELL-ABOUT>
+           <COND (<==? ,PRSI ,BRASS-LANTERN>
+                  <TELL "The troll grunts. \"Yeah, I've got one of those too. Keeps the shadows back.\"" CR>)
+                 (<==? ,PRSI ,SILVER-KEY>
+                  <TELL "The troll's eyes narrow. \"Where'd you find THAT?\"" CR>)
+                 (<==? ,PRSI ,TROLL>
+                  <TELL "The troll snorts. \"Me? I'm a mystery, I am.\"" CR>)>)
+```
+
+Try `TELL TROLL ABOUT LANTERN`, `TELL TROLL ABOUT KEY` (you'll need to have actually picked the key up first — see section 8), `TELL TROLL ABOUT TROLL`, and then something *not* in the list, like `TELL TROLL ABOUT VASE`. That last one is the interesting case: none of the three `==?` checks match, so the inner `COND` falls through with no clause taken — evaluating to false — and `TROLL-F` returns false for the same reason `COIN-F`'s explicit `<RFALSE>` does in section 13. That lets the library's own default response run, and it's a genuinely good one: `The grumpy troll doesn't seem interested.` (it correctly names the object.) You get a sensible fallback for every topic you *haven't* written, for free, without writing an `(T ...)` catch-all clause yourself.
+
+## 12. Containers
 
 Containers allow objects to hold other objects. To make an object function as a container, you assign it the `CONTBIT` flag. You can also define a `CAPACITY` to limit how many items it can hold, and use `OPENBIT` to determine if it starts open or closed.
 
@@ -268,17 +394,13 @@ Containers allow objects to hold other objects. To make an object function as a 
     (FLAGS TAKEBIT)>
 ```
 
-## 11. Scoring, Game Over, and Death
+## 13. Scoring, Game Over, and Death
 
-In a classic text adventure, the status line (in Version 3 games) automatically displays the current score and number of moves. To make use of this, we already turned scoring on back in section 3 (`<SETG USE-SCORING? T>`, before `<INSERT-FILE "parser">`) — now we just need to tell the library the maximum possible score. Add this near the top of your file, alongside `GAME-BANNER`:
-
-```zil
-<CONSTANT MAX-SCORE 100>
-```
+In a classic text adventure, the status line (in Version 3 games) automatically displays the current score and number of moves. Section 3's boilerplate already has everything scoring needs: `<SETG USE-SCORING? T>` before `<INSERT-FILE "parser">`, and `<CONSTANT MAX-SCORE 100>` telling the library the maximum possible score. We just haven't actually awarded any points yet.
 
 ### Awarding Points
 
-The standard library tracks the score in a global variable called `SCORE`. You can update it using `<SETG>` (Set Global). Let's say taking the gold coin gives the player 10 points — this means `GOLD-COIN` needs its own `ACTION` routine now, so add `(ACTION COIN-F)` to the `OBJECT GOLD-COIN` from section 10:
+The standard library tracks the score in a global variable called `SCORE`. You can update it using `<SETG>` (Set Global). Let's say taking the gold coin gives the player 10 points — this means `GOLD-COIN` needs its own `ACTION` routine now, so add `(ACTION COIN-F)` to the `OBJECT GOLD-COIN` from section 12:
 
 ```zil
 <ROUTINE COIN-F ()
@@ -293,19 +415,13 @@ The standard library tracks the score in a global variable called `SCORE`. You c
 
 ### Player Death (JIGS-UP)
 
-Infocom games are famous for their sudden and creative deaths. The standard library provides a beautifully named routine for this: `JIGS-UP`. Calling `JIGS-UP` prints your death message, stops the current turn, and prompts the player to Restart, Restore, or Quit.
-
-```zil
-<ROUTINE TROLL-F ()
-    <COND (<VERB? ATTACK>
-           <JIGS-UP "The troll dodges your attack and crushes you with a single blow from his massive club.">)>>
-```
+Infocom games are famous for their sudden and creative deaths. The standard library provides a beautifully named routine for this: `JIGS-UP`. Calling `JIGS-UP` prints your death message, stops the current turn, and prompts the player to Restart, Restore, or Quit. You've already seen it in action — it's the same call `TROLL-F`'s `<VERB? ATTACK>` clause in section 10 makes.
 
 ### Winning the Game
 
 There's no separate "you win" routine in zillib — `FINISH` and `V-QUIT` aren't real library functions. The idiomatic way real Infocom games end on a *win* is to call `JIGS-UP` with the victory text, exactly the same call used for death: `JIGS-UP` already prints the final score (via `V-SCORE`, now that scoring is turned on) and offers RESTART/RESTORE/QUIT, which is exactly what you want at the end of the game either way.
 
-Let's put a door in the kitchen that ends the game when opened:
+Let's put a door in the kitchen that ends the game when opened (section 14 will make it a locked door instead — this is the version before that):
 
 ```zil
 <OBJECT TREASURE-DOOR
@@ -321,9 +437,44 @@ Let's put a door in the kitchen that ends the game when opened:
            <JIGS-UP "You open the door and step into the sunlight. You have escaped!">)>>
 ```
 
-Try it end to end: `OPEN CHEST`, `TAKE COIN`, `UP`, `OPEN DOOR` should take you from 0 to 10 points and then straight to the winning message, with the score shown correctly in the game-over screen.
+Try it end to end: `OPEN CHEST`, `TAKE COIN`, `UP`, `OPEN DOOR` should take you from 0 to 10 points and then straight to the winning message, with the score shown correctly in the game-over screen. (Once you've added section 14's lock, you'll need the silver key from section 8 first — `TAKE LANTERN`, `TURN ON LANTERN`, `DOWN`, `TAKE KEY`, `UP`, `UP`, `UNLOCK DOOR WITH KEY`, `OPEN DOOR`.)
 
-## 12. Daemons (Background Events)
+## 14. Locked Doors and Keys
+
+Remember the silver key from the dark passage in section 8? Here's what it's for. `OPENABLEBIT` marks something as capable of being opened at all, and `LOCKEDBIT` marks it as currently locked; the standard library's `LOCK`/`UNLOCK` grammar is scoped specifically to objects with those flags:
+
+```zil
+<SYNTAX LOCK OBJECT (FIND OPENABLEBIT) (TOUCH) WITH OBJECT (FIND TOOLBIT) (HAVE HELD CARRIED) = V-LOCK>
+<SYNTAX UNLOCK OBJECT (FIND LOCKEDBIT) (TOUCH) WITH OBJECT (FIND TOOLBIT) (HAVE HELD CARRIED) = V-UNLOCK>
+```
+
+(These two lines already exist in zillib — you don't write them yourself. They're shown here because they explain something you *do* need: the parser will only ever offer an object as the `WITH` object of `LOCK`/`UNLOCK` if it has `TOOLBIT` set, which is exactly why `SILVER-KEY` in section 8 already has `(FLAGS TAKEBIT TOOLBIT)`.) The default `V-LOCK`/`V-UNLOCK` themselves don't do anything useful — they're stubs, left for the game to override, the same as every other verb in this tutorial.
+
+Update `TREASURE-DOOR` from section 13 to start locked. Here is the complete, final version of both:
+
+```zil
+<OBJECT TREASURE-DOOR
+    (IN KITCHEN)
+    (DESC "heavy door")
+    (SYNONYM DOOR)
+    (ADJECTIVE HEAVY)
+    (FLAGS DOORBIT OPENABLEBIT LOCKEDBIT)
+    (ACTION TREASURE-DOOR-F)>
+
+<ROUTINE TREASURE-DOOR-F ()
+    <COND (<VERB? OPEN>
+           <COND (<NOT <FSET? ,TREASURE-DOOR ,LOCKEDBIT>>
+                  <JIGS-UP "You open the door and step into the sunlight. You have escaped!">)>)
+
+          (<VERB? UNLOCK>
+           <COND (<==? ,PRSI ,SILVER-KEY>
+                  <FCLEAR ,TREASURE-DOOR ,LOCKEDBIT>
+                  <TELL "You unlock the heavy door with the silver key." CR>)>)>>
+```
+
+Try `OPEN DOOR` before unlocking it: the inner `COND` in the `OPEN` clause has no `LOCKEDBIT`-still-set branch, falls through false, and `TREASURE-DOOR-F` returns false — letting the library's own `V-OPEN` take over, which already knows how to check `LOCKEDBIT` and prints `You'll have to unlock it first.` on its own. This is the same "return false and let the library handle it" pattern as the darkness message in section 8 and the topic fallback in section 11 — by this point in the tutorial it should start to feel like the normal way to write one of these routines, not a special trick.
+
+## 15. Daemons (Background Events)
 
 Daemons (or Interrupt Routines) are functions that execute automatically at the end of every turn, or after a specific number of turns. They are perfect for countdowns, wandering monsters, or a hunger mechanic.
 
@@ -364,7 +515,7 @@ Start the daemon in your `GO` routine, right after placing the player. Here is t
 
 Twenty turns of typing anything at all (even just `LOOK` repeatedly) should now end the game with the starvation message.
 
-## 13. Vehicles
+## 16. Vehicles
 
 Vehicles allow the player to board an object and travel around while inside it (like the famous plastic boat in *Zork I*). To make an object a vehicle, you give it the `VEHBIT` flag. Since the player needs to be *inside* it, it also requires `CONTBIT` (container) and `OPENBIT` (open).
 
@@ -392,7 +543,7 @@ If you want to customize what happens when the player moves while inside the veh
 
 Note that `WALK` needs an actual direction to reach this code at all — typing bare `WALK` makes the parser ask "Which way do you want to walk?" *before* any `ACTION` routine gets a chance to run, since the parser doesn't have a complete command yet. Test this one with `WALK NORTH` (or any other direction), not `WALK` by itself.
 
-## 14. Compiling Your Game
+## 17. Compiling Your Game
 
 1. Compile the ZIL to ZAP, telling `zilf` where to find zillib and what to name the output:
 
@@ -408,9 +559,9 @@ Note that `WALK` needs an actual direction to reach this code at all — typing 
 
 This produces `zorkish.z3`, playable in any Z-machine interpreter (`frotz`, Lectrote, Gargoyle, etc.).
 
-## 15. Testing Your Game
+## 18. Testing Your Game
 
-Compiling cleanly is not the same as working correctly — several of the bugs called out earlier in this tutorial (the `COND`-comment trap in section 9, the missing `<RFALSE>`) compiled without a single warning and only showed up once actually played. Get in the habit of playing through everything you add, not just re-reading it.
+Compiling cleanly is not the same as working correctly — several of the bugs called out earlier in this tutorial (the `COND`-comment trap in section 10, the missing `<RFALSE>`/`<RTRUE>` calls) compiled without a single warning and only showed up once actually played. Get in the habit of playing through everything you add, not just re-reading it.
 
 ```
 frotz zorkish.z3
@@ -427,11 +578,26 @@ Two `zilf` diagnostics are worth knowing on sight, since neither one is fatal an
 * `zilf: warning: undefined global or constant 'FOO', using 0` — you referenced an atom (a verb constant, a dictionary word symbol, a flag) that was never actually defined anywhere the compiler could see, and it silently substituted `0`. This is *exactly* what happens if you use `<VERB? SOMEVERB>` for a verb with no matching `<SYNTAX>` line, or reference an object/flag before it's ever declared — the compile succeeds, but the check that uses the constant can never be true. If you see this, look for a missing `<SYNTAX>`, `<OBJECT>`, or `<CONSTANT>` for the exact name in the warning.
 * `Warning: @test_attr called with object 0` (from the interpreter, not the compiler) — as covered in section 3, this means something called `GOTO` while the player had no location yet (typically the initial placement in `GO`). It's harmless if you see it, but this tutorial's own `GO` routine avoids it entirely by using `SETG HERE`/`MOVE`/`V-LOOK` for that first placement instead of `GOTO`.
 
+## 19. Where to Go From Here
+
+This tutorial's `zorkish.zil` is intentionally small. Once its patterns feel natural — `ACTION` routines intercepting verbs before the library's own, `RFALSE`/`RTRUE` controlling whether the library still gets a turn, flags for state — the best next step is reading real, complete games built the same way. A few, all buildable with the exact same `zilf`/`zapf` pipeline from section 17:
+
+* **`cloak.zil`** (Cloak of Darkness) — a short, complete, winnable game, and the source of the `SETG HERE`/`MOVE`/`V-LOOK` startup idiom from section 3.
+* **`advent.zil`** (Colossal Cave Adventure) — much bigger: multiple light sources, a maze, NPCs, real puzzles, and its own `REPLACE-DEFINITION DARKNESS-F` (with a warning about falling into pits in the dark) along the same lines as section 8's.
+* **`zork1.zil`** — the real, unmodified 1980s *Zork I*, notable for using its own custom parser file instead of zillib's, which is a good way to see how much of what feels like "the language" is actually just library code you could replace.
+
+All three of these are Version 3 (`<VERSION ZIP>`, same as this tutorial's game), which caps a story file at 128KB and limits you to 255 objects. If a bigger game outgrows that, `<VERSION EZIP>` (V4) or `<VERSION XZIP>` (V5) raise those limits and add features real V3 interpreters don't have (more attributes and properties per object, a proper status-line-free interface, sound in some interpreters). Making that jump isn't just changing one line, though — some things (like a room's exit encoding) change size on disk between versions — so it's worth doing once you have an actual reason (a real game that no longer fits), not preemptively.
+
+A few things this tutorial deliberately left out, worth knowing exist: **pronouns** (`IT`, `HIM`, `HER`, `THEM` — the library already tracks these for you, see `PRONOUN` in `pronouns.zil`), **disambiguation** (what happens when two objects in scope match the same typed word — the parser already asks "which do you mean?" without any code from you), and `SCORING-ACHIEVEMENTS` (a way to award points in named, non-repeatable chunks rather than raw `SETG SCORE` arithmetic, documented right at the top of `scoring.zil`). The library's own doc comments, throughout `zillib`, are consistently better and more precise than any summary of them here — once a specific feature is what you need, going and reading the real routine's comment is usually faster than searching for a tutorial that covers it.
+
 ## Common Pitfalls Recap
 
 A short list of the non-obvious traps this tutorial's own examples ran into, in case you hit their symptoms later in a bigger game:
 
-* **A comment written as `("text")` inside a `COND` is a live clause, not a comment.** Use `;"text"` outside any clause's parentheses instead — see section 9.
-* **An `ACTION` routine that "handles" a verb by returning non-`FALSE` stops the library's own handling for that verb from ever running.** If you want your extra text to *add to* the default behavior rather than replace it, end the clause with `<RFALSE>` (see `COIN-F` in section 11 and `TROLL-F`'s `TELL` clause in section 9).
+* **A comment written as `("text")` inside a `COND` is a live clause, not a comment.** Use `;"text"` outside any clause's parentheses instead — see section 10.
+* **An `ACTION` routine that "handles" a verb by returning non-`FALSE` stops the library's own handling for that verb from ever running.** If you want your extra text to *add to* the default behavior rather than replace it, end the clause with `<RFALSE>` (see `COIN-F` in section 13 and `TROLL-F`'s `TELL` clause in section 10) — or, if you called a helper like `NOW-LIT?`/`NOW-DARK?` last and it happened to return false because nothing needed to change, end with an explicit `<RTRUE>` instead (see `LANTERN-F` in section 8).
+* **`LIGHTBIT` is not just documentation — it's the literal flag the library's darkness code reads.** A portable light source's on/off state has to be represented by toggling `LIGHTBIT` itself, not a separate flag of your own; giving an object `LIGHTBIT` permanently in its `FLAGS` list makes it provide light *regardless* of any on/off state you track separately.
+* **Turning a light on or off mid-turn doesn't automatically announce the change.** Call `<NOW-LIT?>` or `<NOW-DARK?>` yourself right after the flag change for the "it suddenly gets dark"/"the darkness recedes" messages (and the room redescription) to happen.
+* **Overriding a library `DEFAULT-DEFINITION` with your own `REPLACE-DEFINITION` requires a `<DELAY-DEFINITION NAME>` line *before* `<INSERT-FILE "parser">`.** Without it, the library's own default is already installed by the time your replacement is read, and you get `REPLACE-DEFINITION: section has already been inserted`.
 * **Compilation flags like `USE-SCORING?` must be set before the library file that reads them is `INSERT-FILE`d**, not just before the feature is first used in your own code.
 * **A verb doesn't exist for the parser to recognize just because you wrote `<VERB? SOMEVERB>` somewhere** — you need a `<SYNTAX>` line establishing the grammar first, exactly as for any other custom verb.
