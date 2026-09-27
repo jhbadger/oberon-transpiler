@@ -46,7 +46,9 @@ A Simple ZIL example">
     <V-VERSION> "Prints the standard library version and GAME-BANNER"
 
     "Initialize the player's starting location"
-    <GOTO ,START-ROOM>
+    <SETG HERE ,START-ROOM>
+    <MOVE ,PLAYER ,HERE>
+    <V-LOOK>
 
     "Start the standard ZIL parser/game loop"
     <MAIN-LOOP>>
@@ -54,13 +56,7 @@ A Simple ZIL example">
 
 `<SETG USE-SCORING? T>` has to come *before* `<INSERT-FILE "parser">`, because the parser library only compiles in its scoring code (`V-SCORE`, the `SCORE` command, `AWARD-POINTS`, and so on) when that flag is already set. We won't use scoring until section 11, but the flag has to be set here, at the top of the file, before the library that reads it is loaded — setting it later, next to `MAX-SCORE`, is too late and `V-SCORE` will fail to compile with an "unrecognized builtin" error.
 
-When you first run this, you'll likely see a line like:
-
-```
-Warning: @test_attr called with object 0 (PC = ...) (will ignore further occurrences)
-```
-
-This is harmless. The very first time your game calls `GOTO`, the library checks whether the player is currently inside a vehicle by testing a flag on the player's *current location* — which doesn't exist yet, since the player hasn't been placed anywhere. Every zillib game prints this exact warning once, on its very first turn. It is not something your code did wrong.
+Placing the player for the first time uses `SETG HERE`/`MOVE`/`V-LOOK` rather than the more obvious-looking `<GOTO ,START-ROOM>`. You'll see `<GOTO ...>` used for movement all over real ZIL code (it's what the parser calls internally whenever the player walks somewhere), but `GOTO` also checks whether the player's *previous* location was a vehicle — a check that makes sense for an ordinary mid-game move, but not for the very first placement, when there is no previous location yet. Using `GOTO` for the initial placement anyway (a natural thing to reach for, since it's the "move the player" function) makes the interpreter print `Warning: @test_attr called with object 0 (PC = ...) (will ignore further occurrences)` on turn one, because that vehicle check runs against object 0. It's harmless — the real Cloak of Darkness sample game initializes the player exactly this same `SETG HERE`/`MOVE`/`V-LOOK` way, specifically to avoid it — but there's no reason to have it in the transcript at all, so this tutorial does what Cloak does. `V-LOOK` still correctly triggers the room's own `ACTION` routine with `M-LOOK` (via the library's `DESCRIBE-ROOM`), so `START-ROOM-F` below behaves identically either way.
 
 ## 4. Creating Rooms
 
@@ -217,15 +213,14 @@ Now the troll itself:
 
 `,WINNER` is normally the player, but the library changes it temporarily when the player gives an order to an NPC, so you can type `TROLL, HELLO` to make the troll say hello to *you*, or `TROLL, TAKE LAMP` to order it around. `<==? ,WINNER ,TROLL>` is how `TROLL-F` recognizes that it's currently being asked to carry out an order rather than being the direct object of the player's own command.
 
-> **Warning — a comment in the wrong parentheses silently breaks your COND.** The first draft of `TROLL-F` wrote its two documentation notes like this:
-> ```zil
-> <COND
->     ("Check if the player is giving a command to the Troll")
->     (<==? ,WINNER ,TROLL> ...)
->     ("Handling standard actions on the Troll")
->     (<VERB? EXAMINE> ...)
->     ...>
-> ```
+> **Warning — a comment in the wrong parentheses silently breaks your COND.** The first draft of `TROLL-F` wrote its two documentation notes like this (this is *not* real, complete code — a sketch of the mistake, not something to compile):
+>
+> &nbsp;&nbsp;&nbsp;&nbsp;`<COND`
+> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;`("Check if the player is giving a command to the Troll")`
+> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;`(<==? ,WINNER ,TROLL> <the HELLO handling from above>)`
+> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;`("Handling standard actions on the Troll")`
+> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;`(<VERB? EXAMINE> <the rest of the clauses...>)>`
+>
 > This compiles without error, and then silently does the wrong thing at runtime. `COND` evaluates each `(condition body...)` clause in order; if a clause's body is empty, the *condition itself* becomes the clause's value. A non-empty string is truthy — so `("some comment")` is a clause that is immediately true and returns that string, and `COND` stops right there, never reaching the real clauses after it. In the code above, `EXAMINE TROLL` never even got as far as checking `<VERB? EXAMINE>`: the "Handling standard actions on the Troll" clause fired first and swallowed everything after it.
 >
 > The fix is the `;"..."` comment syntax from section 2, used *outside* any clause's parentheses, as shown in the corrected listing above. `;"..."` is thrown away by the reader entirely and can never accidentally become a clause of its own.
@@ -350,13 +345,20 @@ To activate the daemon, you add it to the game's event queue using the `<QUEUE>`
 * `<QUEUE I-HUNGER -1>` runs it *every single turn* continuously.
 * `<QUEUE I-HUNGER 0>` removes it from the queue (disabling it).
 
-Start the daemon in your `GO` routine, right after placing the player (add this line to the `GO` routine from section 3, between `<GOTO ,START-ROOM>` and `<MAIN-LOOP>`):
+Start the daemon in your `GO` routine, right after placing the player. Here is the complete, final version of `GO`, adding one line (`<QUEUE I-HUNGER -1>`) to the version from section 3:
 
 ```zil
 <ROUTINE GO ()
-    ...
-    <GOTO ,START-ROOM>
+    <CRLF>
+    <TELL "Welcome to the interactive fiction tutorial!" CR>
+    <CRLF>
+    <V-VERSION>
+
+    <SETG HERE ,START-ROOM>
+    <MOVE ,PLAYER ,HERE>
+    <V-LOOK>
     <QUEUE I-HUNGER -1>
+
     <MAIN-LOOP>>
 ```
 
@@ -423,7 +425,7 @@ printf 'look\ntake lamp\nturn on lamp\n' | timeout 30 frotz -p zorkish.z3
 Two `zilf` diagnostics are worth knowing on sight, since neither one is fatal and both are easy to misread as "my code is broken" when the real story is more specific:
 
 * `zilf: warning: undefined global or constant 'FOO', using 0` — you referenced an atom (a verb constant, a dictionary word symbol, a flag) that was never actually defined anywhere the compiler could see, and it silently substituted `0`. This is *exactly* what happens if you use `<VERB? SOMEVERB>` for a verb with no matching `<SYNTAX>` line, or reference an object/flag before it's ever declared — the compile succeeds, but the check that uses the constant can never be true. If you see this, look for a missing `<SYNTAX>`, `<OBJECT>`, or `<CONSTANT>` for the exact name in the warning.
-* `Warning: @test_attr called with object 0` (from the interpreter, not the compiler) — as covered in section 3, this specific one is a normal, one-time artifact of the very first `GOTO` in any zillib game, not a bug.
+* `Warning: @test_attr called with object 0` (from the interpreter, not the compiler) — as covered in section 3, this means something called `GOTO` while the player had no location yet (typically the initial placement in `GO`). It's harmless if you see it, but this tutorial's own `GO` routine avoids it entirely by using `SETG HERE`/`MOVE`/`V-LOOK` for that first placement instead of `GOTO`.
 
 ## Common Pitfalls Recap
 
