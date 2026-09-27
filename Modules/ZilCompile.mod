@@ -252,6 +252,25 @@ BEGIN
   Strings.Copy(pre, s); Strings.Append(rest, s)
 END SanitizePrefixed;
 
+(* zillib refers to the four punctuation dictionary words by English name
+   ("W?COMMA", never "W?,") because a literal comma there would trigger the
+   reader's own `,X -> GVAL X` prefix macro instead of naming a character.
+   Real zilf resolves this with an explicit alias table
+   (Compilation.Compile.cs's PreparePunctuationAliasesAndPlanMerges: it
+   registers "W?COMMA" as a second Constants-table name for the same word
+   "W?," already resolves to, alongside "A?"/"PR?"/"ACT?"). This mirrors just
+   that one pre-known mapping - see ConstantTextRaw's and ScanVocabRefs' own
+   comments for why it must stay narrow rather than becoming a general
+   reverse-SanitizeSymbol lookup. *)
+PROCEDURE PunctuationAliasChar(name: ARRAY OF CHAR; VAR ch: CHAR): BOOLEAN;
+BEGIN
+  IF name = "PERIOD" THEN ch := "."; RETURN TRUE END;
+  IF name = "COMMA" THEN ch := ","; RETURN TRUE END;
+  IF name = "QUOTE" THEN ch := '"'; RETURN TRUE END;
+  IF name = "APOSTROPHE" THEN ch := "'"; RETURN TRUE END;
+  RETURN FALSE
+END PunctuationAliasChar;
+
 (* Writes a name as a ZAP symbol. Every symbol this module emits, whether as
    a definition or as a reference, goes through here or through ConstantText
    so that the two spellings always agree. *)
@@ -1078,7 +1097,8 @@ END VarName;
    would just move the error later. STRING values need a .GSTR/.STR
    definition to point at and are left for the strings slice. *)
 PROCEDURE ConstantTextRaw(z: ZilObj.Zo; VAR s: ARRAY OF CHAR): BOOLEAN;
-VAR name, propNm: ARRAY 64 OF CHAR; strTmp: ARRAY 4096 OF CHAR; i: INTEGER;
+VAR name, propNm: ARRAY 64 OF CHAR; strTmp: ARRAY 4096 OF CHAR; punctText: ARRAY 4 OF CHAR;
+    i: INTEGER; punctCh: CHAR;
 BEGIN
   (* <GVAL X> in a constant position is just X — unwrap and retry, matching
      the original's own `form.IsGVAL(...) -> expr = globalAtom; continue`
@@ -1155,7 +1175,38 @@ BEGIN
       IF (name[0] = "A") & (name[1] = "C") THEN Strings.Delete(propNm, 0, 4)
       ELSIF name[1] = "R" THEN Strings.Delete(propNm, 0, 3)
       ELSE Strings.Delete(propNm, 0, 2) END;
-      IF ZilModel.FindVocab(propNm) >= 0 THEN Strings.Copy(name, s); RETURN TRUE END
+      IF ZilModel.FindVocab(propNm) >= 0 THEN Strings.Copy(name, s); RETURN TRUE END;
+      (* zillib spells the four punctuation words' own W?/etc. constants by
+         their English names ("W?COMMA") rather than by the literal character
+         ("W?," would collide with the reader's own `,X -> GVAL X` macro if
+         written out), even though the actual dictionary word's text is the
+         character - real zilf papers over exactly this gap with an explicit
+         alias table (Compilation.Compile.cs's PreparePunctuationAliasesAndPlanMerges),
+         registering "W?COMMA" as a second name for the same word "W?,"
+         already resolves to. Mirror that here: if the plain suffix lookup
+         above didn't find a word literally named "COMMA" etc, try the
+         corresponding character instead. This must NOT become a general
+         reverse-SanitizeSymbol lookup: ordinary mangled words like the
+         verb `\,TELL` (literal text ",TELL", used by real games as a
+         collision-avoiding name for a second TELL syntax line) are found by
+         the plain lookup above using their UNMANGLED literal text, exactly
+         as zilf's own DefineWord resolves `W?,TELL` - they were never
+         reachable through SanitizeSymbol's mangled form in real zilf either,
+         so reversing it here would be solving a problem real zilf doesn't
+         have while breaking a case it does. *)
+      IF PunctuationAliasChar(propNm, punctCh) THEN
+        punctText[0] := punctCh; punctText[1] := 0X;
+        IF ZilModel.FindVocab(punctText) >= 0 THEN
+          (* Return the RAW (unsanitized) "W?<char>" - same convention as
+             the plain FindVocab match just above, and as every other branch
+             in this procedure. ConstantText, every caller's real entry
+             point, runs the result through SanitizePrefixed itself; doing
+             that here too would sanitize it twice (turning "$COMMA" into
+             a mangled escape of its own "$" sign). *)
+          Strings.Copy("W?", s); Strings.Append(punctText, s);
+          RETURN TRUE
+        END
+      END
     END;
     (* A bare atom naming a GLOBAL whose OWN value is a table (<GLOBAL DEF1
        <TABLE ...>>) is a forward reference to that table's address - zork1's
@@ -5637,7 +5688,7 @@ END CompileSyntax;
    on-demand creation does. *)
 
 PROCEDURE ScanVocabRefs(z: ZilObj.Zo);
-VAR nm: ARRAY 64 OF CHAR; i, k: INTEGER;
+VAR nm: ARRAY 64 OF CHAR; i, k: INTEGER; ch: CHAR; chText: ARRAY 4 OF CHAR;
 BEGIN
   IF z = NIL THEN RETURN END;
   IF z.kind = ZilObj.KAtom THEN
@@ -5650,7 +5701,20 @@ BEGIN
     END;
     IF k > 0 THEN
       Strings.Delete(nm, 0, k);
-      IF nm[0] # 0X THEN i := ZilModel.AddVocab(nm, 0) END
+      (* One of the four punctuation words (see PunctuationAliasChar's
+         comment) already exists under its literal character, e.g. "," for
+         "COMMA" - that word already satisfies this reference, and creating
+         a SEPARATE word whose literal text is the spelled-out name "COMMA"
+         would leave the real "," word orphaned under a symbol nothing else
+         references, while this new bogus word answers to a symbol
+         ("W?COMMA") that never matches anything a player can actually
+         type. *)
+      IF PunctuationAliasChar(nm, ch) THEN
+        chText[0] := ch; chText[1] := 0X;
+        IF ZilModel.FindVocab(chText) < 0 THEN i := ZilModel.AddVocab(nm, 0) END
+      ELSIF nm[0] # 0X THEN
+        i := ZilModel.AddVocab(nm, 0)
+      END
     END;
     RETURN
   END;
