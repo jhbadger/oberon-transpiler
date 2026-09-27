@@ -96,7 +96,39 @@ TYPE
 
     bareOperandCount*: INTEGER;
     bareHasStore*: BOOLEAN;
-    bareHasBranch*: BOOLEAN
+    bareHasBranch*: BOOLEAN;
+
+    (* "Once far, always far": HandleInstruction sets this the first time a
+       conditional branch on this line is found to need the 2-byte (long)
+       offset form, and from then on treats it as far unconditionally, even
+       if a later recomputation would say it now fits the 1-byte (short)
+       form again. Without this stickiness, a branch instruction's own
+       chosen size can flip back and forth between short and long forever:
+       each recomputation is a pure function of the CURRENT (possibly still-
+       settling) positions of this instruction and its target, and nothing
+       stops two branches within the same routine from repeatedly re-
+       triggering each other's Reassemble - fixing one to long shifts
+       everything after it, which can put another branch back in short
+       range, whose own correction back to short then reopens the first
+       one, forever. Real assemblers solve exactly this "branch relaxation"
+       instability by only ever widening, never re-narrowing, a chosen
+       encoding once fixed; this is that same monotonicity, scoped to one
+       line since a branch's identity is stable across reassembly attempts
+       (ctx.lines[i] are the same Line objects every attempt) even though
+       its surrounding position generally isn't. *)
+    farBranch*: BOOLEAN;
+
+    (* Same sticky-widening idea as farBranch, for a DIFFERENT size decision:
+       a "2OP" opcode (ADD, EQUAL?, ...) normally compiles to its compact
+       3-byte long form, but HandleInstruction promotes it to the wider VAR
+       form the moment any operand is a "long constant" - a symbol whose
+       value doesn't fit in a byte, most commonly another routine's own
+       packed address. Once set, stays set, for the same reason farBranch
+       does: without it, promoting one instruction to VAR form changes
+       everything after it, which can un-promote a LATER instruction back
+       to 2OP form, whose own reversal can then re-trigger the first one -
+       a multi-instruction cycle that never settles. *)
+    forcedVarForm*: BOOLEAN
   END;
 
 PROCEDURE NewLine*(kind: INTEGER): Line;
@@ -120,6 +152,8 @@ BEGIN
   l.bareOperandCount := 0;
   l.bareHasStore := FALSE;
   l.bareHasBranch := FALSE;
+  l.farBranch := FALSE;
+  l.forcedVarForm := FALSE;
   RETURN l
 END NewLine;
 

@@ -114,6 +114,10 @@ VAR
   buffering: BOOLEAN;
   bufLines: ARRAY MaxBufLines OF LineText;
   nBufLines: INTEGER;
+  (* scratch space for RemoveDeadCode's reachability sweep - module-level
+     rather than a 20000-BOOLEAN local so it isn't reallocated on every
+     routine's own C stack frame *)
+  lineReferenced: ARRAY MaxBufLines OF BOOLEAN;
   tempDepth, tempMax: INTEGER;
   tmpStack: ARRAY MaxRenames OF ARRAY 64 OF CHAR;
   nTmpStack: INTEGER;
@@ -336,6 +340,453 @@ BEGIN
   END;
   nBufLines := 0
 END FlushBuffer;
+
+(* ---------------- peephole: PUSH 0/1 + JUMP -> RFALSE/RTRUE ----------------
+   CompileStmt's COND (and RETURN, and PROG/REPEAT's own block-return) all
+   produce a value the SAME general way: push it, then jump to a shared
+   join point that eventually does `RETURN STACK`. That's the only way to
+   handle an arbitrary value, but a compile-time-constant TRUE/FALSE never
+   needed the stack at all — real zilf recognises exactly this case and
+   emits RTRUE/RFALSE directly at each such site. Retrofitting that
+   directly into COND's clause compiler would need it to know whether it's
+   in the routine's own tail position or a nested sub-expression (where
+   jumping straight out of the routine would be wrong) - a bigger, riskier
+   change to a very central, very recursive piece of the compiler. This
+   gets the same result more safely, as a peephole rewrite over the
+   buffered body text right before it's flushed: `PUSH 0` or `PUSH 1`
+   followed (immediately, or via an unconditional JUMP) by a chain of nothing
+   but label lines ending in `RETURN STACK` is safe to replace with
+   `RFALSE`/`RTRUE` NO MATTER what put it there or who else jumps to that
+   same join point - the rewrite only ever touches the one predecessor
+   whose pushed value it can see is a literal constant, and only after
+   confirming, by reading the actual text, exactly where that predecessor's
+   control flow ends up. *)
+
+PROCEDURE IsLabelLine(s: ARRAY OF CHAR; VAR name: ARRAY OF CHAR): BOOLEAN;
+VAR n, i: INTEGER;
+BEGIN
+  n := Strings.Length(s);
+  IF (n < 2) OR (s[0] = 09X) OR (s[n - 1] # ":") THEN RETURN FALSE END;
+  FOR i := 0 TO n - 2 DO name[i] := s[i] END;
+  name[n - 1] := 0X;
+  RETURN TRUE
+END IsLabelLine;
+
+PROCEDURE FindLabelLineIndex(name: ARRAY OF CHAR): INTEGER;
+VAR i: INTEGER; lbl: ARRAY 256 OF CHAR;
+BEGIN
+  FOR i := 0 TO nBufLines - 1 DO
+    IF IsLabelLine(bufLines[i]^, lbl) & (lbl = name) THEN RETURN i END
+  END;
+  RETURN -1
+END FindLabelLineIndex;
+
+(* Starts with "\tJUMP "? If so, `label` is set to whatever follows. *)
+PROCEDURE JumpTarget(s: ARRAY OF CHAR; VAR label: ARRAY OF CHAR): BOOLEAN;
+VAR i: INTEGER;
+BEGIN
+  IF Strings.Length(s) <= 6 THEN RETURN FALSE END;
+  IF (s[0] # 09X) OR (s[1] # "J") OR (s[2] # "U") OR (s[3] # "M")
+     OR (s[4] # "P") OR (s[5] # " ") THEN RETURN FALSE END;
+  i := 6;
+  WHILE s[i] # 0X DO label[i - 6] := s[i]; INC(i) END;
+  label[i - 6] := 0X;
+  RETURN TRUE
+END JumpTarget;
+
+(* Chases idx through label-definition lines and pure JUMPs to whatever
+   real instruction control ultimately reaches, returning that line's
+   index, or -1 if the chain runs off the end of the buffer or a target
+   label can't be found. A deeply nested COND compiles as a chain of join
+   labels, each just re-jumping to its own enclosing join label
+   (?L6163 -> ?L6161 -> ?L6159 -> RSTACK, say, four hops deep in a real
+   routine this was found against, HACKER-F) - resolving only one hop, as
+   the callers below used to, missed nearly all of them. The `hops` bound
+   guards against a pathological cycle (shouldn't occur in real compiled
+   output, but a text-pattern scan has no other way to know that). *)
+PROCEDURE ResolveControlFlow(idx: INTEGER): INTEGER;
+VAR lbl: ARRAY 256 OF CHAR; hops: INTEGER;
+BEGIN
+  IF idx < 0 THEN RETURN -1 END;
+  hops := 0;
+  WHILE hops < nBufLines DO
+    WHILE (idx < nBufLines) & IsLabelLine(bufLines[idx]^, lbl) DO INC(idx) END;
+    IF idx >= nBufLines THEN RETURN -1 END;
+    IF JumpTarget(bufLines[idx]^, lbl) THEN
+      idx := FindLabelLineIndex(lbl);
+      IF idx < 0 THEN RETURN -1 END;
+      INC(hops)
+    ELSE
+      RETURN idx
+    END
+  END;
+  RETURN -1
+END ResolveControlFlow;
+
+(* Does control starting AT bufLines[idx] reach `RETURN STACK` (or its
+   exact equivalent, `RSTACK` - see EmitReturnValue's own comment)? *)
+PROCEDURE FallsToReturnStack(idx: INTEGER): BOOLEAN;
+VAR r: INTEGER;
+BEGIN
+  r := ResolveControlFlow(idx);
+  RETURN (r >= 0) & ((bufLines[r]^ = "	RETURN STACK") OR (bufLines[r]^ = "	RSTACK"))
+END FallsToReturnStack;
+
+(* Does control starting AT bufLines[idx] reach a BARE `RTRUE` or `RFALSE`
+   (no other work first)? Sets `isTrue` accordingly when it does. Used by
+   OptimizeBranchTargets, below, to retarget a branch instruction straight
+   at ZAP's own `TRUE`/`FALSE` pseudo-labels - see that procedure's own
+   comment for why this is worth doing at all. *)
+PROCEDURE ResolvesToBareReturn(idx: INTEGER; VAR isTrue: BOOLEAN): BOOLEAN;
+VAR r: INTEGER;
+BEGIN
+  r := ResolveControlFlow(idx);
+  IF r < 0 THEN RETURN FALSE END;
+  IF bufLines[r]^ = "	RTRUE" THEN isTrue := TRUE; RETURN TRUE
+  ELSIF bufLines[r]^ = "	RFALSE" THEN isTrue := FALSE; RETURN TRUE
+  ELSE RETURN FALSE
+  END
+END ResolvesToBareReturn;
+
+PROCEDURE MakeLine(text: ARRAY OF CHAR): LineText;
+VAR t: LineText;
+BEGIN
+  NEW(t, Strings.Length(text) + 1);
+  Strings.Copy(text, t^);
+  RETURN t
+END MakeLine;
+
+(* ---------------- peephole: CALL X >STACK; SET 'V,STACK -> CALL X >V ----------------
+   Every value-producing instruction stores through the Z-machine's own
+   store-operand field, which can name ANY variable, not just the stack -
+   but this compiler always spills a value onto the stack first (matching
+   how compound sub-expressions generally have to, per AllocTemp's own
+   comment on operand ordering) even when the very next thing done with it
+   is an unconditional `SET` into a named local, which is really just
+   asking for the ORIGINAL instruction to have stored there directly.
+   Confirmed against six real zilf builds (name/advent/zork1/cloak/
+   cloak_plus/beer, V3-V5): "SET 'x,STACK" immediately after a stack-
+   storing instruction appears 137 times in one game's worth of this
+   port's own output and precisely zero times in any of theirs. Safe as a
+   pure text-local peephole for the same reason the RTRUE/RFALSE one is:
+   it only ever touches an immediately-adjacent, exact-text-verified pair,
+   not a broader assumption. *)
+
+PROCEDURE EndsWithStackStore(s: ARRAY OF CHAR): BOOLEAN;
+VAR n: INTEGER;
+BEGIN
+  n := Strings.Length(s);
+  RETURN (n >= 7) & (s[0] = 09X) & (s[n - 6] = ">") & (s[n - 5] = "S")
+         & (s[n - 4] = "T") & (s[n - 3] = "A") & (s[n - 2] = "C") & (s[n - 1] = "K")
+END EndsWithStackStore;
+
+(* Is `s` exactly "\tSET 'name,STACK"? If so, `target` is set to `name`. *)
+PROCEDURE IsSetFromStack(s: ARRAY OF CHAR; VAR target: ARRAY OF CHAR): BOOLEAN;
+VAR n, i, k: INTEGER;
+BEGIN
+  n := Strings.Length(s);
+  IF n < 13 THEN RETURN FALSE END;
+  IF (s[0] # 09X) OR (s[1] # "S") OR (s[2] # "E") OR (s[3] # "T")
+     OR (s[4] # " ") OR (s[5] # "'") THEN RETURN FALSE END;
+  IF (s[n - 6] # ",") OR (s[n - 5] # "S") OR (s[n - 4] # "T") OR (s[n - 3] # "A")
+     OR (s[n - 2] # "C") OR (s[n - 1] # "K") THEN RETURN FALSE END;
+  k := 0;
+  FOR i := 6 TO n - 7 DO target[k] := s[i]; INC(k) END;
+  target[k] := 0X;
+  RETURN TRUE
+END IsSetFromStack;
+
+PROCEDURE MergeStackStores;
+VAR i, w, n, k: INTEGER; target: ARRAY 256 OF CHAR; newLine: ARRAY 4096 OF CHAR;
+    matched: BOOLEAN;
+BEGIN
+  i := 0; w := 0;
+  WHILE i < nBufLines DO
+    matched := FALSE;
+    IF EndsWithStackStore(bufLines[i]^) & (i + 1 < nBufLines)
+       & IsSetFromStack(bufLines[i + 1]^, target) THEN
+      n := Strings.Length(bufLines[i]^);
+      FOR k := 0 TO n - 6 DO newLine[k] := bufLines[i]^[k] END;
+      newLine[n - 5] := 0X;
+      Strings.Append(target, newLine);
+      bufLines[w] := MakeLine(newLine); INC(w);
+      i := i + 2; matched := TRUE
+    END;
+    IF ~matched THEN bufLines[w] := bufLines[i]; INC(w); INC(i) END
+  END;
+  nBufLines := w
+END MergeStackStores;
+
+PROCEDURE OptimizeReturnValues;
+VAR i, w, tgtIdx: INTEGER; pushed: ARRAY 16 OF CHAR;
+    lbl: ARRAY 256 OF CHAR; matched: BOOLEAN;
+BEGIN
+  i := 0; w := 0;
+  WHILE i < nBufLines DO
+    matched := FALSE;
+    IF (bufLines[i]^ = "	PUSH 1") OR (bufLines[i]^ = "	PUSH 0") THEN
+      IF bufLines[i]^ = "	PUSH 1" THEN Strings.Copy("	RTRUE", pushed)
+      ELSE Strings.Copy("	RFALSE", pushed) END;
+      IF (i + 1 < nBufLines) & JumpTarget(bufLines[i + 1]^, lbl) THEN
+        tgtIdx := FindLabelLineIndex(lbl);
+        IF FallsToReturnStack(tgtIdx) THEN
+          bufLines[w] := MakeLine(pushed); INC(w);
+          i := i + 2; matched := TRUE
+        END
+      ELSIF FallsToReturnStack(i + 1) THEN
+        bufLines[w] := MakeLine(pushed); INC(w);
+        i := i + 1; matched := TRUE
+      END
+    ELSIF EndsWithStackStore(bufLines[i]^) & (i + 1 < nBufLines)
+          & JumpTarget(bufLines[i + 1]^, lbl) THEN
+      (* A value-producing instruction (its result already sitting on the
+         stack - CALL, GETP, whatever) that just jumps straight to the
+         shared RETURN-STACK/RSTACK epilogue: the jump itself can become
+         RSTACK directly, right here, since the value is already exactly
+         where RSTACK expects it - no need to travel to the shared exit at
+         all. Keeps the value-producing line untouched; only the JUMP after
+         it is replaced. This is what real zilf's own DO-SL does (three
+         COND clauses, each ending `CALL SEARCH-LIST,... >STACK` then
+         `RSTACK` directly, no shared join point at all). *)
+      tgtIdx := FindLabelLineIndex(lbl);
+      IF FallsToReturnStack(tgtIdx) THEN
+        bufLines[w] := bufLines[i]; INC(w);
+        bufLines[w] := MakeLine("	RSTACK"); INC(w);
+        i := i + 2; matched := TRUE
+      END
+    END;
+    IF ~matched THEN
+      bufLines[w] := bufLines[i]; INC(w); INC(i)
+    END
+  END;
+  nBufLines := w
+END OptimizeReturnValues;
+
+(* peephole: PRINTI "literal"; CRLF; RTRUE -> PRINTR "literal"
+   print_ret (0OP 179) IS print's own opcode (an inline string literal,
+   same encoding as PRINTI/`print`) with a trailing newline-and-RTRUE
+   baked into the single instruction - exactly the three-instruction
+   sequence a COND clause ending `<TELL "literal text" CR> <RTRUE>`
+   compiles to (or, after OptimizeReturnValues' jump-threading collapses
+   the PUSH-1/JUMP-chain a clause used to fall through to, ANY clause
+   whose last real act is printing a literal and stopping - HACKER-F, a
+   giant COND of exactly this shape, was the routine that surfaced it:
+   real zilf's build uses PRINTR throughout it, this port's didn't use it
+   at all). Only fires on three lines already sitting at fixed adjacent
+   buffer indices, so a label between any of them - meaning some OTHER
+   branch jumps straight to the CRLF or the RTRUE, which does happen in
+   these COND-heavy routines - simply fails to match; rewriting THAT case
+   would change what that jump lands on, so leaving it alone is correct,
+   not just safe. Must run after OptimizeReturnValues, since a clause
+   still ending in a PUSH-1/JUMP chain hasn't become a literal `RTRUE`
+   line yet for this to see. *)
+PROCEDURE IsPrintiLiteral(s: ARRAY OF CHAR): BOOLEAN;
+BEGIN
+  RETURN (Strings.Length(s) > 8) & (s[0] = 09X) & (s[1] = "P") & (s[2] = "R")
+         & (s[3] = "I") & (s[4] = "N") & (s[5] = "T") & (s[6] = "I") & (s[7] = " ")
+         & (s[8] = '"')
+END IsPrintiLiteral;
+
+PROCEDURE MergePrintReturn;
+VAR i, w: INTEGER;
+BEGIN
+  i := 0; w := 0;
+  WHILE i < nBufLines DO
+    IF IsPrintiLiteral(bufLines[i]^) & (i + 2 < nBufLines)
+       & (bufLines[i + 1]^ = "	CRLF") & (bufLines[i + 2]^ = "	RTRUE") THEN
+      bufLines[i]^[6] := "R";
+      bufLines[w] := bufLines[i]; INC(w);
+      i := i + 3
+    ELSE
+      bufLines[w] := bufLines[i]; INC(w); INC(i)
+    END
+  END;
+  nBufLines := w
+END MergePrintReturn;
+
+(* Does `s` end in " /LABEL" or " \LABEL" (a predicate instruction's
+   branch operand, e.g. `EQUAL? PRSA,V?FOO \?L17`)? If so, sets `slashIdx`
+   to the index of the `/` or `\` itself and `label` to the local-label
+   text after it. Only ever matches a LOCAL label (starts with `?`) -
+   never `TRUE`/`FALSE` themselves (already exactly what
+   OptimizeBranchTargets would rewrite them to) or a global name (nothing
+   in this compiler's own branch operands is ever one). *)
+PROCEDURE BranchTarget(s: ARRAY OF CHAR; VAR slashIdx: INTEGER; VAR label: ARRAY OF CHAR): BOOLEAN;
+VAR n, i, j: INTEGER;
+BEGIN
+  n := Strings.Length(s);
+  i := n - 1;
+  WHILE (i >= 0) & (s[i] # " ") DO DEC(i) END;
+  IF i < 0 THEN RETURN FALSE END;
+  IF (s[i + 1] # "/") & (s[i + 1] # "\") THEN RETURN FALSE END;
+  IF s[i + 2] # "?" THEN RETURN FALSE END;
+  slashIdx := i + 1;
+  j := 0;
+  WHILE s[slashIdx + 1 + j] # 0X DO label[j] := s[slashIdx + 1 + j]; INC(j) END;
+  label[j] := 0X;
+  RETURN TRUE
+END BranchTarget;
+
+(* peephole: a branch instruction whose target ultimately (through nothing
+   but label lines and pure JUMPs - see ResolveControlFlow) resolves to a
+   BARE `RTRUE`/`RFALSE` can target ZAP's own `TRUE`/`FALSE` pseudo-labels
+   directly instead (ZapfAsm.mod's HandleInstruction already special-cases
+   `l.branchTarget = "TRUE"`/`"FALSE"`, encoding "return true/false" right
+   in the branch instruction's own offset field - the Z-machine format
+   reserves offset values 0 and 1 for exactly this, so it costs nothing
+   beyond the branch already being emitted). Real zilf uses this
+   constantly for any OR/COND compiled in tail-boolean-return position -
+   PASSIVE-VERB?'s chain of `EQUAL? PRSA,... /TRUE` clauses, found by
+   diffing against `real_lh.zap`, is the routine that surfaced it (14
+   lines there; 79 in this port's, before this fix, from materializing a
+   full 0/1 value into a temp for every single disjunct instead). This
+   port's compiler never emits `/TRUE` or `/FALSE` itself, so the only way
+   to get there without touching how COND/OR are compiled - a much bigger
+   change - is to catch it after the fact: 693 of this port's own branch
+   instructions in `sample/lurkinghorror` alone already target a label
+   whose only content is a bare RTRUE/RFALSE once OptimizeReturnValues and
+   MergePrintReturn have run, which is why this pass runs last. Whatever
+   OTHER code still jumps to that now-maybe-unreferenced label is
+   unaffected - the label and its RTRUE/RFALSE are simply left in place,
+   dead or not; a label costs nothing once assembled. *)
+PROCEDURE OptimizeBranchTargets;
+VAR i, slashIdx, tgtIdx, k: INTEGER; lbl: ARRAY 256 OF CHAR;
+    isTrue: BOOLEAN; buf: ARRAY 8192 OF CHAR;
+BEGIN
+  FOR i := 0 TO nBufLines - 1 DO
+    IF BranchTarget(bufLines[i]^, slashIdx, lbl) THEN
+      tgtIdx := FindLabelLineIndex(lbl);
+      IF (tgtIdx >= 0) & ResolvesToBareReturn(tgtIdx, isTrue) THEN
+        FOR k := 0 TO slashIdx DO buf[k] := bufLines[i]^[k] END;
+        buf[slashIdx + 1] := 0X;
+        IF isTrue THEN Strings.Append("TRUE", buf) ELSE Strings.Append("FALSE", buf) END;
+        bufLines[i] := MakeLine(buf)
+      END
+    END
+  END
+END OptimizeBranchTargets;
+
+(* Follows `label` forward through a chain of PURE jumps - `label:` whose
+   only content (after any further label lines) is itself `JUMP other`,
+   repeatedly - to whatever real, non-jump instruction the chain
+   ultimately reaches, and rewrites `label` in place to name whichever
+   label sits immediately before THAT instruction. Returns whether it
+   actually moved (so a caller only rewrites text that changed). Bounded
+   by `hops` the same way ResolveControlFlow is, for a cycle that
+   shouldn't occur in real compiled output. *)
+PROCEDURE FollowJumpChain(VAR label: ARRAY OF CHAR): BOOLEAN;
+VAR idx, hops: INTEGER; lbl: ARRAY 256 OF CHAR; changed: BOOLEAN;
+BEGIN
+  changed := FALSE; hops := 0;
+  WHILE hops < nBufLines DO
+    idx := FindLabelLineIndex(label);
+    IF idx < 0 THEN RETURN changed END;
+    WHILE (idx < nBufLines) & IsLabelLine(bufLines[idx]^, lbl) DO INC(idx) END;
+    IF (idx < nBufLines) & JumpTarget(bufLines[idx]^, lbl) THEN
+      Strings.Copy(lbl, label); changed := TRUE; INC(hops)
+    ELSE
+      RETURN changed
+    END
+  END;
+  RETURN changed
+END FollowJumpChain;
+
+(* peephole: any JUMP or branch instruction that targets a pure jump-chain
+   (a run of nothing but re-jumping join labels - the ordinary shape a
+   deeply nested COND's own clause boundaries compile to) gets redirected
+   straight at the chain's real destination, skipping every intermediate
+   hop. Unlike OptimizeBranchTargets, above, this doesn't care WHAT the
+   final destination is (not just a bare RTRUE/RFALSE) - any real
+   instruction qualifies. Found by diffing HACKER-F yet again: real zilf's
+   own COND compilation never creates these intermediate join-and-rejump
+   labels in the first place, so a clause's failing test falls straight
+   through to the very next clause's own label with no jump at all -
+   collapsing the chain after the fact gets the same result without
+   touching how COND itself is compiled. Runs before RemoveDeadCode so
+   that pass can then sweep away whatever intermediate labels this leaves
+   with no referrers left at all. *)
+PROCEDURE CollapseJumpChains;
+VAR i, slashIdx, k: INTEGER; lbl: ARRAY 256 OF CHAR; buf: ARRAY 8192 OF CHAR;
+BEGIN
+  FOR i := 0 TO nBufLines - 1 DO
+    IF JumpTarget(bufLines[i]^, lbl) THEN
+      IF FollowJumpChain(lbl) THEN
+        Strings.Copy("	JUMP ", buf); Strings.Append(lbl, buf);
+        bufLines[i] := MakeLine(buf)
+      END
+    ELSIF BranchTarget(bufLines[i]^, slashIdx, lbl) THEN
+      IF FollowJumpChain(lbl) THEN
+        FOR k := 0 TO slashIdx DO buf[k] := bufLines[i]^[k] END;
+        buf[slashIdx + 1] := 0X;
+        Strings.Append(lbl, buf);
+        bufLines[i] := MakeLine(buf)
+      END
+    END
+  END
+END CollapseJumpChains;
+
+(* Does this buffered line unconditionally hand control somewhere else -
+   RTRUE/RFALSE/RSTACK/`RETURN STACK`/`RETURN <x>`, a plain JUMP, or a
+   `PRINTR "literal"` (print_ret prints AND returns true in the one
+   instruction - MergePrintReturn, above, is what produces these, and
+   missing this case here left a `PRINTR "..."` clause's trailing dead
+   join-label chain sitting in the buffer even though nothing could ever
+   reach it, found by diffing HACKER-F against real zilf yet again: real
+   zilf's version has none of these leftover `?Lx:\n?Ly:\nJUMP ?Lz` runs
+   after a PRINTR) - meaning nothing after it in straight-line order can
+   ever be reached by falling through from it? *)
+PROCEDURE IsTerminator(s: ARRAY OF CHAR): BOOLEAN;
+VAR lbl: ARRAY 256 OF CHAR;
+BEGIN
+  RETURN (s = "	RTRUE") OR (s = "	RFALSE") OR (s = "	RSTACK")
+         OR JumpTarget(s, lbl)
+         OR ((Strings.Length(s) > 8) & (s[0] = 09X) & (s[1] = "R") & (s[2] = "E")
+             & (s[3] = "T") & (s[4] = "U") & (s[5] = "R") & (s[6] = "N") & (s[7] = " "))
+         OR ((Strings.Length(s) > 8) & (s[0] = 09X) & (s[1] = "P") & (s[2] = "R")
+             & (s[3] = "I") & (s[4] = "N") & (s[5] = "T") & (s[6] = "R") & (s[7] = " "))
+END IsTerminator;
+
+(* Deletes buffered code no branch, jump, or fallthrough can ever reach.
+   OptimizeBranchTargets (above) retargets a branch straight at ZAP's
+   `TRUE`/`FALSE` pseudo-labels whenever it finds one whose destination is
+   a bare RTRUE/RFALSE - but that only rewrites the REFERRING instruction;
+   the label and its RTRUE/RFALSE it used to jump through are left
+   sitting in the buffer, now possibly dead weight, since nothing removed
+   them. This is a standard straight-line reachability sweep: a label with
+   no remaining JUMP/branch reference is reachable only by falling
+   through from whatever precedes it, so code becomes provably dead
+   exactly when it follows an IsTerminator line AND every label inside
+   the dead stretch (up to the next one some other instruction still
+   references) has zero incoming references either. Runs last, after
+   every other peephole, so it sees their final text - in particular
+   OptimizeBranchTargets' own rewrites, the ones most likely to leave
+   something genuinely unreachable behind. *)
+PROCEDURE RemoveDeadCode;
+VAR i, w, slashIdx, tgtIdx: INTEGER; lbl: ARRAY 256 OF CHAR; reachable: BOOLEAN;
+BEGIN
+  FOR i := 0 TO nBufLines - 1 DO lineReferenced[i] := FALSE END;
+  FOR i := 0 TO nBufLines - 1 DO
+    IF BranchTarget(bufLines[i]^, slashIdx, lbl) THEN
+      tgtIdx := FindLabelLineIndex(lbl);
+      IF tgtIdx >= 0 THEN lineReferenced[tgtIdx] := TRUE END
+    END;
+    IF JumpTarget(bufLines[i]^, lbl) THEN
+      tgtIdx := FindLabelLineIndex(lbl);
+      IF tgtIdx >= 0 THEN lineReferenced[tgtIdx] := TRUE END
+    END
+  END;
+  reachable := TRUE; w := 0;
+  FOR i := 0 TO nBufLines - 1 DO
+    IF IsLabelLine(bufLines[i]^, lbl) THEN
+      IF lineReferenced[i] THEN reachable := TRUE END;
+      IF reachable THEN bufLines[w] := bufLines[i]; INC(w) END
+    ELSIF reachable THEN
+      bufLines[w] := bufLines[i]; INC(w);
+      IF IsTerminator(bufLines[i]^) THEN reachable := FALSE END
+    END
+  END;
+  nBufLines := w
+END RemoveDeadCode;
 
 (* Allocates a compiler temporary and yields its ZAP local name.
    Temporaries come from the SAME pool as PROG/REPEAT bindings rather than a
@@ -862,6 +1313,32 @@ BEGIN
   END;
   RETURN TRUE
 END SimpleBuiltin;
+
+(* Is `name` one of the CURRENT routine's real locals (a declared parameter
+   or an AUX/PROG/REPEAT binding, in or out of lexical scope)? Ported from
+   the same fallback chain as GvalOp (Compilation.Builtins.cs's GvalOp checks
+   `cc.Locals` before treating an unresolved GVAL as a local) — CompileOperand
+   used to skip this check and hand ANY unresolved ",NAME" straight to
+   ResolveLocal on the assumption that a name that turns out not to be a real
+   local would be "caught by zapf" (see ResolveLocal's own call site below),
+   which is true but too late to recover: it just fails the whole assembly.
+   Real zilf checks first, and only actually-real locals take the "quirks:
+   local" branch; a name that is neither an existing global/constant NOR a
+   real local (The Lurking Horror's own V-$VERIFY references ,SERIAL, which
+   is nothing at all — dead code behind an unreachable magic-number
+   condition, confirmed by diffing against a real zilf build, which resolves
+   the same reference to a plain CONSTANT SERIAL=0) falls through further,
+   to GvalOp's own error-recovery path: report it and auto-define it as a
+   zero CONSTANT so the rest of the compile - and the assembly - proceeds
+   exactly as the reference build's does. *)
+PROCEDURE IsDeclaredLocal(name: ARRAY OF CHAR): BOOLEAN;
+VAR i: INTEGER;
+BEGIN
+  FOR i := 0 TO nLocals - 1 DO
+    IF locZil[i] = name THEN RETURN TRUE END
+  END;
+  RETURN FALSE
+END IsDeclaredLocal;
 
 (* Maps a ZIL local name to the ZAP local currently holding it. Innermost
    binding wins; an unbound name stands for itself, which is what makes an
@@ -1432,6 +1909,63 @@ BEGIN
       OR (name = "LOWCORE") OR (name = "LOWCORE-TABLE") OR (name = "QUOTE")
 END IsStatementBuiltin;
 
+(* Is `z` GUARANTEED to evaluate to exactly the T atom or FALSE - never
+   any OTHER truthy value - no matter what runs? This has to mirror
+   CompileCondition's own dispatch exactly: every head listed here is one
+   CompileCondition compiles as a genuine hardware branch instruction
+   (EQUAL?, ZERO?, FSET?, ...), and the Z-machine guarantees those branch
+   the same way T/FALSE would. Deliberately narrower than "CompileCondition
+   can test it" - CompileCondition ALSO has a generic fallback that treats
+   *any* form as a condition by testing its value against zero (real
+   MDL's own BranchIfNonZero), which is exactly the case this predicate
+   must reject: FIRST?/NEXT?/INTBL? really do return a found object/table
+   address as their value, not just T; PROG/BIND's value is whatever its
+   last statement computes; a bare CALL to a user routine has no such
+   guarantee just because it LOOKS like a predicate name. NOT/F? are
+   unconditionally safe regardless of their own operand - they coerce to
+   a fresh T/FALSE by definition, discarding whatever the operand's real
+   value was, which is exactly why real MDL's AND/OR must otherwise keep
+   the actual last-evaluated clause's value: <OR <GETP ...> ,DEFAULT>
+   needs GETP's real property value, not just "found one". Used by
+   CompileOperand's own AND/OR case, below, to recognize when an AND/OR
+   of ONLY such clauses is itself just as guaranteed-T/FALSE as any one of
+   them (PASSIVE-VERB?, a chain of nothing but EQUAL? tests, is exactly
+   this case - found by diffing it against real zilf's own 14-line
+   version, a fifth of this port's un-optimized 79). *)
+PROCEDURE IsPureBoolForm(z: ZilObj.Zo): BOOLEAN;
+VAR headName: ARRAY 64 OF CHAR; c: ZilObj.Zo;
+BEGIN
+  IF z = NIL THEN RETURN FALSE END;
+  IF (z.kind = ZilObj.KAtom) & ((z.atomText = "T") OR (z.atomText = "ELSE")) THEN
+    RETURN TRUE
+  END;
+  IF z.kind = ZilObj.KFalse THEN RETURN TRUE END;
+  IF (z.kind # ZilObj.KForm) OR (z.first = NIL) OR (z.first.kind # ZilObj.KAtom) THEN
+    RETURN FALSE
+  END;
+  Strings.Copy(z.first.atomText, headName);
+  IF (headName = "ZERO?") OR (headName = "0?") OR (headName = "BTST")
+     OR (headName = "FSET?") OR (headName = "IN?") OR (headName = "G=?") OR (headName = "L=?")
+     OR (headName = "1?") OR (headName = "N==?") OR (headName = "N=?")
+     OR (headName = "EQUAL?") OR (headName = "=?") OR (headName = "==?")
+     OR (headName = "L?") OR (headName = "G?") OR (headName = "IGRTR?") OR (headName = "DLESS?")
+     OR (headName = "SAVE") OR (headName = "RESTORE") OR (headName = "VERIFY")
+     OR (headName = "ORIGINAL?") OR (headName = "RESTART") THEN
+    RETURN TRUE
+  ELSIF (headName = "NOT") OR (headName = "F?") THEN
+    RETURN TRUE
+  ELSIF (headName = "AND") OR (headName = "OR") THEN
+    c := z.rest;
+    WHILE (c # NIL) & (c.first # NIL) DO
+      IF ~IsPureBoolForm(c.first) THEN RETURN FALSE END;
+      c := c.rest
+    END;
+    RETURN TRUE
+  ELSE
+    RETURN FALSE
+  END
+END IsPureBoolForm;
+
 (* Compiles `z` as a value-producing expression, emitting whatever
    instructions are needed and returning the ZAP operand text that holds
    the result (a literal number, a local variable's bare name, or
@@ -1442,7 +1976,7 @@ END IsStatementBuiltin;
 PROCEDURE CompileOperand(z: ZilObj.Zo; VAR opText: ARRAY OF CHAR): BOOLEAN;
 VAR leftText, rightText: ARRAY 64 OF CHAR; opcode: ARRAY 16 OF CHAR;
     headName: ARRAY 64 OF CHAR; argTexts: ArgList; errBuf: ARRAY 256 OF CHAR;
-    andTmp, andEnd: ARRAY 16 OF CHAR;
+    andTmp, andEnd, andTrue: ARRAY 16 OF CHAR;
     ok, spilled, simpleStore, restDefault: BOOLEAN;
     nArgs, i, nSpills, maxArgs, simpleN: INTEGER; ap, ap2: ZilObj.Zo;
 BEGIN
@@ -1515,9 +2049,30 @@ BEGIN
        years) - erroring here instead of warning would make every V4+ game
        that pulls in status.zil (anything inserting "parser") fail to
        compile over a mistake in the library, not the game. *)
-    Out.ErrString("zilf: warning: no such global variable '"); Out.ErrString(headName);
-    Out.ErrString("', using the local instead"); Out.ErrLn;
-    ResolveLocal(headName, opText); RETURN TRUE
+    IF IsDeclaredLocal(headName) THEN
+      Out.ErrString("zilf: warning: no such global variable '"); Out.ErrString(headName);
+      Out.ErrString("', using the local instead"); Out.ErrLn;
+      ResolveLocal(headName, opText); RETURN TRUE
+    END;
+    (* Not a real local either - GvalOp's OWN next and final fallback
+       ("Undefined global or constant") isn't fatal in real zilf: it reports
+       the problem and auto-defines the name as a zero CONSTANT, so a build
+       that only trips this on genuinely dead code (as The Lurking Horror's
+       V-$VERIFY does) still produces byte-identical-in-spirit output rather
+       than failing assembly outright on an orphaned symbol. CompileConstants
+       has already run by the time a routine body gets here, so the equate
+       cannot be written right here - a bare "NAME=0" line in the middle of
+       a .FUNCT is not a statement, and confuses zapf into treating the rest
+       of the routine's labels as top-level. CompileProgram emits one for
+       every constant ZilModel ends up holding that CompileConstants never
+       saw, once all routines are compiled and it is safe to start a new
+       top-level line; AddConstant here also makes ConstantText resolve any
+       LATER occurrence of the same name without going through this path
+       (and without emitting a duplicate equate) again. *)
+    Out.ErrString("zilf: warning: undefined global or constant '"); Out.ErrString(headName);
+    Out.ErrString("', using 0"); Out.ErrLn;
+    ZilModel.AddConstant(z.rest.first, ZilObj.NewFix(0));
+    Strings.Copy(headName, opText); RETURN TRUE
 
   ELSIF z.kind = ZilObj.KForm THEN
     IF (z.first = NIL) OR (z.first.kind # ZilObj.KAtom) THEN
@@ -1610,6 +2165,31 @@ BEGIN
          compiler temporary rather than the stack. *)
       IF (z.rest = NIL) OR (z.rest.first = NIL) THEN
         IF headName = "AND" THEN Strings.Copy("1", opText) ELSE Strings.Copy("0", opText) END;
+        RETURN TRUE
+      END;
+      IF IsPureBoolForm(z) THEN
+        (* every clause is a guaranteed-T/FALSE predicate (EQUAL?, ZERO?,
+           FSET?, ...), so <AND>/<OR> of only such clauses is ALSO
+           guaranteed-T/FALSE by induction - no per-clause temp needed,
+           just CompileCondition's own short-circuit branch chain (one
+           shared "true" label instead of a SET+ZERO? retest after every
+           single clause). Real MDL's AND/OR must otherwise keep the last-
+           evaluated clause's ACTUAL value (a GETP result, say), which this
+           shape would destroy - that's exactly what IsPureBoolForm rules
+           out first. Left as PUSH 0/1 + JUMP rather than a bare RTRUE/
+           RFALSE: whether that's what this actually IS (the routine's own
+           tail return) is exactly what OptimizeReturnValues,
+           OptimizeBranchTargets, and RemoveDeadCode - which already run
+           on every routine's buffered body - work out on their own. *)
+        NewLabel(andTrue); NewLabel(andEnd);
+        ok := CompileCondition(z, andTrue, TRUE);
+        IF ~ok THEN RETURN FALSE END;
+        W("	PUSH 0"); WLn;
+        W("	JUMP "); W(andEnd); WLn;
+        W(andTrue); W(":"); WLn;
+        W("	PUSH 1"); WLn;
+        W(andEnd); W(":"); WLn;
+        Strings.Copy("STACK", opText);
         RETURN TRUE
       END;
       Strings.Copy("AND/OR in value position", tmpWhy);
@@ -1789,6 +2369,22 @@ END CompileOperand;
    `rb.Branch(label)`. *)
 PROCEDURE EmitBranch(label: ARRAY OF CHAR);
 BEGIN W("	JUMP "); W(label); WLn END EmitBranch;
+
+(* Emits a routine-level "return this value" - RSTACK (a dedicated,
+   1-byte, no-operand opcode - see the RSTACK case's own comment) when the
+   value is already sitting on the stack, matching real zilf, since
+   `RETURN STACK` and `RSTACK` are exactly equivalent (both pop the stack
+   and return what was on it); a plain RETURN otherwise. Two call sites
+   need this: an explicit <RETURN> leaving the routine outright, and
+   CompileRoutine's own implicit final return of the last statement's
+   value - both used to always spell it out as RETURN, even when the
+   value was already "STACK". *)
+PROCEDURE EmitReturnValue(opText: ARRAY OF CHAR);
+BEGIN
+  IF opText = "STACK" THEN W("	RSTACK")
+  ELSE W("	RETURN "); W(opText) END;
+  WLn
+END EmitReturnValue;
 
 (* Emits a predicate instruction (op1[,op2]) branching to `label` when the
    condition holds and `polarity` is TRUE, or when it does NOT hold and
@@ -2310,6 +2906,18 @@ BEGIN
       IF capHead = NIL THEN capHead := cell ELSE capTail.rest := cell END;
       capTail := cell
 
+    ELSIF (spec.kind = ZilObj.KAdecl) & (spec.adFirst # NIL)
+          & (spec.adFirst.kind = ZilObj.KAtom) & (spec.adFirst.atomText = "*") THEN
+      (* *:DECL (e.g. The Lurking Horror's "S *:STRING <PRINT .X>") captures
+         anything too, exactly like a bare "*", but real zilf also checks
+         the DECL (Decl.Check) against the argument before accepting it —
+         this port has no DECL/type-checking system (see NEWTYPE's and
+         CHTYPE's own comments for the same simplification), so the decl in
+         spec.adSecond is accepted unchecked rather than verified. *)
+      cell := ZilObj.Cons(ZilObj.KList, arg, NIL);
+      IF capHead = NIL THEN capHead := cell ELSE capTail.rest := cell END;
+      capTail := cell
+
     ELSIF spec.kind = ZilObj.KAtom THEN
       IF spec # arg THEN RETURN FALSE END
 
@@ -2320,7 +2928,7 @@ BEGIN
          OR (arg.rest.first # spec.rest.first) THEN RETURN FALSE END
 
     ELSE
-      RETURN FALSE   (* a token spec shape this port doesn't match (e.g. *:DECL) *)
+      RETURN FALSE   (* a token spec shape this port doesn't match (e.g. an ADECL not shaped "*:DECL") *)
     END;
 
     INC(consumed);
@@ -2397,9 +3005,17 @@ BEGIN
 
       ELSIF (ap.first.kind = ZilObj.KForm) & (ZilObj.ListLength(ap.first) = 2)
             & ZilObj.IsAtomNamed(ap.first.first, "QUOTE") THEN
-        (* 'FOO names an object directly; the original retypes it to a GVAL
-           and prints it with PRINTD *)
-        ok := CompileOperand(ap.first.rest.first, opText);
+        (* 'FOO -> <PRINTD ,FOO>: the original retypes the QUOTEd atom to a
+           GVAL and prints THAT, not the bare atom — so 'HERE prints
+           whatever object the HERE global currently holds, not an object
+           literally named HERE. Calling CompileOperand on the bare atom
+           instead (as this used to) only ever worked when FOO also
+           happened to be a constant/routine/object name, and broke on a
+           real game's <TELL 'HERE> (The Lurking Horror's
+           DESCRIBE-ROOM) with "unknown constant/routine/object name". *)
+        ok := CompileOperand(ZilObj.Cons(ZilObj.KForm, ZilObj.Intern("GVAL"),
+                              ZilObj.Cons(ZilObj.KForm, ap.first.rest.first, NIL)),
+                              opText);
         IF ~ok THEN RETURN FALSE END;
         W("	PRINTD "); W(opText); WLn;
         ap := ap.rest
@@ -2622,7 +3238,7 @@ VAR headName: ARRAY 64 OF CHAR; opText, targetName: ARRAY 64 OF CHAR;
     errBuf: ARRAY 256 OF CHAR;
     (* DO *)
     doStart, doEnd, doStep, endClause: ZilObj.Zo; doDown, doPre: BOOLEAN;
-    exhLabel: ARRAY 16 OF CHAR;
+    exhLabel: ARRAY 16 OF CHAR; tickTarget: ARRAY 65 OF CHAR;
     mapNextName: ARRAY 64 OF CHAR; numText: ARRAY 16 OF CHAR;
     (* LOWCORE / LOWCORE-TABLE *)
     lcForm, lcArg: ZilObj.Zo; lcOff, lcLen: INTEGER; lcByte: BOOLEAN;
@@ -2880,7 +3496,7 @@ BEGIN
         bp := bp.rest
       END;
 
-      (* the increment *)
+      (* the increment, and the loop-continuation test *)
       IF doStep # NIL THEN
         IF doDown & (doStep.kind = ZilObj.KFix) THEN
           FixText(-doStep.fixVal, opText);
@@ -2897,21 +3513,41 @@ BEGIN
           IF ~ok THEN DEC(nBlocks); PopInnerLocals(1); RETURN FALSE END;
           W("	ADD "); W(targetName); W(","); W(opText);
           W(" >"); W(targetName); WLn
-        END
-      ELSIF doDown THEN
-        W("	DEC '"); W(targetName); WLn
-      ELSE
-        W("	INC '"); W(targetName); WLn
-      END;
+        END;
+        (* a custom step can't use IGRTR?/DLESS? below (they always move by
+           exactly 1), so it keeps the original three-instruction shape:
+           compare, then unconditionally jump back. *)
+        IF ~doPre THEN
+          ok := CompileOperand(doEnd, opText);
+          IF ~ok THEN DEC(nBlocks); PopInnerLocals(1); RETURN FALSE END;
+          IF doDown THEN EmitPredInstr("LESS?", targetName, opText, exhLabel, TRUE)
+          ELSE EmitPredInstr("GRTR?", targetName, opText, exhLabel, TRUE) END
+        END;
+        EmitBranch(againLabel)
 
-      (* a value end is compared after the increment *)
-      IF ~doPre THEN
+      ELSIF doPre THEN
+        (* the predicate is re-tested at the top of the loop next time
+           around (see the doPre branch above), so the default step is
+           just a plain INC/DEC here, same as before. *)
+        IF doDown THEN W("	DEC '"); W(targetName); WLn
+        ELSE W("	INC '"); W(targetName); WLn END;
+        EmitBranch(againLabel)
+
+      ELSE
+        (* default +-1 step, end checked after the increment: IGRTR?/DLESS?
+           increment, compare, AND branch in a single instruction (see
+           EmitPredInstr's own comment for the branch-marker convention),
+           replacing three instructions (INC/DEC, GRTR?/LESS?, JUMP) with
+           one. This is the exact shape real zilf's own DoLoop always emits
+           for a `<DO (I lo hi) ...>` with no explicit step - confirmed
+           against a real zilf build of The Lurking Horror's own
+           V-VERSION, whose `<DO (CNT 18 23) ...>` compiles this way. *)
+        Strings.Copy("'", tickTarget); Strings.Append(targetName, tickTarget);
         ok := CompileOperand(doEnd, opText);
         IF ~ok THEN DEC(nBlocks); PopInnerLocals(1); RETURN FALSE END;
-        IF doDown THEN EmitPredInstr("LESS?", targetName, opText, exhLabel, TRUE)
-        ELSE EmitPredInstr("GRTR?", targetName, opText, exhLabel, TRUE) END
+        IF doDown THEN EmitPredInstr("DLESS?", tickTarget, opText, againLabel, FALSE)
+        ELSE EmitPredInstr("IGRTR?", tickTarget, opText, againLabel, FALSE) END
       END;
-      EmitBranch(againLabel);
 
       W(exhLabel); W(":"); WLn;
       WHILE (endClause # NIL) & (endClause.first # NIL) DO
@@ -2970,7 +3606,12 @@ BEGIN
       IF nBlocks >= MaxBlocks THEN
         Err("CompileStmt: MAP-CONTENTS nested too deeply"); RETURN FALSE
       END;
-      NewLabel(againLabel); NewLabel(retLabel);
+      (* Two distinct labels, same reasoning as DO's own comment above:
+         "exhausted" is where the loop ends NORMALLY and an (END ...)
+         clause (if any) runs; the block's return label is where an
+         explicit RETURN jumps, skipping the END clause — it is placed
+         AFTER the END clause so normal exhaustion falls through it. *)
+      NewLabel(againLabel); NewLabel(retLabel); NewLabel(exhLabel);
       Strings.Copy(againLabel, blockAgain[nBlocks]);
       Strings.Copy(retLabel, blockReturn[nBlocks]);
       blockNames[nBlocks][0] := 0X;
@@ -2980,7 +3621,7 @@ BEGIN
       INC(nBlocks);
 
       W("	FIRST? "); W(opText); W(" >"); W(targetName);
-      W(" \"); W(retLabel); WLn;
+      W(" \"); W(exhLabel); WLn;
       W(againLabel); W(":"); WLn;
       IF doStep # NIL THEN
         W("	NEXT? "); W(targetName); W(" >"); W(mapNextName); W(" /");
@@ -2989,29 +3630,43 @@ BEGIN
         W(againLabel); W("X:"); WLn
       END;
 
+      (* an (END ...) clause, if present, is not part of the loop body —
+         same convention and same "recognised anywhere in the body" leniency
+         as DO's own (END ...) handling above; e.g. The Lurking Horror's
+         verbs.zil FIND-IN writes <MAP-CONTENTS (W .WHERE) (END <RFALSE>)
+         ...body...> *)
+      endClause := NIL;
       bp := z.rest.rest;
       WHILE (bp # NIL) & (bp.first # NIL) DO
-        ok := CompileStmt(bp.first, FALSE, progResult);
-        IF ~ok THEN DEC(nBlocks); PopInnerLocals(nProgBinds); RETURN FALSE END;
+        IF (bp.first.kind = ZilObj.KList) & ZilObj.IsAtomNamed(bp.first.first, "END") THEN
+          endClause := bp.first.rest
+        ELSE
+          ok := CompileStmt(bp.first, FALSE, progResult);
+          IF ~ok THEN DEC(nBlocks); PopInnerLocals(nProgBinds); RETURN FALSE END
+        END;
         bp := bp.rest
       END;
 
       IF doStep # NIL THEN
         W("	SET '"); W(targetName); W(","); W(mapNextName); WLn;
-        W("	ZERO? "); W(targetName); W(" /"); W(retLabel); WLn
+        W("	ZERO? "); W(targetName); W(" /"); W(exhLabel); WLn
       ELSE
         W("	NEXT? "); W(targetName); W(" >"); W(targetName);
-        W(" \"); W(retLabel); WLn
+        W(" \"); W(exhLabel); WLn
       END;
       EmitBranch(againLabel);
 
       DEC(nBlocks);
       PopInnerLocals(nProgBinds);
-      W(retLabel); W(":"); WLn;
-      IF wantResult THEN
-        W("	PUSH 0"); WLn;
-        Strings.Copy("STACK", resultText)
+      W(exhLabel); W(":"); WLn;
+      WHILE (endClause # NIL) & (endClause.first # NIL) DO
+        ok := CompileStmt(endClause.first, FALSE, progResult);
+        IF ~ok THEN RETURN FALSE END;
+        endClause := endClause.rest
       END;
+      IF wantResult THEN W("	PUSH 0"); WLn END;
+      IF blockReturned[nBlocks] THEN W(retLabel); W(":"); WLn END;
+      IF wantResult THEN Strings.Copy("STACK", resultText) END;
       termFlag := FALSE;
       RETURN TRUE
 
@@ -3232,7 +3887,7 @@ BEGIN
         EmitBranch(blockReturn[blkIdx]);
         blockReturned[blkIdx] := TRUE
       ELSE
-        W("	RETURN "); W(opText); WLn
+        EmitReturnValue(opText)
       END;
       Strings.Copy(opText, resultText); termFlag := TRUE;
       RETURN TRUE
@@ -3417,21 +4072,36 @@ BEGIN
       RETURN TRUE
 
     ELSIF ~wantResult & (FindRoutineIdx(headName) >= 0) THEN
-      (* A routine call whose value is discarded. V1-4 have only storing
-         CALL opcodes, so the original pops the unwanted result with
-         FSTACK (EmitCall's zversion < 4 branch) rather than leaving it to
-         accumulate on the stack. V5+ can't do that: FSTACK's own opcode
-         (pop) was removed from the Z-machine at V5 (V6 replaces it with
-         pop_stack, not emitted here either), so there is no way to
-         discard a V5+ CALL's result other than never storing it — the
-         real compiler's own EmitCall switches to the non-storing ICALL
-         family (ICALL1/ICALL2/ICALL/IXCALL, the same 0/1/2-3/4+
-         argument-count split as CALL1/CALL2/CALL/XCALL) for exactly this
-         case, confirmed against a real V5 build of cloak_plus.zil. Found
-         by bisecting an "outside a function" cascade all the way down to
-         a single CALL+FSTACK pair — FSTACK, with no matching opcode for
-         this version, wasn't cleanly rejected; it silently corrupted
-         zapf's own function-scope tracking from that point on. *)
+      (* A routine call whose value is discarded. This USED to pop the
+         unwanted result with FSTACK in V1-4 (CALL is a storing-only opcode
+         there, so something has to receive the value), on the assumption
+         that leaving it meant it would "accumulate on the stack" - but
+         checked against six real zilf builds (V3/V4/V5: name, advent,
+         zork1, cloak, cloak_plus, beer), none of them ever emit FSTACK, or
+         any pop, after a discarded user-routine call, in any version. Real
+         zilf's own EmitCall (Compilation.Expressions.cs, the ZilRoutine
+         case) passes `resultStorage = null` for exactly this case and
+         never follows up with a pop - correct because a Z-machine ROUTINE
+         CALL creates its own stack frame with its own portion of the
+         evaluation stack, which is entirely discarded when that routine
+         returns (the Z-Machine Standard's own "routine calls" section);
+         an unpopped value left by a nested CALL is not visible to, or
+         confused with, anything the calling routine does before or after
+         it, and needs no explicit cleanup. This does NOT extend to a
+         discarded BUILTIN opcode's result (GETP, GET, etc.) - those
+         execute inline in the CURRENT routine's own frame with no call/
+         return boundary to clean up after them, so leaving one unpopped
+         inside a loop really would accumulate; this port has no code path
+         that discards a builtin's value in the first place, so that case
+         doesn't arise here. V5+ still can't store a discarded CALL's
+         result to the stack at all (FSTACK's own opcode doesn't exist
+         there), so it keeps using the non-storing ICALL family below
+         (ICALL1/ICALL2/ICALL/IXCALL, the same 0/1/2-3/4+ argument-count
+         split as CALL1/CALL2/CALL/XCALL) - confirmed against a real V5
+         build of cloak_plus.zil. Found originally by bisecting an "outside
+         a function" cascade down to a single CALL+FSTACK pair - FSTACK,
+         with no matching opcode for V5+, wasn't cleanly rejected there and
+         silently corrupted zapf's own function-scope tracking. *)
       IF ZilModel.zversion >= 5 THEN
         sbN := 7;
         ok := CompileArgs(z.rest, sbN, sbArgs, sbCount, sbSpills);
@@ -3453,7 +4123,6 @@ BEGIN
       END;
       ok := CompileOperand(z, opText);
       IF ~ok THEN RETURN FALSE END;
-      IF opText = "STACK" THEN W("	FSTACK"); WLn END;
       RETURN TRUE
 
     ELSE
@@ -3614,7 +4283,7 @@ BEGIN
       (* no implicit fall-through return exists anywhere in the original
          either — every routine explicitly returns its last value, unless
          that last statement already left the routine on its own *)
-      W("	RETURN "); W(opText); WLn
+      EmitReturnValue(opText)
     END;
     bp := bp.rest
   END;
@@ -3633,6 +4302,12 @@ BEGIN
   nBlocks := 0;
   EndBuffer;
   IF errFlag THEN RETURN FALSE END;
+  MergeStackStores;
+  OptimizeReturnValues;
+  MergePrintReturn;
+  OptimizeBranchTargets;
+  CollapseJumpChains;
+  RemoveDeadCode;
 
   W(".FUNCT "); WSym(rt.name.atomText);
   i := 0;
@@ -5404,8 +6079,8 @@ END EmitVocab;
    a GO routine around it). `entryName` names the routine the header's
    START:: label goes on — pass "GO" for the ZIL default. *)
 PROCEDURE CompileProgram*(entryName: ARRAY OF CHAR): BOOLEAN;
-VAR i, entryIdx: INTEGER; ok: BOOLEAN; verText: ARRAY 16 OF CHAR;
-    strBuf: ARRAY 4096 OF CHAR;
+VAR i, entryIdx, constsSeen: INTEGER; ok: BOOLEAN; verText: ARRAY 16 OF CHAR;
+    strBuf, text: ARRAY 4096 OF CHAR;
 BEGIN
   ClearErr;
   labelCounter := 0;
@@ -5451,6 +6126,47 @@ BEGIN
     END
   END;
 
+  (* The built-in DIRECTIONS PROPDEF (Context.cs's InitPropDefs,
+     SDirectionsPropDef_V3/_V4_Plus) isn't just a property-table layout —
+     it's ordinary ZIL source, evaluated the same way a game's own PROPDEF
+     complex spec would be, so it ALSO defines each of its field names as a
+     real CONSTANT the game can reference (e.g. zillib's V-WALK compares
+     <PTSIZE .PT> against ,UEXIT/,NEXIT/,FEXIT/,CEXIT/,DEXIT, and the field
+     name constants like ,REXIT/,CEXITFLAG/,DEXITOBJ are byte offsets into
+     the property). EmitDirectionProp above already hand-implements this
+     PROPDEF's byte layout without needing the constants for its own
+     purposes, so this port never had a reason to define them — invisible
+     for every game so far because they all either insert zillib's own
+     parser.zil (which supplies its own copies) or don't reference these
+     names at all, until The Lurking Horror's own parser/verbs (which
+     don't use zillib) referenced ,UEXIT and friends directly and got
+     "symbol is never defined" at assembly time. A game that DOES declare
+     its own <PROPDEF DIRECTIONS ...> would have already registered these
+     names first during evaluation, so only filling in what's still
+     missing preserves that override. *)
+  IF FindConstantIdx("UEXIT") < 0 THEN
+    IF ZilModel.zversion < 4 THEN
+      ZilModel.AddConstant(ZilObj.Intern("UEXIT"), ZilObj.NewFix(1));
+      ZilModel.AddConstant(ZilObj.Intern("NEXIT"), ZilObj.NewFix(2));
+      ZilModel.AddConstant(ZilObj.Intern("FEXIT"), ZilObj.NewFix(3));
+      ZilModel.AddConstant(ZilObj.Intern("CEXIT"), ZilObj.NewFix(4));
+      ZilModel.AddConstant(ZilObj.Intern("DEXIT"), ZilObj.NewFix(5))
+    ELSE
+      ZilModel.AddConstant(ZilObj.Intern("UEXIT"), ZilObj.NewFix(2));
+      ZilModel.AddConstant(ZilObj.Intern("NEXIT"), ZilObj.NewFix(3));
+      ZilModel.AddConstant(ZilObj.Intern("FEXIT"), ZilObj.NewFix(4));
+      ZilModel.AddConstant(ZilObj.Intern("CEXIT"), ZilObj.NewFix(5));
+      ZilModel.AddConstant(ZilObj.Intern("DEXIT"), ZilObj.NewFix(6))
+    END;
+    ZilModel.AddConstant(ZilObj.Intern("REXIT"), ZilObj.NewFix(0));
+    ZilModel.AddConstant(ZilObj.Intern("NEXITSTR"), ZilObj.NewFix(0));
+    ZilModel.AddConstant(ZilObj.Intern("FEXITFCN"), ZilObj.NewFix(0));
+    ZilModel.AddConstant(ZilObj.Intern("CEXITFLAG"), ZilObj.NewFix(1));
+    ZilModel.AddConstant(ZilObj.Intern("CEXITSTR"), ZilObj.NewFix(2));
+    ZilModel.AddConstant(ZilObj.Intern("DEXITOBJ"), ZilObj.NewFix(1));
+    ZilModel.AddConstant(ZilObj.Intern("DEXITSTR"), ZilObj.NewFix(2))
+  END;
+
   (* PROPSPECs first: they rewrite object properties and may define routines
      and tables that everything below has to see *)
   ok := ApplyPropSpecs();
@@ -5466,6 +6182,7 @@ BEGIN
   W("	.NEW "); W(verText); WLn; WLn;
 
   CompileConstants;
+  constsSeen := ZilModel.nConstants;
   ok := CompileGlobals();
   IF ~ok THEN RETURN FALSE END;
   ok := CompileTables();
@@ -5491,6 +6208,25 @@ BEGIN
       IF ~ok THEN RETURN FALSE END
     END;
     INC(i)
+  END;
+
+  (* CompileOperand's GVAL fallback (see its own comment) may have appended
+     more constants to ZilModel while compiling the routines above - any
+     name it auto-defined as a recovery for a genuinely undefined global or
+     constant. CompileConstants already ran and cannot see those; emit them
+     here, now that every .FUNCT is closed and a bare "NAME=0" equate line
+     is safe to write. *)
+  IF ZilModel.nConstants > constsSeen THEN
+    WLn;
+    W("	; constants (defined during compilation - see CompileOperand's GVAL fallback)"); WLn;
+    i := constsSeen;
+    WHILE i < ZilModel.nConstants DO
+      IF ConstantText(ZilModel.constants[i].value, text) THEN
+        W("	"); WSym(ZilModel.constants[i].name.atomText);
+        W("="); W(text); WLn
+      END;
+      INC(i)
+    END
   END;
 
   (* the packed strings, in high memory alongside the routines *)

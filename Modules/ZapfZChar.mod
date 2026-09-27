@@ -32,8 +32,25 @@ CONST
   ModeNoAbbrev* = 1;
 
   MaxTemp = 8192;
-  MaxAbbrevs = 96;
+  MaxAbbrevs* = 96;
   MaxAbbrevLen = 256;
+
+  (* ---- abbreviation FINDER (frequency analysis over the whole corpus of
+     strings a game will print) ---- these bounds are separate from the
+     encoder's own MaxAbbrevs/MaxAbbrevLen above, which apply to whatever
+     the finder (or a hand-written .FSTR) actually registers. *)
+  MaxCorpus = 600000;        (* total corpus characters, incl. 1 separator/string *)
+  MinCandLen = 2;
+  MaxCandLen = 14;           (* longest abbreviation candidate considered *)
+  CompareDepth = MaxCandLen + 4;
+  MaxTopCandidates = 4 * MaxAbbrevs;
+  Boundary = 1X;             (* separates accumulated strings; never real text *)
+
+TYPE
+  (* Named fixed-size type, not an inline `ARRAY OF ARRAY OF CHAR` parameter
+     — this dialect silently degrades that to a single CHAR per element
+     (see ZilCompile.mod's LineText/ArgList comment for the same gotcha). *)
+  AbbrevTextArr* = ARRAY MaxAbbrevs OF ARRAY MaxCandLen + 1 OF CHAR;
 
 VAR
   charset0, charset1: ARRAY 26 OF INTEGER;
@@ -53,6 +70,20 @@ VAR
   abbrevSkip: ARRAY MaxAbbrevs, 256 OF INTEGER;
   abbrevCount*: INTEGER;
   frozen*: BOOLEAN;
+
+  corpus: ARRAY MaxCorpus OF CHAR;
+  corpusLen: INTEGER;
+  suffPos: ARRAY MaxCorpus OF INTEGER;
+
+  candText: ARRAY MaxTopCandidates OF ARRAY MaxCandLen + 1 OF CHAR;
+  candScore: ARRAY MaxTopCandidates OF INTEGER;
+  nCand: INTEGER;
+
+PROCEDURE ResetAbbrevs*;
+BEGIN
+  abbrevCount := 0;
+  frozen := FALSE
+END ResetAbbrevs;
 
 PROCEDURE ResetUnicodeTable*;
 BEGIN
@@ -178,8 +209,7 @@ BEGIN
 
   ResetUnicodeTable;
 
-  abbrevCount := 0;
-  frozen := FALSE
+  ResetAbbrevs
 END Init;
 
 PROCEDURE FindInt(VAR arr: ARRAY OF INTEGER; n, v: INTEGER): INTEGER;
@@ -376,6 +406,228 @@ BEGIN
   FOR i := 0 TO outN - 1 DO cps[i] := outCp[i] END;
   n := outN
 END Abbreviate;
+
+(* ---- abbreviation FINDER ----
+
+   A from-scratch, self-contained frequency analysis choosing which
+   substrings to register as .FSTR abbreviations, since without it the
+   machinery above never gets anything to work with. Not a port of the
+   original's AbbrevFinder/IndexedStringCollection (a full generalized
+   suffix-array with LCP-based substring enumeration and an overlap-aware
+   selection pass) - that is a lot more machinery than a "pragmatic subset"
+   needs. Instead: concatenate every string the game will print into one
+   corpus (with a separator between strings so a candidate can never span
+   two of them), sort every starting position by its leading characters (a
+   poor man's suffix array - one sort serves every candidate length, since
+   positions sharing an L-character prefix end up contiguous in it for
+   every L), and for each candidate length scan that sorted order for runs
+   of matching positions, scoring each run with the original's own
+   formula (`(count-1)*(cost-2) - 2`, cost in the SAME z-char units
+   CharCost already computes for real encoding) so a candidate only
+   survives if replacing it with a 2-z-char abbreviation reference
+   actually saves space. The result isn't the original's OPTIMAL abbreviation
+   set, just a good one - real games "fit or don't" on total byte count, and
+   this is a self-contained, testable piece of that rather than a byte-exact
+   port. *)
+
+PROCEDURE ResetCorpus*;
+BEGIN corpusLen := 0 END ResetCorpus;
+
+(* Accumulates one more string's text into the corpus, terminated by a
+   separator so no candidate can span into the next string added. Silently
+   stops accumulating once the corpus is full (best-effort: a huge game
+   still assembles, it just stops gaining new abbreviation candidates from
+   whatever text didn't fit). *)
+PROCEDURE AddCorpusText*(text: ARRAY OF CHAR);
+VAR i, n: INTEGER;
+BEGIN
+  n := Strings.Length(text);
+  IF corpusLen + n + 1 >= MaxCorpus THEN RETURN END;
+  FOR i := 0 TO n - 1 DO corpus[corpusLen] := text[i]; INC(corpusLen) END;
+  corpus[corpusLen] := Boundary; INC(corpusLen)
+END AddCorpusText;
+
+(* Lexical compare of the corpus starting at a vs at b, up to CompareDepth
+   characters (more than MaxCandLen, so every candidate length's prefix is
+   fully decided within that depth) or the corpus end, whichever is first.
+   Past the corpus end reads as 0X, which sorts below every real character
+   and below Boundary too (0X < 1X), so a short suffix near the very end of
+   the corpus still sorts consistently instead of reading out of bounds. *)
+PROCEDURE ComparePos(a, b: INTEGER): INTEGER;
+VAR i: INTEGER; ca, cb: CHAR;
+BEGIN
+  FOR i := 0 TO CompareDepth - 1 DO
+    IF a + i < corpusLen THEN ca := corpus[a + i] ELSE ca := 0X END;
+    IF b + i < corpusLen THEN cb := corpus[b + i] ELSE cb := 0X END;
+    IF ca # cb THEN
+      IF ca < cb THEN RETURN -1 ELSE RETURN 1 END
+    END
+  END;
+  RETURN 0
+END ComparePos;
+
+(* Hoare-partition quicksort of suffPos[lo..hi] by ComparePos. Corpus text
+   is natural-language prose, not adversarial input, so the classic
+   worst case (already-sorted input driving a fixed first/last-element
+   pivot to quadratic behaviour) isn't a real concern here - median-of-
+   three would guard against it too, but isn't needed for this input. *)
+PROCEDURE QSort(lo, hi: INTEGER);
+VAR i, j, pivot, tmp: INTEGER;
+BEGIN
+  IF lo >= hi THEN RETURN END;
+  i := lo; j := hi;
+  pivot := suffPos[(lo + hi) DIV 2];
+  WHILE i <= j DO
+    WHILE ComparePos(suffPos[i], pivot) < 0 DO INC(i) END;
+    WHILE ComparePos(suffPos[j], pivot) > 0 DO DEC(j) END;
+    IF i <= j THEN
+      tmp := suffPos[i]; suffPos[i] := suffPos[j]; suffPos[j] := tmp;
+      INC(i); DEC(j)
+    END
+  END;
+  IF lo < j THEN QSort(lo, j) END;
+  IF i < hi THEN QSort(i, hi) END
+END QSort;
+
+(* Do positions a and b share the same L-character prefix? *)
+PROCEDURE SamePrefix(a, b, l: INTEGER): BOOLEAN;
+VAR i: INTEGER;
+BEGIN
+  IF (a + l > corpusLen) OR (b + l > corpusLen) THEN RETURN FALSE END;
+  i := 0;
+  WHILE (i < l) & (corpus[a + i] = corpus[b + i]) DO INC(i) END;
+  RETURN i = l
+END SamePrefix;
+
+(* An L-character run starting at `pos` is only a real candidate if it
+   doesn't cross a separator - otherwise it isn't text that ever actually
+   appears together in any one string. *)
+PROCEDURE ValidCandidate(pos, l: INTEGER): BOOLEAN;
+VAR i: INTEGER;
+BEGIN
+  IF pos + l > corpusLen THEN RETURN FALSE END;
+  FOR i := 0 TO l - 1 DO
+    IF corpus[pos + i] = Boundary THEN RETURN FALSE END
+  END;
+  RETURN TRUE
+END ValidCandidate;
+
+(* Cost of encoding text[0..l-1] as ordinary z-chars, in the same units
+   CharCost already uses for real encoding (1/2/4 per character depending
+   on which alphabet, if any, it falls in). Treats each CHAR as its own
+   codepoint - true for the plain-ASCII prose these candidates are drawn
+   from, matching CharCost's own real-encoding behavior for that text. *)
+PROCEDURE CandidateCost(pos, l: INTEGER): INTEGER;
+VAR i, cost: INTEGER;
+BEGIN
+  cost := 0;
+  FOR i := 0 TO l - 1 DO cost := cost + CharCost(ORD(corpus[pos + i])) END;
+  RETURN cost
+END CandidateCost;
+
+(* Keeps the MaxTopCandidates best-scoring candidates seen so far, sorted
+   descending by score (an insertion sort over a bounded array - cheap
+   since MaxTopCandidates is small and this is only called once per
+   surviving (length, run) pair, not per corpus position). *)
+PROCEDURE InsertCandidate(text: ARRAY OF CHAR; score: INTEGER);
+VAR i: INTEGER;
+BEGIN
+  IF (nCand >= MaxTopCandidates) & (score <= candScore[MaxTopCandidates - 1]) THEN RETURN END;
+  IF nCand < MaxTopCandidates THEN i := nCand; INC(nCand) ELSE i := MaxTopCandidates - 1 END;
+  WHILE (i > 0) & (candScore[i - 1] < score) DO
+    candScore[i] := candScore[i - 1];
+    Strings.Copy(candText[i - 1], candText[i]);
+    DEC(i)
+  END;
+  candScore[i] := score;
+  Strings.Copy(text, candText[i])
+END InsertCandidate;
+
+(* Does `big` contain `small` anywhere? Both are short (<= MaxCandLen), so
+   the naive O(|big|*|small|) search is plenty fast for the handful of
+   candidates this gets called on (see FindAbbreviations's own overlap
+   check below). *)
+PROCEDURE ContainsSub(big, small: ARRAY OF CHAR): BOOLEAN;
+VAR bl, sl, i, j: INTEGER; matched: BOOLEAN;
+BEGIN
+  bl := Strings.Length(big); sl := Strings.Length(small);
+  IF sl > bl THEN RETURN FALSE END;
+  FOR i := 0 TO bl - sl DO
+    matched := TRUE; j := 0;
+    WHILE matched & (j < sl) DO
+      IF big[i + j] # small[j] THEN matched := FALSE END;
+      INC(j)
+    END;
+    IF matched THEN RETURN TRUE END
+  END;
+  RETURN FALSE
+END ContainsSub;
+
+(* Runs the frequency analysis over whatever text AddCorpusText has
+   accumulated and returns up to `maxCount` candidate abbreviation texts in
+   outText[0..outCount-1], best (highest-scoring) first. Pure analysis: does
+   not touch abbrevCount/frozen or call AddAbbreviation itself, so the
+   caller decides how (and whether) to actually register and emit each one
+   - this module has no notion of the .zap source lines / global symbols
+   that requires. *)
+PROCEDURE FindAbbreviations*(maxCount: INTEGER; VAR outText: AbbrevTextArr; VAR outCount: INTEGER);
+VAR i, j, l, run, cost, score: INTEGER; redundant: BOOLEAN; buf: ARRAY MaxCandLen + 1 OF CHAR;
+BEGIN
+  nCand := 0;
+  outCount := 0;
+  IF corpusLen = 0 THEN RETURN END;
+
+  FOR i := 0 TO corpusLen - 1 DO suffPos[i] := i END;
+  QSort(0, corpusLen - 1);
+
+  FOR l := MinCandLen TO MaxCandLen DO
+    i := 0;
+    WHILE i < corpusLen DO
+      j := i + 1;
+      WHILE (j < corpusLen) & SamePrefix(suffPos[i], suffPos[j], l) DO INC(j) END;
+      run := j - i;
+      IF (run >= 2) & ValidCandidate(suffPos[i], l) THEN
+        cost := CandidateCost(suffPos[i], l);
+        score := (run - 1) * (cost - 2) - 2;
+        IF score >= 1 THEN
+          FOR j := 0 TO l - 1 DO buf[j] := corpus[suffPos[i] + j] END;
+          buf[l] := 0X;
+          InsertCandidate(buf, score)
+        END
+      END;
+      i := j
+    END
+  END;
+
+  (* Greedy overlap elimination: highest-scoring candidates first (candText
+     is already sorted that way), skipping any candidate that is a
+     substring of - or a superstring containing - an ALREADY-chosen one.
+     Without this, the top of the list is dominated by near-duplicates of
+     the single best pattern (e.g. "the", " the", "the ", " the ", "he ",
+     " th" all scoring well independently), burning many of the scarce 96
+     table slots on trivial variations of ONE idea instead of covering 96
+     DIFFERENT ones - confirmed against a real zilf build's own choices for
+     the same game, which are far more varied. Wagner's DP in Abbreviate
+     would still work fine without this (it just picks whichever abbrev
+     fits best at each position), so this is purely about spending the
+     limited table well, not correctness. *)
+  i := 0;
+  WHILE (i < nCand) & (outCount < maxCount) & (outCount < LEN(outText)) DO
+    redundant := FALSE;
+    j := 0;
+    WHILE (j < outCount) & ~redundant DO
+      IF ContainsSub(candText[i], outText[j]) OR ContainsSub(outText[j], candText[i]) THEN
+        redundant := TRUE
+      END;
+      INC(j)
+    END;
+    IF ~redundant THEN
+      Strings.Copy(candText[i], outText[outCount]);
+      INC(outCount)
+    END;
+    INC(i)
+  END
+END FindAbbreviations;
 
 (* Emits 5-bit z-char codes for the (possibly abbreviated) codepoint
    stream cps[0..n-1] into temp[0..*], returning the count. *)

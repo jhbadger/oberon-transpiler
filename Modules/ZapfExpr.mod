@@ -17,7 +17,20 @@ TYPE
     text*: ARRAY 1024 OF CHAR;  (* Num: literal source text; Str: string content; Sym: name *)
     numVal*: INTEGER;          (* valid when kind = KindNum *)
     inner*: Expr;              (* valid when kind = KindQuote *)
-    left*, right*: Expr        (* valid when kind = KindAdd *)
+    left*, right*: Expr;       (* valid when kind = KindAdd *)
+
+    (* "Once wide, always wide": ZapfAsm.EvalOperand sets this the first
+       time this specific operand needs the 2-byte (word) form rather than
+       the 1-byte (byte) form, and treats it as wide unconditionally from
+       then on - same monotonicity fix, and same reason, as
+       ZapfAst.LineDesc's farBranch: a symbol's value (e.g. a routine's own
+       packed address) can cross the 256 byte/word threshold as OTHER code
+       shrinks or grows during reassembly, and without this, two operands
+       whose sizes depend on each other's surrounding code can flip back
+       and forth forever instead of converging. This Expr node is the same
+       object across every reassembly attempt (built once when the .zap
+       source was parsed), which is what makes the memory meaningful. *)
+    forcedWide*: BOOLEAN
   END;
 
 PROCEDURE NewNumVal*(v: INTEGER): Expr;

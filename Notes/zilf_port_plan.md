@@ -3538,3 +3538,664 @@ stderr, not just whether the output file has content.
 **And when an error message names something that makes no sense**, suspect
 a *later* error masking the real one. That is why `Err` now keeps the first
 message — see the diagnostics note in the DEFSTRUCT milestone above.
+
+## MILESTONE 9: `sample/lurkinghorror` (V3, The Lurking Horror) — six real
+compiler bugs fixed, plus a real .FSTR abbreviation-table finder and a
+genuine assembler stability fix; the game still doesn't fit V3's size limit
+
+The Lurking Horror is a real, unmodified 1986 Infocom game with its OWN
+custom parser (`parser.zil`/`verbs.zil`, not zillib's) — the first game
+this port has tried whose own files intentionally SHADOW zillib files of
+the same name. Investigating "why does it fail" found and fixed six real
+bugs, none of them The Lurking Horror-specific:
+
+1. **`examples/zilf.mod`'s own `DirOf`** dropped the trailing `/` on the
+   very first `currentDir` (unlike `ZilEval.mod`'s own, correct copy used
+   for every *nested* INSERT-FILE), so every top-level INSERT-FILE's
+   currentDir-relative lookup silently failed and fell through to the `-i`
+   library path instead. Invisible for any game that's happy to get
+   zillib's copy of a same-named file; fatal for one that isn't — this
+   game's own `verbs.zil` never got used at all, zillib's did (twice, via
+   two different INSERT-FILE paths), producing a nonsense "duplicate
+   default for section: DARKNESS-F".
+2. `MAKE-GVAL` (builds `<GVAL atom>` programmatically, used by a
+   `misc.zil` macro) was entirely unimplemented.
+3. TELL-TOKENS' `*:DECL` pattern shape (`S *:STRING <PRINT .X>`) wasn't
+   matched — this port has no DECL/type-checking system, so it's now
+   accepted like a plain `*`, unchecked.
+4. `<TELL 'FOO>` compiled the bare atom instead of retyping it to `,FOO`
+   first (`<PRINTD ,FOO>`), so `<TELL 'HERE>` failed instead of printing
+   whatever object the `HERE` global currently holds.
+5. `MAP-CONTENTS` didn't support an `(END ...)` clause (DO already did).
+6. **`==?`/EQ? didn't special-case `,X`/`.X` forms** as exactly-equal when
+   they reference the same atom, unlike real zilf's `ZilForm.ExactlyEquals`
+   — broke `misc.zil`'s `MULTIFROB` (the shared engine behind
+   `VERB?`/`PRSO?`/`PRSI?`/`HERE?`), which tells its GVAL/LVAL cases apart
+   by comparing an incoming FORM against a literal via `==?`. `<VERB? DIG
+   ...>` silently fell through to the wrong branch and referenced a bare
+   `,DIG` instead of the real `,V?DIG` action constant.
+
+Two smaller gaps: the built-in `DIRECTIONS` PROPDEF's constants
+(`UEXIT`/`REXIT`/`NEXIT`/`FEXIT`/`FEXITFCN`/`CEXIT`/`CEXITFLAG`/
+`CEXITSTR`/`DEXIT`/`DEXITOBJ`/`DEXITSTR`) were never registered as real
+globals for a game that doesn't insert zillib (matching real zilf's
+`Context.InitPropDefs`, now done in `CompileProgram`, version-aware); and
+`SYNTAX`'s optional explicit action-name was dropped whenever the
+pre-action slot was written as an explicit `<>` (a very common idiom for
+"share one routine, several distinctly-numbered fake actions" —
+`ZilEval.mod`'s SYNTAX parser stopped scanning at the first non-atom
+instead of just skipping it). Also added a real `Undefined_0_1`-style
+recovery to `CompileOperand`'s GVAL fallback (checks `IsDeclaredLocal`
+before assuming a name is a local; if it's neither a known global/constant
+nor a real local, auto-defines it as a zero CONSTANT, matching real
+zilf's GvalOp, instead of handing zapf a bare name it will never resolve) —
+found via a genuinely-dead `<TELL N ,SERIAL CR>` in an unreachable
+`V-$VERIFY` magic-number branch, confirmed by diffing against a real zilf
+build (`SERIAL=0` in its own constants dump).
+
+After all six, the game compiles and assembles *correctly* — but the
+story file is too big for V3's 128K packed-address ceiling. The real 1986
+game is famously sized right at that ceiling (real zilf's own build is
+~145KB) and relies on Z-machine abbreviation-table compression
+(`FREQUENT-WORDS?`), which this port never implemented — no prior game
+needed it. Two things followed from that:
+
+**A frequency-analysis abbreviation finder, from scratch** (not a port of
+the original's suffix-array `AbbrevFinder`/`IndexedStringCollection` -
+deliberately simpler): `ZapfZChar.mod` gained `AddCorpusText`/
+`ResetCorpus`/`FindAbbreviations`, which concatenate every string the game
+will print, sort every starting position by a poor-man's suffix array (one
+sort serves every candidate length), score each length's runs with the
+original's own formula (`(count-1)*(cost-2) - 2`, cost in the same z-char
+units `CharCost` already used for real encoding), and greedily keep the
+best non-overlapping candidates (skip a candidate that's a substring of, or
+contains, one already picked — without this the top of the list was
+dominated by six trivial variations of "the" alone). `ZapfAsm.mod`'s new
+`AutoAbbreviate` runs this once, unconditionally (not gated behind
+`FREQUENT-WORDS?` — it can only shrink output), over every `.GSTR`/`.STR`/
+`.STRL` and every string-literal instruction operand (where PRINTI's text
+actually lives), then splices in `.FSTR` definitions at the very front
+(before anything can freeze `ZapfZChar.frozen`) and the resulting `.WORD`
+list — **not under a new `WORDS::` label of its own, but right after
+ZilCompile.mod's EXISTING one** (`EmitVocab` already emits `WORDS::` right
+after the dictionary, for exactly this address, matching real zilf's own
+"WORDS" header-field convention — a second, competing `WORDS::` label
+looks harmless but made the build oscillate forever, see below). The
+matching/encoding side (`AddAbbreviation`, Horspool search, Wagner's
+optimal-parse DP) already existed in `ZapfZChar.mod`, unused until now —
+confirmed correct by an actual `frotz` playthrough of `advent` (whose
+abbreviated size dropped ~6.4KB) with correctly-decoded text throughout.
+`zork1` and `cloak_plus` also shrink (~9.5KB and ~0.6KB) and still
+assemble clean.
+
+**A genuine, pre-existing assembler scalability bug**, found only because
+abbreviation-driven code shrinkage was the first thing to trigger it at
+scale: a local branch's short/long (1-byte/2-byte offset) encoding, once
+wrong, used to trigger an IMMEDIATE full rewind-and-replay of the entire
+enclosing routine — fine for a routine with one or two wrong guesses, but
+one specific large, branch-dense routine needed thousands of individual
+corrections (each independently discovering it needed a bigger encoding as
+distances shifted below the short/long threshold), each demanding its own
+full replay: millions of reprocessed instructions, never finishing. Fixed
+with the standard "branch relaxation" technique — monotonic widening,
+never re-narrowing:
+- `ZapfAst.LineDesc` gained `farBranch`/`forcedVarForm` and
+  `ZapfExpr.ExprDesc` gained `forcedWide`, all sticky for the whole run
+  (properties of the persistent Line/Expr objects, not the per-pass symbol
+  table) - once a branch needs the long offset form, once a 2OP opcode
+  needs promoting to VAR form, or once an operand needs the word (not
+  byte) form, it stays that way even if a later recomputation would say
+  otherwise.
+- `HandleLabel`'s local-label mismatch case no longer rewinds immediately;
+  it corrects the symbol in place and sets `ctx.reassemblyDirty`, letting
+  the REST of the current pass keep going so every other label gets its
+  own chance to self-correct in the same pass. `EndReassemblyScope`, at
+  the routine's natural end, replays the whole routine once more only if
+  dirty (`RewindReassemblyScope`, `ctx.pendingReassembleTo` carries the
+  rewind request back up through `HandleDirective`, which cannot take
+  `nodeIndex` by `VAR`) — turning O(number of wrong labels) full replays
+  into O(number of rounds), and a routine that used to need one replay per
+  wrong branch now needs one or two.
+- **One real bug in that fix's first version**: `HandleDirective` kept
+  processing the very directive that triggered a dirty rewind (typically
+  the *next* routine's own `.FUNCT`) before the rewind took effect,
+  registering a whole different routine's locals/globals that then got
+  discarded — surfaced as bogus "symbol is never defined: ONUM" (a real
+  local of the routine two down the line). Fixed by returning from
+  `HandleDirective` immediately once `ctx.pendingReassembleTo` is set.
+- **The actual root cause of the remaining (very long) hang** wasn't
+  branch/operand sizing at all — those fixes made within-routine
+  convergence fast, but the WHOLE FILE still looped forever. Traced (with
+  temporary instrumentation logging every symbol whose position changed)
+  to the competing `WORDS::` label described above: two Line objects with
+  the same global name, each correctly resolving on its own, alternately
+  overwriting one shared Symbol's `.value` — `HandleLabel` doesn't treat
+  same-kind redefinition as an error, only as "this label moved" — so the
+  position flip-flopped between the two labels' actual addresses forever.
+  Not a hypothetical: this is why the fix for it is spelled out above
+  rather than left as "insert the table wherever."
+- The final pass also has its own genuine-looking trap to avoid:
+  local-label memory (`ctx.localHead`) is per-routine and gets cleared at
+  every routine's natural end, so the FIRST local label of every routine
+  is *always* a fresh "never seen before" discovery on the final pass too,
+  needing the one harmless dirty-replay this triggers — that's expected on
+  every pass, not remaining instability, so `EndReassemblyScope`'s local-
+  label dirty path is not `Fatal` on `ctx.finalPass` (unlike the deferred
+  *global*-label check right below it, which legitimately should be, since
+  global values really shouldn't still be moving there).
+
+**Where this leaves The Lurking Horror**: compiles and assembles
+correctly and quickly (well under a second, `Measuring..`/`Assembling`,
+same shape as every other game) but still reports "file length exceeds
+platform limit" — abbreviation compression alone doesn't close the gap.
+This port's code generation is markedly less compact than the original
+1986 compiler's (a rough same-game `.zap` line-count comparison against a
+real zilf build put it at roughly 1.7-1.9x more routine-body lines for the
+same source), and the real game was sized right at V3's ceiling to begin
+with; even a good ~96-entry abbreviation table (confirmed comparable in
+character to a real zilf build's own choices for this exact game) isn't
+enough savings to offset that gap. Actually fitting it would need real
+code-size optimization in `ZilCompile.mod` itself (peephole
+optimization, fewer redundant loads/stores, tighter operand encoding) -
+a materially bigger undertaking than either the six bugs or the
+abbreviation-table work above, and out of scope for this session.
+
+**Regression**: `beer`, `cloak`, `zork1`, `advent`, `cloak_plus` all still
+compile and assemble to a valid story file (all now slightly *smaller*
+than before, from the same abbreviation compression), and `advent`
+confirmed still plays correctly (with abbreviation-compressed text
+decoding correctly) via a real `frotz` run.
+
+## MILESTONE 9b: two small, targeted code-size optimizations in
+`ZilCompile.mod` (same session) — real savings, still not enough alone to
+fit `sample/lurkinghorror`
+
+Comparing `V-VERSION` (a small, simple routine) byte-for-byte against a
+real zilf build turned up two concrete, safe wins - not a general
+optimizing pass, but two specific missing specializations:
+
+1. **`DO`'s default `+-1`-step loop now emits `IGRTR?`/`DLESS?`** (increment-
+   or-decrement-and-branch in one instruction) instead of separate
+   `INC`/`DEC` + `GRTR?`/`LESS?` + an unconditional `JUMP` back to the loop
+   top - 1 instruction instead of 3, exactly matching real zilf's own
+   `DoLoop` for this shape. Only applies when there's no explicit step and
+   the end is checked after the increment (`~doPre`); a custom step or a
+   pre-checked predicate end keeps the original three-instruction shape,
+   since `IGRTR?`/`DLESS?` are hardwired to move by exactly 1.
+2. **A peephole pass over each routine's buffered body** (right before it's
+   flushed, in the existing `BeginBuffer`/`EndBuffer`/`FlushBuffer`
+   machinery that already exists so the `.FUNCT` line can declare the
+   right temp-local count) **replaces `PUSH 0`/`PUSH 1` with
+   `RFALSE`/`RTRUE`** wherever the text proves that predecessor's only
+   remaining job is to reach a `RETURN STACK` - either via an immediately
+   following `JUMP`, or by falling straight through a chain of label-only
+   lines. This is the general form of what looked at first like a
+   COND-specific pattern: COND's clause compiler (and RETURN's, and
+   PROG/REPEAT's block-return) all produce an arbitrary value the same
+   way, by pushing it and jumping to a shared join point that eventually
+   does `RETURN STACK` - correct for any value, but wasteful for a
+   compile-time-constant boolean, which never needed the stack at all.
+   Retrofitting this into COND's own compiler directly would require it to
+   know whether it's in the routine's own tail position or a nested
+   sub-expression (where jumping straight out of the routine would be
+   *wrong*) - a bigger, riskier change to very central, very recursive
+   code. The peephole version sidesteps that entirely: it only touches a
+   `PUSH 0/1` whose actual control flow, confirmed by reading the buffered
+   text itself (not by reasoning about *why* it's shaped that way), leads
+   to `RETURN STACK` through nothing else - correct regardless of
+   which ZIL construct produced it, and regardless of what OTHER
+   predecessors of the same join point do. Leaves a small, harmless amount
+   of dead code behind (the join point's `RETURN STACK` and any label
+   cascade into it, once every predecessor turns out to be constant) -
+   removing that too would need real reachability analysis, not attempted.
+
+**Real, measured savings**, all games unaffected otherwise (still
+compile, assemble, and — checked via `frotz` runs of `advent` and `zork1`
+covering movement, TAKE ALL, container/lock failure messages, turning on
+the lantern — play correctly): `cloak` −520B, `zork1` −1846B, `advent`
+−1432B, `cloak_plus` −576B. `sample/lurkinghorror`'s packed-address
+overflow count dropped only 332→323 (compile+assemble still well under a
+second) - confirming these two, while real and safe, are far too narrow
+to close a gap this size on their own. Actually fitting it would still
+need the broader optimization pass described in MILESTONE 9 (register/
+temp allocation, avoiding unnecessary stack round-trips generally, shared
+subexpression reuse) - out of scope for this session.
+
+## MILESTONE 9c: two more codegen optimizations (same session, in response
+to "improve the optimization") — one small, one substantial
+
+Diffing a real, non-trivial routine (`PERFORM`, both games' common verb
+dispatcher) line-by-line against a real zilf build, rather than just the
+small one from MILESTONE 9b, turned up two more concrete, real-zilf-
+confirmed gaps:
+
+1. **A discarded user-routine call no longer emits `FSTACK`.** This port
+   used to always pop a discarded `CALL`'s result in V1-4 (CALL is a
+   storing-only opcode there, so *something* has to receive the value),
+   reasoning that skipping the pop would leave it "accumulating on the
+   stack." Checked against **six** real zilf builds spanning V3/V4/V5
+   (`name`, `advent`, `zork1`, `cloak`, `cloak_plus`, `beer`) - not one of
+   them ever emits `FSTACK`, or any pop, after a discarded user-routine
+   call, in any version. The real reason it's safe: a Z-machine routine
+   call gets its own stack frame with its own portion of the evaluation
+   stack, entirely discarded when that routine returns (Z-Machine Standard,
+   routine-call semantics) - an unpopped value from a nested `CALL` is
+   invisible to, and never confused with, anything the calling routine
+   does before or after it. This does *not* extend to a discarded
+   *builtin* opcode's result (`GETP`, `GET`, ...): those execute inline in
+   the CURRENT routine's own frame with no call/return boundary to clean
+   up after them, so that case would genuinely need a pop inside a loop -
+   this port has no code path that discards a builtin's value in the
+   first place, so it doesn't arise. Simplest fix of the three: delete the
+   one `IF opText = "STACK" THEN W("	FSTACK") END` line for the "discard a
+   user-routine call's result" case (V5+ already used the non-storing
+   `ICALL` family and is unaffected).
+2. **A second peephole, alongside MILESTONE 9b's `PUSH 0/1`→`RTRUE`/
+   `RFALSE` one, merges `<instr> >STACK` immediately followed by
+   `SET 'x,STACK` into `<instr> >x`** - any value-producing instruction can
+   store to any variable via its own store operand, not just the stack,
+   but this compiler always routes a value through the stack first even
+   when the very next thing done with it is an unconditional `SET` into a
+   named local. Grepping showed **137** occurrences of `SET '*,STACK`
+   in this port's own `sample/lurkinghorror` output and **zero** across
+   all six real builds above. Implemented the same way as the RTRUE/RFALSE
+   peephole (a pass over the routine's already-buffered body, run right
+   before `FlushBuffer`) rather than by teaching every value-producing
+   call site to recognize "the caller wants this stored straight into a
+   named local" - safe for the same reason: it only touches an immediately-
+   adjacent, exact-text-verified pair (a line ending in `>STACK`
+   immediately followed by exactly `SET 'name,STACK`), regardless of which
+   construct produced either line. Cut those 137 occurrences to 40 (the
+   remainder feed a value into something other than a plain trailing
+   `SET`, e.g. a COND test, and are real, not a missed case).
+
+**Real, measured savings on top of MILESTONE 9b's**, all games still
+compile, assemble, and play correctly - `zork1` replayed further this
+time (TAKE ALL, MOVE RUG revealing the trap door, OPEN TRAP DOOR, score
+incrementing) and, notably, **`cloak` was played to a genuine win** ("You
+have won", 2/2 points) with all four optimizations combined active. Sizes
+(post-MILESTONE-9b → post-MILESTONE-9c, i.e. this milestone's own two
+fixes only): `cloak` 32828→32296 (−532B), `zork1` 93408→92956 (−452B),
+`advent` 80596→79868 (−728B), `cloak_plus` 36120→35832 (−288B). Across
+the whole session (original unabbreviated size → now, all four
+optimizations plus abbreviation compression combined): `cloak` −1572B,
+`zork1` −11838B, `advent` −8700B, `cloak_plus` −1628B.
+`sample/lurkinghorror`'s packed-address overflow count: 323 → 264
+(FSTACK fix alone, the single biggest individual win of the session) →
+250 (stack-store merge). Still doesn't fit - four targeted peepholes/
+specializations found by diffing individual routines are closing the gap
+steadily (365 → 250, roughly a third of the original overflow count) but
+a systematic pass would still be needed to fully close it; each new diff
+against a real build keeps finding another real, fixable gap, suggesting
+there may be more of these left to find the same way before a genuine
+general optimizer becomes necessary.
+
+**MILESTONE 9d (2026-09-27, same session, continued): the RSTACK
+specialization plus its own generalization, and a genuine PRINC/stdout
+bug found along the way.**
+
+1. **`RETURN STACK` → `RSTACK`.** Both explicit `<RETURN>` (leaving the
+   routine, `blkIdx < 0`) and the implicit final-statement return now go
+   through a new `EmitReturnValue` helper that specializes the one-byte
+   `RSTACK` opcode (`ret_popped`, 0OP 184) whenever the value being
+   returned is already sitting on the stack, instead of the generic
+   `RETURN STACK`. Introducing this caused a real regression first
+   (advent/zork1/cloak all got *bigger*, not smaller) - traced to
+   `FallsToReturnStack`, part of the earlier MILESTONE 9b `PUSH 0/1`→
+   `RTRUE`/`RFALSE` peephole, which only recognized the literal text
+   `RETURN STACK` as a valid routine-epilogue terminator. Once some
+   epilogues started reading `RSTACK` instead, that earlier (bigger-impact)
+   peephole silently stopped firing for them, and the net effect was a
+   loss. Fixed by having `FallsToReturnStack` accept either spelling.
+   **Generalizable lesson for this compiler's whole family of buffered-
+   text peephole passes: introducing a new text-shape-changing
+   optimization means checking every EXISTING peephole's pattern-matcher
+   for an assumption about the OLD shape, not just adding the new pass.**
+2. **Generalized the same idea one step further**: a value-producing
+   instruction ending in `>STACK` (its result already exactly where
+   `RSTACK` expects it) that just `JUMP`s to a shared `RETURN STACK`/
+   `RSTACK` epilogue can have that `JUMP` replaced with `RSTACK` directly,
+   skipping the indirection - found by diffing `DO-SL`/`SEARCH-LIST`
+   against real zilf's `real_lh.zap`, where each of `DO-SL`'s COND clauses
+   ends `CALL SEARCH-LIST,... >STACK` followed immediately by `RSTACK`,
+   with no shared join label at all, where this port's version jumped to
+   one. Implemented as a third case in `OptimizeReturnValues` (reusing the
+   existing `EndsWithStackStore`/`JumpTarget`/`FallsToReturnStack`
+   helpers): value-producing line kept as-is, only the `JUMP` line after
+   it is replaced with `RSTACK`.
+3. **A real, independent bug found and fixed along the way, unrelated to
+   codegen size**: any game with a top-level `<PRINC "...">` banner (real
+   `zork1.zil` has one, printed purely as a compile-time console message
+   in real zilf, never part of the compiled game) had that banner text
+   land as the literal first line of the `.zap` output, which zapf then
+   rejected as an unrecognized opcode ("Renovated") - a total, silent
+   failure to assemble `zork1` at all whenever compiled without shell-
+   redirect tricks that happened to route around it. Root cause: ZilEval's
+   `PRINC`/`PRIN1`/`PRINT` wrote via `Out.String`, the same output
+   destination `ZilCompile`'s own `W`/`WLn` fall back to - so top-level
+   evaluator side effects and compiled `.zap` text shared a stream. Fixed
+   by routing `PRINC`/`PRIN1`/`PRINT` to `Out.ErrString`/`Out.ErrLn`
+   (stderr), the same stream `zilf`'s own `Fail()` already uses - matches
+   real zilf, where such prints go to the compiler's console, never into
+   the emitted file. This bug **predates this session** (reproduced
+   against unmodified `git HEAD`) and would have silently broken any
+   from-scratch `zork1` build; worth remembering that a previously-
+   recorded "clean zork1 build" byte count in this project's history could
+   have been produced before this bug existed, or via an invocation that
+   avoided it by accident.
+
+**Real, measured savings** (post-MILESTONE-9c → now, this milestone's two
+codegen changes only, all five sample games plus `lurkinghorror`
+recompiled/reassembled from a from-scratch rebuild of both `zilf` and
+`zapf`): `cloak` 32296→32150 (−146B), `zork1` 92956→92522 (−434B, only
+measurable at all once the PRINC bug above stopped blocking assembly),
+`advent` 79868→79422 (−446B), `cloak_plus` 35832→35640 (−192B). `beer`
+unchanged (512B, too small to have any RSTACK-shaped epilogues).
+`sample/lurkinghorror`'s packed-address overflow count: 250 → 210.
+Replayed for regressions: `cloak` **won again** ("You have won", 2/2);
+`zork1` replayed further than before - house/lamp/trap-door sequence,
+descending to the Cellar and Troll Room, and a **full randomized troll
+fight through to victory** (glow warnings, a miss, a stun, then the kill,
+matching real combat-resolution text) all correct; `advent` movement,
+take/drop, inventory, and lamp-on all correct. Still doesn't fit V3's
+128K limit, but the overflow count is now well under half its original,
+abbreviation-free starting value (365 → 210) purely from targeted,
+evidence-based peepholes - the same diff-against-real-zilf methodology
+keeps finding new real gaps every time it's tried, at a noticeably
+shrinking but still nonzero rate.
+
+**MILESTONE 9e (2026-09-27, same session, continued): four more
+optimizations, the biggest single-session gain yet - lurkinghorror's
+overflow count went from 210 to 33.**
+
+Diffing lurkinghorror's own routines against `real_lh.zap` line-by-line
+(counting each `.FUNCT`'s buffered body length in both builds) surfaced
+`HACKER-F` as the single worst offender (496 lines here vs 204 real) -
+inspecting it showed the SAME root cause repeating dozens of times over:
+a deeply nested COND compiles each clause as `PUSH 0/1; JUMP <join
+label>`, and those join labels chain into EACH OTHER (an inner COND's
+join jumps to its enclosing COND's join, which jumps to the routine's
+own shared return point) rather than resolving directly. MILESTONE 9d's
+`FallsToReturnStack` only followed ONE hop of this chain, so it missed
+almost every real instance.
+
+1. **Generalized jump-chain resolution.** Factored the shared "follow
+   label lines and pure JUMPs to whatever real instruction is at the end"
+   logic into one `ResolveControlFlow(idx): INTEGER` (bounded by a `hops`
+   counter for safety, though a cycle shouldn't occur in real compiled
+   output), and rewrote `FallsToReturnStack` to use it instead of a single
+   manual hop. This one change alone - no new peephole, just making an
+   EXISTING one see further - shrank `HACKER-F` from 496 to 462 lines and,
+   across the five sample games, saved `cloak` 96B, `advent` 688B,
+   `zork1` 1226B (the single biggest individual size win of the whole
+   session up to that point), `cloak_plus` 100B. lurkinghorror's overflow
+   count: 210 → 146.
+2. **`PRINTI "literal"; CRLF; RTRUE` → `PRINTR "literal"`.** Once (1)
+   turned all those `PUSH 1; JUMP <chain>` clauses into bare `RTRUE`
+   lines, the very common ZIL idiom `<TELL "..." CR> <RTRUE>` (or a COND
+   clause that just prints and stops) became visible as three separate
+   Z-machine instructions where real zilf uses print_ret (opcode 179,
+   `PRINTR`) as ONE - print an inline string literal, newline, return
+   true, all in a single instruction. `PRINTI` and `PRINTR` are both
+   1-byte-opcode/string-literal families (`print`/`print_ret`), so the
+   rewrite is just flipping the 7th character of the line ('I'→'R') and
+   dropping the following `CRLF`/`RTRUE` lines - implemented as
+   `MergePrintReturn`, run right after `OptimizeReturnValues`. Sizes:
+   `cloak` −142B, `advent` −638B, `zork1` −998B, `cloak_plus` −164B.
+   Overflow count: 146 → 126.
+3. **Branches straight to ZAP's own `TRUE`/`FALSE` pseudo-targets.**
+   `ZapfAsm.mod`'s `HandleInstruction` already special-cases
+   `l.branchTarget = "TRUE"`/`"FALSE"` (the Z-machine branch-instruction
+   format reserves offset values 0 and 1 for "return false"/"return true"
+   directly, no separate instruction needed) - but this port's own
+   codegen never once emitted `/TRUE` or `/FALSE` itself. Diffing
+   `PASSIVE-VERB?` (a chain of `<OR <EQUAL? ...> ...>` tests used as the
+   routine's own boolean return) against real zilf's 14-line version
+   showed real zilf writes each disjunct as `EQUAL? ... /TRUE`, falling
+   through to a final `RFALSE` - while this port's 79-line version
+   materializes a full 0/1 value into a temp for every single disjunct via
+   `PUSH`/`SET`/`ZERO?`. Rather than rearchitect how OR/COND compile (a
+   much bigger, riskier change - see below), added `OptimizeBranchTargets`
+   as a peephole: for every branch instruction, resolve its target through
+   `ResolveControlFlow` and, if it lands on a BARE `RTRUE`/`RFALSE`,
+   rewrite the branch's own target to `TRUE`/`FALSE` directly. 693 of
+   lurkinghorror's own branch instructions matched this pattern in one
+   measurement. Sizes: `cloak` −16B, `advent` −64B, `zork1` −128B,
+   `cloak_plus` −28B (modest on their own - see (4) for why). Overflow:
+   126 → 118.
+4. **`RemoveDeadCode`: a straight-line reachability sweep.** (3)'s
+   rewrites are modest alone because they only retarget the REFERRING
+   branch - the label and its `RTRUE`/`RFALSE` it used to jump through are
+   still sitting in the buffer afterward, now possibly true dead weight.
+   Added a classical unreachable-code elimination pass, run last: build
+   the set of labels still referenced by some JUMP or branch anywhere in
+   the routine's buffer, then sweep top to bottom tracking reachability -
+   reachable starts true, a label with an incoming reference makes it true
+   again, any of `RTRUE`/`RFALSE`/`RSTACK`/`RETURN ...`/`JUMP ...` makes it
+   false again immediately after (nothing can fall through past an
+   unconditional exit) - and drop every line seen while unreachable,
+   labels included. Confirmed no other part of this compiler ever takes
+   the "address" of a local `?`-prefixed label as data (grepped for it) -
+   they're only ever JUMP/branch targets, so this reachability definition
+   is complete, not an approximation. This was the single biggest win of
+   the session: `cloak` −188B, `advent` −420B, `zork1` −522B, `cloak_plus`
+   −256B. lurkinghorror's overflow count: 118 → **33**.
+
+Replayed for regressions after every one of these four (the riskiest
+being (4), since deleting code based on a reachability analysis is a
+different KIND of risk than the purely-local text rewrites used all
+session): `cloak` **won** at every step; `zork1` played through three
+separate full troll-fight resolutions on the final build - a clean win
+("A furious exchange, and the troll is knocked out!" → "He dies."), a
+death ("Conquering his fears, the troll puts you to death" → the real
+resurrection-with-score-penalty sequence, teleport to Forest, 35→25
+points, matching real Zork1's actual death mechanic, not a bug), and a
+disarm ("The axe hits your sword and knocks it spinning" → correctly
+can't attack barehanded afterward) - all three are genuine randomized
+combat outcomes with correct text, not compiler regressions; `advent`
+movement/take/drop/lamp all correct throughout.
+
+**Cumulative for the whole diff-against-real-zilf effort this session**
+(MILESTONE 9b through 9e; sizes are the abbreviation-compressed number
+from MILESTONE 9 through this point): `cloak` 32828→31708 (−1120B),
+`zork1` 93408→89648 (−3760B), `advent` 80596→77612 (−2984B),
+`cloak_plus` 36120→35092 (−1028B). Lurkinghorror's own routine-body line
+count against real zilf's: 23619→20213 lines (ratio 1.80→1.54). Overflow
+count: 250→33, a stone's throw from fitting.
+
+**What's left, per the same per-routine diff, is no longer peephole-shaped.**
+The worst remaining offenders (`PASSIVE-VERB?` still 79 vs 14 lines,
+`HACKER-F` still 355 vs 204, `PARSER` 495 vs 344) share one real, deeper
+cause: this compiler's OR/COND always compiles in "value" style -
+materialize a 0/1 result into a temp for every branch, no matter how the
+result is actually used - while real zilf recognizes when a COND/OR's
+result is used ONLY as the enclosing routine's own tail boolean return
+and compiles in "predicate" style instead (branch straight to `/TRUE`,
+fall through to a final `RFALSE`, no temp, no `ZERO?` re-test at all).
+Fixing that is a change to the actual OR/COND code-generation path, not
+another isolated text-rewriting pass over already-emitted output - a
+different, larger kind of change than anything done this session, with a
+correspondingly larger blast radius (COND and OR are used constantly,
+everywhere, by every routine in every game).
+
+**MILESTONE 9f (2026-09-27, same session, continued): the OR/COND
+code-generation fix itself - lurkinghorror's overflow count went from
+33 to 14.**
+
+The real fix, once worked out: real MDL's `<AND a b c>`/`<OR a b c>`
+returns the ACTUAL VALUE of whichever clause decided the result (the
+first false one for AND, the first true one for OR - or the last, if
+none decide it) - which is why this compiler's existing value-producing
+path (`CompileOperand`'s own AND/OR case) has to materialize each
+clause's real value into a compiler temp and re-test it with `ZERO?`
+after every single one, rather than just branching: it can't assume the
+result is a plain 0/1. BUT when EVERY clause is itself one of the small
+set of builtins the Z-machine (and this compiler's own `CompileCondition`)
+already treats as a genuine hardware branch instruction - `EQUAL?`,
+`ZERO?`, `FSET?`, `IN?`, `BTST`, `G=?`/`L=?`, `IGRTR?`/`DLESS?`, `NOT`/`F?`,
+nested `AND`/`OR` of the same, etc. - each clause's real value IS already
+exactly the T atom or FALSE, nothing else, so the AND/OR's own value is
+ALSO exactly T/FALSE by induction, and compiling it via `CompileCondition`'s
+existing short-circuit branch chain (the same one already used for a real
+`<COND>` test) produces the bit-identical result with none of the
+per-clause temp/`SET`/`ZERO?` overhead.
+
+Added `IsPureBoolForm(z): BOOLEAN`, a recursive checker mirroring
+`CompileCondition`'s own dispatch table exactly (same head list, by
+design - it has to reject anything `CompileCondition` treats via its
+generic "compile as a value and test against zero" fallback, since THAT
+path's real value is whatever the value actually was, not a clean T/FALSE
+- `FIRST?`/`NEXT?`/`INTBL?` genuinely return a found object/table address
+as their value despite also branching, `PROG`/`BIND`'s value is whatever
+its last statement computes, and a bare CALL to a user routine has no
+value guarantee just because its name looks like a predicate's).
+`NOT`/`F?` are unconditionally safe regardless of their own operand, since
+they coerce to a fresh T/FALSE by construction, discarding whatever the
+operand's real value was - which is exactly the property `AND`/`OR`
+values do NOT have in general, and why this whole exercise is needed in
+the first place. Wired into `CompileOperand`'s existing `AND`/`OR` case: when
+`IsPureBoolForm` accepts the whole form, compile it via one
+`CompileCondition` call to a shared "true" label plus a final `PUSH 0/1`
+(left in that shape deliberately - MILESTONE 9e's `OptimizeReturnValues`/
+`OptimizeBranchTargets`/`RemoveDeadCode` already run on every routine's
+buffered body and collapse it further whenever it turns out to sit in
+tail-return position, without this procedure needing to know that).
+
+Found by diffing `PASSIVE-VERB?` (lurkinghorror's own chain of `<OR
+<EQUAL? PRSA, ...> ...>` clauses used as its own tail-return value)
+against real zilf's 14-line version - this port's was 79 lines,
+materializing a full value into a temp after every single disjunct; after
+this fix, 19 lines, matching real zilf's shape almost exactly (the
+remaining 5-line gap is this port unconditionally allocating a return
+temp where real zilf reuses one of the routine's own declared locals -
+much smaller, not chased further).
+
+**Real, measured savings**, full rebuild and recompile of all five sample
+games plus lurkinghorror: `cloak` 31708→31444 (−264B), `advent`
+77612→77348 (−264B), `zork1` 89648→89568 (−80B, smaller here since
+zork1's own combat/parser code apparently uses fewer OR/AND-of-pure-
+predicates as values than cloak/advent's zillib-derived code does),
+`cloak_plus` 35092→34840 (−252B). lurkinghorror's overflow count: **33 →
+14** - a stone's throw from actually fitting V3's 128K limit.
+
+Regression-tested carefully given this is the broadest-blast-radius
+change of the whole session (every `AND`/`OR` used as a value anywhere in
+any routine, not just tail-return position, goes through the new path):
+`cloak` won again; `advent`'s output was BYTE-FOR-BYTE IDENTICAL between
+the pre- and post-fix builds on an extended walkthrough (take all,
+verbose, disambiguation, throw); `cloak_plus`'s output was also
+byte-for-byte identical on its own walkthrough (which hit an unrelated
+game-layout surprise - `cloak_plus` isn't map-compatible with plain
+`cloak`, a pre-existing quirk, not a regression - confirmed by the
+identical-output diff, not by re-deriving the map). `zork1`'s combat
+text differed between builds on the exact same input script - traced to
+frotz's RNG genuinely being real-time-seeded (already observed earlier
+this session: the SAME zork1 walkthrough produced three different combat
+outcomes - a win, a miss-then-retry, a death - across three earlier
+builds that only differed by pure code-shrinking peepholes, well before
+this OR/COND change existed), not a compiler regression - the fight still
+resolves correctly and completes in a similar number of rounds either
+way.
+
+**What's left**: lurkinghorror is now 14 packed-address overflows away
+from fitting V3's 128K ceiling, down from 365 at the start of this
+session's optimization work. The same diff-against-real-zilf methodology
+that found every fix so far is the natural next step if this is picked
+back up, though at 14 remaining the highest-value individual routines
+worth diffing next haven't yet been identified - the next session should
+start there rather than assuming which ones they are.
+
+**MILESTONE 9g (2026-09-27, same session, continued): `sample/lurkinghorror`
+FITS V3 AND IS PLAYABLE. Two more fixes closed the remaining 14 packed-
+address overflows to zero.**
+
+Diffing `HACKER-F` yet again (down to 106 lines over real zilf's 204, from
+496 at the start of the session) found two remaining, distinct gaps in
+the SAME routine:
+
+1. **`IsTerminator` didn't know about `PRINTR`.** `MergePrintReturn`
+   (MILESTONE 9e) turns `PRINTI "x"; CRLF; RTRUE` into one `PRINTR "x"`
+   line - but `print_ret` (opcode 179) unconditionally returns true too,
+   exactly like a bare `RTRUE`, and `RemoveDeadCode`'s reachability sweep
+   (also 9e) never learned that. Every `PRINTR` clause in `HACKER-F` was
+   leaving its old join-label-and-jump plumbing sitting in the buffer
+   afterward, genuinely unreachable, but `RemoveDeadCode` didn't know to
+   treat `PRINTR` as a terminator so never swept it. One more literal-
+   prefix check added to `IsTerminator`, mirroring `IsPrintiLiteral`'s own
+   shape. Sizes: `cloak` −48B, `advent` −276B, `zork1` −400B, `cloak_plus`
+   −44B. lurkinghorror overflow: 33 → 1.
+2. **Jump-to-jump chains were never actually collapsed, only resolved
+   for two narrow internal checks.** `ResolveControlFlow` (9e) already
+   follows a chain of pure `JUMP`s to find out WHERE it ends up, for
+   `FallsToReturnStack` and `ResolvesToBareReturn` - but nothing ever
+   REWROTE the original `JUMP`/branch instruction to point straight at
+   that final destination when the destination wasn't specifically a bare
+   RTRUE/RFALSE/RETURN-STACK. A deeply nested COND's clause boundaries
+   compile as exactly this shape - `?L6120: JUMP ?L6118` sitting between
+   two ordinary clauses, both real instructions, neither a return - and
+   real zilf's own COND compilation never creates the intermediate label
+   at all, chaining clauses directly. Added `FollowJumpChain` (the same
+   walk, generalized to work for ANY final destination, not just the two
+   return-shaped ones) and `CollapseJumpChains`, a peephole applying it to
+   every `JUMP` and every branch operand in the buffer, run right before
+   `RemoveDeadCode` so that pass can then sweep away whatever
+   intermediate labels end up with no referrers left at all. Sizes:
+   `cloak` −42B, `advent` −74B, `zork1` −238B, `cloak_plus` −28B.
+   lurkinghorror overflow: **1 → 0**.
+
+**`sample/lurkinghorror` - The Lurking Horror, the real, unmodified 1987
+Infocom game, 16 INSERT-FILEd sources - now compiles, assembles to a
+130818-byte V3 story file (under the 131072-byte ceiling with 254 bytes
+to spare), and plays correctly.** Verified: the opening sequence (dorm/
+storm/Comp-Center framing text), the Terminal Room, examining and
+navigating around the hacker (`ask hacker about lovecraft` → "Wasn't he a
+fantasy author?", exactly `HACKER-F`'s own compiled text, and correctly
+refusing to let the PC be carried off - "You can't walk off with that!
+It's Tech property!"), taking/dropping/inventory, and multi-room
+navigation (Terminal Room → Second Floor → Kitchen) all behave correctly.
+`cloak`, `advent`, and `cloak_plus` all produced byte-for-byte IDENTICAL
+output on their existing walkthroughs across both of this milestone's
+fixes; `zork1`'s troll fight resolved correctly with the same combat text
+vocabulary, RNG-driven outcome varying run to run as already established
+earlier in this session.
+
+**Cumulative for the whole session's diff-against-real-zilf effort**
+(MILESTONE 9b through 9g): lurkinghorror's packed-address overflow count
+went from 365 (before any of this session's optimizations, with
+abbreviations already applied) to 0. Eleven distinct codegen passes/fixes
+landed along the way (`IGRTR?`/`DLESS?` fusion, RTRUE/RFALSE peephole,
+FSTACK removal, stack-store merge, RSTACK specialization, generalized
+jump-chain resolution for return detection, PRINTR fusion, TRUE/FALSE
+branch retargeting, dead-code elimination, the OR/COND `IsPureBoolForm`
+codegen fix, and finally PRINTR-as-terminator plus general jump-chain
+collapsing), each found the same way: compile a real routine, diff it
+against `~/lib/src/zilf`'s own C# compiler's output for the identical
+source, find a concrete, evidenced gap, fix it narrowly, verify against
+all five other sample games plus a frotz playthrough, document, repeat.
+This is now the SIXTH real game this port can compile, assemble, and
+play - and the one that most directly matches the project's original
+stated goal ("a system that can compile and run real games").
+
+**Incident, same session, worth recording**: partway through this
+milestone's rebuild cycles, `examples/zilf.mod` and `examples/zapf.mod`
+turned up completely missing from disk - `git diff` showed them fully
+deleted, with no error from any `obc` invocation along the way, and the
+exact cause was never established (a deliberate reproduction attempt
+didn't reproduce it). Recovered via `git checkout -- examples/zilf.mod
+examples/zapf.mod`, but that silently restored the last COMMITTED
+version, which lacked an uncommitted fix from earlier the same day (the
+`DirOf` trailing-slash fix behind this exact milestone's own opening
+paragraphs). The regression wasn't obvious on sight - it surfaced as a
+brand-new compile error on the very next `lurkinghorror` build
+(`DEFAULT-DEFINITION: duplicate default for section: DARKNESS-F`) that
+hadn't been there moments before, diagnosed by re-deriving the fix from
+`ZilEval.mod`'s OWN (unaffected, still-intact) copy of `DirOf` as the
+reference for what the convention should be, then reapplying it to
+`examples/zilf.mod`. Reverified afterward that a full rebuild+recompile
+of all five sample games plus lurkinghorror produced byte-identical
+`.zap` output to the last-known-good build from before the incident. See
+[[feedback_uncommitted_source_loss]] for the fuller writeup and the
+standing lesson: commit working milestones promptly rather than letting
+a whole session's worth of real fixes sit uncommitted, and re-run
+end-to-end verification (not just "did it compile") after recovering any
+file that went missing.

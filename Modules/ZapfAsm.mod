@@ -115,7 +115,27 @@ TYPE
     reassemblyLabelCount: INTEGER;
     deferredNames: ARRAY 64 OF ARRAY 80 OF CHAR;
     deferredExpected: ARRAY 64 OF INTEGER;
-    deferredCount: INTEGER
+    deferredCount: INTEGER;
+
+    (* "Batch, don't rewind on the first mismatch": a local-label mismatch
+       used to rewind and replay the WHOLE routine immediately, one mismatch
+       at a time - fine when a routine has one or two wrong guesses, but a
+       routine with many (each branch/label independently discovering it
+       needs a bigger encoding once abbreviation-driven code shrinkage moves
+       many distances near the short/long threshold at once) needed one full
+       replay PER wrong label, compounding into millions of replays. Instead,
+       HandleLabel now corrects a mismatched label'S VALUE in place and just
+       sets reassemblyDirty, letting the rest of the routine's ALREADY-
+       started pass keep going (so every OTHER label gets a chance to also
+       self-correct in the SAME pass); EndReassemblyScope, at the routine's
+       natural end, replays the whole thing again (once) only if anything
+       was actually dirty, converging in O(rounds) full replays instead of
+       O(number of wrong labels). pendingReassembleTo is how that "replay
+       once more" request reaches back to the PassOne/PassTwo loop, since
+       EndReassemblyScope is reached through HandleDirective, which (unlike
+       HandleLabel) does not take nodeIndex by VAR. *)
+    reassemblyDirty*: BOOLEAN;
+    pendingReassembleTo*: INTEGER
   END;
 
 (* ------------------------------------------------------------------ *)
@@ -701,7 +721,8 @@ BEGIN
   ctx.deferredCount := 0;
   ctx.reassemblyNodeIndex := nodeIndex;
   ctx.reassemblyPosition := ctx.position;
-  ctx.reassemblySymbol := sym
+  ctx.reassemblySymbol := sym;
+  ctx.reassemblyDirty := FALSE
 END BeginReassemblyScope;
 
 (* Registers "symbol should end up equal to expected" to be checked once,
@@ -743,11 +764,16 @@ BEGIN
 END CausesReassembly;
 
 (* Rewinds output/local-symbol state to the start of the current .FUNCT
-   body; returns the AST node index the caller should resume from. *)
-PROCEDURE Reassemble*(ctx: Context; curLabel: ARRAY OF CHAR): INTEGER;
-VAR s, prev, cur, nxt: Symbol;
+   body (marking every existing local label phantom again so it gets
+   re-validated, and dropping non-label locals - PROG/REPEAT bindings don't
+   survive a routine restart); returns the AST node index the caller should
+   resume from. Called from EndReassemblyScope, once, when the routine's
+   natural-end replay found the pass dirty (see reassemblyDirty's comment on
+   the Context record) - not from HandleLabel directly any more, since a
+   single mismatch no longer triggers its own immediate rewind. *)
+PROCEDURE RewindReassemblyScope(ctx: Context): INTEGER;
+VAR s, prev, nxt: Symbol;
 BEGIN
-  DefineLocal(ctx, curLabel, SymLabel, ctx.position);
   s := ctx.localHead; prev := NIL;
   WHILE s # NIL DO
     nxt := s.lnext;
@@ -763,32 +789,60 @@ BEGIN
   IF ctx.reassemblySymbol # NIL THEN ctx.reassemblySymbol.phantom := TRUE END;
   ctx.reassemblyLabelCount := 0;
   ctx.deferredCount := 0;
+  ctx.reassemblyDirty := FALSE;
   ctx.position := ctx.reassemblyPosition;
   RETURN ctx.reassemblyNodeIndex
-END Reassemble;
+END RewindReassemblyScope;
 
 PROCEDURE EndReassemblyScope*(ctx: Context; nodeIndex: INTEGER);
 VAR i: INTEGER; sym: Symbol; msg: ARRAY 200 OF CHAR;
 BEGIN
   IF nodeIndex # ctx.reassemblyNodeIndex THEN
-    ctx.reassemblyLabelCount := 0;
-    ctx.reassemblyNodeIndex := -1;
-    ctx.reassemblyPosition := -1;
-    ctx.reassemblySymbol := NIL;
-    ClearLocals(ctx);
-    FOR i := 0 TO ctx.deferredCount - 1 DO
-      sym := FindGlobal(ctx, ctx.deferredNames[i]);
-      IF (sym # NIL) & (sym.value # ctx.deferredExpected[i]) THEN
-        IF ctx.finalPass THEN
-          Strings.Copy("global label ", msg); Strings.Append(ctx.deferredNames[i], msg);
-          Strings.Append(" seems to have moved", msg);
-          Fatal(ctx, "", 0, msg)
-        ELSE
-          ctx.measureAgain := TRUE
+    IF ctx.reassemblyDirty THEN
+      (* Some local label inside this routine corrected itself mid-pass
+         (see HandleLabel's own comment) rather than rewinding immediately.
+         Replay the whole routine once more, now that every label's value
+         has settled, so every instruction - including ones written BEFORE
+         the corrected label, using its stale guess - gets re-emitted
+         consistently. RewindReassemblyScope clears reassemblyDirty, so a
+         routine that needed several rounds keeps re-triggering this same
+         path each time until a full replay makes no further correction.
+
+         Not finalPass-fatal, unlike the deferred GLOBAL-label check just
+         below: local-label memory (ctx.localHead) is per-routine and gets
+         cleared the moment a routine's scope ends normally (a few lines
+         down), so it holds nothing at all at the start of the final pass -
+         every routine's FIRST local label there is unavoidably a fresh
+         "sym = NIL" discovery, and any branch inside it that referenced a
+         later label before reaching it needs exactly the one harmless
+         replay this triggers, same as the very first time that routine was
+         ever measured. That is expected on every pass, not a sign that
+         sizes are still unstable - the sticky farBranch/forcedVarForm/
+         forcedWide fields (which DO carry over, being properties of the
+         Line/Expr objects rather than of this per-pass symbol table) are
+         what actually guarantee convergence; local labels just replay
+         their one routine once more to re-derive positions from them. *)
+      ctx.pendingReassembleTo := RewindReassemblyScope(ctx)
+    ELSE
+      ctx.reassemblyLabelCount := 0;
+      ctx.reassemblyNodeIndex := -1;
+      ctx.reassemblyPosition := -1;
+      ctx.reassemblySymbol := NIL;
+      ClearLocals(ctx);
+      FOR i := 0 TO ctx.deferredCount - 1 DO
+        sym := FindGlobal(ctx, ctx.deferredNames[i]);
+        IF (sym # NIL) & (sym.value # ctx.deferredExpected[i]) THEN
+          IF ctx.finalPass THEN
+            Strings.Copy("global label ", msg); Strings.Append(ctx.deferredNames[i], msg);
+            Strings.Append(" seems to have moved", msg);
+            Fatal(ctx, "", 0, msg)
+          ELSE
+            ctx.measureAgain := TRUE
+          END
         END
-      END
-    END;
-    ctx.deferredCount := 0
+      END;
+      ctx.deferredCount := 0
+    END
   END
 END EndReassemblyScope;
 
@@ -834,6 +888,7 @@ BEGIN
   ctx.finalPass := FALSE; ctx.measureAgain := FALSE; ctx.abortLine := FALSE;
   ctx.reassemblyNodeIndex := -1; ctx.reassemblyPosition := -1; ctx.reassemblySymbol := NIL;
   ctx.reassemblyLabelCount := 0; ctx.deferredCount := 0;
+  ctx.reassemblyDirty := FALSE; ctx.pendingReassembleTo := -1;
   ctx.unicodeTableCount := 0;
   ZapfZChar.ResetUnicodeTable;
   IF ctx.informMode THEN Strings.Copy("sp", stackName) ELSE Strings.Copy("STACK", stackName) END;
@@ -847,7 +902,15 @@ BEGIN
   ctx.globalVarCount := 0; ctx.objectCount := 0;
   ctx.functionsOffset := 0; ctx.stringsOffset := 0;
   ctx.unicodeTableCount := 0;
-  ZapfZChar.ResetUnicodeTable
+  ZapfZChar.ResetUnicodeTable;
+  (* Abbreviations (whether hand-written .FSTR lines or the auto-discovered
+     ones AutoAbbreviate splices in) get re-registered from scratch on every
+     pass, same as everything else here - Encode freezes ZapfZChar.frozen
+     the moment the first ordinary string gets encoded, and without this
+     reset that would still be true at the start of the NEXT pass, so its
+     .FSTR lines (which run again, like every other line) would hit
+     "abbreviations must be defined before strings" on pass two onward. *)
+  ZapfZChar.ResetAbbrevs
 END ResetBetweenPasses;
 
 PROCEDURE CheckForUndefinedSymbols*(ctx: Context);
@@ -970,8 +1033,11 @@ BEGIN
       s := FindGlobal(ctx, inner.text);
       IF s # NIL THEN
         IF s.kind = SymVariable THEN otype := OpVar
-        ELSIF (s.value >= 0) & (s.value < 256) THEN otype := OpByte
-        ELSE otype := OpWord
+        ELSE
+          (* sticky: never re-narrow an operand this line already needed
+             the word form for - see Expr.forcedWide's own comment *)
+          IF (s.value < 0) OR (s.value >= 256) THEN inner.forcedWide := TRUE END;
+          IF inner.forcedWide THEN otype := OpWord ELSE otype := OpByte END
         END;
         ovalue := s.value
       ELSIF ctx.finalPass & ~allowLocalLabel THEN
@@ -991,7 +1057,8 @@ BEGIN
     EvalExpr(ctx, inner, file, line, ek, ev);
     uv := ev MOD 65536;
     ovalue := uv;
-    IF uv < 256 THEN otype := OpByte ELSE otype := OpWord END
+    IF uv >= 256 THEN inner.forcedWide := TRUE END;
+    IF inner.forcedWide THEN otype := OpWord ELSE otype := OpByte END
   END;
 
   IF apos THEN otype := OpByte END
@@ -1202,6 +1269,9 @@ BEGIN
         IF IsLongConstant(ctx, ops[i], l.sourceFile, l.lineNum) THEN needVar := TRUE END
       END
     END;
+    (* sticky: see forcedVarForm's own comment *)
+    IF needVar THEN l.forcedVarForm := TRUE END;
+    IF l.forcedVarForm THEN needVar := TRUE END;
     IF needVar THEN opcode := opcode + 192 END
   END;
 
@@ -1317,7 +1387,11 @@ BEGIN
         sym := FindLocal(ctx, l.branchTarget);
         IF sym # NIL THEN
           offset := sym.value - (ctx.position + 1) + 2;
-          IF (offset < 2) OR (offset > 63) THEN far := TRUE; offset := offset - 1 END
+          IF (offset < 2) OR (offset > 63) THEN far := TRUE END;
+          (* sticky: never re-narrow a branch this line already needed the
+             far form for - see farBranch's own comment *)
+          IF far THEN l.farBranch := TRUE ELSE far := l.farBranch END;
+          IF far THEN offset := offset - 1 END
         ELSE
           offset := 2;
           MarkUnknownBranch(ctx, l.branchTarget)
@@ -1386,19 +1460,25 @@ BEGIN
     IF ~InReassemblyScope(ctx) THEN
       Serious(ctx, l.sourceFile, l.lineNum, "local labels not allowed outside a function"); RETURN
     END;
+    (* Correct-in-place-and-keep-going, not rewind-immediately: a label
+       whose value differs from what an earlier branch guessed (or that an
+       earlier branch referenced before it was ever defined) just gets its
+       real value recorded here, with ctx.reassemblyDirty marking that this
+       routine needs one more full replay before it can be trusted -
+       EndReassemblyScope does that replay, once, at the routine's natural
+       end. This lets every OTHER label in the routine get its own chance to
+       self-correct within the SAME pass, rather than each one needing its
+       own full rewind-and-replay (see reassemblyDirty's own comment). *)
     sym := FindLocal(ctx, l.name);
     IF sym = NIL THEN
-      IF CausesReassembly(ctx, l.name) THEN
-        nodeIndex := Reassemble(ctx, l.name) - 1
-      ELSE
-        DefineLocal(ctx, l.name, SymLabel, ctx.position)
-      END
+      DefineLocal(ctx, l.name, SymLabel, ctx.position);
+      IF CausesReassembly(ctx, l.name) THEN ctx.reassemblyDirty := TRUE END
     ELSIF (sym.kind = SymLabel) & sym.phantom THEN
       IF sym.value # ctx.position THEN
-        nodeIndex := Reassemble(ctx, l.name) - 1
-      ELSE
-        sym.phantom := FALSE
-      END
+        sym.value := ctx.position;
+        ctx.reassemblyDirty := TRUE
+      END;
+      sym.phantom := FALSE
     ELSE
       Serious(ctx, l.sourceFile, l.lineNum, "redefining local label")
     END
@@ -1573,7 +1653,15 @@ BEGIN
        to the NEXT instruction) -- .DEBUG-LINE is skipped entirely (out of
        scope) so it never reaches here as a distinct kind. *)
     IF (l.kind # ZapfAst.LkForm) & (l.kind # ZapfAst.LkOperand) THEN
-      EndReassemblyScope(ctx, nodeIndex)
+      EndReassemblyScope(ctx, nodeIndex);
+      (* A dirty routine ending here asked to be replayed - PassOne/PassTwo
+         will rewind nodeIndex once this call returns (see
+         ctx.pendingReassembleTo's own comment), so THIS line - typically
+         the very next .FUNCT, which would otherwise run BeginFunction and
+         register a whole different routine's locals/globals before the
+         rewind ever takes effect - must not be processed at all this time
+         around. It gets its normal, correct treatment on the replay. *)
+      IF ctx.pendingReassembleTo >= 0 THEN RETURN END
     END
   END;
 
@@ -2080,6 +2168,16 @@ BEGIN
 
   ELSE
     HandleDirective(ctx, l, nodeIndex, FALSE)
+  END;
+  (* EndReassemblyScope (reached through HandleDirective, above) cannot
+     rewind nodeIndex itself - it only gets nodeIndex by value, not VAR, so
+     a routine's "replay once more, now that a dirty pass has settled every
+     label's value" request comes back via ctx.pendingReassembleTo instead.
+     The -1 matches HandleLabel's own old inline "nodeIndex := ... - 1": the
+     caller's loop does INC(nodeIndex) right after this returns. *)
+  IF ctx.pendingReassembleTo >= 0 THEN
+    nodeIndex := ctx.pendingReassembleTo - 1;
+    ctx.pendingReassembleTo := -1
   END
 END PassOne;
 
@@ -2092,6 +2190,10 @@ BEGIN
    |ZapfAst.LkLocalLbl, ZapfAst.LkGlobalLbl: HandleLabel(ctx, l, nodeIndex)
   ELSE
     HandleDirective(ctx, l, nodeIndex, TRUE)
+  END;
+  IF ctx.pendingReassembleTo >= 0 THEN
+    nodeIndex := ctx.pendingReassembleTo - 1;
+    ctx.pendingReassembleTo := -1
   END
 END PassTwo;
 
@@ -2151,6 +2253,119 @@ BEGIN
   END
 END AppendFlatten;
 
+(* Scans every already-parsed line for printable text (.GSTR/.STR/.STRL
+   text, and any string OPERAND of an ordinary instruction - which is where
+   PRINTI's literal actually lives), runs ZapfZChar's frequency analysis
+   over all of it, and - if it found anything worth abbreviating - splices
+   the resulting .FSTR definitions plus a WORDS table referencing them
+   (in the same order the .FSTR lines register them, so table index i really
+   is Z-machine abbreviation number i) in at the very front of ctx.lines,
+   ahead of everything else. That mirrors where a real zilf build's own
+   `.INSERT "game_freq"` line sits (first, before even `.INSERT
+   "game_data"`) and matters for the same reason: ZapfZChar freezes further
+   abbreviation registration the moment it encodes the first ordinary
+   string, so the .FSTR block has to run before any of those.
+
+   Deliberately NOT gated behind the game's own <FREQUENT-WORDS?> flag (a
+   no-op in ZilCompile.mod - the games this port has actually needed to fit
+   under the platform's 128K/256K packed-address ceiling exist because
+   nothing here does string-abbreviation compression at all yet, not
+   because a game opted out of it) - running it unconditionally can only
+   shrink the output, and every existing sample game still assembles to the
+   same byte count when the corpus has nothing worth abbreviating (see this
+   procedure's own early-return). *)
+PROCEDURE AutoAbbreviate(ctx: Context);
+CONST MaxNewLines = ZapfZChar.MaxAbbrevs + 4;
+VAR i, wordsAt, nCand, nFstr, nWord: INTEGER;
+    texts: ZapfZChar.AbbrevTextArr;
+    l: ZapfAst.Line; en: ZapfAst.ExprNode;
+    nameBuf, numBuf: ARRAY 32 OF CHAR;
+    fstrLines, wordLines: ARRAY MaxNewLines OF ZapfAst.Line;
+BEGIN
+  ZapfZChar.ResetCorpus;
+  i := 0;
+  WHILE i < ctx.lineCount DO
+    l := ctx.lines[i];
+    IF (l.kind = ZapfAst.LkGstr) OR (l.kind = ZapfAst.LkStr) OR (l.kind = ZapfAst.LkStrl) THEN
+      ZapfZChar.AddCorpusText(l.text)
+    ELSIF l.kind = ZapfAst.LkInstr THEN
+      en := l.exprList.head;
+      WHILE en # NIL DO
+        IF en.e.kind = ZapfExpr.KindStr THEN ZapfZChar.AddCorpusText(en.e.text) END;
+        en := en.next
+      END
+    END;
+    INC(i)
+  END;
+
+  ZapfZChar.FindAbbreviations(ZapfZChar.MaxAbbrevs, texts, nCand);
+  IF nCand = 0 THEN RETURN END;
+
+  (* ZilCompile.mod already emits a "WORDS::" global label - right after the
+     dictionary, at the point its own WriteHeader lookup for that name would
+     otherwise resolve to a harmless "nothing here" address (see
+     EmitVocab's own comment for why it's there at all). That label IS the
+     abbreviation table's real home; defining a SECOND "WORDS::" here as
+     well, wherever this splice happened to land, would just leave two
+     Line objects sharing one global symbol name, and HandleLabel does not
+     treat that as a redefinition error, only as "this label moved" -
+     harmless-looking, but a Symbol has exactly one .value, so processing
+     BOTH definitions every pass makes it flip between their two positions
+     forever, which never converges (confirmed the hard way, chasing a
+     genuine infinite loop). So: only the .FSTR pool goes at the very front
+     (ahead of every other string, as ZapfZChar.frozen requires); the
+     .WORD list of FSTR addresses is spliced in right after the EXISTING
+     "WORDS::" line instead of introducing a competing one. *)
+  wordsAt := -1;
+  i := 0;
+  WHILE (i < ctx.lineCount) & (wordsAt < 0) DO
+    IF (ctx.lines[i].kind = ZapfAst.LkGlobalLbl) & (ctx.lines[i].name = "WORDS") THEN
+      wordsAt := i
+    END;
+    INC(i)
+  END;
+  IF wordsAt < 0 THEN RETURN END;  (* no WORDS:: label to hang the table off - give up quietly *)
+
+  nFstr := 0;
+  FOR i := 0 TO nCand - 1 DO
+    l := ZapfAst.NewLine(ZapfAst.LkFstr);
+    Strings.Copy("FSTR?", nameBuf); Strings.IntToStr(i, numBuf); Strings.Append(numBuf, nameBuf);
+    Strings.Copy(nameBuf, l.name);
+    Strings.Copy(texts[i], l.text);
+    fstrLines[nFstr] := l; INC(nFstr)
+  END;
+
+  nWord := 0;
+  FOR i := 0 TO nCand - 1 DO
+    l := ZapfAst.NewLine(ZapfAst.LkWord);
+    Strings.Copy("FSTR?", nameBuf); Strings.IntToStr(i, numBuf); Strings.Append(numBuf, nameBuf);
+    ZapfAst.AddExpr(l.exprList, ZapfExpr.NewSym(nameBuf));
+    wordLines[nWord] := l; INC(nWord)
+  END;
+
+  IF ctx.lineCount + nFstr + nWord > MaxLines THEN RETURN END;  (* best-effort only *)
+
+  (* splice the .WORD list in right after "WORDS::" (at wordsAt) first, so
+     wordsAt is still valid when this runs - inserting the .FSTR pool at
+     the front first would shift it by nFstr *)
+  FOR i := ctx.lineCount - 1 TO wordsAt + 1 BY -1 DO
+    ctx.lines[i + nWord] := ctx.lines[i]
+  END;
+  FOR i := 0 TO nWord - 1 DO
+    ctx.lines[wordsAt + 1 + i] := wordLines[i]
+  END;
+  ctx.lineCount := ctx.lineCount + nWord;
+
+  (* now splice the .FSTR pool in at the very front *)
+  FOR i := ctx.lineCount - 1 TO 0 BY -1 DO
+    ctx.lines[i + nFstr] := ctx.lines[i]
+  END;
+  FOR i := 0 TO nFstr - 1 DO
+    ctx.lines[i] := fstrLines[i]
+  END;
+  ctx.lineCount := ctx.lineCount + nFstr
+END AutoAbbreviate;
+
 (* ------------------------------------------------------------------ *)
 (* top-level assembly + CLI entry point                                  *)
 (* ------------------------------------------------------------------ *)
@@ -2161,6 +2376,7 @@ BEGIN
   ZapfParser.InitParser(p, ctx.informMode, ctx.zversion);
   ctx.lineCount := 0;
   AppendFlatten(ctx, p, ctx.inFile, TRUE);
+  AutoAbbreviate(ctx);
 
   IF ~ctx.quiet THEN Out.String("Measuring") END;
   ctx.finalPass := FALSE;

@@ -67,8 +67,22 @@ BEGIN
   OS.Exit(1)
 END Fail;
 
-(* The directory part of `path`, for INSERT-FILE to resolve against — see
-   ZilEval.SetCurrentDir's own comment. *)
+(* The directory part of `path`, WITH its trailing slash, for INSERT-FILE
+   to resolve against — see ZilEval.SetCurrentDir's own comment. Must
+   match ZilEval.mod's own (separate) DirOf convention exactly:
+   LoadFile builds a candidate path via bare `Strings.Copy(currentDir,
+   cand); Strings.Append(nm, cand)`, with no separator check, so
+   currentDir has to end in "/" already (same as AddIncludePath's own
+   entries) - the ORIGINAL form of this procedure left the slash off,
+   which meant the INITIAL currentDir (set here, once, before any nested
+   INSERT-FILE has run its own DirOf) silently concatenated straight into
+   the bare filename with no separator at all - `.../lurkinghorrorfrob`,
+   not `.../lurkinghorror/frob` - so a game's own local override files
+   were never actually found by that first candidate and every INSERT-FILE
+   fell through to the library path instead, quietly picking up zillib's
+   same-named file. Only the FIRST file's own top-level INSERT-FILEs were
+   affected; every nested one already used ZilEval's own DirOf, which
+   always kept the slash. *)
 PROCEDURE DirOf(path: ARRAY OF CHAR; VAR d: ARRAY OF CHAR);
 VAR k, lastSlash: INTEGER;
 BEGIN
@@ -80,8 +94,8 @@ BEGIN
   END;
   IF lastSlash < 0 THEN d[0] := 0X
   ELSE
-    FOR k := 0 TO lastSlash - 1 DO d[k] := path[k] END;
-    d[lastSlash] := 0X
+    FOR k := 0 TO lastSlash DO d[k] := path[k] END;
+    d[lastSlash + 1] := 0X
   END
 END DirOf;
 

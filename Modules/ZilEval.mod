@@ -337,6 +337,7 @@ BEGIN IF b THEN RETURN TrueVal() ELSE RETURN FalseVal() END END BoolVal;
    Lists/forms/vectors are not compared deeply yet (not needed by any
    SUBR implemented so far). *)
 PROCEDURE ValuesEqual*(a, b: ZilObj.Zo): BOOLEAN;
+VAR aAtom: ZilObj.Zo;
 BEGIN
   IF a = b THEN RETURN TRUE END;
   IF (a = NIL) OR (b = NIL) THEN RETURN FALSE END;
@@ -345,6 +346,24 @@ BEGIN
     ZilObj.KFix: RETURN a.fixVal = b.fixVal
    |ZilObj.KChar: RETURN a.charVal = b.charVal
    |ZilObj.KString: RETURN (a.strLen = b.strLen) & (a.strBuf^ = b.strBuf^)
+   |ZilObj.KForm:
+      (* Ported from ZilForm.ExactlyEquals: two separately-built ",X"/".X"
+         forms referencing the SAME atom are exact-equal even though they
+         are different FORM objects — real library idioms depend on it
+         (misc.zil's MULTIFROB, the shared engine behind VERB?/PRSO?/PRSI?/
+         HERE?, does <==? .X ',PRSA> to tell which global its caller meant,
+         where .X and the ',PRSA> literal are two distinct FORM nodes built
+         from separate source occurrences). Without this, VERB? always fell
+         through to MULTIFROB's ELSE branch and returned the bare verb atom
+         instead of the ",V?<verb>" global reference the game actually
+         needed, so The Lurking Horror's <VERB? SGIVE ...> etc. emitted a
+         reference to a plain "SGIVE" symbol that was never defined
+         anywhere, rather than to the real V?SGIVE action-number constant. *)
+      aAtom := ValFormAtom(a, "GVAL");
+      IF aAtom # NIL THEN RETURN aAtom = ValFormAtom(b, "GVAL") END;
+      aAtom := ValFormAtom(a, "LVAL");
+      IF aAtom # NIL THEN RETURN aAtom = ValFormAtom(b, "LVAL") END;
+      RETURN FALSE
   ELSE
     RETURN FALSE
   END
@@ -1372,13 +1391,18 @@ BEGIN
     RETURN MkVal(BoolVal(~IsTrue(args[0])))
 
   ELSIF (name = "PRINC") OR (name = "PRIN1") OR (name = "PRINT") THEN
+    (* Compile-time console chatter, not compiled output - a game's own
+       top-level <PRINC "banner"> (zork1 has one) must never land in the
+       .zap file. Goes to stderr, same stream zilf's own Fail() uses, since
+       Out.String here would otherwise share whatever stream ZilCompile's
+       own W/WLn is currently writing .zap text to. *)
     IF n # 1 THEN RETURN Err("PRINC/PRIN1/PRINT: expected 1 arg") END;
     IF (name = "PRINC") & (args[0].kind = ZilObj.KString) THEN
-      Out.String(args[0].strBuf^)
+      Out.ErrString(args[0].strBuf^)
     ELSE
-      ZilObj.PrintTo(args[0], s); Out.String(s)
+      ZilObj.PrintTo(args[0], s); Out.ErrString(s)
     END;
-    IF name = "PRINT" THEN Out.Ln END;
+    IF name = "PRINT" THEN Out.ErrLn END;
     RETURN MkVal(args[0])
 
   ELSIF name = "CRLF" THEN
@@ -1406,6 +1430,19 @@ BEGIN
 
   ELSIF name = "LIST" THEN
     RETURN MkVal(BuildConsChain(ZilObj.KList, args, n))
+
+  ELSIF name = "MAKE-GVAL" THEN
+    (* <MAKE-GVAL any> builds the FORM <GVAL any> — the programmatic
+       equivalent of the ",X" reader sugar, used by macros (e.g. The
+       Lurking Horror's MULTIFROB in misc.zil) that need to construct a
+       ",ATOM" reference from a value computed at macro-expansion time,
+       where the reader sugar itself isn't available. Ported from
+       Subrs.Types.cs's MAKE_GVAL: unlike CHTYPE's LVAL/GVAL handling,
+       this always wraps, even if `any` is already an ATOM matching an
+       existing LVAL/GVAL form. *)
+    IF n < 1 THEN RETURN Err("MAKE-GVAL: expected 1 argument") END;
+    ind := ZilObj.Cons(ZilObj.KForm, args[0], NIL);
+    RETURN MkVal(ZilObj.Cons(ZilObj.KForm, ZilObj.Intern("GVAL"), ind))
 
   ELSIF name = "TABLE" THEN
     RETURN PerformTable(FALSE, FALSE, args, n)
@@ -1483,17 +1520,30 @@ BEGIN
     END;
 
     (* past the "=": the action, then an optional pre-action, then an optional
-       explicit ACTION NAME. All three are in the original's Syntax.Parse. *)
+       explicit ACTION NAME. All three are in the original's Syntax.Parse.
+       A game that wants an action name but no pre-action writes an explicit
+       "<>" placeholder for the pre-action slot (The Lurking Horror's
+       <SYNTAX DIG ... = V-WASTE-OF-TIME <> DIG>, sharing one routine across
+       several distinctly-numbered fake actions) - that "<>" is a KFalse/
+       empty-KForm, not a KAtom, so it must still be stepped over (without
+       being stored as a pre-action name) for the actionName slot after it
+       to be seen at all. Skipping that step used to leave i one short here,
+       so DIG's explicit actionName was silently dropped and every <PERFORM
+       ,V?DIG ...>/<EQUAL? PRSA ,V?DIG> in the game's own source referenced
+       a V?DIG constant this compiler never defined. *)
     INC(i);
     IF (i < n) & (args[i].kind = ZilObj.KAtom) THEN
       Strings.Copy(args[i].atomText, ZilModel.syntaxes[synKind].action);
       INC(i);
       IF (i < n) & (args[i].kind = ZilObj.KAtom) THEN
         Strings.Copy(args[i].atomText, ZilModel.syntaxes[synKind].preAction);
-        INC(i);
-        IF (i < n) & (args[i].kind = ZilObj.KAtom) THEN
-          Strings.Copy(args[i].atomText, ZilModel.syntaxes[synKind].actionName)
-        END
+        INC(i)
+      ELSIF (i < n) & ((args[i].kind = ZilObj.KFalse)
+                       OR ((args[i].kind = ZilObj.KForm) & ZilObj.IsEmpty(args[i]))) THEN
+        INC(i)
+      END;
+      IF (i < n) & (args[i].kind = ZilObj.KAtom) THEN
+        Strings.Copy(args[i].atomText, ZilModel.syntaxes[synKind].actionName)
       END
     ELSE
       RETURN Err("SYNTAX: expected an action routine name after '='")
@@ -4433,6 +4483,7 @@ BEGIN
   Register("ROUTINE", TRUE); Register("OBJECT", TRUE); Register("ROOM", TRUE);
   Register("PROPDEF", TRUE);
   Register("FORM", FALSE); Register("LIST", FALSE); Register("LENGTH?", FALSE);
+  Register("MAKE-GVAL", FALSE);
   Register("SET", FALSE); Register("SETG", FALSE); Register("GLOBAL", FALSE); Register("CONSTANT", FALSE);
   Register("LVAL", FALSE); Register("GVAL", FALSE);
   Register("GASSIGNED?", FALSE); Register("ASSIGNED?", FALSE);
