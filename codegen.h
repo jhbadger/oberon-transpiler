@@ -10,6 +10,12 @@
  * errors refer back to Oberon source lines. */
 void codegen(Node *module, FILE *out, int is_main, const char *srcfile);
 
+/* Semantic errors codegen() found for the module it just ran on (already
+ * printed as file:line:col diagnostics). Caller must reset to 0 before
+ * each codegen() call and check it after — a nonzero count means the
+ * generated C should not be handed to the C compiler. */
+extern int g_codegen_errors;
+
 /* Generate a C header (.h) with extern declarations of all exported
  * symbols.  Call this for every library (non-main) module.           */
 void codegen_header(Node *module, FILE *out);

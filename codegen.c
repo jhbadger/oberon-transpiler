@@ -46,6 +46,24 @@ static FfiMod g_ffi_mods[MAX_FFI_MODS];
 static int    g_n_ffi_mods = 0;
 static int    g_loop_seq   = 0;  /* monotone counter for LOOP exit labels */
 
+/* Semantic errors found during codegen (e.g. a statement-level call to an
+ * undeclared name) that C's own compiler won't reliably catch — an
+ * implicit function call is only a warning in C, and obc suppresses even
+ * that (see -Wno-implicit-function-declaration) for modules that rely on
+ * calling forward-declared same-module procedures. Left unchecked, such a
+ * call silently makes it to the linker, which reports a bare "undefined
+ * symbol" with no file/line — so obc.c checks this count and stops before
+ * ever reaching the C compile step. */
+int g_codegen_errors = 0;
+
+static void cg_err(CG *g, int line, int col, const char *fmt, ...) {
+    va_list ap;
+    fprintf(stderr, "%s:%d:%d: error: ", g->srcfile, line, col);
+    va_start(ap, fmt); vfprintf(stderr, fmt, ap); va_end(ap);
+    fputc('\n', stderr);
+    g_codegen_errors++;
+}
+
 void ffi_register(const char *modname, const char *header,
                   const OBCFfiMap *maps, int nmaps)
 {
@@ -270,6 +288,13 @@ static Node *lookup_proc_params(const char *name) {
     for (int i = 0; i < g_nprocsigs; i++)
         if (!strcmp(g_procsigs[i].name, name)) return g_procsigs[i].params;
     return NULL;
+}
+/* Unlike lookup_proc_params, distinguishes "not a procedure" from
+ * "a parameterless procedure" (whose params list is NULL either way). */
+static int proc_exists(const char *name) {
+    for (int i = 0; i < g_nprocsigs; i++)
+        if (!strcmp(g_procsigs[i].name, name)) return 1;
+    return 0;
 }
 static Node *lookup_proc_rettype(const char *name) {
     for (int i = 0; i < g_nprocsigs; i++)
@@ -1942,6 +1967,11 @@ static void emit_stmt(CG *g, Node *s) {
              * For nested calls the frame ptr is added below. */
             emit(g, "%s_%s", g->modname, s->c0->str);
         } else {
+            if (s->c0->kind == ND_IDENT && !sym_type(s->c0->str) &&
+                !proc_exists(s->c0->str)) {
+                cg_err(g, s->c0->line, s->c0->col,
+                       "undeclared identifier '%s'", s->c0->str);
+            }
             emit_expr(g, s->c0);
         }
         emit(g,"(");

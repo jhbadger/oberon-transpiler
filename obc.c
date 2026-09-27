@@ -687,8 +687,15 @@ static int compile_module(const char *modfile, int is_main)
                 ast_free_all();
                 return 1;
             }
+            g_codegen_errors = 0;
             codegen(ast, out, is_main, modfile);
             fclose(out);
+            if (g_codegen_errors) {
+                fprintf(stderr, "obc: %d codegen error(s) in %s\n",
+                        g_codegen_errors, modfile);
+                ast_free_all();
+                return 1;
+            }
         }
 
         /* ── Generate .h file (library modules only) ─────────────── */
