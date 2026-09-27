@@ -2240,11 +2240,16 @@ BEGIN
       IF Strings.Compare(wins[i].title, errorFile) = 0 THEN
         ew := wins[i]
       ELSE
-        (* match on basename: errorFile ends with title or title ends with errorFile *)
+        (* match on basename: errorFile ends with title, or title ends with errorFile
+           (one is an absolute path, the other relative, for the same file) *)
         IF Strings.Length(wins[i].title) <= elen THEN
           Strings.Extract(errorFile, elen - Strings.Length(wins[i].title),
           Strings.Length(wins[i].title), base);
           IF Strings.Compare(base, wins[i].title) = 0 THEN  ew := wins[i]  END
+        ELSE
+          Strings.Extract(wins[i].title, Strings.Length(wins[i].title) - elen,
+          elen, base);
+          IF Strings.Compare(base, errorFile) = 0 THEN  ew := wins[i]  END
         END
       END
     END
