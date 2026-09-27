@@ -153,6 +153,11 @@ Let's add a room with no light of its own, reachable from the cellar:
     (DOWN TO DARK-PASSAGE)
     (ACTION START-ROOM-F)>
 
+<ROUTINE START-ROOM-F (RARG)
+    <COND (<==? .RARG ,M-LOOK>
+           <TELL "You are in a dusty, damp cellar. A wooden staircase leads up, and a
+narrow passage leads down into darkness." CR>)>>
+
 <ROOM DARK-PASSAGE
     (IN ROOMS)
     (DESC "Dark Passage")
@@ -171,7 +176,7 @@ Let's add a room with no light of its own, reachable from the cellar:
     (FLAGS TAKEBIT TOOLBIT)>
 ```
 
-(`TOOLBIT` isn't about darkness — it's set up for section 14, which is what this key is actually *for*. Ignore it for now.)
+`START-ROOM-F` also picks up a new `DOWN` sentence here — the whole point of adding an exit is for the player to know it's there, and a room description that never mentions it is the one thing the library can't fix for you (unlike the darkness message below, which *is* automatic). (`TOOLBIT` isn't about darkness — it's set up for section 14, which is what this key is actually *for*. Ignore it for now.)
 
 Walk down into `DARK-PASSAGE` without a lit lantern and the library handles everything on its own: `LOOK` (and the room's own `DARK-PASSAGE-F`, which never even gets a chance to run) is replaced by `It is pitch black. You can't see a thing.`, and anything requiring you to see something in the room, like `TAKE KEY`, gives `It's too dark to see anything here.` No code of ours runs at all — the room's `ACTION` routine, and everything else the room might contain, is unreachable from darkness by default.
 
@@ -473,6 +478,8 @@ Update `TREASURE-DOOR` from section 13 to start locked. Here is the complete, fi
 ```
 
 Try `OPEN DOOR` before unlocking it: the inner `COND` in the `OPEN` clause has no `LOCKEDBIT`-still-set branch, falls through false, and `TREASURE-DOOR-F` returns false — letting the library's own `V-OPEN` take over, which already knows how to check `LOCKEDBIT` and prints `You'll have to unlock it first.` on its own. This is the same "return false and let the library handle it" pattern as the darkness message in section 8 and the topic fallback in section 11 — by this point in the tutorial it should start to feel like the normal way to write one of these routines, not a special trick.
+
+You don't actually have to type the `WITH KEY` part. `UNLOCK`'s `SYNTAX` line requires a `WITH OBJECT`, but if you just type `UNLOCK DOOR` and leave it out, the parser's `GWIM` ("get what I mean") routine looks through everything you're holding for a single object with `TOOLBIT` set; if there's exactly one — which there is, since `SILVER-KEY` is the only such object here — it silently fills in `PRSI` with it, echoes `[with the silver key]` so you know what it assumed, and carries on. Try it: plain `UNLOCK DOOR` produces the same result as `UNLOCK DOOR WITH KEY`. This is also why `SILVER-KEY` needing `TOOLBIT` (from section 8) matters beyond just satisfying the `SYNTAX` line's `WITH OBJECT (FIND TOOLBIT)` clause — it's the exact flag `GWIM` searches for.
 
 ## 15. Daemons (Background Events)
 

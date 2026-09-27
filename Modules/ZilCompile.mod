@@ -2608,27 +2608,19 @@ BEGIN
       EmitPredInstr("EQUAL?", leftText, "1", label, polarity);
       RETURN TRUE
 
-    ELSIF (headName = "N==?") OR (headName = "N=?") THEN
-      (* not-equal: the same EQUAL? instruction with the branch polarity
-         flipped, which is what the original's own NotEqualOp does *)
-      IF (z.rest = NIL) OR (z.rest.first = NIL) OR (z.rest.rest = NIL) OR (z.rest.rest.first = NIL) THEN
-        Err("CompileCondition: N==? expects 2 args"); RETURN FALSE
-      END;
-      ok := CompileOperand(z.rest.first, leftText);
-      IF ~ok THEN RETURN FALSE END;
-      ok := CompileOperand(z.rest.rest.first, rightText);
-      IF ~ok THEN RETURN FALSE END;
-      ok := FixStackedPair(leftText, rightText,
-                           (headName = "EQUAL?") OR (headName = "=?") OR (headName = "==?")
-                           OR (headName = "N==?") OR (headName = "N=?") OR (headName = "BTST"));
-      IF ~ok THEN RETURN FALSE END;
-      EmitPredInstr("EQUAL?", leftText, rightText, label, ~polarity);
-      RETURN TRUE
-
-    ELSIF (headName = "EQUAL?") OR (headName = "=?") OR (headName = "==?") OR (headName = "L?") OR (headName = "G?") THEN
+    ELSIF (headName = "EQUAL?") OR (headName = "=?") OR (headName = "==?")
+          OR (headName = "N==?") OR (headName = "N=?") OR (headName = "L?") OR (headName = "G?") THEN
       IF (z.rest = NIL) OR (z.rest.first = NIL) OR (z.rest.rest = NIL) OR (z.rest.rest.first = NIL) THEN
         Err("CompileCondition: comparison expects 2 args"); RETURN FALSE
       END;
+      (* N==?/N=? mean "not equal to ANY of the comparands" — the same
+         multi-comparand EQUAL? instruction(s) below, just with the branch
+         polarity flipped, exactly like the original's own NotEqualOp.
+         polarity is a value parameter, so flipping this local copy for the
+         rest of this branch (which always returns before falling through)
+         is safe and lets N=?/N==? share the >2-arg chaining logic instead
+         of silently ignoring every comparand past the second. *)
+      IF (headName = "N==?") OR (headName = "N=?") THEN polarity := ~polarity END;
       ok := CompileOperand(z.rest.first, leftText);
       IF ~ok THEN RETURN FALSE END;
       IF (headName = "L?") OR (headName = "G?") THEN
