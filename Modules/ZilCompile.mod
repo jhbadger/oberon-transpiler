@@ -10,29 +10,51 @@ MODULE ZilCompile;
   "map an operator to a Z-machine mnemonic string and emit a line of
   text", which zapf already knows how to assemble).
 
-  Still a pragmatic subset, widened one slice at a time (the discipline
-  used throughout every earlier phase of this port). What compiles today:
+  What compiles today (substantially complete for V3 games and typical
+  V5 story-only games):
 
-    - a required-args-only ROUTINE with a multi-statement body, and
-      CompileProgram to emit a whole assemblable .zap file around them
-      (constants, the global table, an empty object table and dictionary,
-      then the routines — in the memory-map order the Z-machine requires)
-    - operands: FIX and CHARACTER literals, <> , LVAL (.X) and GVAL (,X)
-      references, and bare atoms naming a CONSTANT / ROUTINE / OBJECT
-    - GLOBAL and CONSTANT declarations, with the V3 HERE/SCORE/MOVES
-      variable-order requirement honoured
-    - arithmetic: + - * / MOD
-    - statements: SET, SETG, INC, DEC, RETURN, RTRUE, RFALSE, QUIT,
-      PRINTI, PRINTN, CRLF, and calls to routines this program defines
-    - COND as a real branch tree, with the predicates ZERO?, EQUAL?/=?/
-      ==?, L?, G?, IGRTR?, DLESS?, NOT/F?, T?
+    - ROUTINEs with required, optional ("OPT"), and AUX args; multi-
+      statement bodies; recursive and mutual calls
+    - CompileProgram emits a full assemblable .zap: constants, globals,
+      object/property/flag tables, vocabulary, syntax, and routines in
+      Z-machine memory-map order
+    - operands: FIX and CHARACTER literals, <>, LVAL (.X) and GVAL (,X)
+      references, bare atoms naming a CONSTANT / ROUTINE / OBJECT, and
+      REST/BACK/ZREST/ZBACK table-pointer arithmetic
+    - GLOBAL and CONSTANT declarations; V3 HERE/SCORE/MOVES ordering
+    - arithmetic: + - * / MOD ASH/ASHIFT LSH/SHIFT
+    - bitwise: BAND/ANDB BOR/ORB BCOM XORB
+    - variable ops: SET SETG INC DEC VALUE LVAL GVAL
+    - control flow: COND, AND/OR (short-circuit), PROG/REPEAT/BIND (with
+      RETURN/AGAIN targeting named or enclosing activations), DO (counted
+      loop), MAP-CONTENTS, MAP-DIRECTIONS
+    - predicates: ZERO?/0?, 1?, EQUAL?/=?/==?, N=?/N==?, L?, G?, L=?,
+      G=?, IGRTR?, DLESS?, NOT/F?, T?, FSET?, IN?, BTST, ORIGINAL?,
+      FIRST?, NEXT?, INTBL?, SAVE, RESTORE, VERIFY
+    - terminal statements: RTRUE, RFALSE, RSTACK, RETURN, QUIT
+    - I/O: PRINTI, PRINTN, PRINTC, CRLF, PRINTR, PRINT, PRINTB, PRINTD,
+      PRINTU, PRINTT, TELL (with TELL-TOKENS patterns), READ, INPUT,
+      DIROUT, DIRIN, BUFOUT
+    - object tree: MOVE, LOC, REMOVE, FSET, FCLEAR, FIRST?, NEXT?,
+      GETP, PUTP, GETPT, NEXTP, PTSIZE, IN?
+    - table/memory: GET/ZGET, GETB, PUT/ZPUT, PUTB, COPYT, ZWSTR,
+      INTBL?, LOWCORE, LOWCORE-TABLE
+    - stack/exception: PUSH, POP, FSTACK, CATCH, THROW, USL
+    - screen (V4+): SCREEN, SPLIT, HLIGHT, COLOR, TCOLOR, CURSET,
+      ERASE, BUFOUT, MARGIN
+    - game state: SAVE, RESTORE, RESTART, VERIFY, ISAVE, IRESTORE,
+      ORIGINAL?, RANDOM, SOUND
+    - string packing (.GSTR/.STR) via ZapfZChar
 
-  NOT implemented: OBJECT/property/flag/table emission, the vocabulary and
-  syntax tables, string packing (.GSTR/.STR), TELL, AND/OR short-circuit
-  sequencing, the loop constructs (REPEAT/PROG/AGAIN in their compiled
-  sense), and the bulk of ZBuiltins.cs's 237 builtin registrations. Each
-  is reported as an explicit compile error rather than silently
-  mis-compiled — see the plan doc for the intended order.
+  NOT implemented (V5/V6 features, or rare ops):
+    - window management: WINATTR, WINGET, WINPOS, WINPUT, WINSIZE,
+      CURGET, SCROLL, FONT
+    - graphics/pictures: DISPLAY, DCLEAR, PICINF, PICSET
+    - mouse/menu: MOUSE-INFO, MOUSE-LIMIT, MENU
+    - miscellaneous: CHECKU, PRINTF, XPUSH, RFATAL
+
+  Each unimplemented builtin is reported as an explicit compile error
+  rather than silently mis-compiled.
 
   Compound sub-expressions always route their result through the
   Z-machine stack (STACK) rather than allocating temporary locals — a
