@@ -4199,3 +4199,130 @@ standing lesson: commit working milestones promptly rather than letting
 a whole session's worth of real fixes sit uncommitted, and re-run
 end-to-end verification (not just "did it compile") after recovering any
 file that went missing.
+
+**MILESTONE 10 (2026-09-28): `sample/rascal` — a large, modern, original
+V5/XZIP ZIL game (Tara McGrew's "Rascal", a tiny roguelike, 17 source
+files under `~/lib/zil/sample/rascal/`, not one of the historical Infocom
+titles this port had targeted before) — COMPILES, ASSEMBLES (151168-byte
+V5 story file, comfortably under V5's 256K ceiling — no overflow fight
+this time, unlike lurkinghorror), and PLAYS: verified in frotz, the
+splash screen's ASCII-art logo, the status line (gold/floor/hp/str/def/
+wpn/inv), the roguelike dungeon map rendering (`@`/`.`/`+` glyphs), and
+`@`-glyph player movement in response to input all work correctly. This
+is the seventh real game this port can compile, assemble, and play, and
+the first that ISN'T an existing published Infocom/community title —
+it's original, actively-maintained source that exercises corners of the
+language the six earlier games never touched (V5 true-color opcodes,
+`CATCH`/`THROW`, a real `OBJECT-TEMPLATE` metaprogramming library, and a
+`DO`-loop end-clause shape the six-games corpus never needed either).
+
+Found and fixed by the same "compile, hit a concrete gap, fix it, verify
+against ALL other games, document, repeat" loop as every milestone
+before it — six distinct gaps this time, all in `Modules/ZilEval.mod` and
+`Modules/ZilCompile.mod`:
+
+1. **`SUPPRESS-WARNINGS?` wasn't registered at all** (`zilf: evaluation
+   error: calling unassigned atom: SUPPRESS-WARNINGS?`). Real zilf's own
+   implementation only mutates a diagnostics manager this port doesn't
+   have, so it joins the existing `SubrIgnored` grab-bag in `ZilEval.mod`
+   (GC-MON, BLOAT, ZSTR-ON/OFF, etc.) — parsed, evaluated, does nothing,
+   like the original for any caller that ignores its return value.
+
+2. **A call-site `!.X` segment splice only worked inside a LIST/VECTOR
+   literal or a plain SUBR's own argument list — never against a
+   user-defined FUNCTION/MACRO's own required/optional argument binding,
+   and never against an OBJECT/ROOM's property-list position.**
+   `zillib/template.zil`'s `OBJECT-TEMPLATE` macro (needed to define
+   rascal's randomized floor/trader/item/enemy objects) calls
+   `<HANDLE-DEF !.X>` where `HANDLE-DEF` takes three required positional
+   arguments (`NAME TYPE PROPS`) from ONE spliced 3-element list, and
+   `HANDLE-DEF`'s own generated code later does `<OBJECT .NAME !.PS>`
+   where `PS` is a list of WHOLE properties spliced in as separate
+   top-level property positions — neither shape existed anywhere else in
+   the corpus. Fixed with a new `fnPendingSeg`/`fnPendingIdx`/
+   `fnPendingLen` drain mechanism threaded through `EvalImpl`'s
+   FUNCTION/MACRO argument-binding (required, optional, and the
+   TUPLE-mode variadic collector all share it), mirroring real zilf's
+   `IMayExpandBeforeEvaluation`/`ExpandBeforeEvaluation` — see the
+   dedicated comment at `fnPendingSeg`'s declaration — plus matching
+   segment-splice handling added directly to the OBJECT/ROOM property-list
+   walk (`ZilEval.mod`, mirroring the existing `KSplice` case right next
+   to it). Also fixed in passing: OBJECT/ROOM's own NAME argument was
+   never evaluated at all (taken raw), which broke `<OBJECT .NAME ...>`
+   with a computed name — real zilf registers OBJECT/ROOM as ordinary
+   evaluated-argument SUBRs, so the name needs evaluating too, same as
+   every property.
+
+3. **A word-valued property (SYNONYM/ADJECTIVE, and now PLURAL) couldn't
+   hold a `<>` (FALSE) placeholder value**, only real vocabulary atoms
+   (`CompileObjects: SYNONYM values must be atoms ... got #FALSE ()`).
+   rascal's generic item/enemy object templates pre-allocate SYNONYM/
+   ADJECTIVE/PLURAL slots with `<>` placeholders specifically so runtime
+   code can `PUTB`/`PUT`-patch in a real word address once a specific
+   random item/enemy is assigned — the exact same idiom the DUMMY-NOUN/
+   DUMMY-ADJ dictionary words already used elsewhere in the same
+   templates, just spelled as FALSE instead of a throwaway word for
+   PLURAL specifically. Fixed in `ZilCompile.mod`'s word-property emission
+   (both the V1-3 ADJECTIVE byte path and the general word-address path)
+   to emit a zero placeholder (`.BYTE 0` / `.WORD 0`) for a FALSE/empty-
+   FORM element instead of erroring, matching the existing convention
+   `ConstantText` already uses for FALSE everywhere else. Also: **PLURAL
+   itself wasn't recognized as a word property at all** — added to
+   `IsWordProperty` (registering its atoms as noun-class vocabulary, same
+   part of speech as SYNONYM, per real zilf's own PROPDEF for it in
+   `zillib/parser.zil`).
+
+4. **The DO-loop (and MAP-CONTENTS/MAP-DIRECTIONS) end-clause was
+   recognized only when explicitly tagged `(END ...)`**, found by
+   scanning the whole loop body for a list headed by the literal atom
+   `END` — real zilf's own `CompileBoundedLoop` just asks "is the very
+   next thing after the spec a list at all", with no inspection of its
+   head at all; the `END` atom that makes zillib's own `<DO (I 1 .MAX)
+   (END <RFALSE>) ...>` LOOK tagged is really just a self-evaluating,
+   harmless statement the library author added for readability. rascal's
+   own `<DO (I 1 ,INTERIOR-ENTRANCE-COUNT) (<RFALSE>) ...>`
+   (`dungeon.zil`'s `INTERIOR-ID-AT`) has no such tag and was rejected
+   outright (`CompileOperand: expression of this kind cannot be compiled
+   yet: (<RFALSE>)` — the untagged list was being compiled as an ordinary
+   body statement, and a bare LIST isn't a compilable statement). Fixed
+   to treat the list positionally, right after the spec, keeping a
+   leading `END` atom's text intact when present (matching real zilf's
+   actual behavior AND preserving exact backward compatibility with the
+   existing tagged corpus) rather than stripping it.
+
+5. **`L=?`/`G=?` (compiled as `GRTR?`/`LESS?` with inverted branch
+   polarity) needed an extra temporary local whenever BOTH operands
+   compiled onto the Z-machine stack** (`FixStackedPair`'s existing
+   fix-up for a non-commutative op), which is a real problem when a
+   routine already has all fifteen Z-machine locals in use — exactly
+   rascal's `ROOM-SHAPE-FILL?` (`dungeon.zil`), whose seven parameters
+   plus eight AUX locals (`SHAPE X Y L T R B W H RAD CX CY DX DY TH`) fill
+   every slot before it even reaches `<L=? <+ <* .DX .DX> <* .DY .DY>>
+   <* .RAD .RAD>>`. No temp is actually needed: reading two STACK
+   operands naturally pops them in REVERSE push order, and using the
+   MIRROR comparison instruction (`GRTR?` instead of `LESS?`, or vice
+   versa) compensates exactly, since both operands are already-computed
+   pure values by that point — re-reading them in swapped roles changes
+   nothing observable. Fixed as a narrow special case in the `G=?`/`L=?`
+   branch, ahead of the general `FixStackedPair` call.
+
+6. **Four missing one-instruction builtins**: `TCOLOR`/`COLOR`
+   (`set_true_colour`/`set_colour`, V5+ — rascal's whole color-mode UI
+   layer), `LSH` (a real-zilf alias for the already-implemented `SHIFT`/
+   `log_shift`), `ERASE` (`erase_line`, V4+ — used while drawing the
+   loading-progress bar), and `CATCH`/`THROW` (V5+ stack-unwinding pair —
+   rascal's parser wrapper uses them as a setjmp/longjmp-style escape
+   from nested parser calls). All were already known to `zapf`'s own
+   opcode table (`Modules/ZapfOpcodes.mod`) from the zapf port session —
+   only `ZilCompile.mod`'s builtin-name table needed the entries. `THROW`
+   was also added to `IsTerminator` (it never falls through to its own
+   next instruction, same reachability shape as `RETURN`/`RSTACK`).
+
+Regression-tested after every fix, the same way as every milestone
+before it: full rebuild and recompile+reassemble of all five original
+sample games plus lurkinghorror, confirming identical story-file byte
+counts to before this session's changes (`cloak` 31358, `advent` 77006,
+`zork1` 88908, `cloak_plus` 34768, `lurkinghorror` 130780 bytes — all
+unchanged), plus a fresh frotz playthrough of `cloak` (correct room
+description, status line) to confirm actual behavior, not just
+byte-for-byte stability.

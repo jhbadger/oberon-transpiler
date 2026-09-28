@@ -763,6 +763,10 @@ BEGIN
              & (s[3] = "T") & (s[4] = "U") & (s[5] = "R") & (s[6] = "N") & (s[7] = " "))
          OR ((Strings.Length(s) > 8) & (s[0] = 09X) & (s[1] = "P") & (s[2] = "R")
              & (s[3] = "I") & (s[4] = "N") & (s[5] = "T") & (s[6] = "R") & (s[7] = " "))
+         OR ((Strings.Length(s) > 6) & (s[0] = 09X) & (s[1] = "T") & (s[2] = "H")
+             & (s[3] = "R") & (s[4] = "O") & (s[5] = "W") & (s[6] = " "))
+             (* THROW (V5+) unwinds straight to its matching CATCH and never
+                falls through, same reachability shape as RETURN/RSTACK *)
 END IsTerminator;
 
 (* Deletes buffered code no branch, jump, or fallthrough can ever reach.
@@ -1304,7 +1308,11 @@ BEGIN
   ELSIF name = "NEXTP" THEN Strings.Copy("NEXTP", zap); nargs := 2
   ELSIF name = "BCOM" THEN Strings.Copy("BCOM", zap); nargs := 1
   ELSIF (name = "ASH") OR (name = "ASHIFT") THEN Strings.Copy("ASHIFT", zap); nargs := 2
-  ELSIF name = "SHIFT" THEN Strings.Copy("SHIFT", zap); nargs := 2
+  ELSIF (name = "SHIFT") OR (name = "LSH") THEN
+    (* LSH is real zilf's own alias for the logical-shift builtin (a
+       positive count shifts left, negative shifts right) - same opcode
+       (log_shift) either spelling, per ZapfOpcodes.mod's own SHIFT entry *)
+    Strings.Copy("SHIFT", zap); nargs := 2
   ELSIF name = "RANDOM" THEN Strings.Copy("RANDOM", zap); nargs := 1
   ELSIF name = "LOC" THEN Strings.Copy("LOC", zap); nargs := 1
     (* FIRST?/NEXT? both store AND branch; used as a value only the stored
@@ -1321,6 +1329,11 @@ BEGIN
        its <UNDO> command, gated on the USE-UNDO? flag ZIP-OPTIONS sets. *)
   ELSIF name = "ISAVE" THEN Strings.Copy("ISAVE", zap); nargs := 0
   ELSIF name = "IRESTORE" THEN Strings.Copy("IRESTORE", zap); nargs := 0
+  ELSIF name = "CATCH" THEN
+    (* returns a catch token (V5+) for a later THROW to unwind back to -
+       sample/rascal's WRAP-PARSER-MAIN-LOOP uses it to bail out of nested
+       parser calls in one jump, same idiom as a C setjmp/longjmp pair *)
+    Strings.Copy("CATCH", zap); nargs := 0
 
   (* void *)
   ELSE
@@ -1336,6 +1349,7 @@ BEGIN
     ELSIF name = "SCREEN" THEN Strings.Copy("SCREEN", zap); nargs := 1
     ELSIF name = "SPLIT" THEN Strings.Copy("SPLIT", zap); nargs := 1
     ELSIF name = "CLEAR" THEN Strings.Copy("CLEAR", zap); nargs := 1
+    ELSIF name = "ERASE" THEN Strings.Copy("ERASE", zap); nargs := 1
     ELSIF name = "CURSET" THEN Strings.Copy("CURSET", zap); nargs := 3
     ELSIF name = "BUFOUT" THEN Strings.Copy("BUFOUT", zap); nargs := 1
     ELSIF name = "DIROUT" THEN Strings.Copy("DIROUT", zap); nargs := 2
@@ -1359,6 +1373,20 @@ BEGIN
     ELSIF name = "POP" THEN Strings.Copy("POP", zap); nargs := 0
     ELSIF name = "FSTACK" THEN Strings.Copy("FSTACK", zap); nargs := 0
     ELSIF name = "MARGIN" THEN Strings.Copy("MARGIN", zap); nargs := 3
+    ELSIF name = "THROW" THEN
+      (* unwinds the stack back to the matching CATCH token (V5+); never
+         returns to its own caller, same as RSTACK/RTRUE - see IsTerminator *)
+      Strings.Copy("THROW", zap); nargs := 2
+    ELSIF name = "TCOLOR" THEN
+      (* set_true_colour (V5+, ZapfOpcodes.mod already knows the mnemonic).
+         Real zilf also has a V6 ternary form (fg, bg, window) - not needed
+         here since sample/rascal (V5/XZIP) only ever calls it with two
+         operands. *)
+      Strings.Copy("TCOLOR", zap); nargs := 2
+    ELSIF name = "COLOR" THEN
+      (* set_colour - same V5-binary/V6-ternary split as TCOLOR above, same
+         reason only the binary form is needed here. *)
+      Strings.Copy("COLOR", zap); nargs := 2
     ELSE RETURN FALSE
     END
   END;
@@ -2589,9 +2617,26 @@ BEGIN
       IF ~ok THEN RETURN FALSE END;
       ok := CompileOperand(z.rest.rest.first, rightText);
       IF ~ok THEN RETURN FALSE END;
-      ok := FixStackedPair(leftText, rightText,
-                           (headName = "EQUAL?") OR (headName = "=?") OR (headName = "==?")
-                           OR (headName = "N==?") OR (headName = "N=?") OR (headName = "BTST"));
+      IF (leftText = "STACK") & (rightText = "STACK") THEN
+        (* Both operands are already-computed values sitting on the stack,
+           read back in REVERSE push order (right was pushed last, so it
+           pops first) — normally FixStackedPair corrects that by popping
+           the right one into a temporary, but sample/rascal's
+           ROOM-SHAPE-FILL? has all fifteen locals already in use for its
+           own params/AUX (SHAPE X Y L T R B W H RAD CX CY DX DY TH) when
+           it compiles `<L=? <+ <* .DX .DX> <* .DY .DY>> <* .RAD .RAD>>`,
+           so there is no sixteenth local left for a temp. No temp is
+           needed at all: using the MIRROR instruction instead of fixing
+           the order gives the identical answer, since GRTR?(B,A) and
+           LESS?(A,B) are the same comparison — both operands are pure
+           already-evaluated values by this point, so re-reading them in
+           swapped roles changes nothing observable. *)
+        IF headName = "G=?" THEN EmitPredInstr("GRTR?", leftText, rightText, label, ~polarity)
+        ELSE EmitPredInstr("LESS?", leftText, rightText, label, ~polarity)
+        END;
+        RETURN TRUE
+      END;
+      ok := FixStackedPair(leftText, rightText, FALSE);
       IF ~ok THEN RETURN FALSE END;
       IF headName = "G=?" THEN EmitPredInstr("LESS?", leftText, rightText, label, ~polarity)
       ELSE EmitPredInstr("GRTR?", leftText, rightText, label, ~polarity)
@@ -3521,21 +3566,33 @@ BEGIN
         IF ~ok THEN DEC(nBlocks); PopInnerLocals(1); RETURN FALSE END
       END;
 
-      (* an (END ...) clause, if present, is the last body element and is
-         not part of the loop body *)
+      (* an end-clause, if present, is a WHOLE LIST sitting immediately
+         after the spec (positional, not a tagged form) — real zilf's own
+         CompileBoundedLoop: `rest.StartsWith(out ZilList? endStmts)` just
+         asks "is the next thing a list at all", with no inspection of its
+         first element. zillib's own `<DO (I 1 .MAX) (END <RFALSE>) ...>`
+         (parser.zil) LOOKS keyword-tagged, but real zilf would compile
+         that literal atom END as a (harmless, self-evaluating, discarded)
+         statement along with <RFALSE> — this port instead strips a
+         leading END atom, kept for backward compatibility with existing
+         zillib-derived games rather than risking CompileOperand choking
+         on a bare, unbound ATOM statement. Either way, sample/rascal's own
+         UNTAGGED `<DO (I 1 ...) (<RFALSE>) ...>` (dungeon.zil's
+         INTERIOR-ID-AT) needs the general "any list here is the
+         end-clause" rule this port used to lack entirely (it only ever
+         looked for one tagged with END, anywhere in the body — which also
+         meant it could never durability tell an end-clause from an
+         ordinary list-shaped body statement placed later). *)
       endClause := NIL;
       bp := z.rest.rest;
+      IF (bp # NIL) & (bp.first # NIL) & (bp.first.kind = ZilObj.KList) THEN
+        IF ZilObj.IsAtomNamed(bp.first.first, "END") THEN endClause := bp.first.rest
+        ELSE endClause := bp.first END;
+        bp := bp.rest
+      END;
       WHILE (bp # NIL) & (bp.first # NIL) DO
-        IF (bp.first.kind = ZilObj.KList) & ZilObj.IsAtomNamed(bp.first.first, "END") THEN
-          (* real source puts the END clause immediately after the spec —
-             zillib's APPLY-GENERIC-FCN writes <DO (I 1 .MAX) (END <RFALSE>)
-             ...body...> — so it is recognised anywhere in the body rather
-             than only at the end *)
-          endClause := bp.first.rest
-        ELSE
-          ok := CompileStmt(bp.first, FALSE, progResult);
-          IF ~ok THEN DEC(nBlocks); PopInnerLocals(1); RETURN FALSE END
-        END;
+        ok := CompileStmt(bp.first, FALSE, progResult);
+        IF ~ok THEN DEC(nBlocks); PopInnerLocals(1); RETURN FALSE END;
         bp := bp.rest
       END;
 
@@ -3673,20 +3730,21 @@ BEGIN
         W(againLabel); W("X:"); WLn
       END;
 
-      (* an (END ...) clause, if present, is not part of the loop body —
-         same convention and same "recognised anywhere in the body" leniency
-         as DO's own (END ...) handling above; e.g. The Lurking Horror's
-         verbs.zil FIND-IN writes <MAP-CONTENTS (W .WHERE) (END <RFALSE>)
-         ...body...> *)
+      (* an end-clause, if present, is a WHOLE LIST positioned right after
+         the spec — same convention (and the same DO/END backward-compat
+         nuance) as DO's own end-clause handling above; see its comment.
+         e.g. The Lurking Horror's verbs.zil FIND-IN writes <MAP-CONTENTS
+         (W .WHERE) (END <RFALSE>) ...body...> *)
       endClause := NIL;
       bp := z.rest.rest;
+      IF (bp # NIL) & (bp.first # NIL) & (bp.first.kind = ZilObj.KList) THEN
+        IF ZilObj.IsAtomNamed(bp.first.first, "END") THEN endClause := bp.first.rest
+        ELSE endClause := bp.first END;
+        bp := bp.rest
+      END;
       WHILE (bp # NIL) & (bp.first # NIL) DO
-        IF (bp.first.kind = ZilObj.KList) & ZilObj.IsAtomNamed(bp.first.first, "END") THEN
-          endClause := bp.first.rest
-        ELSE
-          ok := CompileStmt(bp.first, FALSE, progResult);
-          IF ~ok THEN DEC(nBlocks); PopInnerLocals(nProgBinds); RETURN FALSE END
-        END;
+        ok := CompileStmt(bp.first, FALSE, progResult);
+        IF ~ok THEN DEC(nBlocks); PopInnerLocals(nProgBinds); RETURN FALSE END;
         bp := bp.rest
       END;
 
@@ -4665,14 +4723,21 @@ BEGIN
        & (FindObjectIdx(body.first.atomText) >= 0)
 END IsLocationProperty;
 
-(* SYNONYM and ADJECTIVE are real properties, but their values are
+(* SYNONYM, ADJECTIVE, and PLURAL are real properties, but their values are
    DICTIONARY WORDS rather than ordinary constants, so they are emitted by
    their own code below. PSEUDO (a list of word/routine pairs for scenery)
    is handled the same way, just further down (its STRING elements are
    vocabulary words too, but its ATOM elements are ordinary routine
-   references, unlike SYNONYM/ADJECTIVE's all-atom shape). *)
+   references, unlike SYNONYM/ADJECTIVE/PLURAL's all-atom shape). PLURAL's
+   own values are only ever ONE word in zillib's shipped games, but
+   zillib's own PROPDEF for it (parser.zil: `<PROPDEF PLURAL <> (PLURAL
+   "MANY" W:ATOM = "MANY" <VOC .W OBJECT>)>`) declares it MANY-valued, same
+   as SYNONYM — sample/rascal's GENERIC-ENEMIES uses three (ENEMIES BEASTS
+   MONSTERS), so this port needs the same multi-word handling SYNONYM
+   already gets, not the single-constant fallback every other property
+   goes through. *)
 PROCEDURE IsWordProperty(name: ARRAY OF CHAR): BOOLEAN;
-BEGIN RETURN (name = "SYNONYM") OR (name = "ADJECTIVE") END IsWordProperty;
+BEGIN RETURN (name = "SYNONYM") OR (name = "ADJECTIVE") OR (name = "PLURAL") END IsWordProperty;
 
 (* A direction property like (NORTH TO CELLAR) is a complex PROPDEF pattern,
    recognised here by the TO/PER/SORRY keywords real source uses. *)
@@ -4935,7 +5000,10 @@ BEGIN
           body := p.first.rest;
           WHILE (body # NIL) & (body.first # NIL) DO
             IF body.first.kind = ZilObj.KAtom THEN
-              IF nm = "SYNONYM" THEN
+              IF (nm = "SYNONYM") OR (nm = "PLURAL") THEN
+                (* PLURAL words are nouns too (real zilf: `<VOC .W OBJECT>`
+                   in its own PROPDEF for PLURAL — see IsWordProperty's own
+                   comment), same part of speech as SYNONYM, not ADJECTIVE's *)
                 j := ZilModel.AddVocab(body.first.atomText, ZilModel.PsObject)
               ELSE
                 j := ZilModel.AddVocab(body.first.atomText, ZilModel.PsAdjective)
@@ -5206,19 +5274,30 @@ BEGIN
               W("	.PROP "); W(text); W(",P?"); W(propNameTab[k]); WLn;
               v := body;
               WHILE (v # NIL) & (v.first # NIL) DO
-                IF v.first.kind # ZilObj.KAtom THEN
-                  Strings.Copy("CompileObjects: ADJECTIVE values must be atoms, in object ", errBuf);
+                IF (v.first.kind = ZilObj.KFalse) OR ((v.first.kind = ZilObj.KForm) & ZilObj.IsEmpty(v.first)) THEN
+                  (* `<>` reserves a zero placeholder slot - sample/rascal's
+                     generic item/enemy templates pre-allocate ADJECTIVE/
+                     PLURAL slots this way and PUTB/PUT-patch them at
+                     runtime once a specific random item is assigned a real
+                     word, same convention ConstantText already uses for
+                     FALSE elsewhere (see its own comment). *)
+                  W("	.BYTE 0"); WLn
+                ELSIF v.first.kind # ZilObj.KAtom THEN
+                  Strings.Copy("CompileObjects: ", errBuf);
+                  Strings.Append(propNameTab[k], errBuf);
+                  Strings.Append(" values must be atoms (or <>), in object ", errBuf);
                   Strings.Append(o.name.atomText, errBuf);
                   Strings.Append(": ", errBuf);
                   ZilObj.PrintTo(v.first, nm); Strings.Append(nm, errBuf);
                   Err(errBuf); RETURN FALSE
-                END;
+                ELSE
                 (* the word part goes through WSym, matching how the A?WORD
                    constant itself is defined (EmitVocabTable's own A?
                    emission) - a word with a character ZAP disallows bare
                    (advent's "pirate's") needs the SAME sanitized spelling
                    on both sides or the reference does not resolve. *)
-                W("	.BYTE A?"); WSym(v.first.atomText); WLn;
+                W("	.BYTE A?"); WSym(v.first.atomText); WLn
+                END;
                 v := v.rest
               END
             ELSE
@@ -5226,14 +5305,20 @@ BEGIN
               W("	.PROP "); W(text); W(",P?"); W(propNameTab[k]); WLn;
               v := body;
               WHILE (v # NIL) & (v.first # NIL) DO
-                IF v.first.kind # ZilObj.KAtom THEN
-                  Strings.Copy("CompileObjects: SYNONYM values must be atoms, in object ", errBuf);
+                IF (v.first.kind = ZilObj.KFalse) OR ((v.first.kind = ZilObj.KForm) & ZilObj.IsEmpty(v.first)) THEN
+                  (* see the matching V1-3 ADJECTIVE comment just above *)
+                  W("	.WORD 0"); WLn
+                ELSIF v.first.kind # ZilObj.KAtom THEN
+                  Strings.Copy("CompileObjects: ", errBuf);
+                  Strings.Append(propNameTab[k], errBuf);
+                  Strings.Append(" values must be atoms (or <>), in object ", errBuf);
                   Strings.Append(o.name.atomText, errBuf);
                   Strings.Append(": ", errBuf);
                   ZilObj.PrintTo(v.first, nm); Strings.Append(nm, errBuf);
                   Err(errBuf); RETURN FALSE
+                ELSE
+                W("	.WORD W?"); WSym(v.first.atomText); WLn
                 END;
-                W("	.WORD W?"); WSym(v.first.atomText); WLn;
                 v := v.rest
               END
             END

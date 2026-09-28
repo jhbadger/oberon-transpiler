@@ -2177,16 +2177,21 @@ BEGIN
         OR (name = "BEGIN-SEGMENT") OR (name = "END-SEGMENT")
         OR (name = "DEFINE-SEGMENT") OR (name = "FREQUENT-WORDS?")
         OR (name = "NEVER-ZAP-TO-SOURCE-DIRECTORY?") OR (name = "ASK-FOR-PICTURE-FILE?")
-        OR (name = "PICFILE") THEN
+        OR (name = "PICFILE") OR (name = "SUPPRESS-WARNINGS?") THEN
     (* SubrIgnored (Subrs.Meta.cs): a grab-bag of real-compiler knobs this
        port has no use for - memory/GC tuning (GC-MON, BLOAT), string-pool
        tuning (ZSTR-ON/OFF), the MDL file-loading protocol (ENDLOAD,
        PUT-PURE-HERE, DEFAULTS-DEFINED, CHECKPOINT), save-file segmentation
        (BEGIN-/END-/DEFINE-SEGMENT, used by V6 only), a Z-machine
-       optimization hint (FREQUENT-WORDS?, zork1.zil calls this), and Inform/
+       optimization hint (FREQUENT-WORDS?, zork1.zil calls this), Inform/
        Blorb-era authoring conveniences this target format doesn't have
-       (NEVER-ZAP-TO-SOURCE-DIRECTORY?, ASK-FOR-PICTURE-FILE?, PICFILE). The
-       original always returns FALSE and does nothing else; so does this. *)
+       (NEVER-ZAP-TO-SOURCE-DIRECTORY?, ASK-FOR-PICTURE-FILE?, PICFILE), and
+       diagnostic-suppression (SUPPRESS-WARNINGS?, takes warning codes or
+       ALL/NONE - meaningless here since this port has no warning system to
+       suppress). The original always returns FALSE and does nothing else
+       (SUPPRESS-WARNINGS? included - it mutates ctx.DiagnosticManager as a
+       side effect but its own return value is unused by callers); so does
+       this. *)
     RETURN MkVal(FalseVal())
 
   ELSIF (name = "PACKAGE") OR (name = "ZPACKAGE") OR (name = "ZZPACKAGE")
@@ -2610,6 +2615,11 @@ VAR
   fnSpecFirst, fnActivation, fnBP: ZilObj.Zo;
   fnBindAtoms, fnSavedVals: ARRAY MaxBindings OF ZilObj.Zo;
   fnNBind, fnI, fnPhase: INTEGER;
+  (* pending, already-evaluated values being drained from a call-site
+     segment (!.X) — see the dedicated comment where fnPendingSeg is
+     first used, in the required/optional argument binding *)
+  fnPendingSeg, fnPendingVal: ZilObj.Zo;
+  fnPendingIdx, fnPendingLen: INTEGER;
   (* INSERT-FILE (see the dedicated comment at that branch) *)
   insRd: ZilRead.Reader;
   insOk, insDone, insIsTerm, insOpened: BOOLEAN;
@@ -3034,6 +3044,19 @@ BEGIN
       fnStop := FALSE;
       fnUsedVarargs := FALSE;
       fnCallArgs := z.rest;
+      (* fnPendingSeg/Idx/Len: already-evaluated values being drained from a
+         call-site segment (!.X) — <HANDLE-DEF !.X> (zillib/template.zil,
+         needed by sample/rascal) calls a 3-required-arg function with a
+         single segment that must splice across all three positions. A
+         segment can only be expanded by evaluating it (EvalImpl(KSegment)
+         itself always errors — see the dedicated comment there — since a
+         bare segment has no meaning outside a splice site), so the drained
+         values below are already final and must NOT be run through
+         EvalImpl again — only through the raw-fnCallArgs.first path below,
+         which real forms still take. Invariant: "no pending value left" is
+         exactly fnPendingIdx > fnPendingLen, true both initially (1 > 0)
+         and once a segment's last element has been consumed. *)
+      fnPendingSeg := NIL; fnPendingIdx := 1; fnPendingLen := 0;
       fnSpecPos := fnActualHead.funcArgSpec;
       fnPhase := APReq;
 
@@ -3068,19 +3091,41 @@ BEGIN
           fnVarargsRaw := fnOneSpec.strBuf^ = "ARGS";
           fnUsedVarargs := TRUE;
           resultHead := NIL; resultTail := NIL;
-          WHILE (fnCallArgs # NIL) & (fnCallArgs.first # NIL) & ~fnStop DO
-            IF fnVarargsRaw THEN
-              r := MkVal(fnCallArgs.first)
+          LOOP
+            IF ~fnVarargsRaw THEN
+              (* TUPLE evaluates, so a call-site segment can be drained here
+                 — see fnPendingSeg's dedicated comment above *)
+              WHILE (fnPendingIdx > fnPendingLen) & (fnCallArgs # NIL) & (fnCallArgs.first # NIL)
+                    & (fnCallArgs.first.kind = ZilObj.KSegment) DO
+                r := EvalImpl(fnCallArgs.first.segForm, FALSE);
+                IF ShouldPass(r) THEN RETURN r END;
+                IF evalErrFlag THEN RETURN r END;
+                IF ~IsStructured(r.value) THEN
+                  RETURN ErrAtom("SEGMENT: expected a structured value to splice, got", r.value)
+                END;
+                fnPendingSeg := r.value; fnPendingLen := StructLength(r.value); fnPendingIdx := 1;
+                fnCallArgs := fnCallArgs.rest
+              END
+            END;
+            IF fnStop THEN EXIT END;
+            IF fnPendingIdx <= fnPendingLen THEN
+              r := MkVal(StructNth(fnPendingSeg, fnPendingIdx)); INC(fnPendingIdx)
+            ELSIF (fnCallArgs # NIL) & (fnCallArgs.first # NIL) THEN
+              IF fnVarargsRaw THEN
+                r := MkVal(fnCallArgs.first)
+              ELSE
+                r := EvalImpl(fnCallArgs.first, FALSE)
+              END;
+              fnCallArgs := fnCallArgs.rest
             ELSE
-              r := EvalImpl(fnCallArgs.first, FALSE)
+              EXIT
             END;
             IF r.outcome # OValue THEN
-              fnStop := TRUE
+              fnStop := TRUE; EXIT
             ELSE
               cell := ZilObj.Cons(ZilObj.KList, r.value, NIL);
               IF resultHead = NIL THEN resultHead := cell ELSE resultTail.rest := cell END;
-              resultTail := cell;
-              fnCallArgs := fnCallArgs.rest
+              resultTail := cell
             END
           END;
           IF ~fnStop THEN
@@ -3133,16 +3178,36 @@ BEGIN
           fnSavedVals[fnNBind] := fnTarget.localVal;
           INC(fnNBind);
 
-          IF fnPhase = APReq THEN
-            IF (fnCallArgs = NIL) OR (fnCallArgs.first = NIL) THEN
-              RETURN Err("FUNCTION/MACRO: too few arguments")
+          (* drain a leading call-site segment before looking at fnCallArgs
+             directly — see fnPendingSeg's dedicated comment above. Applies
+             to both APReq and APOpt, which share one argument stream. *)
+          WHILE (fnPendingIdx > fnPendingLen) & (fnCallArgs # NIL) & (fnCallArgs.first # NIL)
+                & (fnCallArgs.first.kind = ZilObj.KSegment) DO
+            r := EvalImpl(fnCallArgs.first.segForm, FALSE);
+            IF ShouldPass(r) THEN RETURN r END;
+            IF evalErrFlag THEN RETURN r END;
+            IF ~IsStructured(r.value) THEN
+              RETURN ErrAtom("SEGMENT: expected a structured value to splice, got", r.value)
             END;
-            IF fnQuoted THEN r := MkVal(fnCallArgs.first) ELSE r := EvalImpl(fnCallArgs.first, FALSE) END;
-            IF r.outcome # OValue THEN fnStop := TRUE ELSE fnTarget.localVal := r.value END;
+            fnPendingSeg := r.value; fnPendingLen := StructLength(r.value); fnPendingIdx := 1;
             fnCallArgs := fnCallArgs.rest
+          END;
+
+          IF fnPhase = APReq THEN
+            IF fnPendingIdx <= fnPendingLen THEN
+              fnTarget.localVal := StructNth(fnPendingSeg, fnPendingIdx); INC(fnPendingIdx)
+            ELSIF (fnCallArgs = NIL) OR (fnCallArgs.first = NIL) THEN
+              RETURN Err("FUNCTION/MACRO: too few arguments")
+            ELSE
+              IF fnQuoted THEN r := MkVal(fnCallArgs.first) ELSE r := EvalImpl(fnCallArgs.first, FALSE) END;
+              IF r.outcome # OValue THEN fnStop := TRUE ELSE fnTarget.localVal := r.value END;
+              fnCallArgs := fnCallArgs.rest
+            END
 
           ELSIF fnPhase = APOpt THEN
-            IF (fnCallArgs # NIL) & (fnCallArgs.first # NIL) THEN
+            IF fnPendingIdx <= fnPendingLen THEN
+              fnTarget.localVal := StructNth(fnPendingSeg, fnPendingIdx); INC(fnPendingIdx)
+            ELSIF (fnCallArgs # NIL) & (fnCallArgs.first # NIL) THEN
               IF fnQuoted THEN r := MkVal(fnCallArgs.first) ELSE r := EvalImpl(fnCallArgs.first, FALSE) END;
               IF r.outcome # OValue THEN fnStop := TRUE ELSE fnTarget.localVal := r.value END;
               fnCallArgs := fnCallArgs.rest
@@ -3166,7 +3231,8 @@ BEGIN
         END
       END;
 
-      IF ~fnStop & ~fnUsedVarargs & (fnCallArgs # NIL) & (fnCallArgs.first # NIL) THEN
+      IF ~fnStop & ~fnUsedVarargs
+         & ((fnPendingIdx <= fnPendingLen) OR ((fnCallArgs # NIL) & (fnCallArgs.first # NIL))) THEN
         RETURN Err("FUNCTION/MACRO: too many arguments")
       END;
 
@@ -3770,10 +3836,41 @@ BEGIN
       objProps := NIL; objTail := NIL;
       n := z.rest;
       IF (n = NIL) OR (n.first = NIL) THEN RETURN Err("OBJECT/ROOM: expected a name") END;
-      cell := ZilObj.Cons(ZilObj.KList, n.first, NIL);
+      (* the name is evaluated too, like every other OBJECT/ROOM argument
+         (see the branch's own header comment) — a bare atom self-evaluates
+         so this changes nothing for the common `<OBJECT ROOMS ...>` case,
+         but zillib/template.zil's generated `<OBJECT .NAME !.PS>` (needed
+         by sample/rascal) needs the name's LVAL actually resolved rather
+         than the literal atom NAME being registered as every object's
+         name. *)
+      r := EvalImpl(n.first, FALSE);
+      IF ShouldPass(r) THEN RETURN r END;
+      IF evalErrFlag THEN RETURN r END;
+      cell := ZilObj.Cons(ZilObj.KList, r.value, NIL);
       objProps := cell; objTail := cell;
       n := n.rest;
       WHILE (n # NIL) & (n.first # NIL) DO
+        IF n.first.kind = ZilObj.KSegment THEN
+          (* <OBJECT .NAME !.PS> (zillib/template.zil's per-template
+             OBJECT-TEMPLATE constructor, needed by sample/rascal): PS is a
+             list of whole properties, spliced in as separate top-level
+             property positions — same shape as the KSplice case just
+             below, so it's handled the same way (each element contributed
+             raw, not re-evaluated — it's already a final value). *)
+          r := EvalImpl(n.first.segForm, FALSE);
+          IF ShouldPass(r) THEN RETURN r END;
+          IF evalErrFlag THEN RETURN r END;
+          IF ~IsStructured(r.value) THEN
+            RETURN ErrAtom("SEGMENT: expected a structured value to splice, got", r.value)
+          END;
+          splice := r.value;
+          WHILE (splice # NIL) & (splice.first # NIL) DO
+            cell := ZilObj.Cons(ZilObj.KList, splice.first, NIL);
+            objTail.rest := cell; objTail := cell;
+            splice := splice.rest
+          END;
+          n := n.rest
+        ELSE
         r := EvalImpl(n.first, FALSE);
         IF ShouldPass(r) THEN RETURN r END;
         IF evalErrFlag THEN RETURN r END;
@@ -3800,6 +3897,7 @@ BEGIN
           objTail.rest := cell; objTail := cell
         END;
         n := n.rest
+        END
       END;
       RETURN ApplyObject(name = "ROOM", objProps)
 
@@ -4527,6 +4625,7 @@ BEGIN
   Register("DEFINE-SEGMENT", FALSE); Register("FREQUENT-WORDS?", FALSE);
   Register("NEVER-ZAP-TO-SOURCE-DIRECTORY?", FALSE); Register("ASK-FOR-PICTURE-FILE?", FALSE);
   Register("PICFILE", FALSE);
+  Register("SUPPRESS-WARNINGS?", FALSE);
   Register("ADD-TELL-TOKENS", TRUE); Register("TELL-TOKENS", TRUE);
   Register("NTH", FALSE); Register("GET-ELEMENT", FALSE); Register("REST", FALSE);
   Register("PUTREST", FALSE);
