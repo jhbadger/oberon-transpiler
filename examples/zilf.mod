@@ -23,6 +23,18 @@ MODULE Zilf;
                         -i /path/to/zilf/zillib
     -e, --entry NAME   compile NAME as the entry routine (default: GO)
     -q, --quiet        suppress progress messages
+    -c, --compile      compile straight through to a story file: the .zap
+                        goes to a temporary file instead of stdout/output,
+                        and zapf (must be on PATH) is run on it
+                        automatically. With -c, the optional output
+                        argument names the FINAL story file (e.g.
+                        game.z5) rather than a .zap file:
+
+                          zilf -c game.zil game.z5
+
+                        With -c and no output argument, the story file is
+                        named after the input, same as running zapf by
+                        hand with no output argument of its own.
 
   IMPORTANT — this is a partial compiler. Object/property/flag tables,
   the vocabulary and parser tables, string packing, tables, and most of
@@ -35,15 +47,17 @@ MODULE Zilf;
     obc --mod-path Modules examples/zilf.mod -o zilf
 *)
 
-IMPORT ZilObj, ZilRead, ZilEval, ZilModel, ZilCompile, Args, Strings, Out, OS;
+IMPORT ZilObj, ZilRead, ZilEval, ZilModel, ZilCompile, Args, Strings, Out, OS, Env, Files;
 
 VAR
   rd: ZilRead.Reader;
   z: ZilObj.Zo;
   r: ZilEval.ZResult;
-  ok, done, isTerm, quiet, haveIn, haveOut: BOOLEAN;
-  termChar, i, n, nForms: INTEGER;
+  ok, done, isTerm, quiet, haveIn, haveOut, compileFlag: BOOLEAN;
+  termChar, i, n, nForms, rc: INTEGER;
   arg, inFile, outFile, entryName, dir: ARRAY 512 OF CHAR;
+  tmpDir, zapFile, finalOut: ARRAY 512 OF CHAR;
+  cmd: ARRAY 1536 OF CHAR;
   detail: ARRAY 1024 OF CHAR;
 
 PROCEDURE Usage;
@@ -51,7 +65,8 @@ BEGIN
   Out.String("usage: zilf [options] input.zil [output.zap]"); Out.Ln;
   Out.String("  -i, --include DIR  add DIR to the library search path (repeatable)"); Out.Ln;
   Out.String("  -e, --entry NAME   entry routine name (default: GO)"); Out.Ln;
-  Out.String("  -q, --quiet        suppress progress messages"); Out.Ln
+  Out.String("  -q, --quiet        suppress progress messages"); Out.Ln;
+  Out.String("  -c, --compile      run zapf automatically; output is the story file"); Out.Ln
 END Usage;
 
 (* Diagnostics go to STDERR, because the compiled `.zap` goes to stdout when
@@ -99,8 +114,36 @@ BEGIN
   END
 END DirOf;
 
+(* Where to put the temporary .zap file for -c. Deliberately does NOT fall
+   back to a hardcoded "/tmp" — not every target has one (e.g. Termux) —
+   so an unset/empty $TMPDIR falls back to the current directory instead,
+   which always exists. *)
+PROCEDURE TempDir(VAR d: ARRAY OF CHAR);
 BEGIN
-  quiet := FALSE; haveIn := FALSE; haveOut := FALSE;
+  IF ~Env.Get("TMPDIR", d) OR (d[0] = 0X) THEN Strings.Copy(".", d) END
+END TempDir;
+
+(* Same extension-replacement rule zapf.mod's own MakeDefaultOutput uses:
+   strip inFile's extension (keeping its directory) and append the ".z#"
+   placeholder, which zapf then rewrites to ".z3" .. ".z8" once it knows
+   the story file's version. Used for -c's default output name, so `zilf
+   -c game.zil` and `zilf game.zil game.zap && zapf game.zap` name the
+   story file the same way. *)
+PROCEDURE MakeDefaultZOutput(inFile: ARRAY OF CHAR; VAR outFile: ARRAY OF CHAR);
+VAR n, k, dot: INTEGER;
+BEGIN
+  n := Strings.Length(inFile);
+  dot := n;
+  FOR k := 0 TO n - 1 DO
+    IF inFile[k] = "." THEN dot := k END
+  END;
+  FOR k := 0 TO dot - 1 DO outFile[k] := inFile[k] END;
+  outFile[dot] := 0X;
+  Strings.Append(".z#", outFile)
+END MakeDefaultZOutput;
+
+BEGIN
+  quiet := FALSE; haveIn := FALSE; haveOut := FALSE; compileFlag := FALSE;
   Strings.Copy("GO", entryName);
 
   n := Args.Count();
@@ -109,6 +152,8 @@ BEGIN
     Args.Get(i, arg);
     IF (arg = "-q") OR (arg = "--quiet") THEN
       quiet := TRUE
+    ELSIF (arg = "-c") OR (arg = "--compile") THEN
+      compileFlag := TRUE
     ELSIF (arg = "-i") OR (arg = "--include") THEN
       INC(i);
       IF i > n THEN Fail("--include requires a directory", "") END;
@@ -190,16 +235,34 @@ BEGIN
     Out.String(" objects"); Out.Ln
   END;
 
-  IF haveOut THEN
+  IF compileFlag THEN
+    TempDir(tmpDir);
+    Strings.Copy(tmpDir, zapFile); Strings.Append("/zilf_tmp.zap", zapFile);
+    IF ~ZilCompile.OpenOutput(zapFile) THEN Fail("cannot write", zapFile) END
+  ELSIF haveOut THEN
     IF ~ZilCompile.OpenOutput(outFile) THEN Fail("cannot write", outFile) END
   END;
 
   ok := ZilCompile.CompileProgram(entryName);
   ZilCompile.CloseOutput;
 
-  IF ~ok THEN Fail("compile error", ZilCompile.errMsg) END;
+  IF ~ok THEN
+    IF compileFlag THEN Files.Delete(zapFile) END;
+    Fail("compile error", ZilCompile.errMsg)
+  END;
 
-  IF ~quiet & haveOut THEN
+  IF compileFlag THEN
+    IF haveOut THEN Strings.Copy(outFile, finalOut) ELSE MakeDefaultZOutput(inFile, finalOut) END;
+
+    Strings.Copy("zapf ", cmd);
+    IF quiet THEN Strings.Append("-q ", cmd) END;
+    Strings.Append("'", cmd); Strings.Append(zapFile, cmd); Strings.Append("' '", cmd);
+    Strings.Append(finalOut, cmd); Strings.Append("'", cmd);
+
+    rc := OS.Exec(cmd);
+    Files.Delete(zapFile);
+    IF rc # 0 THEN Fail("zapf failed", "") END
+  ELSIF ~quiet & haveOut THEN
     Out.String("zilf: wrote "); Out.String(outFile); Out.Ln
   END
 END Zilf.
