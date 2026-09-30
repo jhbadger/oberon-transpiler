@@ -1,4 +1,4 @@
-<VERSION XZIP>
+<VERSION ZIP>
 <CONSTANT RELEASEID 1>
 <SETG USE-SCORING? T>
 <DELAY-DEFINITION DARKNESS-F>
@@ -150,16 +150,26 @@ An Interactive Sci-Fi Mystery in ZIL">
     (FLAGS LIGHTBIT)
     (WEST TO AIRLOCK)
     (EAST TO DARK-CORRIDOR)
+    (NORTH TO ENGINEERING-DECK)
     (ACTION MED-BAY-F)>
 
 <ROUTINE MED-BAY-F (RARG)
     <COND (<==? .RARG ,M-LOOK>
-           <TELL "Racked medical supplies lie shattered across the floor. An operational Android stands quietly beside a diagnostic bay. Exits lie west to the airlock and east to a dark hallway." CR>)>>
+           <TELL "Racked medical supplies lie shattered across the floor. An operational Android stands quietly beside a diagnostic bay. Exits lie west to the airlock, east to a dark hallway, and north through a heavy bulkhead door into Engineering." CR>)>>
+
+;"==========================================================================="
+;" Syntax & Action for Custom Verb: KISS"
+;"==========================================================================="
+
+<SYNTAX KISS OBJECT = V-KISS>
+
+<ROUTINE V-KISS ()
+    <TELL "That would be inappropriate." CR>>
 
 <OBJECT EVE
     (IN MED-BAY)
     (DESC "Eve the Synthetic")
-    (SYNONYM EVE ANDROID SYNTHETIC FEMALE WOMAN)
+    (SYNONYM EVE ANDROID SYNTHETIC FEMALE)
     (ADJECTIVE FRIENDLY SYNTHETIC)
     (FLAGS PERSONBIT)
     (ACTION EVE-F)>
@@ -178,6 +188,9 @@ An Interactive Sci-Fi Mystery in ZIL">
         ;"Standard interactions with Eve"
         (<VERB? EXAMINE>
            <TELL "Eve is a sleek, friendly android with silver trim and expressive synthetic eyes. She seems undamaged by the catastrophe." CR>)
+
+        (<VERB? KISS>
+           <TELL "Eve gently steps back, her expression remaining polite and calm. 'I am a class-4 medical unit, not a companion model. Romance is not part of my programming.'" CR>)
 
         (<VERB? TELL>
            <TELL "Eve tilts her head, listening intently." CR>
@@ -272,3 +285,126 @@ An Interactive Sci-Fi Mystery in ZIL">
            <COND (<==? ,PRSI ,ACCESS-CARD>
                   <FCLEAR ,ESCAPE-POD-DOOR ,LOCKEDBIT>
                   <TELL "You swipe the keycard through the door terminal. The blast door unlocks with a heavy hiss." CR>)>)>>
+
+;"==========================================================================="
+;" Room 5: Engineering Deck (Power Grid & coolant hazard)"
+;"==========================================================================="
+
+<ROOM ENGINEERING-DECK
+    (IN ROOMS)
+    (DESC "Engineering Deck")
+    (SOUTH TO MED-BAY)
+    (DOWN TO REACTOR-CORE)
+    (NORTH TO VENT-SHAFT)
+    (ACTION ENGINEERING-DECK-F)>
+
+<ROUTINE ENGINEERING-DECK-F (RARG)
+    <COND (<==? .RARG ,M-LOOK>
+           <TELL "Heavy coolant pipes line the steel walls, hiss-venting green vapor. High-voltage conduits run down toward the Reactor Core below, and a maintenance vent shaft opens to the north. South leads back to the Med-Bay." CR>)>>
+
+<OBJECT FUSE-BOX
+    (IN ENGINEERING-DECK)
+    (DESC "breaker panel")
+    (SYNONYM BOX PANEL BREAKER)
+    (ADJECTIVE BREAKER ELECTRICAL COOLANT)
+    (FLAGS CONTBIT OPENABLEBIT)
+    (CAPACITY 5)
+    (ACTION FUSE-BOX-F)>
+
+<ROUTINE FUSE-BOX-F ()
+    <COND (<VERB? OPEN>
+           <COND (<FSET? ,FUSE-BOX ,OPENBIT>
+                  <TELL "The breaker panel is already open." CR>)
+                 (T
+                  <FSET ,FUSE-BOX ,OPENBIT>
+                  <TELL "You pull open the breaker panel, exposing the power bus." CR>
+                  <RTRUE>)>)>>
+
+<OBJECT FUSE
+    (IN FUSE-BOX)
+    (DESC "power relay fuse")
+    (SYNONYM FUSE RELAY)
+    (ADJECTIVE POWER HEAVY)
+    (FLAGS TAKEBIT TOOLBIT)>
+
+<OBJECT COOLANT-LEAK
+    (IN ENGINEERING-DECK)
+    (DESC "coolant leak")
+    (SYNONYM LEAK VAPOR GAS PIPE)
+    (ADJECTIVE GREEN TOXIC COOLANT)
+    (ACTION COOLANT-LEAK-F)>
+
+<ROUTINE COOLANT-LEAK-F ()
+    <COND (<VERB? EXAMINE>
+           <TELL "Corrosive coolant vapor vents from a ruptured pipe. Breathing it unprotected will quickly prove fatal." CR>)
+          (<VERB? REPAIR SEAL FIX>
+           <COND (<IN? ,SEALANT-CANISTER ,PLAYER>
+                  <REMOVE ,COOLANT-LEAK>
+                  <SETG SCORE <+ ,SCORE 10>>
+                  <TELL "You spray thermal sealant over the breach. The hissing stops and the green vapor clears! (+10 points)" CR>)
+                 (T
+                  <TELL "You need some kind of industrial sealant to repair the pipe." CR>)>)>>
+
+;"==========================================================================="
+;" Room 6: Reactor Core (Deep Power Grid)"
+;"==========================================================================="
+
+<ROOM REACTOR-CORE
+    (IN ROOMS)
+    (DESC "Reactor Chamber")
+    (UP TO ENGINEERING-DECK)
+    (ACTION REACTOR-CORE-F)>
+
+<ROUTINE REACTOR-CORE-F (RARG)
+    <COND (<==? .RARG ,M-LOOK>
+           <TELL "You stand on a metal catwalk suspended above the dormant containment vessel. A master sub-station terminal hums faintly. Metal stairs lead up to Engineering." CR>)>>
+
+<OBJECT REACTOR-TERMINAL
+    (IN REACTOR-CORE)
+    (DESC "main reactor console")
+    (SYNONYM TERMINAL CONSOLE PANEL REACTOR)
+    (ADJECTIVE REACTOR MASTER MAIN)
+    (FLAGS TOOLBIT)
+    (ACTION REACTOR-TERMINAL-F)>
+
+<ROUTINE REACTOR-TERMINAL-F ()
+    <COND (<VERB? EXAMINE>
+           <COND (<FSET? ,REACTOR-TERMINAL ,LIGHTBIT>
+                  <TELL "The main reactor console is fully online, directing primary emergency power across the station!" CR>)
+                 (T
+                  <TELL "The terminal display flashes: 'CRITICAL ERROR: RELAY FUSE MISSING'." CR>)>)
+
+          (<VERB? REPAIR FIX>
+           <COND (<IN? ,FUSE ,REACTOR-TERMINAL>
+                  <FSET ,REACTOR-TERMINAL ,LIGHTBIT>
+                  <SETG SCORE <+ ,SCORE 10>>
+                  <TELL "You seat the heavy power relay fuse into the reactor bus. A low rumble shakes the floor as secondary power returns! (+10 points)" CR>)
+                 (T
+                  <TELL "The terminal is missing a primary relay fuse." CR>)>)>>
+
+;"==========================================================================="
+;" Room 7: Ventilation Shaft (Bypassing obstacles)"
+;"==========================================================================="
+
+<ROOM VENT-SHAFT
+    (IN ROOMS)
+    (DESC "Maintenance Vent Shaft")
+    (SOUTH TO ENGINEERING-DECK)
+    (NORTH TO COMMAND-DECK)
+    (ACTION VENT-SHAFT-F)>
+
+<ROUTINE VENT-SHAFT-F (RARG)
+    <COND (<==? .RARG ,M-LOOK>
+           <TELL "A claustrophobic square tunnel running above the primary decks. Ducting leads south to Engineering and north directly behind the Command Deck blast doors." CR>)>>
+
+<OBJECT SEALANT-CANISTER
+    (IN VENT-SHAFT)
+    (DESC "canister of thermal sealant")
+    (SYNONYM CANISTER SEALANT FOAM SPRAY)
+    (ADJECTIVE THERMAL INDUSTRIAL FOAM)
+    (FLAGS TAKEBIT TOOLBIT)
+    (ACTION SEALANT-CANISTER-F)>
+
+<ROUTINE SEALANT-CANISTER-F ()
+    <COND (<VERB? EXAMINE>
+           <TELL "A pressurized canister of quick-curing thermal sealant foam." CR>)>>
