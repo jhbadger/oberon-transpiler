@@ -9,22 +9,6 @@ A Simple ZIL example">
 
 <CONSTANT MAX-SCORE 100>
 
-"The GO routine is the entry point for your game"
-<ROUTINE GO ()
-    <CRLF>
-    <TELL "Welcome to the interactive fiction tutorial!" CR>
-    <CRLF>
-    <V-VERSION> "Prints the standard library version and GAME-BANNER"
-
-    "Initialize the player's starting location"
-    <SETG HERE ,START-ROOM>
-    <MOVE ,PLAYER ,HERE>
-    <V-LOOK>
-
-    "Start the standard ZIL parser/game loop"
-    <MAIN-LOOP>>
-
-
 <OBJECT BRASS-LANTERN
     (IN START-ROOM)
     (DESC "brass lantern")
@@ -32,10 +16,6 @@ A Simple ZIL example">
     (ADJECTIVE BRASS)
     (FLAGS TAKEBIT)
     (ACTION LANTERN-F)>
-
-<ROUTINE LANTERN-F ()
-    <COND (<VERB? EXAMINE>
-           <TELL "It is a heavy brass lantern, currently turned off." CR>)>>
 
 <ROOM KITCHEN
     (IN ROOMS)
