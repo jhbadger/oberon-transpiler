@@ -10,6 +10,10 @@ An Interactive Sci-Fi Mystery in ZIL">
 
 <CONSTANT MAX-SCORE 50>
 
+;"Global Resource Tracking"
+<GLOBAL POWER-LEVEL 100>
+<GLOBAL RADIATION-TOLERANCE 25>
+
 ;"==========================================================================="
 ;" Syntax & Grammar Definitions"
 ;"==========================================================================="
@@ -38,6 +42,8 @@ An Interactive Sci-Fi Mystery in ZIL">
     
     ;"Start the radiation hazard daemon running every turn"
     <QUEUE I-RADIATION -1>
+    ;"Start the power drain daemon running every turn"
+    <QUEUE I-POWER-DRAIN -1>
     <MAIN-LOOP>>
 
 ;"==========================================================================="
@@ -70,6 +76,14 @@ An Interactive Sci-Fi Mystery in ZIL">
           (<==? ,RAD-LEVEL 25>
            <JIGS-UP "Radiation sickness overwhelms your central nervous system. You collapse onto the cold deck plates.">)>>
 
+;"Routine to slowly drain station power"
+<ROUTINE I-POWER-DRAIN ()
+    <SETG POWER-LEVEL <- ,POWER-LEVEL 2>>
+    <COND (<==? ,POWER-LEVEL 10>
+           <TELL "The station lights flicker violently. Critical power levels detected!" CR>)
+          (<==? ,POWER-LEVEL 0>
+           <JIGS-UP "The station goes completely dark, and vital systems fail. You are stranded in the void.">)>>
+
 ;"==========================================================================="
 ;" Room 1: Airlock (Lit Starting Room)"
 ;"==========================================================================="
@@ -82,7 +96,9 @@ An Interactive Sci-Fi Mystery in ZIL">
     (ACTION AIRLOCK-F)>
 
 <ROUTINE AIRLOCK-F (RARG)
-    <COND (<==? .RARG ,M-LOOK>
+    <COND (<==? ,POWER-LEVEL 0>
+           <TELL "The airlock systems are dead. Emergency lighting has failed. You are trapped in absolute darkness." CR>)
+          (<==? .RARG ,M-LOOK>
            <TELL "You are standing in the entry airlock of the derelict station. Emergency strips flicker weakly overhead. An inner hatchway leads east into the station interior." CR>)>>
 
 <OBJECT FLASH-BATON
@@ -157,21 +173,12 @@ An Interactive Sci-Fi Mystery in ZIL">
     <COND (<==? .RARG ,M-LOOK>
            <TELL "Racked medical supplies lie shattered across the floor. An operational Android stands quietly beside a diagnostic bay. Exits lie west to the airlock, east to a dark hallway, and north through a heavy bulkhead door into Engineering." CR>)>>
 
-;"==========================================================================="
-;" Syntax & Action for Custom Verb: KISS"
-;"==========================================================================="
-
-<SYNTAX KISS OBJECT = V-KISS>
-
-<ROUTINE V-KISS ()
-    <TELL "That would be inappropriate." CR>>
-
 <OBJECT EVE
     (IN MED-BAY)
     (DESC "Eve the Synthetic")
     (SYNONYM EVE ANDROID SYNTHETIC FEMALE)
     (ADJECTIVE FRIENDLY SYNTHETIC)
-    (FLAGS PERSONBIT)
+    (FLAGS PERSONBIT CONTBIT)
     (ACTION EVE-F)>
 
 <ROUTINE EVE-F ()
@@ -202,10 +209,21 @@ An Interactive Sci-Fi Mystery in ZIL">
                  (<==? ,PRSI ,ACCESS-CARD>
                   <TELL "Eve nods. 'The chief officer dropped his clearance card during the evacuation in the eastern hallway.'" CR>)
                  (<==? ,PRSI ,EVE>
-                  <TELL "Eve smiles warm-heartedly. 'I was manufactured by Weyland-Yutani to safeguard station personnel.'" CR>)>)
+                  <TELL "Eve smiles warm-heartedly. 'I was manufactured by Weyland-Yutani to safeguard station personnel. I hold vital diagnostics on my internal drive.'" CR>)
+                 (<==? ,PRSI ,DATA-CHIP>
+                  <TELL "Eve scans the chip with a diagnostic lens. 'This is a primary system key. It holds the necessary override code for the Reactor Core.'" CR>)>)
 
         (<VERB? ATTACK>
-           <TELL "Eve effortlessly sidesteps your strike. 'Violence will not resolve our predicament, human.'" CR>)>>
+           <TELL "Eve effortlessly sidesteps your strike. 'Violence will not resolve our predicament, human.'" CR>)
+           
+        ;"NEW ACTION: Putting items into Eve"
+        (<VERB? PUT>
+           <COND (<IN? ,DATA-CHIP ,EVE>
+                  <TELL "Eve accepts the chip with a slight whirring sound. 'Thank you. This will allow me to access restricted protocols.'" CR>
+                  <RTRUE>)
+                 (T
+                  <TELL "Eve declines the chip; it does not fit her primary docking port." CR>
+                  <RFALSE>)>)>>
 
 <OBJECT FIRST-AID-KIT
     (IN MED-BAY)
@@ -229,6 +247,14 @@ An Interactive Sci-Fi Mystery in ZIL">
                   <SETG SCORE <+ ,SCORE 15>>
                   <TELL "You pocket the stimpack. You feel a sudden surge of hope! (+15 points)" CR>)>
            <RFALSE>)>>
+
+;"NEW OBJECT: Critical Data Chip held by Eve"
+<OBJECT DATA-CHIP
+    (IN EVE)
+    (DESC "corrupted data chip")
+    (SYNONYM CHIP MODULE)
+    (ADJECTIVE CRITICAL)
+    (FLAGS TAKEBIT TOOLBIT)>
 
 ;"==========================================================================="
 ;" Room 4: Command Deck (Monster & Security Gate)"
@@ -255,15 +281,27 @@ An Interactive Sci-Fi Mystery in ZIL">
 
 <ROUTINE MONSTER-F ()
     <COND (<VERB? EXAMINE>
-           <TELL "A terrifying creature made of teeth, talons, and dark chitin. It hates bright light!" CR>)
+           <TELL "A terrifying creature made of teeth, talons, and dark chitin. It hates bright light and specialized electromagnetic pulses." CR>)
 
           (<VERB? ATTACK>
            <COND (<FSET? ,FLASH-BATON ,LIGHTBIT>
                   <REMOVE ,MONSTER>
                   <SETG SCORE <+ ,SCORE 15>>
                   <TELL "You thrust the glowing plasma baton at the beast! Shrieking in pain from the blazing beam, the monster retreats into the ventilation shafts! (+15 points)" CR>)
+                 (<FSET? ,EMERGENCY-STUNNER ,HAS-STUNNER>
+                  <REMOVE ,MONSTER>
+                  <SETG SCORE <+ ,SCORE 25>>
+                  <TELL "You deploy the stunner! The creature collapses into a stunned heap, defeated. (+25 points)" CR>)
                  (T
                   <JIGS-UP "You attempt to fight the beast barehanded. It lunges instantly, gutting you in single stroke.">)>)>>
+
+;"NEW OBJECT: High-power item for the monster"
+<OBJECT EMERGENCY-STUNNER
+    (IN COMMAND-DECK)
+    (DESC "EMERGENCY stunner")
+    (SYNONYM STUNNER PULSE)
+    (ADJECTIVE HIGH-POWER ELECTRIC)
+    (FLAGS TAKEBIT TOOLBIT)>
 
 <OBJECT ESCAPE-POD-DOOR
     (IN COMMAND-DECK)
@@ -370,9 +408,11 @@ An Interactive Sci-Fi Mystery in ZIL">
 <ROUTINE REACTOR-TERMINAL-F ()
     <COND (<VERB? EXAMINE>
            <COND (<FSET? ,REACTOR-TERMINAL ,LIGHTBIT>
-                  <TELL "The main reactor console is fully online, directing primary emergency power across the station!" CR>)
+                  <TELL "The main reactor console is fully online, directing primary emergency power across the station! The station systems stabilize." CR>)
+                 (<FSET? ,REACTOR-TERMINAL ,SYSTEM-ONLINE>
+                  <TELL "The terminal display flashes: 'CRITICAL ERROR: RELAY FUSE MISSING.'">)
                  (T
-                  <TELL "The terminal display flashes: 'CRITICAL ERROR: RELAY FUSE MISSING'." CR>)>)
+                  <TELL "The terminal display flashes: 'SYSTEM CRITICAL: CORE DORMANT. DATA REQUIRED.'" CR>)>)
 
           (<VERB? REPAIR FIX>
            <COND (<IN? ,FUSE ,REACTOR-TERMINAL>
@@ -380,31 +420,40 @@ An Interactive Sci-Fi Mystery in ZIL">
                   <SETG SCORE <+ ,SCORE 10>>
                   <TELL "You seat the heavy power relay fuse into the reactor bus. A low rumble shakes the floor as secondary power returns! (+10 points)" CR>)
                  (T
-                  <TELL "The terminal is missing a primary relay fuse." CR>)>)>>
+                  <TELL "The terminal is missing a primary relay fuse." CR>)>)
 
-;"==========================================================================="
+          ;"NEW ACTION: Inserting the chip"
+          (<VERB? INSERT>
+           <COND (<IN? ,DATA-CHIP ,PLAYER>
+                  <COND (<NOT <FSET? ,REACTOR-TERMINAL ,SYSTEM-ONLINE>>
+                         <SETG SCORE <+ ,SCORE 15>>
+                         <SETG ,REACTOR-TERMINAL ,SYSTEM-ONLINE>
+                         <TELL "The chip slides into the console slot. The main reactor hums to life! Primary power restored! (+15 points)" CR>)
+                  (T
+                   <TELL "The reactor console is already operating at full capacity." CR>)>)>)>>
+"==========================================================================="
 ;" Room 7: Ventilation Shaft (Bypassing obstacles)"
 ;"==========================================================================="
 
 <ROOM VENT-SHAFT
-    (IN ROOMS)
-    (DESC "Maintenance Vent Shaft")
-    (SOUTH TO ENGINEERING-DECK)
-    (NORTH TO COMMAND-DECK)
-    (ACTION VENT-SHAFT-F)>
+(IN ROOMS)
+(DESC "Maintenance Vent Shaft")
+(SOUTH TO ENGINEERING-DECK)
+(NORTH TO COMMAND-DECK)
+(ACTION VENT-SHAFT-F)>
 
 <ROUTINE VENT-SHAFT-F (RARG)
-    <COND (<==? .RARG ,M-LOOK>
-           <TELL "A claustrophobic square tunnel running above the primary decks. Ducting leads south to Engineering and north directly behind the Command Deck blast doors." CR>)>>
+<COND (<==? .RARG ,M-LOOK>
+<TELL "A claustrophobic square tunnel running above the primary decks. Ducting leads south to Engineering and north directly behind the Command Deck blast doors." CR>)>>
 
 <OBJECT SEALANT-CANISTER
-    (IN VENT-SHAFT)
-    (DESC "canister of thermal sealant")
-    (SYNONYM CANISTER SEALANT FOAM SPRAY)
-    (ADJECTIVE THERMAL INDUSTRIAL FOAM)
-    (FLAGS TAKEBIT TOOLBIT)
-    (ACTION SEALANT-CANISTER-F)>
+(IN VENT-SHAFT)
+(DESC "canister of thermal sealant")
+(SYNONYM CANISTER SEALANT FOAM SPRAY)
+(ADJECTIVE THERMAL INDUSTRIAL FOAM)
+(FLAGS TAKEBIT TOOLBIT)
+(ACTION SEALANT-CANISTER-F)>
 
 <ROUTINE SEALANT-CANISTER-F ()
-    <COND (<VERB? EXAMINE>
-           <TELL "A pressurized canister of quick-curing thermal sealant foam." CR>)>>
+<COND (<VERB? EXAMINE>
+<TELL "A pressurized canister of quick-curing thermal sealant foam." CR>)>>
