@@ -2,7 +2,7 @@
 
 ZIL (Zork Implementation Language) is a dialect of MDL (a Lisp derivative) used by Infocom in the 1980s to write classics like *Zork* and *The Hitchhiker's Guide to the Galaxy*. Today, thanks to the open-source **ZILF** project, you can write and compile ZIL code into Z-machine files playable on any modern interpreter.
 
-This tutorial covers the basics of setting up a modern ZIL workflow while using classic Infocom programming concepts. Every example in this tutorial has been compiled, assembled, and actually played through an interpreter (`frotz`) to confirm it behaves as described — see section 18 for how to do the same with your own code.
+This tutorial covers the basics of setting up a modern ZIL workflow while using classic Infocom programming concepts. Every example in this tutorial has been compiled, assembled, and actually played through an interpreter (`frotz`) to confirm it behaves as described — see section 21 for how to do the same with your own code.
 
 ## 1. Prerequisites and Setup (The Oberon Part)
 
@@ -550,7 +550,102 @@ If you want to customize what happens when the player moves while inside the veh
 
 Note that `WALK` needs an actual direction to reach this code at all — typing bare `WALK` makes the parser ask "Which way do you want to walk?" *before* any `ACTION` routine gets a chance to run, since the parser doesn't have a complete command yet. Test this one with `WALK NORTH` (or any other direction), not `WALK` by itself.
 
-## 17. Compiling Your Game
+## 17. Pre-Actions and the Full Handling Order
+
+Section 4's boilerplate noted that `PRSI`'s own `ACTION` routine gets the first crack at the input, then `PRSO`'s, then the verb default. There's a stop on that chain that runs *earlier* than any of them: a **pre-action**.
+
+A pre-action is tied to a verb, not an object, named by convention `PRE-<verb>`, and wired up right on the `SYNTAX` line, after the verb default's name. This isn't a tutorial-only convention — it's the exact mechanism zillib itself uses; `<SYNTAX TAKE OBJECT (MANY IN-ROOM) FROM OBJECT (FIND CONTBIT) (TOUCH) = V-TAKE-FROM PRE-TAKE-FROM>` is a real line straight out of `verbs.zil`.
+
+The point of a pre-action is to make one verb-wide check instead of repeating it in every object that verb might target. Here, smashing *anything* should require a hammer, and that check belongs in one place rather than copy-pasted into `VASE-F` and every smashable object added later:
+
+```zil
+<SYNTAX SMASH OBJECT = V-SMASH PRE-SMASH>
+
+<ROUTINE PRE-SMASH ()
+    <COND (<NOT <IN? ,HAMMER ,PLAYER>>
+           <TELL "You'll need something solid to smash " T ,PRSO " with." CR>
+           <RTRUE>)>>
+```
+
+```zil
+<OBJECT HAMMER
+    (IN START-ROOM)
+    (DESC "heavy hammer")
+    (SYNONYM HAMMER)
+    (ADJECTIVE HEAVY)
+    (FLAGS TAKEBIT)
+    (DESCFCN HAMMER-D)>   ;"see section 18"
+```
+
+Try `SMASH VASE` before ever picking up the hammer: `PRE-SMASH` runs *before* `VASE-F` gets a chance, so the vase survives and you get the refusal message instead. `RTRUE` from a pre-action means exactly what it means from an `ACTION` routine — "fully handled, stop here" — so `VASE-F` never runs at all. Now `TAKE HAMMER` and try `SMASH VASE` again: `PRE-SMASH`'s predicate is false this time, the `COND` falls through, `PRE-SMASH` returns false, and the chain continues down to `VASE-F` exactly as it did back in section 9, unmodified.
+
+> **Watch the spacing around tell-tokens.** `T ,PRSO` (and `A ,PRSO`) print `"the "`/`"a "` *followed by* the `DESC` — a trailing space, with no leading space of its own. The strings on either side have to supply their own spacing, or words run together. The first draft of `PRE-SMASH` wrote `"...to smash" T ,PRSO "with."`, which compiled fine and printed `You'll need something solid to smashthe porcelain vasewith.` The fix is the version above: a trailing space before the token, a leading space after it.
+
+## 18. Dynamic Object Descriptions (DESCFCN)
+
+An object's appearance in a room listing has, so far, used its `DESC` (plugged into a generic default) or a static `LDESC` for something more specific. Neither can change *mid-game* on its own. The `DESCFCN` property hands that job to a routine instead, so the exact same object can describe itself differently depending on what's happened so far:
+
+```zil
+<GLOBAL VASE-SMASHED <>>
+```
+
+Update `VASE-F` from section 9 to set it the moment the vase breaks (this is the complete, final version):
+
+```zil
+<ROUTINE VASE-F ()
+    <COND (<VERB? SMASH>
+           <SETG VASE-SMASHED T>
+           <REMOVE ,VASE>
+           <TELL "You smash the vase to pieces! It shatters all over the floor." CR>)>>
+```
+
+And `HAMMER-D`, the routine named in `HAMMER`'s `DESCFCN` property back in section 17:
+
+```zil
+<ROUTINE HAMMER-D ("OPTIONAL" ARG)
+    <COND (<EQUAL? .ARG ,M-OBJDESC?>
+           <RTRUE>)
+          (,VASE-SMASHED
+           <TELL "There is a heavy hammer here, its head chipped from smashing the vase." CR>)
+          (T
+           <TELL "There is a heavy hammer here." CR>)>>
+```
+
+`LOOK` while standing in `START-ROOM` prints "There is a heavy hammer here." the ordinary way. Now pick up the hammer, go smash the vase (section 17), come back and `DROP HAMMER`, then `LOOK` again — the exact same object now reports "its head chipped from smashing the vase," with no change at all to `HAMMER`'s `DESC`, `LDESC`, or any other static property.
+
+> **A `DESCFCN` is called twice, and only one of those calls should ever print anything.** The describers first call it with the argument `M-OBJDESC?`, as a yes/no question: "will you be the one describing yourself?" Only if that returns true do they call it again, with `M-OBJDESC`, meaning "okay, go ahead." `HAMMER-D`'s first `COND` clause exists *only* to answer that question with `<RTRUE>` — which is the entire reason it checks for `M-OBJDESC?` instead of falling straight through to the `,VASE-SMASHED` clause. A routine that `TELL`s unconditionally, ignoring which constant it was actually handed, answers both calls by printing — once for the query, and once more for the real request. (Some real 1980s Infocom source, Zork I's own `BAT-D`, does exactly that, always `TELL`ing regardless of its argument — treat it as a historical oddity rather than a pattern worth copying; checking `M-OBJDESC?` explicitly, as `HAMMER-D` does, is the safe default.)
+
+## 19. "Switch" Syntaxes
+
+`GIVE HAMMER TO TROLL` and `GIVE TROLL THE HAMMER` mean the same thing, but they put `PRSO` and `PRSI` in opposite slots — in the first, `PRSO` is the hammer and `PRSI` is the troll; in the second, it's reversed. zillib already defines grammar for both phrasings — these two lines are real, straight out of `verbs.zil`, not something you write yourself:
+
+```zil
+<SYNTAX GIVE OBJECT (HAVE HELD CARRIED) TO OBJECT (FIND PERSONBIT) (TOUCH) = V-GIVE>
+<SYNTAX GIVE OBJECT (FIND PERSONBIT) (TOUCH) OBJECT (HAVE HELD CARRIED) = V-SGIVE>
+```
+
+The second line is the "switch" syntax, recognizable by the naming convention — the ordinary verb's name with an `S` tacked on the front, `V-GIVE` → `V-SGIVE`. Its entire job is to swap `PRSO` and `PRSI` back and re-run the input as the first form, via `PERFORM` (the same routine from section 8 that `TROLL-F`'s `V-TELL`/`WINNER` dance in section 10 relies on):
+
+```zil
+<ROUTINE V-SGIVE ()
+    <PERFORM ,V?GIVE ,PRSI ,PRSO>
+    <RTRUE>>
+```
+
+Practical effect: you write handling once, for the `V-GIVE` phrasing, and the switched phrasing reaches the exact same code for free. Add this clause to `TROLL-F`, alongside the ones from sections 10 and 11:
+
+```zil
+        (<AND <VERB? GIVE> <==? ,PRSO ,HAMMER>>
+           <MOVE ,HAMMER ,TROLL>
+           <TELL "The troll's eyes light up. \"Finally, something useful!\" He snatches the hammer and stomps off into the shadows." CR>
+           <RTRUE>)
+```
+
+Note that this clause checks `,PRSO`, not `,PRSI` — even though `TROLL-F` is running because the troll is `PRSI` (the recipient) under the ordinary `V-GIVE` phrasing. `V-SGIVE` already swapped `PRSO` and `PRSI` *before* calling `PERFORM`, so by the time any code in `TROLL-F` runs, the two globals have settled back into their `V-GIVE` meaning no matter which way the player actually typed it.
+
+Try it: `TAKE HAMMER`, then either `GIVE HAMMER TO TROLL` or `GIVE TROLL THE HAMMER` — both print the identical "eyes light up" response and move the hammer out of your inventory and into the troll's. There's no second, parallel implementation anywhere that could quietly drift out of sync with the first.
+
+## 20. Compiling Your Game
 
 1. Compile the ZIL to ZAP, telling `zilf` where to find zillib and what to name the output:
 
@@ -566,7 +661,7 @@ Note that `WALK` needs an actual direction to reach this code at all — typing 
 
 This produces `zorkish.z3`, playable in any Z-machine interpreter (`frotz`, Lectrote, Gargoyle, etc.).
 
-## 18. Testing Your Game
+## 21. Testing Your Game
 
 Compiling cleanly is not the same as working correctly — several of the bugs called out earlier in this tutorial (the `COND`-comment trap in section 10, the missing `<RFALSE>`/`<RTRUE>` calls) compiled without a single warning and only showed up once actually played. Get in the habit of playing through everything you add, not just re-reading it.
 
@@ -585,9 +680,9 @@ Two `zilf` diagnostics are worth knowing on sight, since neither one is fatal an
 * `zilf: warning: undefined global or constant 'FOO', using 0` — you referenced an atom (a verb constant, a dictionary word symbol, a flag) that was never actually defined anywhere the compiler could see, and it silently substituted `0`. This is *exactly* what happens if you use `<VERB? SOMEVERB>` for a verb with no matching `<SYNTAX>` line, or reference an object/flag before it's ever declared — the compile succeeds, but the check that uses the constant can never be true. If you see this, look for a missing `<SYNTAX>`, `<OBJECT>`, or `<CONSTANT>` for the exact name in the warning.
 * `Warning: @test_attr called with object 0` (from the interpreter, not the compiler) — as covered in section 3, this means something called `GOTO` while the player had no location yet (typically the initial placement in `GO`). It's harmless if you see it, but this tutorial's own `GO` routine avoids it entirely by using `SETG HERE`/`MOVE`/`V-LOOK` for that first placement instead of `GOTO`.
 
-## 19. Where to Go From Here
+## 22. Where to Go From Here
 
-This tutorial's `zorkish.zil` is intentionally small. Once its patterns feel natural — `ACTION` routines intercepting verbs before the library's own, `RFALSE`/`RTRUE` controlling whether the library still gets a turn, flags for state — the best next step is reading real, complete games built the same way. A few, all buildable with the exact same `zilf`/`zapf` pipeline from section 17:
+This tutorial's `zorkish.zil` is intentionally small. Once its patterns feel natural — `ACTION` routines intercepting verbs before the library's own, `RFALSE`/`RTRUE` controlling whether the library still gets a turn, flags for state — the best next step is reading real, complete games built the same way. A few, all buildable with the exact same `zilf`/`zapf` pipeline from section 20:
 
 * **`cloak.zil`** (Cloak of Darkness) — a short, complete, winnable game, and the source of the `SETG HERE`/`MOVE`/`V-LOOK` startup idiom from section 3.
 * **`advent.zil`** (Colossal Cave Adventure) — much bigger: multiple light sources, a maze, NPCs, real puzzles, and its own `REPLACE-DEFINITION DARKNESS-F` (with a warning about falling into pits in the dark) along the same lines as section 8's.
@@ -608,3 +703,6 @@ A short list of the non-obvious traps this tutorial's own examples ran into, in 
 * **Overriding a library `DEFAULT-DEFINITION` with your own `REPLACE-DEFINITION` requires a `<DELAY-DEFINITION NAME>` line *before* `<INSERT-FILE "parser">`.** Without it, the library's own default is already installed by the time your replacement is read, and you get `REPLACE-DEFINITION: section has already been inserted`.
 * **Compilation flags like `USE-SCORING?` must be set before the library file that reads them is `INSERT-FILE`d**, not just before the feature is first used in your own code.
 * **A verb doesn't exist for the parser to recognize just because you wrote `<VERB? SOMEVERB>` somewhere** — you need a `<SYNTAX>` line establishing the grammar first, exactly as for any other custom verb.
+* **An object's `ACTION` routine does nothing if the object's own `(ACTION ...)` property was never actually set.** The routine itself compiles cleanly either way — nothing in the compiler can tell that nobody wired it up. (This is exactly what happened to this tutorial's own `GOLD-COIN` for a while: section 13's text always said to add `(ACTION COIN-F)`, but the property was missing from the actual object definition, so `COIN-F` silently never ran and taking the coin never scored any points.)
+* **`T`/`A` tell-tokens print a trailing space before the `DESC`, never a leading one.** The strings on either side of the token have to supply their own spacing, or words run together — see section 17.
+* **A `DESCFCN` is called once to ask whether it *will* describe the object, and only then again to actually do it.** `TELL`ing unconditionally, instead of checking for the `M-OBJDESC?` query first, prints the description twice — see section 18.

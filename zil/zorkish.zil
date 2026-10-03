@@ -87,10 +87,20 @@ narrow passage leads down into darkness." CR>)>>
                   <TELL "It is already off." CR>)>)>>
 
 
-<SYNTAX SMASH OBJECT = V-SMASH>
+<SYNTAX SMASH OBJECT = V-SMASH PRE-SMASH>
+
+;"A pre-action runs before ANY object's own ACTION routine gets a crack at
+  the input -- so this single check covers smashing anything, without every
+  smashable object repeating it"
+<ROUTINE PRE-SMASH ()
+    <COND (<NOT <IN? ,HAMMER ,PLAYER>>
+           <TELL "You'll need something solid to smash " T ,PRSO " with." CR>
+           <RTRUE>)>>
 
 <ROUTINE V-SMASH ()
     <TELL "You hit the " D ,PRSO " as hard as you can, but nothing much happens." CR>>
+
+<GLOBAL VASE-SMASHED <>>
 
 <OBJECT VASE
     (IN KITCHEN)
@@ -102,8 +112,29 @@ narrow passage leads down into darkness." CR>)>>
 
 <ROUTINE VASE-F ()
     <COND (<VERB? SMASH>
+           <SETG VASE-SMASHED T>
            <REMOVE ,VASE>
            <TELL "You smash the vase to pieces! It shatters all over the floor." CR>)>>
+
+<OBJECT HAMMER
+    (IN START-ROOM)
+    (DESC "heavy hammer")
+    (SYNONYM HAMMER)
+    (ADJECTIVE HEAVY)
+    (FLAGS TAKEBIT)
+    (DESCFCN HAMMER-D)>
+
+;"The describers call a DESCFCN twice: first with M-OBJDESC? to ask whether
+  it wants to handle the object's description at all, then (only if that
+  answered true) with M-OBJDESC to actually do it. Answering the first call
+  with a real description, instead of a plain RTRUE, would print it twice."
+<ROUTINE HAMMER-D ("OPTIONAL" ARG)
+    <COND (<EQUAL? .ARG ,M-OBJDESC?>
+           <RTRUE>)
+          (,VASE-SMASHED
+           <TELL "There is a heavy hammer here, its head chipped from smashing the vase." CR>)
+          (T
+           <TELL "There is a heavy hammer here." CR>)>>
 
 
 <SYNTAX HELLO = V-HELLO>
@@ -140,7 +171,17 @@ narrow passage leads down into darkness." CR>)>>
            <RFALSE>)
 
         (<VERB? ATTACK>
-           <JIGS-UP "The troll dodges your attack and crushes you with a single blow from his massive club.">)>>
+           <JIGS-UP "The troll dodges your attack and crushes you with a single blow from his massive club.">)
+
+        ;"GIVE HAMMER TO TROLL and GIVE TROLL THE HAMMER reach this exact same
+          clause -- zillib's V-SGIVE handles the second phrasing by calling
+          <PERFORM ,V?GIVE ,PRSI ,PRSO>, swapping PRSO/PRSI back and
+          re-running V-GIVE's syntax, so TROLL-F never has to know which way
+          the player phrased it"
+        (<AND <VERB? GIVE> <==? ,PRSO ,HAMMER>>
+           <MOVE ,HAMMER ,TROLL>
+           <TELL "The troll's eyes light up. \"Finally, something useful!\" He snatches the hammer and stomps off into the shadows." CR>
+           <RTRUE>)>>
 
 
 
@@ -174,7 +215,8 @@ narrow passage leads down into darkness." CR>)>>
     (DESC "gold coin")
     (SYNONYM COIN GOLD)
     (ADJECTIVE GOLD SHINY)
-    (FLAGS TAKEBIT)>
+    (FLAGS TAKEBIT)
+    (ACTION COIN-F)>
 
 
 <ROUTINE COIN-F ()
