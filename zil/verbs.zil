@@ -1,0 +1,2101 @@
+"Verbs"
+
+<FILE-FLAGS UNUSED-ROUTINES?>
+
+<DIRECTIONS NORTH SOUTH EAST WEST NE NW SE SW IN OUT UP DOWN>
+
+<SYNONYM NORTH N>
+<SYNONYM SOUTH S>
+<SYNONYM EAST E>
+<SYNONYM WEST W>
+<SYNONYM NE NORTHEAST>
+<SYNONYM NW NORTHWEST>
+<SYNONYM SE SOUTHEAST>
+<SYNONYM SW SOUTHWEST>
+<SYNONYM IN INTO INSIDE>
+<SYNONYM OUT OUTSIDE>
+<SYNONYM UP U>
+<SYNONYM DOWN D>
+
+<SYNONYM THROUGH THRU>
+<SYNONYM ON ONTO>
+
+;"Syntaxes for regular verbs"
+
+<SYNTAX LOOK = V-LOOK>
+<VERB-SYNONYM LOOK L>
+
+<SYNTAX WALK OBJECT = V-WALK>
+<SYNTAX WALK IN OBJECT (FIND KLUDGEBIT) (IN-ROOM) = V-ENTER>
+<SYNTAX WALK OUT OBJECT (FIND KLUDGEBIT) (IN-ROOM) = V-EXIT>
+<SYNTAX WALK THROUGH OBJECT (FIND DOORBIT) (IN-ROOM) = V-ENTER>
+<VERB-SYNONYM WALK GO>
+
+<SYNTAX ENTER = V-ENTER>
+<SYNTAX ENTER OBJECT (IN-ROOM TOUCH) = V-ENTER>
+<SYNTAX GET IN OBJECT (FIND KLUDGEBIT) (IN-ROOM TOUCH) = V-ENTER>
+<SYNTAX GET ON OBJECT (FIND KLUDGEBIT) (IN-ROOM TOUCH) = V-ENTER>
+<VERB-SYNONYM ENTER BOARD>
+
+<SYNTAX EXIT = V-EXIT>
+<SYNTAX EXIT OBJECT (IN-ROOM TOUCH) = V-EXIT>
+<SYNTAX GET OUT OBJECT (FIND KLUDGEBIT) (IN-ROOM TOUCH) = V-EXIT>
+<SYNTAX GET OFF OBJECT (FIND KLUDGEBIT) (IN-ROOM TOUCH) = V-EXIT>
+<VERB-SYNONYM EXIT LEAVE>
+
+<SYNTAX QUIT = V-QUIT>
+
+;"TAKE handles the touchability check itself"
+<SYNTAX TAKE OBJECT (FIND TAKEBIT) (MANY ON-GROUND IN-ROOM) = V-TAKE>
+<VERB-SYNONYM TAKE GRAB>
+<SYNTAX PICK UP OBJECT (FIND TAKEBIT) (MANY ON-GROUND IN-ROOM) = V-TAKE>
+<SYNTAX PICK OBJECT (FIND TAKEBIT) (MANY ON-GROUND IN-ROOM) UP OBJECT (FIND KLUDGEBIT) = V-TAKE>
+<SYNTAX GET OBJECT (FIND TAKEBIT) (MANY ON-GROUND IN-ROOM) = V-TAKE>
+
+<SYNTAX DROP OBJECT (MANY HAVE HELD CARRIED) = V-DROP PRE-DROP>
+<SYNTAX PUT DOWN OBJECT (MANY HAVE HELD CARRIED) = V-DROP PRE-DROP>
+<SYNTAX PUT OBJECT (MANY HAVE HELD CARRIED) DOWN OBJECT (FIND KLUDGEBIT) = V-DROP PRE-DROP>
+
+<SYNTAX EXAMINE OBJECT (MANY HELD CARRIED ON-GROUND IN-ROOM) = V-EXAMINE PRE-REQUIRES-LIGHT>
+<SYNTAX LOOK AT OBJECT (MANY HELD CARRIED ON-GROUND IN-ROOM) = V-EXAMINE PRE-REQUIRES-LIGHT>
+<VERB-SYNONYM EXAMINE X>
+
+<SYNTAX WEAR OBJECT (FIND WEARBIT) (HAVE TAKE) = V-WEAR>
+<VERB-SYNONYM WEAR DON>
+<SYNTAX PUT ON OBJECT (FIND WEARBIT) (HAVE TAKE) = V-WEAR>
+
+<SYNTAX UNWEAR OBJECT (FIND WORNBIT) (HAVE HELD CARRIED) = V-UNWEAR>
+<VERB-SYNONYM UNWEAR DOFF REMOVE>
+<SYNTAX TAKE OFF OBJECT (FIND WORNBIT) (HAVE HELD CARRIED) = V-UNWEAR>
+
+;"When they score equally, the parser will prefer syntax lines that are defined
+  later. PUT IN is defined before PUT ON because objects with SURFACEBIT
+  typically also have CONTBIT, but not vice versa. If GWIM can succeed for both
+  syntaxes, we want the parser to prefer PUT ON."
+<SYNTAX PUT OBJECT (MANY TAKE HELD CARRIED) IN OBJECT (FIND CONTBIT) (TOUCH) = V-PUT-IN
+        PRE-PUT-IN>
+<VERB-SYNONYM PUT PLACE INSERT>
+
+<SYNTAX PUT OBJECT (MANY TAKE HELD CARRIED) ON OBJECT (FIND SURFACEBIT) (TOUCH) = V-PUT-ON PRE-PUT-ON>
+<SYNTAX PUT UP OBJECT (MANY TAKE HELD CARRIED) ON OBJECT (FIND SURFACEBIT) (TOUCH) = V-PUT-ON PRE-PUT-ON>
+<VERB-SYNONYM PUT HANG PLACE>
+
+<SYNTAX TAKE OBJECT (MANY IN-ROOM) FROM OBJECT (FIND CONTBIT) (TOUCH) = V-TAKE-FROM PRE-TAKE-FROM>
+
+<SYNTAX INVENTORY = V-INVENTORY>
+<SYNTAX TAKE INVENTORY OBJECT (FIND KLUDGEBIT) = V-INVENTORY>
+<VERB-SYNONYM INVENTORY I>
+
+<SYNTAX CONTEMPLATE OBJECT = V-THINK-ABOUT>
+<VERB-SYNONYM CONTEMPLATE CONSIDER>
+<SYNTAX THINK ABOUT OBJECT = V-THINK-ABOUT>
+
+<SYNTAX OPEN OBJECT (FIND OPENABLEBIT) (TOUCH) = V-OPEN>
+
+<SYNTAX CLOSE OBJECT (FIND OPENBIT) (TOUCH) = V-CLOSE>
+<VERB-SYNONYM CLOSE SHUT>
+
+<SYNTAX LOCK OBJECT (FIND OPENABLEBIT) (TOUCH) WITH OBJECT (FIND TOOLBIT) (HAVE HELD CARRIED) = V-LOCK>
+
+<SYNTAX UNLOCK OBJECT (FIND LOCKEDBIT) (TOUCH) WITH OBJECT (FIND TOOLBIT) (HAVE HELD CARRIED) = V-UNLOCK>
+
+<SYNTAX TURN ON OBJECT (FIND DEVICEBIT) (TOUCH) = V-TURN-ON>
+<SYNTAX TURN OBJECT (FIND DEVICEBIT) (TOUCH) ON OBJECT (FIND KLUDGEBIT) = V-TURN-ON>
+
+<SYNTAX TURN OFF OBJECT (FIND DEVICEBIT) (TOUCH) = V-TURN-OFF>
+<SYNTAX TURN OBJECT (FIND DEVICEBIT) (TOUCH) OFF OBJECT (FIND KLUDGEBIT) = V-TURN-OFF>
+
+<SYNTAX FLIP OBJECT (FIND DEVICEBIT) (TOUCH) = V-FLIP>
+<VERB-SYNONYM FLIP SWITCH TOGGLE>
+
+<SYNTAX WAIT = V-WAIT>
+<VERB-SYNONYM WAIT Z>
+
+<SYNTAX AGAIN = V-AGAIN>
+<VERB-SYNONYM AGAIN G>
+
+<SYNTAX READ OBJECT (FIND READBIT) (TAKE HELD CARRIED ON-GROUND IN-ROOM) = V-READ PRE-REQUIRES-LIGHT>
+<VERB-SYNONYM READ PERUSE>
+
+<SYNTAX EAT OBJECT (FIND EDIBLEBIT) (TAKE HAVE HELD CARRIED ON-GROUND IN-ROOM) = V-EAT>
+<VERB-SYNONYM EAT SCARF DEVOUR GULP CHEW>
+
+<SYNTAX DRINK OBJECT (TOUCH) = V-DRINK>
+
+<SYNTAX SMELL OBJECT (TOUCH) = V-SMELL>
+
+<SYNTAX PUSH OBJECT (TOUCH) = V-PUSH>
+<VERB-SYNONYM PUSH SHOVE>
+
+<SYNTAX PULL OBJECT (TOUCH) = V-PULL>
+<VERB-SYNONYM PULL YANK DRAG CARRY>
+
+<SYNTAX FILL OBJECT (FIND CONTBIT) (TOUCH) = V-FILL>
+<SYNTAX EMPTY OBJECT (FIND CONTBIT) (TOUCH) = V-EMPTY>
+
+<SYNTAX ATTACK OBJECT (FIND ATTACKBIT) (TOUCH) = V-ATTACK>
+<VERB-SYNONYM ATTACK HIT SMASH BREAK KILL DESTROY>
+
+<SYNTAX GIVE OBJECT (HAVE HELD CARRIED) TO OBJECT (FIND PERSONBIT) (TOUCH) = V-GIVE>
+<SYNTAX GIVE OBJECT (FIND PERSONBIT) (TOUCH) OBJECT (HAVE HELD CARRIED) = V-SGIVE>
+
+<SYNTAX TELL OBJECT (FIND PERSONBIT) ABOUT OBJECT = V-TELL-ABOUT PRE-TELL>
+
+<SYNTAX WAVE = V-WAVE-HANDS>
+<SYNTAX WAVE OBJECT (TAKE HAVE HELD CARRIED) = V-WAVE>
+
+<SYNTAX THROW OBJECT (TAKE HAVE HELD CARRIED) TO OBJECT (FIND PERSONBIT) (ON-GROUND IN-ROOM) (TOUCH) = V-GIVE>
+<SYNTAX THROW OBJECT (TAKE HAVE HELD CARRIED) AT OBJECT (FIND ATTACKBIT) (ON-GROUND IN-ROOM) (TOUCH) = V-THROW-AT>
+<VERB-SYNONYM THROW TOSS>
+
+<SYNTAX BURN OBJECT ;(FIND BURNBIT) (TOUCH) = V-BURN>
+<VERB-SYNONYM BURN ROAST TORCH>
+
+<SYNTAX RUB OBJECT (TOUCH) = V-RUB>
+
+<SYNTAX LOOK UNDER OBJECT (FIND SURFACEBIT) (TOUCH) = V-LOOK-UNDER PRE-REQUIRES-LIGHT>
+
+<SYNTAX SEARCH OBJECT (FIND CONTBIT) (TOUCH) = V-SEARCH PRE-REQUIRES-LIGHT>
+<SYNTAX LOOK IN OBJECT (FIND CONTBIT) (TOUCH) = V-SEARCH PRE-REQUIRES-LIGHT>
+
+<SYNTAX WAKE OBJECT (FIND PERSONBIT) = V-WAKE>
+<SYNTAX WAKE UP OBJECT (FIND PERSONBIT) = V-WAKE>
+<SYNTAX WAKE OBJECT (FIND PERSONBIT) UP OBJECT (FIND KLUDGEBIT) = V-WAKE>
+
+<SYNTAX JUMP = V-JUMP>
+<SYNTAX SWIM = V-SWIM>
+<SYNTAX CLIMB = V-CLIMB>
+<SYNTAX CLIMB OBJECT (TOUCH) = V-CLIMB>
+<SYNTAX SING = V-SING>
+<SYNTAX DANCE = V-DANCE>
+
+<SYNTAX YES = V-YES>
+<VERB-SYNONYM YES Y>
+<SYNTAX NO = V-NO>
+
+;"Syntaxes for game verbs"
+
+<SYNTAX VERSION = V-VERSION>
+
+<SYNTAX UNDO = V-UNDO>
+<SYNTAX SAVE = V-SAVE>
+<SYNTAX RESTORE = V-RESTORE>
+<SYNTAX RESTART = V-RESTART>
+
+<SYNTAX BRIEF = V-BRIEF>
+<SYNTAX SUPERBRIEF = V-SUPERBRIEF>
+<SYNTAX VERBOSE = V-VERBOSE>
+
+<SYNTAX SCRIPT = V-SCRIPT>
+<SYNTAX SCRIPT ON OBJECT (FIND KLUDGEBIT) = V-SCRIPT>
+<SYNTAX SCRIPT OFF OBJECT (FIND KLUDGEBIT) = V-UNSCRIPT>
+<VERB-SYNONYM SCRIPT TRANSCRIPT>
+<SYNTAX UNSCRIPT = V-UNSCRIPT>
+<VERB-SYNONYM UNSCRIPT NOSCRIPT>
+
+<SYNTAX PRONOUNS = V-PRONOUNS>
+
+<SYNTAX \,TELL OBJECT (FIND PERSONBIT) = V-TELL PRE-TELL>
+
+;"Debugging verbs"
+<IF-DEBUG
+    <SYNTAX XTRACE OBJECT = V-XTRACE>>
+
+<IF-DEBUGGING-VERBS
+    <SYNTAX XTREE = V-XTREE>
+    <SYNTAX XTREE OBJECT = V-XTREE>
+    
+    <SYNTAX XGOTO OBJECT = V-XGOTO>
+    
+    <SYNTAX XMOVE OBJECT TO OBJECT (FIND PERSONBIT) = V-XMOVE>
+    <SYNTAX XMOVE OBJECT = V-XMOVE>
+    <SYNTAX XREMOVE OBJECT = V-XREMOVE>
+    
+    <SYNTAX XLIGHT = V-XLIGHT>
+    
+    <SYNTAX XEXITS = V-XEXITS>
+    <SYNTAX XEXITS OBJECT = V-XEXITS>
+    
+    <SYNTAX XOBJ OBJECT = V-XOBJ>
+    
+    <SYNTAX XIT OBJECT = V-XIT>
+>
+
+;"Constants"
+
+;"TODO: these belong in parser.zil?"
+;"Object action handlers may get: M-WINNER, M-ENTER, M-TRYOPEN?, or no arg"
+;"Room action handlers may get: M-BEG, M-END, M-ENTER, M-LOOK, M-FLASH"
+;"Object DESCFCNs may get: M-OBJDESC?, M-OBJDESC"
+;"Object CONTFCNs may get: M-BLOCKER or no arg"
+;"DARKNESS-F may get: M-LOOK, M-SCOPE?, M-LIT-TO-DARK, M-DARK-TO-LIT,
+    M-DARK-TO-DARK, M-DARK-CANT-GO"
+<CONSTANT M-BEG 1>                ;"Intercept action at beginning of turn"
+<CONSTANT M-END 2>                ;"React to action at end of turn"
+<CONSTANT M-ENTER 3>              ;"Player is entering room"
+<CONSTANT M-LOOK 4>               ;"Show room description"
+<CONSTANT M-FLASH 5>              ;"Show important descriptions even in BRIEF mode"
+<CONSTANT M-OBJDESC? 6>           ;"Choose whether to self-describe"
+<CONSTANT M-OBJDESC 7>            ;"Write a self-description"
+<CONSTANT M-SCOPE? 8>             ;"Decide which scope stages run in darkness"
+<CONSTANT M-LIT-TO-DARK 9>        ;"Player moved from light to darkness"
+<CONSTANT M-DARK-TO-LIT 10>       ;"Player moved from darkness to light"
+<CONSTANT M-DARK-TO-DARK 11>      ;"Player moved from one dark room to another"
+<CONSTANT M-DARK-CANT-GO 12>      ;"Player stumbled around in a dark room"
+<CONSTANT M-NOW-DARK 13>          ;"Light source is gone"
+<CONSTANT M-NOW-LIT 14>           ;"Light source is back"
+<CONSTANT M-WINNER 15>            ;"Object is the one performing this action"
+<CONSTANT M-TRYOPEN? 16>          ;"Choose whether to block implicit open"
+<CONSTANT M-BLOCKER 17>           ;"Object is making the touch check fail; return 0 to block action, 1 to intercept, or -1 to allow action"
+
+;"Helper routines for action handlers"
+
+;"LM? is true when called from the TELL token, to suppress a final CRLF,
+  since the TELL token is meant for use in library messages where a CR is
+  added at the call site."
+<ROUTINE YOU-MASHER ("OPT" WHOM LM?)
+    <TELL <LIBRARY-MESSAGE VERBS YOU-MASHER ((WHOM <OR .WHOM ,PRSO>))>>
+    <COND (.LM? <RTRUE>) (ELSE <CRLF>)>>
+
+;"LM? can't be a separate parameter here, because only 3 arguments are
+  allowed in a routine call in V3."
+<ROUTINE POINTLESS-IMPL (VING "OPT" PREP FLAGS
+                    "AUX" F S
+                    (REV? <ANDB .FLAGS ,POINTLESS-FL-REV?>)
+                    (LM? <ANDB .FLAGS ,POINTLESS-FL-LM?>))
+    <COND (.REV? <SET F ,PRSI> <SET S ,PRSO>)
+          (ELSE <SET F ,PRSO> <SET S ,PRSI>)>
+    <TELL .VING>
+    <COND (.F
+           <TELL !\  T .F>
+           <COND (.PREP
+                  <TELL !\  .PREP>
+                  <COND (.S <TELL !\  T .S>)>)>)>
+    <TELL <LIBRARY-MESSAGE VERBS POINTLESS>>
+    <COND (.LM? <RTRUE>) (ELSE <CRLF>)>>
+
+<CONSTANT POINTLESS-FL-REV? 1>
+<CONSTANT POINTLESS-FL-LM? 2>
+
+<DEFMAC POINTLESS ('VING "OPT" ('PREP <>) (REV? <>) (LM? <>))
+    `<POINTLESS-IMPL ~.VING ~.PREP ~<+ <COND (.REV? ,POINTLESS-FL-REV?) (ELSE 0)>
+                                       <COND (.LM? ,POINTLESS-FL-LM?) (ELSE 0)>>>>
+
+<ROUTINE NOT-POSSIBLE (V "OPT" LM?)
+    <SETG P-CONT 0>
+    <TELL <LIBRARY-MESSAGE VERBS NOT-POSSIBLE ((V .V))>>
+    <COND (.LM? <RTRUE>) (ELSE <CRLF>)>>
+
+<ROUTINE RHETORICAL ("OPT" LM?)
+    <TELL <LIBRARY-MESSAGE VERBS RHETORICAL>>
+    <COND (.LM? <RTRUE>) (ELSE <CRLF>)>>
+
+<ROUTINE BE-SPECIFIC ("OPT" LM?)
+    <SETG P-CONT 0>
+    <TELL <LIBRARY-MESSAGE VERBS BE-SPECIFIC>>
+    <COND (.LM? <RTRUE>) (ELSE <CRLF>)>>
+
+<ROUTINE SILLY ("OPT" LM?)
+    <SETG P-CONT 0>
+    <TELL <LIBRARY-MESSAGE VERBS SILLY>>
+    <COND (.LM? <RTRUE>) (ELSE <CRLF>)>>
+
+<ROUTINE TSD ("OPT" LM?)
+    <SETG P-CONT 0>
+    <TELL <LIBRARY-MESSAGE VERBS TSD>>
+    <COND (.LM? <RTRUE>) (ELSE <CRLF>)>>
+
+<DEFMAC IF-PLURAL ('O 'IF-PL 'IF-SG)
+    `<COND (<FSET? ~.O ,PLURALBIT> ~.IF-PL) (ELSE ~.IF-SG)>>
+
+<ROUTINE PRE-REQUIRES-LIGHT ()
+    <COND (<NOT ,HERE-LIT>
+           <SETG P-CONT 0>
+           <TELL <LIBRARY-MESSAGE DARKNESS TOO-DARK-TO-SEE> CR>)>>
+
+;"Action handler routines"
+
+<ROUTINE V-LOOK ()
+    <COND (<DESCRIBE-ROOM ,HERE T>
+           <DESCRIBE-OBJECTS ,HERE>)>>
+
+;"Prints a room description, handling darkness and briefness.
+
+If the room is HERE and the player doesn't have a light source, this prints
+a generic room name and description.
+
+Otherwise, the real name is printed, optionally followed by a description
+(if MODE is VERBOSE, or if it's BRIEF and this is the first time describing
+the room, or if LONG is true).
+
+Uses:
+  MODE
+
+Args:
+  RM: The room to describe.
+  LONG: If true, print the room description even in BRIEF mode.
+
+Returns:
+  True if the objects in the room should also be described, otherwise
+  false."
+<ROUTINE DESCRIBE-ROOM (RM "OPT" LONG "AUX" P V)
+    <COND (<AND <==? .RM ,HERE> <NOT ,HERE-LIT>>
+           <DARKNESS-F ,M-LOOK>
+           <RFALSE>)>
+    ;"Print the room's real name. If the player is in a vehicle in the room,
+        print a combined header like: 'Room, on the couch'."
+    <VERSION? (ZIP) (ELSE <HLIGHT ,H-BOLD>)>
+    <COND (<AND <SET V <LOC ,WINNER>> <NOT <IN? .V ,ROOMS>> <FSET? .V ,VEHBIT>>
+           <TELL D .RM ", ">
+           <COND (<FSET? .V ,SURFACEBIT> <TELL "on ">)
+                   (ELSE <TELL "in ">)>
+           <TELL T .V CR>)
+          (ELSE <TELL D .RM CR>)>
+    <VERSION? (ZIP) (ELSE <HLIGHT ,H-NORMAL>)>
+    ;"If this is an implicit LOOK, check briefness."
+    <COND (<NOT .LONG>
+           <COND (<EQUAL? ,MODE ,SUPERBRIEF>
+                  <RFALSE>)
+                 (<AND <FSET? .RM ,TOUCHBIT>
+                       <NOT <EQUAL? ,MODE ,VERBOSE>>>
+                  ;"Call the room's ACTION with M-FLASH even in brief mode."
+                  <APPLY <GETP .RM ,P?ACTION> ,M-FLASH>
+                  <RTRUE>)>)>
+    ;"The room's ACTION can print a description with M-LOOK.
+      Otherwise, print the LDESC if present."
+    <COND (<APPLY <GETP .RM ,P?ACTION> ,M-LOOK>)
+          (<SET P <GETP .RM ,P?LDESC>>
+           <TELL .P CR>)>
+    ;"Call the room's ACTION again with M-FLASH for important descriptions."
+    <APPLY <GETP .RM ,P?ACTION> ,M-FLASH>
+    ;"Mark the room visited."
+    <FSET .RM ,TOUCHBIT>
+    <RTRUE>>
+
+<DEFAULT-DEFINITION DARKNESS-F
+
+    ;"Implements various darkness-related behavior, depending on its argument.
+    
+      M-LOOK:
+        Called when the player looks around in darkness.
+        Returns T.
+
+      M-SCOPE?:
+        Called to check whether the current scope stage applies in darkness.
+        Returns true if the current scope stage should apply, otherwise false.
+
+      M-NOW-DARK:
+        Called to print a message when the player enters darkness.
+        Returns T.
+
+      M-NOW-LIT:
+        Called to print a message when the player leaves darkness.
+        Returns false if a V-LOOK should automatically follow, or true if
+        the routine has printed everything the player needs to see.
+    "
+    <ROUTINE DARKNESS-F (ARG)
+        <COND (<=? .ARG ,M-LOOK>
+               <TELL <LIBRARY-MESSAGE DARKNESS LOOK> CR>)
+              (<=? .ARG ,M-SCOPE?>
+               <T? <SCOPE-STAGE? VEHICLE GENERIC INVENTORY GLOBALS>>)
+              (<=? .ARG ,M-NOW-DARK>
+               <TELL <LIBRARY-MESSAGE DARKNESS NOW-DARK> CR>)
+              (<=? .ARG ,M-NOW-LIT>
+               <TELL <LIBRARY-MESSAGE DARKNESS NOW-LIT> CR CR>
+               <RFALSE>)
+              (ELSE <RFALSE>)>>
+>
+
+<DEFAULT-DEFINITION DESCRIBE-OBJECTS
+
+;"Describes the objects in a room.
+
+Objects are described in four passes:
+1. All non-person objects with DESCFCNs, FDESCS, and LDESCs, except vehicles containing WINNER.
+2. All non-person objects not covered by #1, except vehicles containing WINNER.
+3. The visible contents of containers and surfaces, excluding WINNER.
+4. All objects with PERSONBIT other than WINNER.
+
+Uses:
+  WINNER
+
+Args:
+  RM: The room.
+
+Returns:
+  T."
+
+    <ROUTINE DESCRIBE-OBJECTS (RM "AUX" P N)
+        <MAP-CONTENTS (I .RM)
+            <COND
+                ;"skip objects with NDESCBIT"
+                (<FSET? .I ,NDESCBIT>)
+                ;"skip vehicles containing WINNER"
+                (<AND <FSET? .I ,VEHBIT> <HELD? ,WINNER .I>>)
+                ;"objects with DESCFCNs"
+                (<AND <SET P <GETP .I ,P?DESCFCN>> <APPLY .P ,M-OBJDESC?>>
+                 <CRLF>
+                 ;"The DESCFCN is responsible for listing the object's contents"
+                 <APPLY .P ,M-OBJDESC>
+                 <THIS-IS-IT .I>)
+                ;"objects with applicable FDESCs or LDESCs"
+                (<OR <AND <NOT <FSET? .I ,TOUCHBIT>>
+                          <SET P <GETP .I ,P?FDESC>>>
+                     <SET P <GETP .I ,P?LDESC>>>
+                 <TELL CR .P CR>
+                 <THIS-IS-IT .I>
+                 ;"Describe contents if applicable"
+                 <COND (<AND <SEE-INSIDE? .I> <FIRST? .I>>
+                        <DESCRIBE-CONTENTS .I>)>)>>
+        ;"See if there are any non fdesc, ndescbit, personbit objects in room"
+        <MAP-CONTENTS (I .RM)
+            <COND (<GENERIC-DESC? .I>
+                   <SET N T>
+                   <RETURN>)>>
+        ;"go through the N objects"
+        <COND (.N
+               <TELL CR "There ">
+               <LIST-OBJECTS .RM GENERIC-DESC? ,L-ISMANY>
+               <TELL " here." CR>
+               <CONTENTS-ARE-IT .RM GENERIC-DESC?>)>
+        ;"describe visible contents of generic-desc containers and surfaces"
+        <MAP-CONTENTS (I .RM)
+            <COND (<AND <SEE-INSIDE? .I>
+                        <CONTENTS-DESC? .I>>
+                   <DESCRIBE-CONTENTS .I>)>>
+        ;"See if there are any NPCs"
+        <SET N <>>
+        <MAP-CONTENTS (I .RM)
+            <COND (<NPC-DESC? .I>
+                   <SET N T>
+                   <RETURN>)>>
+        ;"go through the N NPCs"
+        <COND (.N
+               <CRLF>
+               <LIST-OBJECTS .RM NPC-DESC? <+ ,L-SUFFIX ,L-CAP>>
+               <TELL " here." CR>
+               <CONTENTS-ARE-IT .RM NPC-DESC?>)>
+        <RTRUE>>
+
+    <ROUTINE GENERIC-DESC? (OBJ "AUX" P)
+        <T? <NOT <OR <==? .OBJ ,WINNER>
+                     <FSET? .OBJ ,NDESCBIT>
+                     <FSET? .OBJ ,PERSONBIT>
+                     <AND <NOT <FSET? .OBJ ,TOUCHBIT>>
+                          <GETP .OBJ ,P?FDESC>>
+                     <AND <FSET? .OBJ ,VEHBIT>
+                          <HELD? ,WINNER .OBJ>>
+                     <GETP .OBJ ,P?LDESC>
+                     <AND <SET P <GETP .OBJ ,P?DESCFCN>> <APPLY .P ,M-OBJDESC?>>>>>>
+
+    <ROUTINE NPC-DESC? (OBJ "AUX" P)
+        <T? <AND <FSET? .OBJ ,PERSONBIT>
+                 <NOT <OR <==? .OBJ ,WINNER>
+                          <FSET? .OBJ ,NDESCBIT>
+                          <AND <NOT <FSET? .OBJ ,TOUCHBIT>>
+                               <GETP .OBJ ,P?FDESC>>
+                          <GETP .OBJ ,P?LDESC>
+                          <AND <SET P <GETP .OBJ ,P?DESCFCN>> <APPLY .P ,M-OBJDESC?>>>>>>>
+
+    ;"Only describe contents if it contains something besides WINNER.
+      Unlike GENERIC-DESC?, we might still describe the contents of a vehicle the player is in.
+
+    Returns:
+      True if the object's contents should be described, otherwise false."
+    <ROUTINE CONTENTS-DESC? (OBJ "AUX" P)
+        <T? <AND <SET P <FIRST? .OBJ>>
+                 <OR <N==? .P ,WINNER> <NEXT? .P>>
+                 <NOT <OR <FSET? .OBJ ,NDESCBIT>
+                          <FSET? .OBJ ,PERSONBIT>
+                          <AND <NOT <FSET? .OBJ ,TOUCHBIT>>
+                               <GETP .OBJ ,P?FDESC>>
+                          <GETP .OBJ ,P?LDESC>
+                          <AND <SET P <GETP .OBJ ,P?DESCFCN>> <APPLY .P ,M-OBJDESC?>>>>>>>
+>
+
+<DEFMAC UPPERCASE-CHAR ('C)
+    `<BIND ((?TMP ~.C))
+        <COND (<AND <G=? .?TMP !\a> <L=? .?TMP !\z>>
+                <- .?TMP 32>)
+               (ELSE .?TMP)>>>
+
+;"Prints a (short) string with the first letter capitalized.
+
+Returns:
+  T."
+<ROUTINE PRINT-CAP-STR (S "AUX" MAX C)
+    <DIROUT 3 ,TEMPTABLE>
+    <PRINT .S>
+    <DIROUT -3>
+    <SET MAX <GET ,TEMPTABLE 0>>
+    <COND (.MAX
+           <INC MAX>
+           <DO (I 2 .MAX)
+               <SET C <GETB ,TEMPTABLE .I>>
+               <AND <=? .I 2> <SET C <UPPERCASE-CHAR .C>>>
+               <PRINTC .C>>)>
+    <RTRUE>>
+
+;"Prints an object name with the first letter capitalized.
+
+Returns:
+  T."
+<ROUTINE PRINT-CAP-OBJ (OBJ "AUX" MAX C)
+    <DIROUT 3 ,TEMPTABLE>
+    <PRINTD .OBJ>
+    <DIROUT -3>
+    <SET MAX <GET ,TEMPTABLE 0>>
+    <COND (.MAX
+           <INC MAX>
+           <DO (I 2 .MAX)
+               <SET C <GETB ,TEMPTABLE .I>>
+               <AND <=? .I 2> <SET C <UPPERCASE-CHAR .C>>>
+               <PRINTC .C>>)>
+    <RTRUE>>
+
+;"Implements <TELL A .OBJ>.
+
+Returns:
+  T."
+<ROUTINE PRINT-INDEF (OBJ "AUX" A)
+    <COND (<FSET? .OBJ ,NARTICLEBIT>)
+          (<SET A <GETP .OBJ ,P?ARTICLE>> <TELL .A> <PRINTC !\ >)
+          (<FSET? .OBJ ,PLURALBIT> <TELL "some ">)
+          (<FSET? .OBJ ,VOWELBIT> <TELL "an ">)
+          (ELSE <TELL "a ">)>
+    <PRINTD .OBJ>
+    <RTRUE>>
+
+;"Implements <TELL T .OBJ>.
+
+Returns:
+  T."
+<ROUTINE PRINT-DEF (OBJ)
+    <COND (<NOT <FSET? .OBJ ,NARTICLEBIT>> <TELL "the ">)>
+    <PRINTD .OBJ>
+    <RTRUE>>
+
+;"Implements <TELL P .OBJ>.
+
+Returns:
+  T."
+<ROUTINE PRINT-PLURAL (OBJ "AUX" P)
+    <COND (<SET P <GETP .OBJ ,P?PDESC>> <TELL .P>)
+          (ELSE <TELL D .OBJ !\s>)>
+    <RTRUE>>
+
+;"Implements <TELL CA .OBJ>.
+
+Returns:
+  T."
+<ROUTINE PRINT-CINDEF (OBJ "AUX" A)
+    <COND (<FSET? .OBJ ,NARTICLEBIT>
+           <PRINT-CAP-OBJ .OBJ>
+           <RTRUE>)>
+    <COND (<SET A <GETP .OBJ ,P?ARTICLE>> <PRINT-CAP-STR .A> <PRINTC !\ >)
+          (<FSET? .OBJ ,PLURALBIT> <TELL "Some ">)
+          (<FSET? .OBJ ,VOWELBIT> <TELL "An ">)
+          (ELSE <TELL "A ">)>
+    <PRINTD .OBJ>
+    <RTRUE>>
+
+;"Implements <TELL CT .OBJ>.
+
+Returns:
+  T."
+<ROUTINE PRINT-CDEF (OBJ)
+    <COND (<FSET? .OBJ ,NARTICLEBIT>
+           <PRINT-CAP-OBJ .OBJ>
+           <RTRUE>)
+          (ELSE <TELL "The " D .OBJ>)>
+    <RTRUE>>
+
+;"Implements <TELL CP .OBJ>.
+
+Returns:
+  T."
+<ROUTINE PRINT-CPLURAL (OBJ "AUX" P)
+    <COND (<SET P <GETP .OBJ ,P?PDESC>> <PRINT-CAP-STR .P>)
+          (ELSE <PRINT-CAP-OBJ .OBJ> <TELL !\s>)>
+    <RTRUE>>
+
+;"Prints a sentence describing the contents of a surface or container.
+
+Returns:
+  T."
+<ROUTINE DESCRIBE-CONTENTS (OBJ)
+    <COND (<FSET? .OBJ ,SURFACEBIT> <TELL "On">)
+          (ELSE <TELL "In">)>
+    <TELL " " T .OBJ " ">
+    <LIST-OBJECTS .OBJ NOT-WINNER? ,L-ISARE>
+    <TELL "." CR>
+    <CONTENTS-ARE-IT .OBJ NOT-WINNER?>
+    <RTRUE>>
+
+;"A filter routine to exclude WINNER from contents listings.
+
+Returns:
+  True unless OBJ is WINNER."
+<ROUTINE NOT-WINNER? (OBJ) <N==? .OBJ ,WINNER>>
+
+;"Prints a list describing a set of objects, usually the contents of a
+surface or container.
+
+No trailing punctuation is printed.
+
+If the L-ISARE flag is passed, the list begins with 'is' or 'are' depending
+on the count and plurality of the child objects. For example:
+
+  If the container is empty:
+    is nothing
+
+  If the container has one singular object:
+    is a shirt
+
+  If the container has one plural object:
+    are some pants
+
+  If the container has two objects:
+    are a shirt and a hat
+
+  If the container has three objects:
+    are a shirt, a hat, and a watch
+
+Uses:
+  HERE
+  PSEUDO-LOC
+
+Args:
+  O: The object whose contents are to be listed, or if L-PRSTABLE is given,
+    the address of a table containing the objects.
+  FILTER: An optional routine to select children to list.
+    If provided, the list will only include objects for which the filter
+    returns true; otherwise it'll list all contents.
+  FLAGS: A combination of option flags:
+    L-ISARE: Print 'is' or 'are'.
+    L-SUFFIX: Print the verb after the list instead of before. (Implies L-ISARE.)
+    L-ISMANY: Use 'is' before a list of objects unless the first one has
+      PLURALBIT. (Implies L-ISARE. Ignored if L-SUFFIX is given.)
+    L-PRSTABLE: List objects from a table instead of the contents of another
+      object. O is the address of the table in P-PRSOS/P-PRSIS format.
+    L-THE: Print the definite article instead of indefinite.
+    L-OR: Print 'or' instead of 'and'.
+    L-CAP: Capitalize the first article printed. (Implies L-SUFFIX.)
+    L-SCENERY: Refer to PSEUDO-OBJECT as 'some scenery [in PSEUDO-LOC]'.
+
+Returns:
+  The number of objects listed."
+<ROUTINE LIST-OBJECTS (O "OPT" FILTER FLAGS "AUX" N F S MAX J)
+    <COND (<BTST .FLAGS ,L-CAP>
+           <SET FLAGS <BOR .FLAGS ,L-SUFFIX>>)>
+    <COND (<OR <BTST .FLAGS ,L-SUFFIX> <BTST .FLAGS ,L-ISMANY>>
+           <SET FLAGS <BOR .FLAGS ,L-ISARE>>)>
+    ;"Copy filtered objects to P-LOBJS"
+    <COND (<BTST .FLAGS ,L-PRSTABLE>
+           <COND (<SET MAX <GETB .O 0>>
+                  <DO (I 1 .MAX)
+                      <SET J <GET/B .O .I>>
+                      <COND (<OR <NOT .FILTER> <APPLY .FILTER .J>>
+                             <COND (<0? .F> <SET F .J>)
+                                   (<0? .S> <SET S .J>)>
+                             <SET N <+ .N 1>>
+                             <PUT/B ,P-LOBJS .N .J>)>>)>)
+          (ELSE
+           <MAP-CONTENTS (I .O)
+               <COND (<OR <NOT .FILTER> <APPLY .FILTER .I>>
+                      <COND (<0? .F> <SET F .I>)
+                            (<0? .S> <SET S .I>)>
+                      <SET N <+ .N 1>>
+                      <PUT/B ,P-LOBJS .N .I>)>>)>
+    <COND (<==? .N 0>
+           <COND (<BTST .FLAGS ,L-CAP>
+                  <TELL "Nothing is">)
+                 (<BTST .FLAGS ,L-SUFFIX>
+                  <TELL "nothing is">)
+                 (<BTST .FLAGS ,L-ISARE>
+                  <TELL "is nothing">)
+                 (ELSE <TELL "nothing">)>)
+          (<==? .N 1>
+           <COND (<OR <BTST .FLAGS ,L-CAP> <BTST .FLAGS ,L-SUFFIX>>
+                  <LIST-OBJECTS-PRINT .F .FLAGS>
+                  <IF-PLURAL .F <TELL " are"> <TELL " is">>)
+                 (ELSE
+                  <AND <BTST .FLAGS ,L-ISARE>
+                       <IF-PLURAL .F <TELL "are "> <TELL "is ">>>
+                  <LIST-OBJECTS-PRINT .F .FLAGS>)>)
+          (<==? .N 2>
+           <COND (<AND <GETP .F ,P?PDESC> <INDISTINGUISHABLE? .F .S>>
+                  ;"list the two objects together"
+                  <COND (<AND <BTST .FLAGS ,L-ISARE>
+                              <NOT <BTST .FLAGS ,L-SUFFIX>>>
+                         <TELL "are ">)>
+                  <LIST-OBJECTS-PRINT .F .FLAGS 2>
+                  <AND <BTST .FLAGS ,L-SUFFIX> <TELL " are">>)
+                 (ELSE
+                  <COND (<AND <BTST .FLAGS ,L-ISARE>
+                              <NOT <BTST .FLAGS ,L-SUFFIX>>>
+                              <COND (<OR <NOT <BTST .FLAGS ,L-ISMANY>>
+                                         <FSET? .F ,PLURALBIT>>
+                                     <TELL "are ">)
+                                    (ELSE <TELL "is ">)>)>
+                  <LIST-OBJECTS-PRINT .F .FLAGS>
+                  <COND (<BTST .FLAGS ,L-OR> <TELL " or ">) (ELSE <TELL " and ">)>
+                  <LIST-OBJECTS-PRINT .S <BAND .FLAGS <BCOM ,L-CAP>>>
+                  <AND <BTST .FLAGS ,L-SUFFIX> <TELL " are">>)>)
+          (ELSE
+           <PUTB ,P-LOBJS 0 .N>
+           <LIST-OBJECTS-TAG-COUNTS ,P-LOBJS ,P-LOBJS-TAGS>
+           <SET MAX <GETB ,P-LOBJS 0>>
+           <COND (<AND <BTST .FLAGS ,L-ISARE>
+                       <NOT <BTST .FLAGS ,L-SUFFIX>>>
+                  <COND (<OR <NOT <BTST .FLAGS ,L-ISMANY>>
+                             <FSET? .F ,PLURALBIT>
+                             <G? <GETB ,P-LOBJS-TAGS 1> 1>>
+                         <TELL "are ">)
+                        (ELSE <TELL "is ">)>)>
+           <SET F <- .MAX 1>>
+           <DO (I 1 .MAX)
+               <SET J <GET/B ,P-LOBJS .I>>
+               <SET S <GETB ,P-LOBJS-TAGS .I>>
+               <COND (<==? .I 1>
+                      <LIST-OBJECTS-PRINT .J .FLAGS .S>)
+                     (ELSE
+                      <LIST-OBJECTS-PRINT .J <BAND .FLAGS <BCOM ,L-CAP>> .S>)>
+               <COND (<==? .I .MAX>)
+                     (<==? .I .F>
+                      <COND (<BTST .FLAGS ,L-OR> <TELL ", or ">)
+                            (ELSE <TELL ", and ">)>)
+                     (ELSE <TELL ", ">)>>
+           <AND <BTST .FLAGS ,L-SUFFIX> <TELL " are">>)>
+    <RETURN .N>>
+
+;"Prints one entry in an object list.
+
+Returns:
+  T."
+<ROUTINE LIST-OBJECTS-PRINT (O FLAGS "OPT" CNT "AUX" (CAP? <BAND .FLAGS ,L-CAP>))
+    <COND (<AND <=? .O ,PSEUDO-OBJECT>
+                <BTST .FLAGS ,L-SCENERY>>
+           <COND (.CAP? <TELL !\S>) (ELSE <TELL !\s>)>
+           <TELL "ome scenery">
+           <COND (<N=? ,PSEUDO-LOC ,HERE>
+                  <TELL " in " D ,PSEUDO-LOC>)>
+           <RTRUE>)
+          (<G? .CNT 1>
+           <PRINT-ENGLISH-NUM .CNT .CAP?>
+           <TELL " " P .O>)
+          (.CAP?
+           <COND (<BTST .FLAGS ,L-THE> <TELL CT .O>)
+                 (ELSE <TELL CA .O>)>)
+          (ELSE
+           <COND (<BTST .FLAGS ,L-THE> <TELL T .O>)
+                 (ELSE <TELL A .O>)>)>
+    <RTRUE>>
+
+;"Prints a small positive integer as an English word when possible.
+
+Returns:
+  T."
+<ROUTINE PRINT-ENGLISH-NUM (N "OPT" CAP?)
+    <COND (<G? .N <GET ,ENGLISH-NUM-STRS 0>> <TELL N .N>)
+          (.CAP? <PRINT-CAP-STR <GET ,ENGLISH-NUM-STRS .N>>)
+          (ELSE <TELL <GET ,ENGLISH-NUM-STRS .N>>)>
+    <RTRUE>>
+
+;"Counts indistinguishable objects in a PRSTBL, filters each set down to a
+  single object, and fills a tag table with the corresponding counts.
+
+  Args:
+    TBL: A PRSTBL containing the objects to count. Some objects may be removed
+      from this table and its count updated.
+    TAGS: A byte table with elements corresponding to TBL. It will be filled
+      in with the number of objects in each corresponding indistinguishable set
+      (1 or more). Its count (byte 0) is ignored.
+    IND-FUNC: A function to check if two objects are indistinguishable. If
+      omitted, uses INDISTINGUISHABLE?.
+
+  Returns:
+    The number of objects left in TBL."
+<ROUTINE LIST-OBJECTS-TAG-COUNTS (TBL TAGS "OPT" IND-FUNC "AUX" C MAX O P N)
+    <SET MAX <GETB .TBL 0>>
+    ;"initialize tags to 1"
+    <DO (I 1 .MAX)
+        <PUTB .TAGS .I 1>>
+    ;"increment tags of the first indistinguishable objects in each set, zero the others"
+    <DO (I 1 .MAX)
+        <COND (<SET C <GETB .TAGS .I>>
+               <SET O <GET/B .TBL .I>>
+               <COND (<AND <L? .I .MAX> <GETP .O ,P?PDESC>>
+                      <DO (J <+ .I 1> .MAX)
+                          <SET P <GET/B .TBL .J>>
+                          <COND (<COND (.IND-FUNC <APPLY .IND-FUNC .O .P>)
+                                       (ELSE <INDISTINGUISHABLE? .O .P>)>
+                                 <SET C <+ .C 1>>
+                                 <PUTB .TAGS .J 0>)>>
+                      <PUTB .TAGS .I .C>)>)>>
+    ;"remove the zeroed objects"
+    <SET C 1>
+    <SET N .MAX>
+    <DO (I 1 .MAX)
+        <SET O <GET/B .TBL .I>>
+        <SET P <GETB .TAGS .I>>
+        <COND (<0? .P>
+               <SET N <- .N 1>>)
+              (ELSE
+               <PUT/B .TBL .C .O>
+               <PUTB .TAGS .C .P>
+               <SET C <+ .C 1>>)>>
+    <PUTB .TBL 0 .N>
+    .N>
+
+;"Direction properties have a different format on V4+, where object numbers are words."
+<VERSION?
+    (ZIP
+        <CONSTANT UEXIT 1>          ;"size of unconditional exit"
+        <CONSTANT NEXIT 2>          ;"size of non-exit"
+        <CONSTANT FEXIT 3>          ;"size of function exit"
+        <CONSTANT CEXIT 4>          ;"size of conditional exit"
+        <CONSTANT DEXIT 5>          ;"size of door exit"
+
+        <CONSTANT EXIT-RM 0>        ;GET/B
+        <CONSTANT NEXIT-MSG 0>      ;GET
+        <CONSTANT FEXIT-RTN 0>      ;GET
+        <CONSTANT CEXIT-VAR 1>      ;GETB/VAR
+        <CONSTANT CEXIT-MSG 1>      ;GET
+        <CONSTANT DEXIT-OBJ 1>      ;GET/B
+        <CONSTANT DEXIT-MSG 1>      ;GET)
+    (GLULX
+        <CONSTANT UEXIT 4>          ;"room(4)"
+        <CONSTANT NEXIT 5>          ;"msg(4) dummy(1)"
+        <CONSTANT FEXIT 6>          ;"routine(4) dummy(2)"
+        <CONSTANT CEXIT 12>         ;"room(4) var(4) msg(4)"
+        <CONSTANT DEXIT 13>         ;"room(4) door(4) msg(4) dummy(1)"
+
+        <CONSTANT EXIT-RM 0>
+        <CONSTANT NEXIT-MSG 0>
+        <CONSTANT FEXIT-RTN 0>
+        <CONSTANT CEXIT-VAR 1>
+        <CONSTANT CEXIT-MSG 2>
+        <CONSTANT DEXIT-OBJ 1>
+        <CONSTANT DEXIT-MSG 2>)
+    (T
+        <CONSTANT UEXIT 2>
+        <CONSTANT NEXIT 3>
+        <CONSTANT FEXIT 4>
+        <CONSTANT CEXIT 5>
+        <CONSTANT DEXIT 6>
+
+        <CONSTANT EXIT-RM 0>
+        <CONSTANT NEXIT-MSG 0>
+        <CONSTANT FEXIT-RTN 0>
+        <CONSTANT CEXIT-VAR 4>
+        <CONSTANT CEXIT-MSG 1>
+        <CONSTANT DEXIT-OBJ 1>
+        <CONSTANT DEXIT-MSG 2>)>
+
+;"Checks whether PRSA is a meta-verb that does not cause time to pass."
+<DEFMAC GAME-VERB? ()
+    `<VERB? QUIT VERSION WAIT SAVE RESTORE RESTART INVENTORY UNDO
+            SUPERBRIEF BRIEF VERBOSE AGAIN SCRIPT UNSCRIPT
+            PRONOUNS TELL
+            ~!<IFFLAG (DEBUG '(XTRACE)) (ELSE '())>
+            ~!<IFFLAG
+                (DEBUGGING-VERBS
+                 '(XTREE XGOTO XMOVE XREMOVE XLIGHT XEXITS XOBJ XIT))
+                (ELSE '())>
+            ~!,EXTRA-GAME-VERBS>>
+
+<COND (<NOT <GASSIGNED? EXTRA-GAME-VERBS>> <SETG EXTRA-GAME-VERBS '()>)>
+
+<CONSTANT CANT-GO-THAT-WAY <LIBRARY-MESSAGE WALK CANT-GO-THAT-WAY>>
+
+<ROUTINE V-WALK ("AUX" PT PTS RM D)
+    <COND (<NOT ,PRSO-DIR>
+           <TELL <LIBRARY-MESSAGE WALK NO-DIRECTION> CR>
+           <RTRUE>)
+          (<0? <SET PT <GETPT ,HERE ,PRSO>>>
+           <COND (<OR ,HERE-LIT <NOT <DARKNESS-F ,M-DARK-CANT-GO>>>
+                  <TELL ,CANT-GO-THAT-WAY CR>)>
+           <SETG P-CONT 0>
+           <RTRUE>)
+          (<==? <SET PTS <PTSIZE .PT>> ,UEXIT>
+           <SET RM <GET/B .PT ,EXIT-RM>>)
+          (<==? .PTS ,NEXIT>
+           <TELL <GET .PT ,NEXIT-MSG> CR>
+           <SETG P-CONT 0>
+           <RTRUE>)
+          (<==? .PTS ,FEXIT>
+           <COND (<0? <SET RM <APPLY <GET .PT ,FEXIT-RTN>>>>
+                  <SETG P-CONT 0>
+                  <RTRUE>)>)
+          (<==? .PTS ,CEXIT>
+           <COND (<VALUE <GETB/VAR .PT ,CEXIT-VAR>>
+                  <SET RM <GET/B .PT ,EXIT-RM>>)
+                 (ELSE
+                  <COND (<SET RM <GET .PT ,CEXIT-MSG>>
+                         <TELL .RM CR>)
+                        (<AND <NOT ,HERE-LIT> <DARKNESS-F ,M-DARK-CANT-GO>>
+                         ;"DARKNESS-F printed a message")
+                        (ELSE
+                         <TELL ,CANT-GO-THAT-WAY CR>)>
+                  <SETG P-CONT 0>
+                  <RTRUE>)>)
+          (<==? .PTS ,DEXIT>
+           <COND (<FSET? <SET D <GET/B .PT ,DEXIT-OBJ>> ,OPENBIT>
+                  <SET RM <GET/B .PT ,EXIT-RM>>)
+                 (<SET RM <GET .PT ,DEXIT-MSG>>
+                  <TELL .RM CR>
+                  <SETG P-CONT 0>
+                  <RTRUE>)
+                 (ELSE
+                  <THIS-IS-IT .D>
+                  <TELL <LIBRARY-MESSAGE WALK BLOCKED-BY-DOOR ((DOOR .D))> CR>
+                  <SETG P-CONT 0>
+                  <RTRUE>)>)
+          (ELSE
+           <TELL "Broken exit (" N .PTS ")." CR>
+           <SETG P-CONT 0>
+           <RTRUE>)>
+    <GOTO .RM>>
+
+<ROUTINE V-ENTER ("AUX" O)
+    <COND (<==? ,PRSO ,ROOMS <>>
+           ;"ENTER with no object: look for an IN exit, a door, or a vehicle"
+           <COND (<GETPT ,HERE ,P?IN>
+                  <DO-WALK ,P?IN>)
+                 (<OR <SET O <GWIM ,DOORBIT ,SF-IN-ROOM <>>>
+                      <SET O <GWIM ,VEHBIT ,SF-IN-ROOM <>>>>
+                  <PERFORM ,V?ENTER .O>)
+                 (ELSE <TELL <LIBRARY-MESSAGE ENTER NO-OBJECT> CR>)>)
+          (<FSET? ,PRSO ,DOORBIT>
+           <DO-WALK <DOOR-DIR ,PRSO>>
+           <RTRUE>)
+          (<FSET? ,PRSO ,VEHBIT>
+           <COND (<HELD? ,PRSO>
+                  <TELL <LIBRARY-MESSAGE ENTER HELD ((OBJ ,PRSO) (SURFACE? <FSET? ,PRSO ,SURFACEBIT>))> CR>
+                  <SETG P-CONT 0>
+                  <RTRUE>)
+                 (<IMPLICIT-OPEN? ,PRSO>
+                  <TELL <LIBRARY-MESSAGE ENTER IMPLICIT-OPEN ((OBJ ,PRSO))> CR>
+                  <FSET ,PRSO ,OPENBIT>
+                  <MOVE ,WINNER ,PRSO>
+                  <APPLY <GETP ,PRSO ,P?ACTION> ,M-ENTER>
+                  <TELL <LIBRARY-MESSAGE ENTER SUCCESS ((OBJ ,PRSO) (SURFACE? <FSET? ,PRSO ,SURFACEBIT>))> CR>
+                  <NOW-LIT?>   ;"because opening the vehicle may have revealed a light source"
+                  <RTRUE>)
+                 (<NOT <OR <FSET? ,PRSO ,SURFACEBIT>
+                           <FSET? ,PRSO ,OPENBIT>>>
+                  <TELL <LIBRARY-MESSAGE ENTER CLOSED ((OBJ ,PRSO))> CR>
+                  <RTRUE>)
+                 (ELSE
+                  <MOVE ,WINNER ,PRSO>
+                  <APPLY <GETP ,PRSO ,P?ACTION> ,M-ENTER>
+                  <TELL <LIBRARY-MESSAGE ENTER SUCCESS ((OBJ ,PRSO) (SURFACE? <FSET? ,PRSO ,SURFACEBIT>))> CR>
+                  <RTRUE>)>)
+          (ELSE <TELL <LIBRARY-MESSAGE ENTER NOT-ENTERABLE> CR>)>>
+
+<DEFMAC IMPLICIT-OPEN? ('OBJ)
+    `<AND <FSET? ~.OBJ ,OPENABLEBIT>
+          <NOT <FSET? ~.OBJ SURFACEBIT>>
+          <NOT <FSET? ~.OBJ ,OPENBIT>>
+          <NOT <FSET? ~.OBJ ,LOCKEDBIT>>
+          <NOT <APPLY <GETP ~.OBJ ,P?ACTION> ,M-TRYOPEN?>>>>
+
+<ROUTINE V-EXIT ("AUX" O)
+    <COND (<==? ,PRSO ,ROOMS <>>
+           ;"EXIT with no object: look for a vehicle, a door, or an OUT exit"
+           <COND (<FSET? <LOC ,WINNER> ,VEHBIT>
+                  <PERFORM ,V?EXIT <LOC ,WINNER>>)
+                 (<SET O <GWIM ,DOORBIT ,SF-IN-ROOM <>>>
+                  <PERFORM ,V?EXIT .O>)
+                 (<GETPT ,HERE ,P?OUT>
+                  <DO-WALK ,P?OUT>)
+                 (ELSE <TELL <LIBRARY-MESSAGE EXIT NO-OBJECT> CR>)>)
+          (<FSET? ,PRSO ,DOORBIT>
+           <DO-WALK <DOOR-DIR ,PRSO>>
+           <RTRUE>)
+          (<FSET? ,PRSO ,VEHBIT>
+           <COND (<NOT <IN? ,WINNER ,PRSO>>
+                  <TELL <LIBRARY-MESSAGE EXIT NOT-IN ((OBJ ,PRSO) (SURFACE? <FSET? ,PRSO ,SURFACEBIT>))> CR>
+                  <SETG P-CONT 0>
+                  <RTRUE>)
+                 (<IMPLICIT-OPEN? ,PRSO>
+                  <TELL <LIBRARY-MESSAGE EXIT IMPLICIT-OPEN ((OBJ ,PRSO))> CR>
+                  <FSET ,PRSO ,OPENBIT>
+                  <MOVE ,WINNER ,HERE>
+                  <TELL <LIBRARY-MESSAGE EXIT SUCCESS ((OBJ ,PRSO) (SURFACE? <FSET? ,PRSO ,SURFACEBIT>))> CR>
+                  <NOW-LIT?>   ;"because opening the vehicle may have revealed a light source"
+                  <RTRUE>)
+                 (<NOT <OR <FSET? ,PRSO ,SURFACEBIT>
+                           <FSET? ,PRSO ,OPENBIT>>>
+                  <TELL <LIBRARY-MESSAGE EXIT CLOSED ((OBJ ,PRSO))> CR>
+                  <RTRUE>)
+                 (ELSE
+                  <MOVE ,WINNER ,HERE>
+                  <TELL <LIBRARY-MESSAGE EXIT SUCCESS ((OBJ ,PRSO) (SURFACE? <FSET? ,PRSO ,SURFACEBIT>))> CR>
+                  <RTRUE>)>)
+          (ELSE <TELL <LIBRARY-MESSAGE EXIT NOT-EXITABLE> CR>)>>
+
+;"Performs the WALK action with a direction.
+
+Returns:
+  True if the action was handled, otherwise false."
+<ROUTINE DO-WALK (DIR)
+    <WITH-GLOBAL ((PRSO-DIR T)) <PERFORM ,V?WALK .DIR>>>
+
+;"Finds a direction from HERE that leads through the given door.
+
+Returns:
+  A direction property, or false if no direction leads through the door."
+<ROUTINE DOOR-DIR DD (DOOR)
+    <MAP-DIRECTIONS (D PT ,HERE)
+        <COND (<AND <==? <PTSIZE .PT> ,DEXIT>
+                    <==? <GET/B .PT ,DEXIT-OBJ> .DOOR>>
+               <RETURN .D .DD>)>>
+    <RFALSE>>
+
+;"Finds the room on the other side of a given door from HERE.
+
+Returns:
+  A room, or false if no direction leads through the door."
+<ROUTINE OTHER-SIDE (DOOR "AUX" D)
+    <COND (<SET D <DOOR-DIR .DOOR>>
+           <GET/B <GETPT ,HERE .D> ,EXIT-RM>)
+          (ELSE <>)>>
+
+<ROUTINE V-QUIT ()
+    <IF-SCORING <V-SCORE>>
+    <TELL <LIBRARY-MESSAGE QUIT PROMPT>>
+    <COND (<YES?>
+           <TELL CR <LIBRARY-MESSAGE QUIT GOODBYE> CR>
+           <QUIT>)
+          (ELSE
+           <TELL CR <LIBRARY-MESSAGE QUIT ABORTED> CR>)>>
+
+<ROUTINE V-EXAMINE ("AUX" P (N <>))
+    <COND (<OR <SET P <GETP ,PRSO ,P?TEXT>>
+               <SET P <GETP ,PRSO ,P?LDESC>>>
+           <TELL .P CR>
+           <SET N T>)>
+    <COND (<FSET? ,PRSO ,OPENABLEBIT>
+           <TELL <LIBRARY-MESSAGE EXAMINE OPENABLE ((OBJ ,PRSO) (OPEN? <FSET? ,PRSO ,OPENBIT>))> CR>
+           <SET N T>)>
+    <COND (<AND <FIRST? ,PRSO> <SEE-INSIDE? ,PRSO>>
+           <DESCRIBE-CONTENTS ,PRSO>
+           <SET N T>)>
+    <COND (<NOT .N>
+           <TELL <LIBRARY-MESSAGE EXAMINE DEFAULT ((OBJ ,PRSO))> CR>)>>
+
+<ROUTINE V-LOOK-UNDER ()
+    <COND (<AND <N=? ,PRSO ,WINNER> <FSET? ,PRSO ,PERSONBIT>>
+           <TELL <LIBRARY-MESSAGE LOOK-UNDER PERSON ((WHOM ,PRSO))> CR>
+           <RTRUE>)
+          (<NOT ,HERE-LIT> <TELL <LIBRARY-MESSAGE DARKNESS TOO-DARK> CR>)
+          (ELSE <TELL <LIBRARY-MESSAGE LOOK-UNDER DEFAULT> CR>)>>
+
+<ROUTINE V-SEARCH ()
+    <COND (<PRSO? ,WINNER> <PERFORM ,V?INVENTORY>)
+          (<FSET? ,PRSO ,PERSONBIT> <TELL <LIBRARY-MESSAGE SEARCH PERSON ((WHOM ,PRSO))> CR>)
+          (<NOT <FSET? ,PRSO ,CONTBIT>> <TELL <LIBRARY-MESSAGE SEARCH NOT-CONTAINER> CR>)
+          (<AND <FSET? ,PRSO ,OPENABLEBIT> <NOT <SEE-INSIDE? ,PRSO>>>
+           <TELL <LIBRARY-MESSAGE SEARCH CLOSED ((OBJ ,PRSO) (PLURAL? <FSET? ,PRSO PLURALBIT>))> CR>)
+          (<NOT <FIRST? ,PRSO>>
+           <TELL <LIBRARY-MESSAGE SEARCH EMPTY ((OBJ ,PRSO) (PLURAL? <FSET? ,PRSO PLURALBIT>))> CR>)
+          (ELSE <DESCRIBE-CONTENTS ,PRSO>)>>
+
+<ROUTINE V-INVENTORY ("AUX" N O)
+    ;"check for light first"
+    <COND (,HERE-LIT
+           <COND (<FIRST? ,WINNER>
+                  <TELL <LIBRARY-MESSAGE INVENTORY HEADER> CR>
+                  ;"load inventory into P-XOBJS"
+                  <SET N 0>
+                  <MAP-CONTENTS (I ,WINNER)
+                      <SET N <+ .N 1>>
+                      <PUT/B ,P-XOBJS .N .I>>
+                  <PUTB ,P-XOBJS 0 .N>
+                  ;"combine indistinguishable items"
+                  <SET N <LIST-OBJECTS-TAG-COUNTS ,P-XOBJS ,P-XOBJS-TAGS ,INV-INDISTINGUISHABLE?>>
+                  <DO (I 1 .N)
+                      <SET O <GET/B ,P-XOBJS .I>>
+                      <TELL "   ">
+                      <LIST-OBJECTS-PRINT .O 0 <GETB ,P-XOBJS-TAGS .I>>
+                      <INV-PRINT-DETAILS .O>
+                      <CRLF>>)
+                 (ELSE
+                  <TELL <LIBRARY-MESSAGE INVENTORY EMPTY-HANDED> CR>)>)
+          (ELSE
+           <TELL <LIBRARY-MESSAGE INVENTORY TOO-DARK> CR>)>>
+
+;"Prints a space followed by a parenthetical describing the contents of a
+surface or container, for use in inventory listings.
+
+Returns:
+  T."
+
+<ROUTINE INV-DESCRIBE-CONTENTS (OBJ "AUX" F)
+    <COND (<FSET? .OBJ ,SURFACEBIT>
+           <TELL <LIBRARY-MESSAGE INVENTORY CONTENTS-1-SURFACE>>)
+          (ELSE <TELL <LIBRARY-MESSAGE INVENTORY CONTENTS-1-CONTAINER>>)>
+    <SET F <FIRST? .OBJ>>
+    <COND (<NOT .F>
+           <TELL <LIBRARY-MESSAGE INVENTORY NOTHING>
+                 <LIBRARY-MESSAGE INVENTORY CONTENTS-2>>
+           <RETURN T>)>
+    <LIST-OBJECTS .OBJ>
+    <TELL <LIBRARY-MESSAGE INVENTORY CONTENTS-2>>
+    <RTRUE>>
+
+<DEFAULT-DEFINITION INV-PRINT-DETAILS
+    ;"Prints the attributes following an object in an inventory listing,
+      including the contents of open containers.
+
+    Returns:
+      T."
+    <ROUTINE INV-PRINT-DETAILS (O)
+        <AND <FSET? .O ,WORNBIT> <TELL <LIBRARY-MESSAGE INVENTORY WORN>>>
+        <AND <FSET? .O ,LIGHTBIT> <TELL <LIBRARY-MESSAGE INVENTORY LIGHTING>>>
+        <INV-PRINT-EXTRA-DETAILS .O>
+        <COND (<FSET? .O ,CONTBIT>
+               <COND (<FSET? .O ,OPENABLEBIT>
+                      <COND (<FSET? .O ,OPENBIT>
+                             <TELL <LIBRARY-MESSAGE INVENTORY OPEN>>)
+                            (ELSE <TELL <LIBRARY-MESSAGE INVENTORY CLOSED>>)>)>
+               <COND (<SEE-INSIDE? .O> <INV-DESCRIBE-CONTENTS .O>)>)>
+        <RTRUE>>>
+
+<DEFAULT-DEFINITION INV-EXTRA-DETAILS
+    ;"The game can replace this to show more details for inventory objects."
+    <DEFMAC INV-PRINT-EXTRA-DETAILS ('O) <>>
+
+    ;"If INV-PRINT-EXTRA-DETAILS is replaced, this should also be replaced to
+      determine whether two objects have the same extra details."
+    <DEFMAC INV-SAME-EXTRA-DETAILS? ('A 'B) T>>
+
+<DEFAULT-DEFINITION INV-INDISTINGUISHABLE?
+    ;"Checks whether two objects are indistinguishable for inventory purposes,
+      i.e., whether they should be combined in an inventory listing, where
+      they'd appear with attributes like (worn) or (providing light) and, for
+      open containers, their contents.
+
+    Returns:
+      True if the objects should be combined, otherwise false."
+    <ROUTINE INV-INDISTINGUISHABLE? (A B)
+        <AND <INDISTINGUISHABLE? .A .B>
+             <==? <FSET? .A ,WORNBIT> <FSET? .B ,WORNBIT>>
+             <==? <FSET? .A ,LIGHTBIT> <FSET? .B ,LIGHTBIT>>
+             <INV-SAME-EXTRA-DETAILS? .A .B>
+             ;"If neither is a container..."
+             <OR <NOT <OR <FSET? .A ,CONTBIT> <FSET? .B ,CONTBIT>>>
+                 ;"...or they're both unopenable..."
+                 <NOT <OR <FSET? .A ,OPENABLEBIT> <FSET? .B ,OPENABLEBIT>>>
+                 ;"...or they're both open or both closed, and..."
+                 <AND <==? <FSET? .A ,OPENBIT> <FSET? .B ,OPENBIT>>
+                      ;"...either we can't see the contents of either..."
+                      <OR <NOT <OR <SEE-INSIDE? .A> <SEE-INSIDE? .B>>>
+                          ;"...or they're both empty."
+                          <NOT <OR <FIRST? .A> <FIRST? .B>>>>>>>>>
+
+<ROUTINE V-TAKE ()
+    <TRY-TAKE ,PRSO>
+    <RTRUE>>
+
+;"Attempts to take an object, implementing all of the default checks, and
+  possibly printing a success or failure message.
+
+Args:
+  OBJ: The object to take.
+  SILENT: If true, suppresses any success or failure message.
+
+Returns:
+  True if the object was taken."
+<ROUTINE TRY-TAKE (OBJ "OPT" SILENT "AUX" HOLDER)
+    <COND (<=? .OBJ ,WINNER>
+           <COND (.SILENT)
+                 (<=? ,P-V-WORD ,W?GET> <TELL <LIBRARY-MESSAGE TAKE GET-ME> CR>)
+                 (<=? ,P-V-WORD ,W?TAKE ,W?GRAB> <TELL <LIBRARY-MESSAGE TAKE TAKE-ME> CR>)
+                 (<=? ,P-V-WORD ,W?PICK> <TELL <LIBRARY-MESSAGE TAKE PICK-ME-UP> CR>)
+                 (ELSE <TELL <LIBRARY-MESSAGE TAKE TAKE-ME-OTHER> CR>)>
+           <RFALSE>)
+          (<FSET? .OBJ ,PERSONBIT>
+           <OR .SILENT <TELL <LIBRARY-MESSAGE TAKE PERSON ((WHOM .OBJ))> CR>>
+           <RFALSE>)
+          (<NOT <FSET? .OBJ ,TAKEBIT>>
+           <OR .SILENT <TELL <LIBRARY-MESSAGE TAKE NOT-TAKEABLE> CR>>
+           <RFALSE>)
+          (<IN? .OBJ ,WINNER>
+           <OR .SILENT <TELL <LIBRARY-MESSAGE TAKE ALREADY-HELD> CR>>
+           <RFALSE>)
+          (<HELD? ,WINNER .OBJ>
+           <COND (<NOT .SILENT>
+                  <TELL <LIBRARY-MESSAGE TAKE TAKE-FROM-INSIDE ((OBJ ,PRSO) (SURFACE? <FSET? .OBJ ,SURFACEBIT>))> CR>
+                  <RFALSE>)>)>
+    ;"See if picked up object is being taken from a container"
+    <COND (<SET HOLDER <TAKE-HOLDER .OBJ ,WINNER>>
+           <COND (<FSET? .HOLDER ,PERSONBIT>
+                  <OR .SILENT <TELL <LIBRARY-MESSAGE TAKE BLOCKED-BY-PERSON ((HOLDER .HOLDER))> CR>>
+                  <RFALSE>)
+                 (<BLOCKS-TAKE? .HOLDER>
+                  <THIS-IS-IT .HOLDER>
+                  <OR .SILENT <TELL <LIBRARY-MESSAGE TAKE BLOCKED-BY-OBJECT ((HOLDER .HOLDER) (PLURAL? <FSET? .HOLDER ,PLURALBIT>))> CR>>
+                  <RFALSE>)
+                 (<NOT <TAKE-CAPACITY-CHECK .OBJ .SILENT>>)
+                 (<AND <FSET? .HOLDER ,CONTBIT>
+                       <HELD? .OBJ .HOLDER>
+                       <NOT <HELD? ,WINNER .HOLDER>>>
+                  <FSET .OBJ ,TOUCHBIT>
+                  <MOVE .OBJ ,WINNER>
+                  <COND (.SILENT)
+                        (<SHORT-REPORT?> <TELL <LIBRARY-MESSAGE TAKE SUCCESS-SHORT> CR>)
+                        (ELSE
+                         <TELL <LIBRARY-MESSAGE TAKE SUCCESS-CONTAINER ((HOLDER .HOLDER) (OBJ .OBJ))> CR>)>
+                  <RTRUE>)>)>
+    <COND (<NOT <TAKE-CAPACITY-CHECK .OBJ .SILENT>>
+           <RFALSE>)
+          (ELSE
+           <FSET .OBJ ,TOUCHBIT>
+           <MOVE .OBJ ,WINNER>
+           <COND (.SILENT)
+                 (<SHORT-REPORT?> <TELL <LIBRARY-MESSAGE TAKE SUCCESS-SHORT> CR>)
+                 (ELSE <TELL <LIBRARY-MESSAGE TAKE SUCCESS ((OBJ .OBJ))> CR>)>
+           <RTRUE>)>>
+
+;"Locates the container, person, or room that restricts the ability to take a
+given object.
+
+If at least one thing between the taker and the object is a closed container
+or a person, the closest one to the taker will be returned. Otherwise, the
+innermost non-surface container or room that encloses the object will be
+returned.
+
+Args:
+  OBJ: The object being taken.
+  TAKER: The object doing the taking.
+
+Returns:
+  The closed container or person blocking the take, or the open container
+  or room allowing the take, or ROOMS if the objects have no common parent."
+<ROUTINE TAKE-HOLDER (OBJ TAKER "AUX" CEIL BLOCKER ALLOWER HAD-ALLOWER?)
+    <SET CEIL <COMMON-PARENT? .OBJ .TAKER>>
+    <COND (<0? .CEIL> <RETURN ,ROOMS>)>
+    ;"Walk up the tree from OBJ to CEIL"
+    <COND (<N=? .OBJ .CEIL>
+           <DO (L <LOC .OBJ> <0? .L> <SET L <LOC .L>>)
+               <COND (<==? .L .CEIL>
+                      <RETURN>)
+                     (<BLOCKS-TAKE? .L>
+                      ;"Keep the furthest blocker from OBJ"
+                      <SET BLOCKER .L>)
+                     (<OR <AND <FSET? .L ,CONTBIT>
+                               <NOT <FSET? .L ,SURFACEBIT>>>
+                          <IN? .L ,ROOMS>>
+                      ;"Keep the closest allower to OBJ"
+                      <OR .ALLOWER <SET ALLOWER .L>>)>>)>
+    ;"Walk up the tree from TAKER to CEIL, setting variables in reverse"
+    <SET HAD-ALLOWER? .ALLOWER>
+    <COND (<N=? .TAKER .CEIL>
+           <DO (L <LOC .TAKER> <0? .L> <SET L <LOC .L>>)
+               <COND (<==? .L .CEIL>
+                      <RETURN>)
+                     (<BLOCKS-TAKE? .L>
+                      ;"Keep the closest blocker to TAKER"
+                      <OR .BLOCKER <SET BLOCKER .L>>)
+                     (<OR <AND <FSET? .L ,CONTBIT>
+                               <NOT <FSET? .L ,SURFACEBIT>>>
+                          <IN? .L ,ROOMS>>
+                      ;"Keep the furthest blocker from TAKER unless we already found
+                        one on the first walk."
+                      <OR .HAD-ALLOWER? <SET ALLOWER .L>>)>>)>
+    <OR .BLOCKER .ALLOWER>>
+
+;"Checks whether an object blocks taking something through it.
+
+Returns:
+  True for people and closed openable containers, otherwise false."
+<ROUTINE BLOCKS-TAKE? (OBJ)
+    <T? <OR <FSET? .OBJ ,PERSONBIT>
+            <AND <FSET? .OBJ ,CONTBIT>
+                 <FSET? .OBJ ,OPENABLEBIT>
+                 <NOT <FSET? .OBJ ,OPENBIT>>>>>>
+
+;"Returns the closest object to A and B that contains both of them, or <> if there is none.
+This assumes that if the objects have a common parent, it's within HERE."
+<DEFMAC COMMON-PARENT? ('A 'B)
+    `<COMMON-PARENT-R ~.A ~.B ,HERE>>
+
+<ROUTINE COMMON-PARENT-R CPR (A B ROOT "AUX" N F R)
+    <OR .ROOT <RFALSE>>
+    ;"If ROOT is equal to A or B, it's the common parent"
+    <COND (<EQUAL? .ROOT .A .B> <RETURN .ROOT>)>
+    ;"Look for common parent in each subtree, keeping any matching
+      tree and counting the number found."
+    <MAP-CONTENTS (I .ROOT)
+        <COND (<SET R <COMMON-PARENT-R .A .B .I>>
+               <SET F .R>
+               <SET N <+ .N 1>>
+               ;"If we found matching parents in two children,
+                ROOT is the common parent."
+               <COND (<G? .N 1> <RETURN .ROOT .CPR>)>)>>
+    ;"One child contained both objects, so the common parent is whatever
+      COMMON-PARENT-R returned for it."
+    .F>
+
+<DEFAULT-DEFINITION TAKE-CAPACITY-CHECK
+
+    ;"Checks whether WINNER can carry an additional object without exceeding capacity.
+
+    Returns:
+      True if the object can be carried, otherwise false."
+    <ROUTINE TAKE-CAPACITY-CHECK (O "OPT" SILENT "AUX" (CAP <GETP ,WINNER ,P?CAPACITY>) CWT NWT)
+        <COND (<L? .CAP 0> <RTRUE>)>
+        <SET CWT <- <WEIGHT ,WINNER> <GETP ,WINNER ,P?SIZE>>>
+        <SET NWT <WEIGHT .O>>
+        <COND (<G? <+ .CWT .NWT> .CAP>
+               <COND (.SILENT)
+                     (<SHORT-REPORT?>
+                      <TELL <LIBRARY-MESSAGE TAKE TOO-HEAVY-SHORT> CR>)
+                     (ELSE
+                      <TELL <LIBRARY-MESSAGE TAKE TOO-HEAVY ((OBJ .O))> CR>)>
+               <RFALSE>)>
+        <RTRUE>>
+>
+
+<ROUTINE PRE-DROP ()
+    <COND (<NOT <IN? ,PRSO ,WINNER>>
+           <SETG P-CONT 0>
+           <TELL <LIBRARY-MESSAGE DROP NOT-HELD> CR>)>>
+
+<ROUTINE V-DROP ("AUX" L)
+    <COND (<AND <FSET? <SET L <LOC ,WINNER>> ,VEHBIT>
+                <NOT <FSET? .L ,SURFACEBIT>>>
+           ;"Items dropped inside a non-surface vehicle stay in the vehicle"
+           <MOVE ,PRSO .L>)
+          (ELSE <MOVE ,PRSO ,HERE>)>
+    <FSET ,PRSO ,TOUCHBIT>
+    <FCLEAR ,PRSO ,WORNBIT>
+    <COND (<SHORT-REPORT?> <TELL <LIBRARY-MESSAGE DROP SUCCESS-SHORT> CR>)
+          (ELSE <TELL <LIBRARY-MESSAGE DROP SUCCESS ((OBJ ,PRSO))> CR>)>>
+
+<ROUTINE PRE-PUT-ON ()
+    <COND (<PRSI? ,WINNER> <PERFORM ,V?WEAR ,PRSO> <RTRUE>)
+          (<PRSO? ,WINNER> <PERFORM ,V?ENTER ,PRSI> <RTRUE>)
+          (<NOT <HAVE-TAKE-CHECK ,PRSO ,SF-HAVE>> <RTRUE>)>>
+
+<ROUTINE V-PUT-ON ("AUX" S CCAP X W B)
+    <COND (<FSET? ,PRSI ,PERSONBIT>
+           <TELL <LIBRARY-MESSAGE PUT-ON PERSON ((WHOM ,PRSI))> CR>)
+          (<NOT <AND <FSET? ,PRSI ,CONTBIT>
+                     <FSET? ,PRSI ,SURFACEBIT>>>
+           <TELL <LIBRARY-MESSAGE PUT-ON NOT-SURFACE> CR>
+           <RTRUE>)
+          (<NOT <IN? ,PRSO ,WINNER>>
+           <TELL <LIBRARY-MESSAGE PUT-ON NOT-HELD> CR>)
+          (<OR <EQUAL? ,PRSO ,PRSI> <HELD? ,PRSI ,PRSO>>
+           <TELL <LIBRARY-MESSAGE PUT-ON PUT-ON-ITSELF> CR>)
+          (ELSE
+           <SET S <GETP ,PRSO ,P?SIZE>>
+           <COND (<G=? <SET CCAP <GETP ,PRSI ,P?CAPACITY>> 0>)
+                 (ELSE
+                  <SET CCAP 5>
+                  ;"set bottomless flag"
+                  <SET B 1>)>
+           <COND (<G? .S .CCAP>
+                  <TELL <LIBRARY-MESSAGE PUT-ON TOO-BIG ((HOLDER ,PRSI))> CR>
+                  <RETURN>)>
+           <COND (<0? .B>
+                  ;"Determine weight of contents of IO"
+                  <SET W <CONTENTS-WEIGHT ,PRSI>>
+                  <SET X <+ .W .S>>
+                  <COND (<G? .X .CCAP>
+                         <TELL <LIBRARY-MESSAGE PUT-ON NO-ROOM ((HOLDER ,PRSI))> CR>
+                         <RETURN>)>
+                  )>
+           <MOVE ,PRSO ,PRSI>
+           <FSET ,PRSO ,TOUCHBIT>
+           <FCLEAR ,PRSO ,WORNBIT>
+           <COND (<SHORT-REPORT?> <TELL <LIBRARY-MESSAGE PUT-ON SUCCESS-SHORT> CR>)
+                 (ELSE <TELL <LIBRARY-MESSAGE PUT-ON SUCCESS ((OBJ ,PRSO) (HOLDER ,PRSI))> CR>)>)>>
+
+<ROUTINE PRE-PUT-IN ()
+    <COND (<PRSI? ,WINNER> <TELL <LIBRARY-MESSAGE PUT-IN PUT-IN-ME> CR> <RTRUE>)
+          (<PRSO? ,WINNER> <PERFORM ,V?ENTER ,PRSI> <RTRUE>)
+          (<NOT <HAVE-TAKE-CHECK ,PRSO ,SF-HAVE>> <RTRUE>)>>
+
+<ROUTINE V-PUT-IN ("AUX" S CCAP CSIZE X W B)
+    <COND (<FSET? ,PRSI ,PERSONBIT> <TELL <LIBRARY-MESSAGE PUT-IN PERSON ((WHOM ,PRSI))> CR> <RTRUE>)
+          (<OR <NOT <FSET? ,PRSI ,CONTBIT>>
+               <FSET? ,PRSI ,SURFACEBIT>>
+           <TELL <LIBRARY-MESSAGE PUT-IN NOT-OPENABLE ((HOLDER ,PRSI))> CR>
+           <RTRUE>)
+          (<AND <NOT <FSET? ,PRSI ,OPENBIT>>
+                <FSET? ,PRSI ,OPENABLEBIT>>
+           <TELL <LIBRARY-MESSAGE PUT-IN CLOSED ((HOLDER ,PRSI))> CR>)
+          ;"always closed case"
+          (<AND <NOT <FSET? ,PRSI ,OPENBIT>>
+                <FSET? ,PRSI ,CONTBIT>>
+           <TELL <LIBRARY-MESSAGE PUT-IN NOT-OPENABLE ((HOLDER ,PRSI))> CR>)
+          (<NOT <IN? ,PRSO ,WINNER>>
+           <TELL <LIBRARY-MESSAGE PUT-IN NOT-HELD> CR>)
+          (<OR <EQUAL? ,PRSO ,PRSI> <HELD? ,PRSI ,PRSO>>
+           <TELL <LIBRARY-MESSAGE PUT-IN PUT-IN-ITSELF> CR>)
+          (ELSE
+           <SET S <GETP ,PRSO ,P?SIZE>>
+           <COND (<G=? <SET CCAP <GETP ,PRSI ,P?CAPACITY>> 0>)
+                 (ELSE
+                  <SET CCAP 5>
+                  ;"set bottomless flag"
+                  <SET B 1>)>
+           <SET CSIZE <GETP ,PRSI ,P?SIZE>>
+           <COND (<G? .S .CCAP>
+                  <TELL <LIBRARY-MESSAGE PUT-IN TOO-BIG ((HOLDER ,PRSI))> CR>
+                  <RETURN>)>
+           <COND (<0? .B>
+                  ;"Determine weight of contents of IO"
+                  <SET W <CONTENTS-WEIGHT ,PRSI>>
+                  ;<TELL "Back from Contents-weight loop" CR>
+                  <SET X <+ .W .S>>
+                  <COND (<G? .X .CCAP>
+                         <TELL <LIBRARY-MESSAGE PUT-IN NO-ROOM ((HOLDER ,PRSI))> CR>
+                         <RETURN>)>)>
+    <MOVE ,PRSO ,PRSI>
+    <FSET ,PRSO ,TOUCHBIT>
+    <FCLEAR ,PRSO ,WORNBIT>
+    <COND (<SHORT-REPORT?> <TELL <LIBRARY-MESSAGE PUT-IN SUCCESS-SHORT> CR>)
+          (ELSE <TELL <LIBRARY-MESSAGE PUT-IN SUCCESS ((OBJ ,PRSO) (HOLDER ,PRSI))> CR>)>)>>
+
+;"Calculates the weight of all objects in a container, non-recursively.
+
+Returns:
+  The total weight of the container's immediate children."
+<ROUTINE CONTENTS-WEIGHT (O "AUX" W)
+    ;"add size of objects inside container - does not recurse through containers
+      within this container"
+    <MAP-CONTENTS (I .O)
+        <SET W <+ .W <GETP .I ,P?SIZE>>>>
+    .W>
+
+;"Calculates the weight of an object, including its contents recursively.
+
+Returns:
+  The total weight of the object and all of its descendants."
+<ROUTINE WEIGHT (O "AUX" X W)
+    ;"Unlike CONTENTS-WEIGHT - drills down through all contents, adding sizes of all objects + contents"
+    ;"start with size of container itself"
+    <SET W <GETP .O ,P?SIZE>>
+    ;"add size of objects inside container"
+    <MAP-CONTENTS (I .O)
+         <COND (<OR <FSET? .I ,CONTBIT>
+                    <FSET? .I ,PERSONBIT>>
+                <SET X <WEIGHT .I>>
+                <SET W <+ .W .X>>)
+               (ELSE
+                <SET W <+ .W <GETP .I ,P?SIZE>>>)>>
+    .W>
+
+<ROUTINE PRE-TAKE-FROM ()
+    <COND (<HELD? ,PRSO ,PRSI> <PERFORM ,V?TAKE ,PRSO>)
+          (<FSET? ,PRSI ,PERSONBIT>
+           <TELL <LIBRARY-MESSAGE TAKE-FROM NOT-HELD-BY-PERSON ((OBJ ,PRSO) (HOLDER ,PRSI) (SURFACE? <FSET? ,PRSI ,SURFACEBIT>))> CR>)
+          (ELSE
+           <TELL <LIBRARY-MESSAGE TAKE-FROM NOT-HELD-BY-OBJECT ((OBJ ,PRSO) (HOLDER ,PRSI) (SURFACE? <FSET? ,PRSI ,SURFACEBIT>))> CR>)>
+    <RTRUE>>
+
+<ROUTINE V-TAKE-FROM ()
+    ;"this should never be called, PRE-TAKE-FROM always intervenes"
+    <RTRUE>>
+
+<ROUTINE V-WEAR ()
+    <COND (<FSET? ,PRSO ,WEARBIT>
+           <COND (<NOT <FSET? ,PRSO ,WORNBIT>>
+                  <FSET ,PRSO ,WORNBIT>
+                  <TELL <LIBRARY-MESSAGE WEAR SUCCESS ((OBJ ,PRSO))> CR>)
+                 (ELSE <TELL <LIBRARY-MESSAGE WEAR ALREADY-WORN> CR>)>)
+          (ELSE <TELL <LIBRARY-MESSAGE WEAR NOT-WEARABLE> CR>)>>
+
+<ROUTINE V-UNWEAR ()
+    <COND (<AND <IN? ,PRSO ,WINNER> <FSET? ,PRSO ,WORNBIT>>
+           <FCLEAR ,PRSO ,WORNBIT>
+           <TELL <LIBRARY-MESSAGE UNWEAR SUCCESS ((OBJ ,PRSO))> CR>)
+          (ELSE <TELL <LIBRARY-MESSAGE UNWEAR NOT-WORN> CR>)>>
+
+<ROUTINE V-EAT ()
+    <COND (<PRSO? ,WINNER> <TELL <LIBRARY-MESSAGE EAT EAT-ME> CR> <RTRUE> ;"FIXME: impossible?")
+          (<FSET? ,PRSO ,PERSONBIT> <TELL <LIBRARY-MESSAGE EAT PERSON ((WHOM ,PRSO))> CR> <RTRUE>)
+          (<FSET? ,PRSO ,EDIBLEBIT>
+           <REMOVE ,PRSO>
+           <COND (<SHORT-REPORT?> <TELL <LIBRARY-MESSAGE EAT SUCCESS-SHORT> CR>)
+                 (ELSE <TELL <LIBRARY-MESSAGE EAT SUCCESS ((OBJ ,PRSO))> CR>)>)
+          (ELSE <TELL <LIBRARY-MESSAGE EAT NOT-EDIBLE> CR>)>>
+
+<DEFMAC PRINT-GAME-BANNER ()
+    <COND (<AND <GETPROP GAME-TITLE ZVAL>
+                <GETPROP GAME-DESCRIPTION ZVAL>>
+           #SPLICE (<VERSION? (ZIP) (ELSE <HLIGHT ,H-BOLD>)>
+                    <TELL ,GAME-TITLE CR>
+                    <VERSION? (ZIP) (ELSE <HLIGHT ,H-NORMAL>)>
+                    <TELL ,GAME-DESCRIPTION CR>))
+          (ELSE '<TELL ,GAME-BANNER CR>)>>
+
+<ROUTINE V-VERSION ()
+    <PRINT-GAME-BANNER>
+    <TELL <LIBRARY-MESSAGE VERSION RELEASE-AND-SERIAL ((RELEASE <BAND <LOWCORE RELEASEID> *3777*>))>>
+    <LOWCORE-TABLE SERIAL 6 PRINTC>
+    <TELL %<STRING " / " ,ZIL-VERSION>>
+    <CRLF>>
+
+<ROUTINE V-THINK-ABOUT ()
+    <COND (<PRSO? ,WINNER>
+           <TELL <LIBRARY-MESSAGE THINK-ABOUT THINK-ABOUT-ME> CR>)
+          (ELSE
+           <TELL <LIBRARY-MESSAGE THINK-ABOUT DEFAULT ((OBJ ,PRSO))> CR>)>>
+
+<ROUTINE V-OPEN ()
+    <COND (<FSET? ,PRSO ,PERSONBIT> <TELL <LIBRARY-MESSAGE OPEN PERSON ((WHOM ,PRSO))> CR> <RTRUE>)
+          (<NOT <FSET? ,PRSO ,OPENABLEBIT>> <TELL <LIBRARY-MESSAGE OPEN NOT-OPENABLE> CR> <RTRUE>)
+          (<FSET? ,PRSO ,OPENBIT>
+           <TELL <LIBRARY-MESSAGE OPEN ALREADY-OPEN> CR>)
+          (<FSET? ,PRSO ,LOCKEDBIT>
+           <TELL <LIBRARY-MESSAGE OPEN LOCKED> CR>)
+          (ELSE
+           <FSET ,PRSO ,TOUCHBIT>
+           <FSET ,PRSO ,OPENBIT>
+           <COND (<SHORT-REPORT?> <TELL <LIBRARY-MESSAGE OPEN SUCCESS-SHORT> CR>)
+                 (ELSE
+                  <TELL <LIBRARY-MESSAGE OPEN SUCCESS ((OBJ ,PRSO))> CR>
+                  <COND (<AND ,HERE-LIT
+                              <FSET? ,PRSO ,CONTBIT>
+                              <NOT <FSET? ,PRSO ,TRANSBIT>>
+                              <NOT <HELD? ,WINNER ,PRSO>>>
+                         <DESCRIBE-CONTENTS ,PRSO>)>)>
+           <NOW-LIT?>)>>
+
+<ROUTINE V-CLOSE ()
+    <COND (<FSET? ,PRSO ,PERSONBIT> <TELL <LIBRARY-MESSAGE CLOSE PERSON ((WHOM ,PRSO))> CR> <RTRUE>)
+          (<NOT <FSET? ,PRSO ,OPENABLEBIT>> <TELL <LIBRARY-MESSAGE CLOSE NOT-CLOSEABLE> CR> <RTRUE>)
+          ;(<FSET? ,PRSO ,SURFACEBIT> <TELL <LIBRARY-MESSAGE CLOSE NOT-CLOSEABLE> CR> <RTRUE>)
+          (<NOT <FSET? ,PRSO ,OPENBIT>>
+           <TELL <LIBRARY-MESSAGE CLOSE ALREADY-CLOSED> CR>)
+          (ELSE
+           <FSET ,PRSO ,TOUCHBIT>
+           <FCLEAR ,PRSO ,OPENBIT>
+           <COND (<SHORT-REPORT?> <TELL <LIBRARY-MESSAGE CLOSE SUCCESS-SHORT> CR>)
+                 (ELSE <TELL <LIBRARY-MESSAGE CLOSE SUCCESS ((OBJ ,PRSO))> CR>)>
+           <NOW-DARK?>)>>
+
+<ROUTINE V-LOCK ()
+    <TELL <LIBRARY-MESSAGE LOCK DEFAULT> CR>
+    <RTRUE>>
+
+<ROUTINE V-UNLOCK ()
+    <TELL <LIBRARY-MESSAGE UNLOCK DEFAULT> CR>
+    <RTRUE>>
+
+<ROUTINE V-WAIT ("AUX" T INTERRUPT ENDACT)
+    <SET T 1>
+    <TELL <LIBRARY-MESSAGE WAIT SUCCESS> CR>
+    <REPEAT ()
+        <HOOK-BEFORE-M-END>
+        <SET ENDACT <APPLY <GETP ,HERE ,P?ACTION> ,M-END>>
+        <HOOK-AFTER-M-END ENDACT>
+        <HOOK-BEFORE-CLOCKER>
+        <SET INTERRUPT <CLOCKER>>
+        <HOOK-AFTER-CLOCKER INTERRUPT>
+        <SET T <+ .T 1>>
+        <COND (<OR <G? .T ,STANDARD-WAIT>
+                   .ENDACT
+                   .INTERRUPT>
+               <RETURN>)>>>
+
+<ROUTINE V-AGAIN ()
+    <COND (<NOT <PST-PRSA ,AGAIN-STORAGE>>
+           <TELL <LIBRARY-MESSAGE AGAIN NO-COMMAND> CR>
+           <RTRUE>)>
+    <SAVE-PARSER-RESULT ,TEMP-PARSER-RESULT>
+    <RESTORE-PARSER-RESULT ,AGAIN-STORAGE>
+    <PROG ()
+        ;"if PRSO and/or PRSI are set, make sure the object(s) still pass the checks"
+        <COND (<AND <N==? ,PRSO <> ,ROOMS>
+                    <NOT ,PRSO-DIR>
+                    <NOT <AND <STILL-VISIBLE-CHECK ,P-PRSOS>
+                              <HAVE-TAKE-CHECK-TBL ,P-PRSOS <GETB ,P-SYNTAX ,SYN-OPTS1>>>>>
+               <RETURN>)
+              (<AND <N==? ,PRSI <> ,ROOMS>
+                    <NOT <AND <STILL-VISIBLE-CHECK ,P-PRSIS>
+                              <HAVE-TAKE-CHECK-TBL ,P-PRSIS <GETB ,P-SYNTAX ,SYN-OPTS2>>>>>
+               <RETURN>)>
+        ;"if we get here, they were unset or they passed"
+        <MAIN-LOOP-HANDLE-COMMAND>>
+    <RESTORE-PARSER-RESULT ,TEMP-PARSER-RESULT>
+    <RTRUE>>
+
+<ROUTINE V-READ ("AUX" T)
+    <COND (<NOT <FSET? ,PRSO ,READBIT>> <TELL <LIBRARY-MESSAGE READ NOT-READABLE> CR> <RTRUE>)
+          (<SET T <GETP ,PRSO ,P?TEXT>>
+           <TELL .T CR>)
+          (<SET T <GETP ,PRSO ,P?TEXT-HELD>>
+           <COND (<IN? ,PRSO ,WINNER>
+                  <TELL .T CR>)
+                 (ELSE
+                  <TELL <LIBRARY-MESSAGE READ NOT-HELD> CR>)>)
+          (ELSE
+           <PERFORM ,V?EXAMINE ,PRSO>)>>
+
+<ROUTINE V-TURN-ON ()
+    <COND (<PRSO? ,WINNER> <TELL <LIBRARY-MESSAGE TURN-ON TURN-ME-ON> CR> <RTRUE>)
+          (<NOT <FSET? ,PRSO ,DEVICEBIT>> <TELL <LIBRARY-MESSAGE TURN-ON NOT-SWITCHABLE> CR> <RTRUE>)
+          (<FSET? ,PRSO ,ONBIT>
+           <TELL <LIBRARY-MESSAGE TURN-ON ALREADY-ON> CR>)
+          (ELSE
+           <FSET ,PRSO ,ONBIT>
+           <COND (<SHORT-REPORT?> <TELL <LIBRARY-MESSAGE TURN-ON SUCCESS-SHORT> CR>)
+                 (ELSE <TELL <LIBRARY-MESSAGE TURN-ON SUCCESS ((OBJ ,PRSO))> CR>)>)>>
+
+<ROUTINE V-TURN-OFF ()
+    <COND (<PRSO? ,WINNER>
+           <TELL <LIBRARY-MESSAGE TURN-OFF TURN-ME-OFF> CR>)
+          (<NOT <FSET? ,PRSO ,DEVICEBIT>>
+           <TELL <LIBRARY-MESSAGE TURN-OFF NOT-SWITCHABLE> CR> <RTRUE>)
+          (<NOT <FSET? ,PRSO ,ONBIT>>
+           <TELL <LIBRARY-MESSAGE TURN-OFF NOT-ON> CR>)
+          (ELSE
+           <FCLEAR ,PRSO ,ONBIT>
+           <COND (<SHORT-REPORT?> <TELL <LIBRARY-MESSAGE TURN-OFF SUCCESS-SHORT> CR>)
+                 (ELSE <TELL <LIBRARY-MESSAGE TURN-OFF SUCCESS ((OBJ ,PRSO))> CR>)>)>>
+
+<ROUTINE V-FLIP ()
+    <COND (<NOT <FSET? ,PRSO ,DEVICEBIT>>
+           <COND (<FSET? ,PRSO ,SURFACEBIT>
+                  <TELL <LIBRARY-MESSAGE FLIP DEFAULT> CR>)
+                 (ELSE <TELL <LIBRARY-MESSAGE FLIP NOT-SWITCHABLE> CR>)>)
+          (<FSET? ,PRSO ,ONBIT>
+           <PERFORM ,V?TURN-OFF ,PRSO>)
+          (ELSE
+           <PERFORM ,V?TURN-ON ,PRSO>)>
+    <RTRUE>>
+
+<ROUTINE V-PUSH ()
+    <COND (<PRSO? ,WINNER> <TELL <LIBRARY-MESSAGE PUSH PUSH-ME> CR>)
+          (<FSET? ,PRSO ,PERSONBIT> <TELL <LIBRARY-MESSAGE PUSH PERSON ((WHOM ,PRSO))> CR>)
+          (ELSE <TELL <LIBRARY-MESSAGE PUSH DEFAULT> CR>)>
+    <RTRUE>>
+
+<ROUTINE V-PULL ()
+    <COND (<PRSO? ,WINNER> <TELL <LIBRARY-MESSAGE PULL PULL-ME> CR>)
+          (<FSET? ,PRSO ,PERSONBIT> <TELL <LIBRARY-MESSAGE PULL PERSON ((WHOM ,PRSO))> CR>)
+          (ELSE <TELL <LIBRARY-MESSAGE PULL DEFAULT> CR>)>
+    <RTRUE>>
+
+<ROUTINE V-YES ()
+    <TELL <LIBRARY-MESSAGE YES DEFAULT> CR>
+    <RTRUE>>
+
+<ROUTINE V-NO ()
+    <TELL <LIBRARY-MESSAGE NO DEFAULT> CR>
+    <RTRUE>>
+
+<ROUTINE V-DRINK ()
+    <TELL <LIBRARY-MESSAGE DRINK DEFAULT> CR>>
+
+<ROUTINE V-FILL ()
+    <TELL <LIBRARY-MESSAGE FILL DEFAULT> CR>
+    <RTRUE>>
+
+<ROUTINE V-EMPTY ()
+    <TELL <LIBRARY-MESSAGE EMPTY DEFAULT> CR>
+    <RTRUE>>
+
+<ROUTINE V-SMELL ()
+    <TELL <LIBRARY-MESSAGE SMELL DEFAULT> CR>>
+
+<ROUTINE V-ATTACK ()
+    <COND (<PRSO? ,WINNER> <TELL <LIBRARY-MESSAGE ATTACK ATTACK-ME> CR>)
+          (<FSET? ,PRSO ,PERSONBIT> <TELL <LIBRARY-MESSAGE ATTACK PERSON ((WHOM ,PRSO))> CR>)
+          (ELSE <TELL <LIBRARY-MESSAGE ATTACK DEFAULT> CR>)>
+    <RTRUE>>
+
+<ROUTINE V-THROW-AT ()
+    <COND (<PRSO? ,WINNER> <TELL <LIBRARY-MESSAGE THROW-AT THROW-AT-ME ((PLURAL? <FSET? ,PRSO PLURALBIT>))> CR>)
+          (<FSET? ,PRSI ,PERSONBIT> <TELL <LIBRARY-MESSAGE THROW-AT PERSON ((WHOM ,PRSI))> CR>)
+          (ELSE <TELL <LIBRARY-MESSAGE THROW-AT DEFAULT> CR>)>
+    <RTRUE>>
+
+<ROUTINE V-GIVE ()
+    <COND (<PRSI? ,WINNER>
+           <COND (<HELD? ,PRSO> <TELL <LIBRARY-MESSAGE GIVE GIVE-ME-ALREADY-HELD> CR>)
+                 (ELSE <TELL <LIBRARY-MESSAGE GIVE GIVE-ME ((PLURAL? <FSET? ,PRSO ,PLURALBIT>))> CR> ;"FIXME: impossible?")>)
+          (<PRSO? ,WINNER> <TELL <LIBRARY-MESSAGE GIVE GIVE-YOURSELF> CR>)
+          (<FSET? ,PRSO ,PERSONBIT> <TELL <LIBRARY-MESSAGE GIVE PERSON ((WHOM ,PRSO))> CR>)
+          (<NOT <FSET? ,PRSI ,PERSONBIT>> <TELL <LIBRARY-MESSAGE GIVE NOT-PERSON> CR>)
+          (ELSE <TELL <LIBRARY-MESSAGE GIVE DEFAULT ((OBJ ,PRSO) (WHOM ,PRSI) (PLURAL? <FSET? ,PRSI ,PLURALBIT>))> CR>)>>
+
+<ROUTINE V-SGIVE ()
+    <PERFORM ,V?GIVE ,PRSI ,PRSO>
+    <RTRUE>>
+
+<ROUTINE PRE-TELL ()
+    <COND (<OR <PRSO? ,WINNER> <NOT <FSET? ,PRSO ,PERSONBIT>>>
+           <SETG P-CONT 0>
+           <TELL <LIBRARY-MESSAGE TELL DEFAULT-1>>
+           <COND (<PRSO? ,WINNER> <TELL <LIBRARY-MESSAGE TELL DEFAULT-2-YOURSELF>>)
+                 (ELSE <TELL <LIBRARY-MESSAGE TELL DEFAULT-2-OBJECT ((OBJ ,PRSO))>>)>
+           <TELL <LIBRARY-MESSAGE TELL DEFAULT-3> CR>)>>
+
+<ROUTINE V-TELL-ABOUT ()
+    <TELL <LIBRARY-MESSAGE TELL DEFAULT-PERSON ((WHOM ,PRSO))> CR>>
+
+;"TELL is a game verb, but it's defined here because it shares PRE-TELL"
+<ROUTINE V-TELL ()
+    <IF-DEBUG <COND (<0? ,P-CONT> <PRINTR "[P-CONT=0 in V-TELL]">)>>
+    <SETG WINNER ,PRSO>
+    <RTRUE>>
+
+<ROUTINE V-WAVE-HANDS ()
+    <TELL <LIBRARY-MESSAGE WAVE-HANDS DEFAULT> CR>
+    <RTRUE>>
+
+<ROUTINE V-WAVE ()
+    <TELL <LIBRARY-MESSAGE WAVE DEFAULT> CR>
+    <RTRUE>>
+
+<ROUTINE V-CLIMB ()
+    <COND (,PRSO <TELL <LIBRARY-MESSAGE CLIMB DEFAULT-OBJECT> CR>)
+          (ELSE <TELL <LIBRARY-MESSAGE CLIMB DEFAULT> CR>)>
+    <RTRUE>>
+
+<ROUTINE V-SWIM ()
+    <TELL <LIBRARY-MESSAGE SWIM DEFAULT> CR>
+    <RTRUE>>
+
+<ROUTINE V-JUMP ()
+    <TELL <LIBRARY-MESSAGE JUMP DEFAULT> CR>
+    <RTRUE>>
+
+<ROUTINE V-SING ()
+    <TELL <LIBRARY-MESSAGE SING DEFAULT> CR>>
+
+<ROUTINE V-DANCE ()
+    <TELL <LIBRARY-MESSAGE DANCE DEFAULT> CR>>
+
+<ROUTINE V-WAKE ()
+    <COND (<PRSO? ,WINNER> <TELL <LIBRARY-MESSAGE WAKE WAKE-ME> CR>)
+          (<FSET? ,PRSO ,PERSONBIT> <TELL <LIBRARY-MESSAGE WAKE PERSON ((WHOM ,PRSO))> CR>)
+          (ELSE <TELL <LIBRARY-MESSAGE WAKE NOT-WAKEABLE> CR>)>>
+
+<ROUTINE V-RUB ()
+    <COND (<PRSO? ,WINNER> <TELL <LIBRARY-MESSAGE RUB RUB-ME> CR>)
+          (<FSET? ,PRSO ,PERSONBIT> <TELL <LIBRARY-MESSAGE RUB PERSON ((WHOM ,PRSO))> CR>)
+          (ELSE <TELL <LIBRARY-MESSAGE RUB DEFAULT> CR>)>>
+
+<ROUTINE V-BURN ()
+    <COND (<PRSO? ,WINNER> <TELL <LIBRARY-MESSAGE BURN BURN-ME> CR>)
+          (<FSET? ,PRSO ,PERSONBIT> <TELL <LIBRARY-MESSAGE BURN PERSON ((WHOM ,PRSO))> CR>)
+          (ELSE <TELL <LIBRARY-MESSAGE BURN DEFAULT> CR>)>>
+
+;"Action handlers for game verbs"
+
+<ROUTINE V-UNDO ()
+    <IFFLAG
+        (UNDO
+         <COND (<NOT ,USAVE>
+                <TELL <LIBRARY-MESSAGE UNDO NO-UNDO-STATE> CR>
+                <RETURN>)
+               (<NOT <IRESTORE>>
+                <TELL <LIBRARY-MESSAGE UNDO FAILED> CR>)>)
+        (ELSE <TELL <LIBRARY-MESSAGE UNDO NOT-SUPPORTED> CR>)>>
+
+<ROUTINE V-SAVE ()
+    <TELL <LIBRARY-MESSAGE SAVE SAVING> CR CR>
+    <COND (<SAVE> <V-LOOK>)
+          (ELSE <TELL <LIBRARY-MESSAGE SAVE FAILED> CR>)>>
+
+<ROUTINE V-RESTORE ()
+    <COND (<NOT <RESTORE>>
+           <TELL <LIBRARY-MESSAGE RESTORE FAILED> CR>)>>
+
+<ROUTINE V-RESTART ()
+    <TELL <LIBRARY-MESSAGE RESTART PROMPT>>
+    <COND (<YES?>
+           <RESTART>)
+          (ELSE
+           <TELL <LIBRARY-MESSAGE RESTART ABORTED> CR>)>>
+
+<ROUTINE V-BRIEF ()
+    <TELL <LIBRARY-MESSAGE BRIEF SUCCESS> CR>
+    <SETG MODE ,BRIEF>>
+
+<ROUTINE V-VERBOSE ()
+    <TELL <LIBRARY-MESSAGE VERBOSE SUCCESS> CR CR>
+    <SETG MODE ,VERBOSE>
+    <V-LOOK>>
+
+<ROUTINE V-SUPERBRIEF ()
+    <TELL <LIBRARY-MESSAGE SUPERBRIEF SUCCESS> CR>
+    <SETG MODE ,SUPERBRIEF>>
+
+<ROUTINE V-SCRIPT ()
+    <COND (<BTST <LOWCORE FLAGS> 1>
+           <TELL <LIBRARY-MESSAGE SCRIPT ALREADY-ON> CR>)
+          (<AND <DIROUT 2>
+                <BTST <LOWCORE FLAGS> 1>>
+           <TELL <LIBRARY-MESSAGE SCRIPT SUCCESS>>
+           <V-VERSION>
+           <RTRUE>)
+          (ELSE <TELL <LIBRARY-MESSAGE SCRIPT FAILED> CR>)>>
+
+<ROUTINE V-UNSCRIPT ()
+    <COND (<NOT <BTST <LOWCORE FLAGS> 1>>
+           <TELL <LIBRARY-MESSAGE UNSCRIPT ALREADY-OFF> CR>)
+          (<AND <TELL CR <LIBRARY-MESSAGE UNSCRIPT SUCCESS> CR>
+                <DIROUT -2>
+                <BTST <LOWCORE FLAGS> 1>>
+           <TELL <LIBRARY-MESSAGE UNSCRIPT FAILED> CR>)>>
+
+;"Debugging verbs"
+<IF-DEBUG
+
+    <ROUTINE V-XTRACE ()
+        <COND (<NOT <PRSO? ,NUMBER>>
+               <TELL "Expected a number." CR>)
+              (ELSE
+               <SETG TRACE-LEVEL ,P-NUMBER>
+               <TELL "Tracing level " N ,TRACE-LEVEL "." CR>)>>
+>
+
+<IF-DEBUGGING-VERBS
+
+    <CONSTANT TREE-INDENT <ITABLE BYTE 80 <BYTE !\ >>>
+
+    <VERSION?
+        (GLULX
+         <ROUTINE OBJREF? (O)
+             <COND (<=? .O ,NUMBER>
+                    <COND (<AND <L=? ,P-NUMBER <LOWCORE MEMSIZE>>
+                                <==? <GETB ,P-NUMBER 0> 112 ;"70 hex">>
+                           ,P-NUMBER)
+                          (ELSE
+                           <TELL "[Bad objref.]" CR>
+                           <>)>)
+                   (ELSE .O)>>
+
+        <ROUTINE V-XTREE ("AUX" ROOT L)
+             <HLIGHT ,H-MONO>
+             <PUTB ,TREE-INDENT 0 0>
+             <COND (<SET ROOT <OBJREF? ,PRSO>>
+                 <COND (<SET L <LOC .ROOT>>
+                         <PRINT-OBJREF .L>
+                         <CRLF>)>
+                 <TREE-FROM .ROOT>)
+                 (ELSE
+                  <DO (I ,LAST-OBJECT <0? .I> <GET .I 2>)    ;"traverse linked list"
+                      <COND (<IN? .I <>> <TREE-FROM .I>)>>)>
+             <HLIGHT ,H-NORMAL>>)
+
+
+        (ELSE
+         <ROUTINE OBJREF? (O)
+             <COND (<=? .O ,NUMBER>
+                 <COND (<AND <G=? ,P-NUMBER 1>
+                             <L=? ,P-NUMBER ,LAST-OBJECT>>
+                         ,P-NUMBER)
+                         (ELSE
+                         <TELL "[Bad objref.]" CR>
+                         <>)>)
+                 (ELSE .O)>>
+
+         <ROUTINE V-XTREE ("AUX" OFL ROOT L)
+             <SET OFL <LOWCORE FLAGS>>
+             <LOWCORE FLAGS <ORB .OFL 2>>
+             <PUTB ,TREE-INDENT 0 0>
+             <COND (<SET ROOT <OBJREF? ,PRSO>>
+                 <COND (<SET L <LOC .ROOT>>
+                         <PRINT-OBJREF .L>
+                         <CRLF>)>
+                 <TREE-FROM .ROOT>)
+                 (ELSE
+                 <DO (I ,LAST-OBJECT 1 -1)
+                     <COND (<IN? .I <>> <TREE-FROM .I>)>>)>
+             <LOWCORE FLAGS .OFL>>)>
+
+
+    <ROUTINE TREE-FROM (O "AUX" I)
+        <PRINT-TREE-INDENT>
+        <TELL "- ">
+        <PRINT-OBJREF .O>
+        <CRLF>
+        <SET I <GETB ,TREE-INDENT 0>>
+        <COND (<AND .I <=? <GETB ,TREE-INDENT .I> !\`>>
+               <PUTB ,TREE-INDENT .I !\ >)>
+        <INC I>
+        <PUTB ,TREE-INDENT .I !\ >
+        <INC I>
+        <PUTB ,TREE-INDENT .I !\ >
+        <INC I>
+        <PUTB ,TREE-INDENT .I !\|>
+        <PUTB ,TREE-INDENT 0 .I>
+        <MAP-CONTENTS (C N .O)
+            <COND (<NOT .N> <PUTB ,TREE-INDENT .I !\`>)>
+            <TREE-FROM .C>>
+        <PUTB ,TREE-INDENT 0 <- .I 3>>>
+
+    <ROUTINE PRINT-TREE-INDENT ("AUX" MAX)
+        <SET MAX <GETB ,TREE-INDENT 0>>
+        <OR .MAX <RETURN>>
+        <DO (I 1 .MAX)
+            <PRINTC <GETB ,TREE-INDENT .I>>>>
+
+    <ROUTINE PRINT-OBJREF (O)
+        ;"Object name"
+        <COND (<0? .O> <TELL "<>">)
+              (<=? .O ,ROOMS> <TELL "ROOMS">)
+              (<=? .O ,GLOBAL-OBJECTS> <TELL "GLOBAL-OBJECTS">)
+              (<=? .O ,LOCAL-GLOBALS> <TELL "LOCAL-GLOBALS">)
+              (<=? .O ,GENERIC-OBJECTS> <TELL "GENERIC-OBJECTS">)
+              (ELSE <TELL D .O>)>
+        ;"Object number"
+        <TELL " (" N .O ")">>
+
+    <ROUTINE PRINT-VARREF (N)
+        <TELL !\[>
+        <COND (<=? .N 0> <TELL "stack">)
+              (<L=? .N 15> <TELL "local " N .N>)
+              (<L=? .N 255> <TELL "global " N .N>)
+              (ELSE <TELL "bad var " N .N>)>
+        <TELL " = " <VALUE .N> !\]>>
+
+    <CONSTANT FLAG-NAMES
+        <PLTABLE
+            !<MAPF ,LIST
+                   <FUNCTION (FLAG) <MAPRET .FLAG <SPNAME .FLAG>>>
+                   ,KNOWN-FLAGS>>>
+
+    <ROUTINE PRINT-FLAGREF (N "AUX" MAX)
+        <TELL N .N>
+        <SET MAX <GET ,FLAG-NAMES 0>>
+        <DO (I 1 .MAX 2)
+            <COND (<=? <GET ,FLAG-NAMES .I> .N>
+                   <TELL " (" <GET ,FLAG-NAMES <+ .I 1>> ")">
+                   <RETURN>)>>>
+
+    <ROUTINE V-XGOTO ("AUX" D)
+        <COND (<SET D <OBJREF? ,PRSO>>
+               <GOTO .D>)>>
+
+    <ROUTINE V-XMOVE ("AUX" V D)
+        <OR ,PRSI <SETG PRSI ,WINNER>>
+        <COND (<AND <SET V <OBJREF? ,PRSO>>
+                    <SET D <OBJREF? ,PRSI>>>
+               <MOVE .V .D>
+               <TELL "Moved ">
+               <PRINT-OBJREF .V>
+               <TELL " to ">
+               <PRINT-OBJREF .D>
+               <TELL "." CR>)>>
+
+    <ROUTINE V-XREMOVE (V)
+        <COND (<SET V <OBJREF? ,PRSO>>
+               <REMOVE .V>
+               <TELL "Removed ">
+               <PRINT-OBJREF .V>
+               <TELL "." CR>)>>
+
+    <ROUTINE V-XLIGHT ()
+        <COND (<FSET? ,WINNER ,LIGHTBIT>
+               <FCLEAR ,WINNER ,LIGHTBIT>
+               <TELL "You stop glowing." CR>
+               <NOW-DARK?>)
+              (ELSE
+               <FSET ,WINNER ,LIGHTBIT>
+               <TELL "You're now glowing." CR>
+               <NOW-LIT?>)>>
+
+    <ROUTINE V-XEXITS ("AUX" R S M)
+        <COND (,PRSO <SET R <OBJREF? ,PRSO>>)
+              (ELSE <SET R ,HERE>)>
+        <OR .R <RTRUE>>
+        <PRINT-OBJREF .R>
+        <CRLF>
+        <MAP-DIRECTIONS (D PT .R)
+            <PRINT-MATCHING-WORD .D ,PS?DIRECTION ,P1?DIRECTION>
+            <TELL " -> ">
+            <SET S <PTSIZE .PT>>
+            <COND (<=? .S ,UEXIT>
+                   <TELL "TO ">
+                   <PRINT-OBJREF <GET/B .PT ,EXIT-RM>>)
+                  (<=? .S ,NEXIT>
+                   <TELL "SORRY \"" <GET .PT ,NEXIT-MSG> "\"">)
+                  (<=? .S ,FEXIT>
+                   <TELL "PER " N <GET .PT ,FEXIT-RTN>>)
+                  (<=? .S ,CEXIT>
+                   <TELL "TO ">
+                   <PRINT-OBJREF <GET/B .PT ,EXIT-RM>>
+                   <TELL " IF ">
+                   <PRINT-VARREF <GETB .PT ,CEXIT-VAR>>
+                   <COND (<SET M <GET .PT ,CEXIT-MSG>>
+                          <TELL " ELSE \"" .M "\"">)>)
+                  (<=? .S ,DEXIT>
+                   <TELL "TO ">
+                   <PRINT-OBJREF <GET/B .PT ,EXIT-RM>>
+                   <TELL " IF ">
+                   <PRINT-OBJREF <GET/B .PT ,DEXIT-OBJ>>
+                   <TELL " IS OPEN">
+                   <COND (<SET M <GET .PT ,DEXIT-MSG>>
+                          <TELL " ELSE \"" .M "\"">)>)
+                  (ELSE
+                   <TELL "??? S=" N .S>)>
+            <CRLF>>>
+
+    <ROUTINE V-XOBJ ("AUX" O F PT MAX)
+        <COND (<NOT <SET O <OBJREF? ,PRSO>>> <RETURN>)>
+        <PRINT-OBJREF .O>
+        <CRLF>
+        <TELL "Adjectives: ">
+        <COND (<AND <SET PT <GETPT .O ,P?ADJECTIVE>>
+                    <SET MAX <PTSIZE .PT>>>
+               <VERSION? (ZIP) (ELSE <SET MAX </ .MAX ,WORD-SIZE>>)>
+               <SET MAX <- .MAX 1>>
+               <DO (I 0 .MAX)
+                   <COND (.I <TELL ", ">)>
+                   <VERSION?
+                       (ZIP <PRINT-MATCHING-WORD <GETB .PT .I> ,PS?ADJECTIVE ,P1?ADJECTIVE>)
+                       (ELSE <PRINTB <GET .PT .I>>)>>)>
+        <CRLF>
+        <TELL "Nouns: ">
+        <COND (<AND <SET PT <GETPT .O ,P?SYNONYM>>
+                    <SET MAX </ <PTSIZE .PT> ,WORD-SIZE>>>
+               <SET MAX <- .MAX 1>>
+               <DO (I 0 .MAX)
+                   <COND (.I <TELL ", ">)>
+                   <PRINTB <GET .PT .I>>>)>
+        <CRLF>
+        <TELL "Location: ">
+        <PRINT-OBJREF <LOC .O>>
+        <COND (<AND <SET PT <GETPT .O ,P?GLOBAL>>
+                    <SET MAX <PTSIZE .PT>>>
+               <VERSION? (ZIP) (ELSE <SET MAX </ .MAX ,WORD-SIZE>>)>
+               <SET MAX <- .MAX 1>>
+               <CRLF>
+               <TELL "Local globals: ">
+               <DO (I 0 .MAX)
+                   <COND (.I <TELL ", ">)>
+                   <PRINT-OBJREF <GET/B .PT .I>>>)>
+        <COND (<SET PT <GETP .O ,P?THINGS>>
+               <CRLF>
+               <TELL "Pseudos: ">
+               <PRINT-PSEUDOS .PT>)>
+        <CRLF>
+        <TELL "Flags: ">
+        <DO (I 0 %<VERSION? (ZIP 31) (ELSE 47)>)
+            <COND (<FSET? .O .I>
+                   <COND (.F <TELL ", ">)>
+                   <SET F T>
+                   <PRINT-FLAGREF .I>)>>
+        <CRLF>>
+
+    <ROUTINE V-XIT ("AUX" O)
+        <COND (<NOT <SET O <OBJREF? ,PRSO>>> <RETURN>)>
+        <PUTB ,P-PRO-IT-OBJS 0 1>
+        <PUT/B ,P-PRO-IT-OBJS 1 .O>
+        <TELL "IT now refers to ">
+        <PRINT-OBJREF .O>
+        <TELL "." CR>>
+>
