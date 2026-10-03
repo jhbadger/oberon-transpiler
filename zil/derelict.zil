@@ -23,7 +23,19 @@ An Interactive Sci-Fi Mystery in ZIL">
 <ROUTINE V-HELLO ()
     <TELL "You speak into the silence, but get no response." CR>>
 
+<SYNTAX KISS OBJECT = V-KISS>
+
+<SYNTAX LIGHT OBJECT (FIND DEVICEBIT) (TOUCH) = V-TURN-ON>
+
+<ROUTINE V-KISS ()
+    <TELL "That would be inappropriate." CR>>
+
 ;"Standard ZIL parser includes topic asking via TELL ABOUT"
+
+<SYNTAX ASK OBJECT (FIND PERSONBIT) ABOUT OBJECT = V-ASK-ABOUT>
+
+<ROUTINE V-ASK-ABOUT ()
+    <TELL "That doesn't seem like something worth asking about." CR>>
 
 ;"==========================================================================="
 ;" Game Initialization & Setup"
@@ -176,9 +188,9 @@ An Interactive Sci-Fi Mystery in ZIL">
 <OBJECT EVE
     (IN MED-BAY)
     (DESC "Eve the Synthetic")
-    (SYNONYM EVE ANDROID SYNTHETIC FEMALE)
+    (SYNONYM EVE ANDROID SYNTHETIC)
     (ADJECTIVE FRIENDLY SYNTHETIC)
-    (FLAGS PERSONBIT CONTBIT)
+    (FLAGS PERSONBIT CONTBIT FEMALEBIT)
     (ACTION EVE-F)>
 
 <ROUTINE EVE-F ()
@@ -203,7 +215,7 @@ An Interactive Sci-Fi Mystery in ZIL">
            <TELL "Eve tilts her head, listening intently." CR>
            <RFALSE>)
 
-        (<VERB? TELL-ABOUT>
+        (<VERB? TELL-ABOUT ASK-ABOUT>
            <COND (<==? ,PRSI ,MONSTER>
                   <TELL "Eve winces. 'The specimen escaped containment on the lower decks. Its hide is resistant to kinetic fire, but light repels it!'" CR>)
                  (<==? ,PRSI ,ACCESS-CARD>
@@ -211,7 +223,9 @@ An Interactive Sci-Fi Mystery in ZIL">
                  (<==? ,PRSI ,EVE>
                   <TELL "Eve smiles warm-heartedly. 'I was manufactured by Weyland-Yutani to safeguard station personnel. I hold vital diagnostics on my internal drive.'" CR>)
                  (<==? ,PRSI ,DATA-CHIP>
-                  <TELL "Eve scans the chip with a diagnostic lens. 'This is a primary system key. It holds the necessary override code for the Reactor Core.'" CR>)>)
+                  <TELL "Eve scans the chip with a diagnostic lens. 'This is a primary system key. It holds the necessary override code for the Reactor Core.'" CR>)
+                 (T
+                  <TELL "Eve tilts her head. 'I don't have any information on that.'" CR>)>)
 
         (<VERB? ATTACK>
            <TELL "Eve effortlessly sidesteps your strike. 'Violence will not resolve our predicament, human.'" CR>)
