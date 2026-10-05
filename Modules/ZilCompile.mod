@@ -5732,7 +5732,8 @@ BEGIN
       (* reverse definition order, as the original emits them *)
       FOR j := ZilModel.nSyntaxes - 1 TO i BY -1 DO
         IF ZilModel.syntaxes[j].verb = ZilModel.syntaxes[i].verb THEN
-          Strings.IntToStr(ZilModel.syntaxes[j].numObjects, num);
+          Strings.IntToStr(ZilModel.syntaxes[j].numObjects
+                           + ZilModel.syntaxes[j].topicBits, num);
           W("	.BYTE "); W(num); WLn;
 
           IF ZilModel.syntaxes[j].prep1[0] # 0X THEN
@@ -6190,6 +6191,11 @@ BEGIN
     FOR i := 0 TO ZilModel.nVocab - 1 DO
       k := order[i];
       IF ZilModel.vocab[k].mergedInto < 0 THEN
+      IF ZilModel.TrimPartsOfSpeech(k) THEN
+        Out.ErrString("zilf: warning: too many parts of speech for '");
+        Out.ErrString(ZilModel.vocab[k].text);
+        Out.ErrString("', discarding the extras"); Out.ErrLn
+      END;
       Strings.Copy(ZilModel.vocab[k].text, text);
       W("W?"); WSym(text); W(":: .ZWORD ");
       Strings.ToLower(text);

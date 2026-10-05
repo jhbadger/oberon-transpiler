@@ -55,6 +55,7 @@ CONST
   OMapLeave* = 5;
 
   MaxArgs = 64;
+  MaxBigArgs = 4096;
   MaxBindings = 32;
   MaxTableElems = 8192;
 
@@ -66,6 +67,13 @@ TYPE
     value*: ZilObj.Zo;
     activation*: ZilObj.Zo
   END;
+
+  (* overflow storage for an argument list longer than the MaxArgs-sized
+     stack array EvalImpl keeps for the common case (see AddArg). A fixed
+     heap record rather than a POINTER TO ARRAY OF: this transpiler loses an
+     open array's length when the pointer is a VAR parameter. *)
+  ArgBufRec = RECORD a: ARRAY MaxBigArgs OF ZilObj.Zo END;
+  ArgBuf = POINTER TO ArgBufRec;
 
 VAR
   evalErrFlag*: BOOLEAN;
@@ -525,19 +533,46 @@ END TableFlagBits;
    matching the original's own exclusion (a TEMP-TABLE is compiler-
    internal scratch space, never part of the final output). *)
 PROCEDURE PerformTable(pure, wantLength: BOOLEAN; args: ARRAY OF ZilObj.Zo; n: INTEGER): ZResult;
-VAR flags, valStart, i: INTEGER; tab: ZilObj.Zo; vals: ARRAY MaxArgs OF ZilObj.Zo;
+VAR flags, valStart, i: INTEGER; tab: ZilObj.Zo; vals: ArgBuf;
 BEGIN
+  NEW(vals);
   flags := 0; valStart := 0;
   IF (n > 0) & (args[0].kind = ZilObj.KList) THEN
     flags := TableFlagBits(args[0]); valStart := 1
   END;
   IF pure THEN flags := flags + ZilObj.TfPure END;
   IF wantLength THEN flags := flags + ZilObj.TfLength END;
-  FOR i := valStart TO n - 1 DO vals[i - valStart] := args[i] END;
-  tab := ZilObj.NewTable(vals, n - valStart, 1, flags);
+  IF n - valStart > MaxBigArgs THEN RETURN Err("TABLE: too many elements") END;
+  FOR i := valStart TO n - 1 DO vals.a[i - valStart] := args[i] END;
+  tab := ZilObj.NewTable(vals.a, n - valStart, 1, flags);
   IF (flags DIV ZilObj.TfTemp) MOD 2 = 0 THEN ZilModel.AddTable(tab) END;
   RETURN MkVal(tab)
 END PerformTable;
+
+(* Appends `v` to an argument list kept in `small` (EvalImpl's fixed stack
+   array) until that fills, then in `big`, a heap buffer that grows by
+   doubling. The fixed array alone used to drop every argument past the
+   64th without a word: advent's TELEPORT-ROOMS-TABLE is one <TABLE> of 182
+   values, and losing the last 118 - including its 0 terminator - sent
+   "walk to building" running off the end into an illegal object.
+   Returns FALSE (dropping `v`) only past MaxBigArgs. *)
+PROCEDURE AddArg(VAR small: ARRAY OF ZilObj.Zo; VAR big: ArgBuf; VAR n: INTEGER;
+                 v: ZilObj.Zo): BOOLEAN;
+VAR i: INTEGER;
+BEGIN
+  IF (big = NIL) & (n < LEN(small)) THEN
+    small[n] := v
+  ELSE
+    IF big = NIL THEN
+      NEW(big);
+      FOR i := 0 TO n - 1 DO big.a[i] := small[i] END
+    END;
+    IF n >= MaxBigArgs THEN RETURN FALSE END;
+    big.a[n] := v
+  END;
+  INC(n);
+  RETURN TRUE
+END AddArg;
 
 (* <ITABLE [specifier] count [(flags...)] init...>: `count` repetitions of
    `init` (or of a single zero, if no init values given). `init` can
@@ -1483,14 +1518,50 @@ BEGIN
     s[0] := 0X;          (* the preposition awaiting its object *)
     i := 1;
     WHILE (i < n) & ~((args[i].kind = ZilObj.KAtom) & (args[i].atomText = "=")) DO
-      IF (args[i].kind = ZilObj.KAtom) & (args[i].atomText = "OBJECT") THEN
+      IF (args[i].kind = ZilObj.KAtom)
+         & ((args[i].atomText = "OBJECT") OR (args[i].atomText = "TOPIC")) THEN
+        (* TOPIC is an object slot too (advent's <SYNTAX WALK (GO) TO TOPIC
+           = V-GO-TO-ROOM>), flagged special; it is NOT a preposition *)
         INC(ZilModel.syntaxes[synKind].numObjects);
+        IF args[i].atomText = "TOPIC" THEN
+          IF ZilModel.syntaxes[synKind].numObjects = 1 THEN
+            INC(ZilModel.syntaxes[synKind].topicBits, 4)
+          ELSE
+            INC(ZilModel.syntaxes[synKind].topicBits, 16)
+          END
+        END;
         IF ZilModel.syntaxes[synKind].numObjects = 1 THEN
           Strings.Copy(s, ZilModel.syntaxes[synKind].prep1)
         ELSE
           Strings.Copy(s, ZilModel.syntaxes[synKind].prep2)
         END;
         s[0] := 0X
+
+      ELSIF (args[i].kind = ZilObj.KList)
+            & (ZilModel.syntaxes[synKind].numObjects = 0) THEN
+        (* a list before any OBJECT: the verb's synonyms, as in advent's
+           <SYNTAX SESAME (SHAZAM HOCUS ABRACADABRA ...) = V-OLD-MAGIC> - the
+           original's Syntax.Parse, which then does exactly what
+           <VERB-SYNONYM SESAME SHAZAM ...> does. A scope/FIND list there
+           is a misplaced flag list, which the original ignores with a
+           warning. *)
+        ind := args[i].first;
+        IF (ind # NIL) & (ind.kind = ZilObj.KAtom)
+           & ((ind.atomText = "FIND") OR (ind.atomText = "TAKE") OR (ind.atomText = "HAVE")
+              OR (ind.atomText = "MANY") OR (ind.atomText = "HELD") OR (ind.atomText = "CARRIED")
+              OR (ind.atomText = "ON-GROUND") OR (ind.atomText = "IN-ROOM")) THEN
+          Out.ErrString("zilf: warning: ignoring list of flags in syntax definition with no preceding OBJECT");
+          Out.ErrLn
+        ELSE
+          ind := args[i];
+          WHILE (ind # NIL) & (ind.first # NIL) DO
+            IF ind.first.kind # ZilObj.KAtom THEN
+              RETURN Err("SYNTAX: verb synonyms must be atoms")
+            END;
+            ZilModel.AddSynonym(ZilModel.SynVerb, args[0], ind.first);
+            ind := ind.rest
+          END
+        END
 
       ELSIF args[i].kind = ZilObj.KList THEN
         IF ZilObj.IsAtomNamed(args[i].first, "FIND") THEN
@@ -1517,6 +1588,14 @@ BEGIN
         len := ZilModel.AddVocab(s, ZilModel.PsPreposition)
       END;
       INC(i)
+    END;
+
+    (* a TOPIC slot has no FIND flag or scope options *)
+    IF (ZilModel.syntaxes[synKind].topicBits DIV 4) MOD 2 = 1 THEN
+      ZilModel.syntaxes[synKind].find1[0] := 0X; ZilModel.syntaxes[synKind].opts1 := 0
+    END;
+    IF (ZilModel.syntaxes[synKind].topicBits DIV 16) MOD 2 = 1 THEN
+      ZilModel.syntaxes[synKind].find2[0] := 0X; ZilModel.syntaxes[synKind].opts2 := 0
     END;
 
     (* past the "=": the action, then an optional pre-action, then an optional
@@ -2265,9 +2344,12 @@ BEGIN
   ELSIF name = "VOC" THEN
     (* <VOC "text" [part-of-speech]> interns the word into the dictionary
        and returns the atom naming it. The original CHTYPEs that atom to a
-       VOC pseudo-type; there is no type system here, so the plain atom is
-       returned — which is what real source uses it as, a building block
-       inside larger expressions. *)
+       VOC pseudo-type; there is no type system here, so an atom stands in -
+       but spelled W?WORD, the dictionary word's own symbol, not the bare
+       word: a bare atom resolves to an OBJECT/ROUTINE/CONSTANT of the same
+       name first (ConstantTextRaw), so advent's <VOC "ROAD"> in its
+       teleport tables became the ROAD object and "walk to end of road"
+       never matched. W?WORD only ever resolves to the word. *)
     IF (n < 1) OR (args[0].kind # ZilObj.KString) THEN
       RETURN Err("VOC: expected a STRING")
     END;
@@ -2277,7 +2359,8 @@ BEGIN
     IF (n >= 2) & (args[1].kind = ZilObj.KAtom) THEN i := PartOfSpeechBits(args[1].atomText) END;
     len := ZilModel.AddVocab(s, i);
     IF len < 0 THEN RETURN Err("VOC: too many vocabulary words") END;
-    RETURN MkVal(ZilObj.Intern(s))
+    Strings.Copy("W?", msgBuf); Strings.Append(s, msgBuf);
+    RETURN MkVal(ZilObj.Intern(msgBuf))
 
   ELSIF name = "CONS" THEN
     (* <CONS first rest>: prepends first onto rest, a LIST — or FALSE
@@ -2567,6 +2650,7 @@ VAR
   nFirst, zFirst, zRestFirst, clauseFirst: ZilObj.Zo;
   r, cr: ZResult;
   args: ARRAY MaxArgs OF ZilObj.Zo;
+  bigArgs: ArgBuf;   (* args past MaxArgs, see AddArg *)
   nargs, i: INTEGER;
   name: ARRAY 64 OF CHAR;
   isFSubr: BOOLEAN;
@@ -4018,7 +4102,7 @@ BEGIN
 
     ELSE
       (* plain SUBR: evaluate all args left-to-right, then dispatch *)
-      nargs := 0;
+      nargs := 0; bigArgs := NIL;
       n := z.rest;
       WHILE (n # NIL) & (n.first # NIL) DO
         IF n.first.kind = ZilObj.KSegment THEN
@@ -4033,7 +4117,7 @@ BEGIN
           END;
           segLen := StructLength(r.value);
           FOR segI := 1 TO segLen DO
-            IF nargs < MaxArgs THEN args[nargs] := StructNth(r.value, segI); INC(nargs) END
+            IF ~AddArg(args, bigArgs, nargs, StructNth(r.value, segI)) THEN RETURN Err("too many arguments") END
           END
         ELSE
           r := EvalImpl(n.first, FALSE);
@@ -4049,13 +4133,27 @@ BEGIN
                argument. *)
             segLen := StructLength(r.value);
             FOR segI := 1 TO segLen DO
-              IF nargs < MaxArgs THEN args[nargs] := StructNth(r.value, segI); INC(nargs) END
+              IF ~AddArg(args, bigArgs, nargs, StructNth(r.value, segI)) THEN RETURN Err("too many arguments") END
             END
-          ELSIF nargs < MaxArgs THEN
-            args[nargs] := r.value; INC(nargs)
+          ELSE
+            IF ~AddArg(args, bigArgs, nargs, r.value) THEN RETURN Err("too many arguments") END
           END
         END;
         n := n.rest
+      END;
+
+      IF bigArgs # NIL THEN
+        (* more than MaxArgs arguments: only the generic SUBR dispatch below
+           takes an open array; the inline special cases all read `args` *)
+        IF (name = "INSERT-FILE") OR (name = "FLOAD") OR (name = "XFLOAD")
+           OR (name = "USE") OR (name = "INCLUDE") OR (name = "USE-WHEN")
+           OR (name = "INCLUDE-WHEN") OR (name = "APPLY") OR (name = "APPLY-MACRO")
+           OR (name = "MAPRET") OR (name = "MAPSTOP") OR (name = "MAPLEAVE")
+           OR (name = "MAPF") OR (name = "MAPR") OR (name = "EXPAND")
+           OR (name = "EVAL") OR (name = "EVAL-IN-SEGMENT") THEN
+          RETURN Err("too many arguments")
+        END;
+        RETURN ApplySubr(name, bigArgs.a, nargs)
       END;
 
       IF (name = "INSERT-FILE") OR (name = "FLOAD") OR (name = "XFLOAD") THEN
@@ -4233,10 +4331,13 @@ BEGIN
         END;
         mapI := 0;
         mapCell := mapHead;
-        WHILE (mapCell # NIL) & (mapCell.first # NIL) & (mapI < MaxArgs) DO
-          mapArgs[mapI] := mapCell.first; INC(mapI);
+        WHILE (mapCell # NIL) & (mapCell.first # NIL) DO
+          IF ~AddArg(mapArgs, bigArgs, mapI, mapCell.first) THEN
+            RETURN Err("MAPF: too many results")
+          END;
           mapCell := mapCell.rest
         END;
+        IF bigArgs # NIL THEN RETURN ApplyValue(args[0], bigArgs.a, mapI) END;
         RETURN ApplyValue(args[0], mapArgs, mapI)
 
       ELSIF name = "EXPAND" THEN

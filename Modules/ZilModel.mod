@@ -100,6 +100,10 @@ TYPE
        Record field names are safe in general; they are not safe when they
        collide with an exported VAR in the same module. *)
     numObjects*: INTEGER;
+    (* "special" bits ORed into the syntax table's object-count byte: 4 if
+       object 1 is a TOPIC, 16 if object 2 is - a TOPIC slot matches any
+       words rather than an object, and has zero FIND/scope bytes *)
+    topicBits*: INTEGER;
     prep1*, prep2*: ARRAY 64 OF CHAR;
     find1*, find2*: ARRAY 64 OF CHAR;
     opts1*, opts2*: INTEGER;
@@ -346,6 +350,7 @@ BEGIN
   syntaxes[nSyntaxes].rawArgs := rawArgs;
   syntaxes[nSyntaxes].verb[0] := 0X;
   syntaxes[nSyntaxes].numObjects := 0;
+  syntaxes[nSyntaxes].topicBits := 0;
   syntaxes[nSyntaxes].prep1[0] := 0X; syntaxes[nSyntaxes].prep2[0] := 0X;
   syntaxes[nSyntaxes].find1[0] := 0X; syntaxes[nSyntaxes].find2[0] := 0X;
   syntaxes[nSyntaxes].opts1 := 240; syntaxes[nSyntaxes].opts2 := 240;
@@ -594,6 +599,63 @@ BEGIN
   END;
   RETURN p = 0
 END ShouldSetFirst;
+
+(* A dictionary entry has room for two parts-of-speech values, so a word
+   with more must lose some - the original's OldParserWord.CheckTooMany, run
+   as each word is written. In V4+ ADJECTIVE records no value and doesn't
+   count. Parts are discarded in the original's fixed order (adjective,
+   object, buzzword, preposition, verb, direction) until two remain, and the
+   survivors are re-added in ascending bit order so the First flags come out
+   exactly as the original's UnsetPartOfSpeech recomputes them. advent's
+   OUT is preposition + direction + (ADJECTIVE WORN OUT WORN-OUT) on V3:
+   without this the adjective pushed the direction's property number out of
+   the entry and "out" stopped working as a direction.
+   Returns TRUE if anything was discarded. *)
+PROCEDURE TrimPartsOfSpeech*(i: INTEGER): BOOLEAN;
+VAR p, count, k, part: INTEGER; trimmed: BOOLEAN;
+    trimOrder, addOrder: ARRAY 6 OF INTEGER;
+BEGIN
+  p := vocab[i].pos - vocab[i].pos MOD 4;
+  count := 0; k := p;
+  WHILE k # 0 DO
+    IF k MOD 2 = 1 THEN INC(count) END;
+    k := k DIV 2
+  END;
+  IF (zversion > 3) & ((p DIV PsAdjective) MOD 2 = 1) THEN DEC(count) END;
+  IF count <= 2 THEN RETURN FALSE END;
+
+  trimOrder[0] := PsAdjective; trimOrder[1] := PsObject; trimOrder[2] := PsBuzzword;
+  trimOrder[3] := PsPreposition; trimOrder[4] := PsVerb; trimOrder[5] := PsDirection;
+  trimmed := FALSE; k := 0;
+  WHILE (k < 6) & (count > 2) DO
+    part := trimOrder[k];
+    IF ((p DIV part) MOD 2 = 1) & ~((part = PsAdjective) & (zversion > 3)) THEN
+      p := p - part; DEC(count); trimmed := TRUE
+    END;
+    INC(k)
+  END;
+
+  (* rebuild, recomputing the First flags as each part is re-added *)
+  addOrder[0] := PsBuzzword; addOrder[1] := PsPreposition; addOrder[2] := PsDirection;
+  addOrder[3] := PsAdjective; addOrder[4] := PsVerb; addOrder[5] := PsObject;
+  vocab[i].pos := 0;
+  FOR k := 0 TO 5 DO
+    part := addOrder[k];
+    IF (p DIV part) MOD 2 = 1 THEN
+      IF (part = PsBuzzword) OR (part = PsPreposition) THEN
+        vocab[i].pos := vocab[i].pos - vocab[i].pos MOD 4
+      ELSIF (part = PsDirection) & ShouldSetFirst(i) THEN
+        vocab[i].pos := vocab[i].pos + PsDirFirst
+      ELSIF (part = PsAdjective) & (zversion < 4) & ShouldSetFirst(i) THEN
+        vocab[i].pos := vocab[i].pos + PsAdjFirst
+      ELSIF (part = PsVerb) & ShouldSetFirst(i) THEN
+        vocab[i].pos := vocab[i].pos + PsVerbFirst
+      END;
+      vocab[i].pos := vocab[i].pos + part
+    END
+  END;
+  RETURN trimmed
+END TrimPartsOfSpeech;
 
 PROCEDURE AddVocab*(text: ARRAY OF CHAR; posBits: INTEGER): INTEGER;
 VAR i, firstBits: INTEGER; clearFirst: BOOLEAN;
