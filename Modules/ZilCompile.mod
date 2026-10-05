@@ -162,6 +162,7 @@ VAR
   locName: ARRAY MaxLocals OF ARRAY 64 OF CHAR;   (* the ZAP name *)
   locZil: ARRAY MaxLocals OF ARRAY 64 OF CHAR;    (* the ZIL name it stands for *)
   locInit: ARRAY MaxLocals OF ARRAY 64 OF CHAR;   (* constant default, or "" *)
+  locOpt: ARRAY MaxLocals OF BOOLEAN;   (* declared after "OPT" *)
   locExpr: ARRAY MaxLocals OF ZilObj.Zo;          (* non-constant default, or NIL *)
   locInScope: ARRAY MaxLocals OF BOOLEAN;
   nLocals, nParams: INTEGER;
@@ -4262,7 +4263,7 @@ END CompileStmt;
    BuildRoutine: wantResult is true only for the routine's final
    statement) — and a RETURN of that final value. *)
 PROCEDURE CompileRoutine*(idx: INTEGER; isEntry: BOOLEAN): BOOLEAN;
-VAR rt: ZilModel.RoutineRec; opText: ARRAY 64 OF CHAR; n, routineAgain: ARRAY 16 OF CHAR;
+VAR rt: ZilModel.RoutineRec; opText: ARRAY 64 OF CHAR; n, routineAgain, optSkip: ARRAY 16 OF CHAR;
     a, bp, item, dflt: ZilObj.Zo; ok, isLast: BOOLEAN; i, phase: INTEGER;
 BEGIN
   rt := ZilModel.routines[idx];
@@ -4317,6 +4318,7 @@ BEGIN
       END;
       locInit[nParams][0] := 0X;
       locExpr[nParams] := NIL;
+      locOpt[nParams] := phase = 1;
       IF dflt # NIL THEN
         IF phase = 0 THEN
           Err("CompileRoutine: a required argument cannot have a default value"); RETURN FALSE
@@ -4328,7 +4330,13 @@ BEGIN
            argument, which needs the argument-count test this port doesn't
            emit yet — so refuse that combination rather than silently
            overwriting a supplied value. *)
-        IF ~ConstantText(dflt, locInit[nParams]) THEN
+        IF ZilModel.zversion >= 5 THEN
+          (* V5+ routine headers carry no initial values at all (the
+             Z-machine zeroes every local), and zapf drops any it is given
+             with only a warning. The original moves every default into the
+             body instead — see the assignment loop below. *)
+          locExpr[nParams] := dflt
+        ELSIF ~ConstantText(dflt, locInit[nParams]) THEN
           IF phase = 1 THEN
             Err("CompileRoutine: an OPT argument's default must be a constant here");
             RETURN FALSE
@@ -4363,14 +4371,22 @@ BEGIN
   nBlocks := 1;
   W(routineAgain); W(":"); WLn;
 
-  (* non-constant AUX defaults become assignments at the top of the body,
-     before anything else runs *)
+  (* non-constant AUX defaults (and on V5+, every default) become
+     assignments at the top of the body, before anything else runs. On V5+
+     an OPT default only applies when the caller didn't pass that argument,
+     which ASSIGNED? (check_arg_count) tests — exactly the original's
+     shape: ASSIGNED? 'X /?L; SET 'X,dflt; ?L: *)
   i := 0;
   WHILE i < nParams DO
     IF locExpr[i] # NIL THEN
+      IF locOpt[i] THEN
+        NewLabel(optSkip);
+        W("	ASSIGNED? '"); W(locName[i]); W(" /"); W(optSkip); WLn
+      END;
       ok := CompileOperand(locExpr[i], opText);
       IF ~ok THEN EndBuffer; FlushBuffer; RETURN FALSE END;
-      W("	SET '"); W(locName[i]); W(","); W(opText); WLn
+      W("	SET '"); W(locName[i]); W(","); W(opText); WLn;
+      IF locOpt[i] THEN W(optSkip); W(":"); WLn END
     END;
     INC(i)
   END;
