@@ -197,6 +197,10 @@ VAR
   propNameTab: ARRAY MaxPropNames OF ARRAY 64 OF CHAR;
   nPropNames: INTEGER;
   objParent, objSibling, objChild: ARRAY ZilModel.MaxObjects OF INTEGER;
+  (* objNumOrder[n] is the definition index of the object numbered n+1;
+     objInsOrder is the order objects are inserted into the initial tree.
+     Both follow the original's defaults - see OrderObjects. *)
+  objNumOrder, objInsOrder: ARRAY ZilModel.MaxObjects OF INTEGER;
 
   blockNames: ARRAY MaxBlocks OF ARRAY 64 OF CHAR;
   blockAgain, blockReturn: ARRAY MaxBlocks OF ARRAY 16 OF CHAR;
@@ -5015,8 +5019,83 @@ END EmitDirectionProp;
 
 (* Emits the whole object table: the property-default words, one .OBJECT
    row per object, and a property table per object. *)
+(* The original's default object orderings (ZEnvironment.cs), which this
+   port previously replaced with plain definition order for both:
+
+   - Object NUMBERS (ObjectsInDefinitionOrder): reverse "mention" order,
+     where an object is mentioned by its own definition or, earlier, by
+     another object naming it in IN/LOC/GLOBAL.
+   - Initial TREE (ObjectsInInsertionOrder): objects are inserted in
+     definition order, except each parent's first-defined child is moved to
+     just after its last-defined child. Insertion pushes onto the front of
+     the child list, so the first-defined child ends up listed first and the
+     rest in reverse - "There is an apple, a painting, a table, a cube, and
+     grime here" in cloak_plus, where plain definition order listed the
+     apple last.
+
+   Requires objParent. ORDER-OBJECTS?/ORDER-TREE? (non-default orderings)
+   are not supported; nothing in the sample games or zillib uses them. *)
+PROCEDURE OrderObjects;
+VAR i, j, k, n, first, last, posFirst, posLast: INTEGER;
+    seen: ARRAY ZilModel.MaxObjects OF BOOLEAN;
+    mention: ARRAY ZilModel.MaxObjects OF INTEGER;
+    p, q: ZilObj.Zo; nm: ARRAY 64 OF CHAR;
+
+  PROCEDURE Mention(idx: INTEGER);
+  BEGIN
+    IF (idx >= 0) & ~seen[idx] THEN seen[idx] := TRUE; mention[n] := idx; INC(n) END
+  END Mention;
+
+BEGIN
+  (* numbering *)
+  FOR i := 0 TO ZilModel.nObjects - 1 DO seen[i] := FALSE END;
+  n := 0;
+  FOR i := 0 TO ZilModel.nObjects - 1 DO
+    Mention(i);
+    p := ZilModel.objects[i].props;
+    WHILE (p # NIL) & (p.first # NIL) DO
+      q := p.first;
+      IF (q.kind = ZilObj.KList) & (q.first # NIL) & (q.first.kind = ZilObj.KAtom)
+         & (q.rest # NIL) & (q.rest.first # NIL) THEN
+        Strings.Copy(q.first.atomText, nm);
+        IF ((nm = "LOC") OR ((nm = "IN") & ((q.rest.rest = NIL) OR (q.rest.rest.first = NIL))))
+           & (q.rest.first.kind = ZilObj.KAtom) THEN
+          Mention(FindObjectIdx(q.rest.first.atomText))
+        ELSIF nm = "GLOBAL" THEN
+          q := q.rest;
+          WHILE (q # NIL) & (q.first # NIL) DO
+            IF q.first.kind = ZilObj.KAtom THEN Mention(FindObjectIdx(q.first.atomText)) END;
+            q := q.rest
+          END
+        END
+      END;
+      p := p.rest
+    END
+  END;
+  FOR k := 0 TO n - 1 DO objNumOrder[k] := mention[n - 1 - k] END;
+
+  (* tree insertion *)
+  FOR i := 0 TO ZilModel.nObjects - 1 DO objInsOrder[i] := i END;
+  FOR i := 0 TO ZilModel.nObjects - 1 DO
+    first := -1; last := -1;
+    FOR j := 0 TO ZilModel.nObjects - 1 DO
+      IF objParent[j] = i THEN
+        IF first < 0 THEN first := j END;
+        last := j
+      END
+    END;
+    IF first # last THEN
+      posFirst := 0; WHILE objInsOrder[posFirst] # first DO INC(posFirst) END;
+      FOR k := posFirst TO ZilModel.nObjects - 2 DO objInsOrder[k] := objInsOrder[k + 1] END;
+      posLast := 0; WHILE objInsOrder[posLast] # last DO INC(posLast) END;
+      FOR k := ZilModel.nObjects - 1 TO posLast + 2 BY -1 DO objInsOrder[k] := objInsOrder[k - 1] END;
+      objInsOrder[posLast + 1] := first
+    END
+  END
+END OrderObjects;
+
 PROCEDURE CompileObjects(): BOOLEAN;
-VAR i, j, k, num, nOwnProps: INTEGER;
+VAR i, j, k, num, row, nOwnProps: INTEGER;
     o: ZilModel.ObjectRec; p, body, v: ZilObj.Zo;
     nm, text, errBuf: ARRAY 256 OF CHAR;
     flagsWord: ARRAY 3, 256 OF CHAR;
@@ -5119,8 +5198,9 @@ BEGIN
   END;
 
   (* --- pass 2: the containment tree ---
-     each child is pushed onto the front of its parent's child list, exactly
-     as the original does (ob.Sibling = parent.Child; parent.Child = ob) *)
+     first resolve every object's parent; OrderObjects then inserts them in
+     the original's order, each child pushed onto the front of its parent's
+     child list (ob.Sibling = parent.Child; parent.Child = ob) *)
   i := 0;
   WHILE i < ZilModel.nObjects DO
     p := ZilModel.objects[i].props;
@@ -5133,9 +5213,7 @@ BEGIN
            & ((p.first.rest.rest = NIL) OR (p.first.rest.rest.first = NIL)) THEN
           j := FindObjectIdx(p.first.rest.first.atomText);
           IF j >= 0 THEN
-            objParent[i] := j;
-            objSibling[i] := objChild[j];
-            objChild[j] := i
+            objParent[i] := j
           ELSE
             Strings.Copy("CompileObjects: no such object: ", errBuf);
             Strings.Append(p.first.rest.first.atomText, errBuf);
@@ -5146,6 +5224,15 @@ BEGIN
       p := p.rest
     END;
     INC(i)
+  END;
+
+  OrderObjects;
+  FOR k := 0 TO ZilModel.nObjects - 1 DO
+    i := objInsOrder[k];
+    IF objParent[i] >= 0 THEN
+      objSibling[i] := objChild[objParent[i]];
+      objChild[objParent[i]] := i
+    END
   END;
 
   (* --- flag and property symbols --- *)
@@ -5235,8 +5322,10 @@ BEGIN
 
   IF ZilModel.nObjects > 0 THEN WLn END;
 
-  i := 0;
-  WHILE i < ZilModel.nObjects DO
+  (* rows in object-number order *)
+  row := 0;
+  WHILE row < ZilModel.nObjects DO
+    i := objNumOrder[row];
     o := ZilModel.objects[i];
     Strings.Copy("0", flagsWord[0]);
     Strings.Copy("0", flagsWord[1]);
@@ -5282,7 +5371,7 @@ BEGIN
     IF objChild[i] >= 0 THEN W(","); WSym(ZilModel.objects[objChild[i]].name.atomText)
     ELSE W(",0") END;
     W(",?PTBL?"); WSym(o.name.atomText); WLn;
-    INC(i)
+    INC(row)
   END;
   W("	.ENDT"); WLn; WLn;
 
