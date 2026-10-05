@@ -6285,9 +6285,12 @@ BEGIN
      6-byte/9-Z-character dictionary keys, SAVE/RESTORE as a 0OP STORE
      instead of a 0OP branch) are already shared with V4, which already
      works, so V5 needed no separate codegen path at all - just this
-     version-range check widened to admit it. *)
-  IF (ZilModel.zversion < 3) OR (ZilModel.zversion > 5) THEN
-    Err("CompileProgram: only Z-machine versions 3-5 are emitted yet");
+     version-range check widened to admit it. V8 is V5 with a ×8 packed-
+     address multiplier and a 512KB ceiling, both purely the assembler's
+     concern, so it is admitted the same way. V6/V7 are not: V6 needs its
+     own graphics/window opcodes, and both use packing offsets. *)
+  IF (ZilModel.zversion < 3) OR (ZilModel.zversion > 5) & (ZilModel.zversion # 8) THEN
+    Err("CompileProgram: only Z-machine versions 3-5 and 8 are emitted yet");
     RETURN FALSE
   END;
 
