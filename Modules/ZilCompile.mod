@@ -1357,6 +1357,10 @@ BEGIN
        sample/rascal's WRAP-PARSER-MAIN-LOOP uses it to bail out of nested
        parser calls in one jump, same idiom as a C setjmp/longjmp pair *)
     Strings.Copy("CATCH", zap); nargs := 0
+  ELSIF name = "INPUT" THEN
+    (* read_char (V4+) stores the key it read - rascal's GETCHAR macro is
+       <INPUT 1> and every keystroke it handles arrives as that value *)
+    Strings.Copy("INPUT", zap); nargs := 3
 
   (* void *)
   ELSE
@@ -1383,15 +1387,14 @@ BEGIN
     ELSIF name = "PRINTU" THEN Strings.Copy("PRINTU", zap); nargs := 1
     ELSIF name = "PUSH" THEN Strings.Copy("PUSH", zap); nargs := 1
     ELSIF name = "RESTART" THEN Strings.Copy("RESTART", zap); nargs := 0
-    ELSIF name = "READ" THEN Strings.Copy("READ", zap); nargs := 4
-      (* V1-4's read takes a text buffer and a parse buffer and stores
-         nothing; V5's stores the terminating character, but CompileProgram
-         refuses V5 anyway, so the void form is the only one reachable *)
+    ELSIF name = "READ" THEN Strings.Copy("READ", zap); nargs := 4;
+      (* V1-4's sread takes a text buffer and a parse buffer and stores
+         nothing; V5's aread stores the terminating character *)
+      store := ZilModel.zversion >= 5
     ELSIF name = "COPYT" THEN Strings.Copy("COPYT", zap); nargs := 3
     ELSIF name = "PRINTT" THEN Strings.Copy("PRINTT", zap); nargs := 4
     ELSIF name = "ZWSTR" THEN Strings.Copy("ZWSTR", zap); nargs := 4
     ELSIF name = "DIRIN" THEN Strings.Copy("DIRIN", zap); nargs := 2
-    ELSIF name = "INPUT" THEN Strings.Copy("INPUT", zap); nargs := 3
     ELSIF name = "SOUND" THEN Strings.Copy("SOUND", zap); nargs := 4
     ELSIF name = "POP" THEN Strings.Copy("POP", zap); nargs := 0
     ELSIF name = "FSTACK" THEN Strings.Copy("FSTACK", zap); nargs := 0
@@ -1962,6 +1965,17 @@ BEGIN
        & ((z.first.atomText = "LVAL") OR (z.first.atomText = "GVAL"))
 END IsVarRefForm;
 
+(* Whether <RETURN value> inside a block leaves the whole routine - the
+   original's Context.ReturnQuirkMode: DO-FUNNY-RETURN? set true or false
+   decides outright; left unassigned, it is "by version", V5 and up. *)
+PROCEDURE PreferRoutineReturn(): BOOLEAN;
+VAR a: ZilObj.Zo;
+BEGIN
+  a := ZilObj.Intern("DO-FUNNY-RETURN?");
+  IF a.globalVal # NIL THEN RETURN ZilEval.IsTrue(a.globalVal) END;
+  RETURN ZilModel.zversion >= 5
+END PreferRoutineReturn;
+
 (* Finds the innermost open block whose activation atom is `name`, for a
    named <AGAIN .NAME> / <RETURN value .NAME> — MDL's way of targeting an
    OUTER loop from inside a nested one, rather than the reflexive "innermost
@@ -2484,6 +2498,8 @@ BEGIN W("	JUMP "); W(label); WLn END EmitBranch;
 PROCEDURE EmitReturnValue(opText: ARRAY OF CHAR);
 BEGIN
   IF opText = "STACK" THEN W("	RSTACK")
+  ELSIF opText = "1" THEN W("	RTRUE")
+  ELSIF opText = "0" THEN W("	RFALSE")
   ELSE W("	RETURN "); W(opText) END;
   WLn
 END EmitReturnValue;
@@ -3177,7 +3193,7 @@ END CompileTell;
 PROCEDURE CompileOperandTo(z: ZilObj.Zo; dest: ARRAY OF CHAR): BOOLEAN;
 VAR headName, opText, leftText, rightText: ARRAY 64 OF CHAR;
     opcode: ARRAY 16 OF CHAR; endLabel: ARRAY 16 OF CHAR;
-    ok, spilled, sStore: BOOLEAN; sN, i, nA: INTEGER; ap, rw: ZilObj.Zo;
+    ok, spilled, sStore: BOOLEAN; sN, i, nA, nT: INTEGER; ap, rw: ZilObj.Zo;
     argT: ArgList;
 BEGIN
   (* a header read is a GET/GETB, so it can store straight into dest *)
@@ -3254,6 +3270,11 @@ BEGIN
         INC(nA); ap := ap.rest
       END;
       IF (ap = NIL) OR (ap.first = NIL) THEN
+        (* two or more stacked arguments come off in the wrong order unless
+           all but the deepest are popped into temporaries first - sample/
+           rascal's <SET Y1 <CLAMP .AY <ROOM-GET ..T> <ROOM-GET ..B>>> got
+           its bounds swapped without this *)
+        IF ~FixStackedArgs(argT, nA, nT) THEN RETURN FALSE END;
         IF ZilModel.zversion < 4 THEN Strings.Copy("CALL", opcode)
         ELSIF nA = 0 THEN Strings.Copy("CALL1", opcode)
         ELSIF nA = 1 THEN Strings.Copy("CALL2", opcode)
@@ -3264,6 +3285,7 @@ BEGIN
         i := 0;
         WHILE i < nA DO W(","); W(argT[i]); INC(i) END;
         W(" >"); W(dest); WLn;
+        WHILE nT > 0 DO FreeTemp; DEC(nT) END;
         RETURN TRUE
       END
       (* too many arguments: fall through so CompileOperand reports it *)
@@ -3278,6 +3300,7 @@ BEGIN
         INC(nA); ap := ap.rest
       END;
       IF (nA <= sN) & (nA >= BuiltinMinArgs(headName, sN)) THEN
+        IF ~FixStackedArgs(argT, nA, nT) THEN RETURN FALSE END;
         W("	"); W(opcode);
         i := 0;
         WHILE i < nA DO
@@ -3286,6 +3309,7 @@ BEGIN
         END;
         W(" >"); W(dest);
         IF IsValuePredBuiltin(headName) THEN EmitDeadBranch ELSE WLn END;
+        WHILE nT > 0 DO FreeTemp; DEC(nT) END;
         RETURN TRUE
       END;
       (* wrong arity: fall through and let CompileOperand report it *)
@@ -4003,6 +4027,16 @@ BEGIN
         END
       ELSE
         WHILE (blkIdx >= 0) & ~blockHasReturn[blkIdx] DO DEC(blkIdx) END
+      END;
+      (* The original's "return quirk" (ReturnQuirkMode): <RETURN value>
+         inside a PROG/REPEAT/DO is ambiguous in ZIL, and on V5+ it returns
+         from the ROUTINE, block argument or not, unless DO-FUNNY-RETURN?
+         says otherwise (T: always the routine; FALSE: always the block).
+         sample/rascal depends on it - its INV-FIRST-FREE-SLOT is
+         <DO (I 1 ,INV-SIZE) <COND (... <RETURN .I>)>> 0, which otherwise
+         always answers 0, so the inventory is "full" from the start. *)
+      IF (blkIdx >= 0) & (z.rest # NIL) & (z.rest.first # NIL) & PreferRoutineReturn() THEN
+        blkIdx := -1
       END;
       IF blkIdx >= 0 THEN
         IF blockWantResult[blkIdx] & (opText # "STACK") THEN
