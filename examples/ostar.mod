@@ -15,7 +15,7 @@ MODULE OStar;
  *              ^QO next heading, ^QG transpose chars, ^QT transpose words,
  *              ^QL go to line, ^Q0-9 jump to bookmark.
  * Prefix ^O  — Onscreen: ^OB cycle theme, ^OH cycle help, ^OW wrap,
- *              ^OS spellcheck, ^OT typewriter scroll, ^OC word count,
+ *              ^OS spellcheck, ^OT typewriter scroll, ^OC word/char count (toggle),
  *              ^OF focus mode, ^OL style check, ^OY dictionary/thesaurus
  *              lookup of the word under the cursor, ^OX regex se
 arch toggle.
@@ -275,6 +275,9 @@ VAR
   focusMode   : BOOLEAN;
   focusParaS  : INTEGER;
   focusParaE  : INTEGER;
+
+  (* Count display (^OC toggle) *)
+  showCount    : BOOLEAN;
 
   (* Style check *)
   styleEnabled : BOOLEAN;
@@ -2682,6 +2685,20 @@ BEGIN
   RETURN n
 END WordCount;
 
+PROCEDURE CharCount(): INTEGER;
+VAR row, col, n: INTEGER;
+BEGIN
+  n := 0;
+  FOR row := 0 TO numLines - 1 DO
+    col := 0;
+    WHILE lines[row].s[col] # 0X DO
+      INC(n);
+      INC(col, UTF8SeqLen(lines[row].s[col]))
+    END
+  END;
+  RETURN n
+END CharCount;
+
 (* ── Palette (F1 key list) ───────────────────────────────────────── *)
 
 (* Palette entries: chord string + description, terminated by empty pair *)
@@ -2747,7 +2764,7 @@ BEGIN
   | 55: COPY("^KM",  chord); COPY("export RTF manuscript",  desc)
   | 56: COPY("^KE",  chord); COPY("clean export (strip notes)", desc)
   | 57: COPY("^KN",  chord); COPY("snapshot/backup",        desc)
-  | 58: COPY("^OC",  chord); COPY("word count",             desc)
+  | 58: COPY("^OC",  chord); COPY("word/char count toggle",  desc)
   | 59: COPY("^OF",  chord); COPY("focus mode toggle",      desc)
   | 60: COPY("^OL",  chord); COPY("style check toggle",     desc)
   | 61: COPY("^QI",  chord); COPY("next style issue",        desc)
@@ -3531,6 +3548,10 @@ BEGIN
   ELSIF styleEnabled & (styleCurKind = StFiller)  THEN COPY("filler word",  s)
   ELSIF styleEnabled & (styleCurKind = StPassive) THEN COPY("passive voice", s)
   ELSIF styleEnabled & (styleCurKind = StLong)    THEN COPY("long sentence", s)
+  ELSIF showCount THEN
+    COPY("W:", s); Strings.IntToStr(WordCount(), tmp); Strings.Append(tmp, s);
+    Strings.Append(" Ch:", s); Strings.IntToStr(CharCount(), tmp); Strings.Append(tmp, s);
+    Strings.Append(" L:", s); Strings.IntToStr(numLines, tmp); Strings.Append(tmp, s)
   ELSIF statusMsg[0] # 0X THEN COPY(statusMsg, s)
   ELSIF useRegex THEN COPY("RE", s)
   END;
@@ -4505,14 +4526,15 @@ BEGIN
 END HandlePrefixQ;
 
 PROCEDURE HandlePrefixO(k: CHAR);
-VAR tmp: ARRAY 32 OF CHAR; wc: INTEGER;
+VAR tmp: ARRAY 32 OF CHAR;
 BEGIN
   prefix := PrefNone;
   CASE k OF
     'c', 'C':
-      wc := WordCount();
-      COPY("Words: ", statusMsg); Strings.IntToStr(wc, tmp); Strings.Append(tmp, statusMsg);
-      Strings.Append("  Lines: ", statusMsg); Strings.IntToStr(numLines, tmp); Strings.Append(tmp, statusMsg)
+      showCount := ~showCount;
+      IF showCount THEN SetStatus("Count display ON")
+      ELSE SetStatus("Count display OFF")
+      END
   | 'f', 'F':
       focusMode := ~focusMode;
       IF focusMode THEN SetStatus("Focus mode ON") ELSE SetStatus("Focus mode OFF") END
