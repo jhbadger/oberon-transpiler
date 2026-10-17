@@ -130,6 +130,14 @@ CONST
   mShift = 1; mAlt = 2; mCtrl = 4;
 
 
+  (* screen colors: explicit xterm-256 indices, as in ostar.  The ANSI
+     16-color slots are remapped (and muted) by many terminal themes. *)
+  xBlue = 19;       (* #0000af, nearest to CGA blue #0000AA *)
+  xNavy = 17;       (* #00005f, block text on white *)
+  xBlack = 16; xGray = 252; xWhite = 231;
+  xRed = 196; xMagenta = 201; xCyan = 51; xYellow = 226; xGreen = 46;
+  xGreenFg = 40; xAmber = 214; xAmberHi = 220;
+
   MaxPath = 512;
   MaxPrompt = 256;
   MaxQueue = 20000;
@@ -244,6 +252,7 @@ VAR
 
   cfg: Settings;
   cBg, cFg, cHi: INTEGER;              (* screen colors *)
+  cBlkFg, cBlkBg: INTEGER;             (* block / reverse video *)
   eds: ARRAY 3 OF Ed;                  (* Doc 1, Doc 2 *)
   active: INTEGER;                     (* 1 or 2 *)
   e: Ed;                               (* the editor being worked on *)
@@ -2957,10 +2966,10 @@ END InitSettings;
 PROCEDURE ApplyColors;
 BEGIN
   CASE cfg.colors OF
-    2: cBg := TUI.Black; cFg := TUI.White; cHi := TUI.BrightWhite
-  | 3: cBg := TUI.Black; cFg := TUI.Green; cHi := TUI.BrightGreen
-  | 4: cBg := TUI.Black; cFg := TUI.Yellow; cHi := TUI.BrightWhite
-  ELSE cBg := TUI.Blue; cFg := TUI.White; cHi := TUI.BrightWhite
+    2: cBg := xBlack; cFg := xGray; cHi := xWhite; cBlkFg := xBlack; cBlkBg := xGray
+  | 3: cBg := xBlack; cFg := xGreenFg; cHi := xGreen; cBlkFg := xBlack; cBlkBg := xGreen
+  | 4: cBg := xBlack; cFg := xAmber; cHi := xAmberHi; cBlkFg := xBlack; cBlkBg := xAmber
+  ELSE cBg := xBlue; cFg := xGray; cHi := xWhite; cBlkFg := xNavy; cBlkBg := xWhite
   END
 END ApplyColors;
 
@@ -3480,13 +3489,16 @@ PROCEDURE AttrColors(a: INTEGER; VAR fg, bg: INTEGER);
 BEGIN
   fg := cFg; bg := cBg;
   IF ODD(ASR(a, aBold)) OR ODD(ASR(a, aShadow)) OR ODD(ASR(a, aOutline)) THEN fg := cHi END;
-  IF ODD(ASR(a, aRed)) THEN fg := TUI.BrightRed END;
-  IF ODD(ASR(a, aStrike)) THEN fg := TUI.BrightMagenta END;
-  IF ODD(ASR(a, aItal)) THEN fg := TUI.BrightCyan END;
-  IF ODD(ASR(a, bSuper)) OR ODD(ASR(a, bSub)) THEN fg := TUI.Yellow END;
-  IF ODD(ASR(a, bGen)) THEN fg := TUI.BrightGreen END;
-  IF ODD(ASR(a, aUnd)) THEN fg := fg + TUI.AttrUnderline END;
-  IF ODD(ASR(a, aRev)) OR ODD(ASR(a, bBlock)) THEN bg := cFg; fg := cBg END
+  IF ODD(ASR(a, aRed)) THEN fg := xRed END;
+  IF ODD(ASR(a, aStrike)) THEN fg := xMagenta END;
+  IF ODD(ASR(a, aItal)) THEN fg := xCyan END;
+  IF ODD(ASR(a, bSuper)) OR ODD(ASR(a, bSub)) THEN fg := xYellow END;
+  IF ODD(ASR(a, bGen)) THEN fg := xGreen END;
+  IF ODD(ASR(a, aRev)) OR ODD(ASR(a, bBlock)) THEN
+    bg := cBlkBg;
+    IF fg = cFg THEN fg := cBlkFg ELSIF fg = cHi THEN fg := xBlack END
+  END;
+  IF ODD(ASR(a, aUnd)) THEN fg := fg + TUI.AttrUnderline END
 END AttrColors;
 
 PROCEDURE BlockRange(x: Ed; VAR a, b: INTEGER): BOOLEAN;
@@ -3524,7 +3536,7 @@ BEGIN
     ELSIF (it.k = kHRt) & (cfg.hrtChar # 32) & (cfg.hrtChar > 0) THEN
       PutCp(c, y, CHR(cfg.hrtChar), cFg, cBg)
     ELSIF blk & (i >= ba) & (i < bb) & (it.k = kHRt) THEN
-      PutCp(c, y, " ", cBg, cFg)
+      PutCp(c, y, " ", cBlkFg, cBlkBg)
     END
   END
 END DrawTextLine;
@@ -3718,7 +3730,7 @@ BEGIN
         IF (pass = 1) & (y >= row) & (y - row < h) THEN
           IF isCode THEN fg := cHi ELSE AttrColors(x.iattr[i] MOD 256, fg, bg) END;
           bg := cBg;
-          IF i = x.cur THEN bg := cFg; fg := cBg END;
+          IF i = x.cur THEN bg := cBlkBg; fg := cBlkFg END;
           FOR j := 0 TO w - 1 DO PutCp(c + j, y0 + y - row, s[j], fg, bg) END
         END;
         c := c + w;
@@ -3734,7 +3746,7 @@ BEGIN
     END
   END;
   IF x.cur >= x.d.n THEN
-    IF (curRow - row >= 0) & (curRow - row < h) THEN PutCp(curCol, y0 + curRow - row, " ", cBg, cFg) END
+    IF (curRow - row >= 0) & (curRow - row < h) THEN PutCp(curCol, y0 + curRow - row, " ", cBlkFg, cBlkBg) END
   END
 END DrawReveal;
 
@@ -4459,7 +4471,7 @@ BEGIN
         FileEntry(i, s);
         x := 1 + c * 41; y := 4 + r;
         fg := cFg; bg := cBg;
-        IF i = sel THEN fg := cBg; bg := cFg END;
+        IF i = sel THEN fg := cBlkFg; bg := cBlkBg END;
         IF lfMark[i] THEN PutCp(x, y, "*", cHi, cBg) END;
         Cpy(s, t); PadTo(t, 39);
         Text(x + 1, y, t, fg, bg)
@@ -6048,9 +6060,9 @@ BEGIN
             a := ORD(pl[top + r].a[i]);
             fg := cFg; bg := cBg;
             IF ODD(a DIV pBold) THEN fg := cHi END;
-            IF ODD(a DIV pSup) OR ODD(a DIV pSub) THEN fg := TUI.Yellow END;
-            IF ODD(a DIV pRed) THEN fg := TUI.BrightRed END;
-            IF ODD(a DIV pStrk) THEN fg := TUI.BrightMagenta END;
+            IF ODD(a DIV pSup) OR ODD(a DIV pSub) THEN fg := xYellow END;
+            IF ODD(a DIV pRed) THEN fg := xRed END;
+            IF ODD(a DIV pStrk) THEN fg := xMagenta END;
             IF ODD(a DIV pUnd) THEN fg := fg + TUI.AttrUnderline END;
             c := pl[top + r].s[i];
             PutCp(i + 1, r + 1, c, fg, bg)
@@ -6058,7 +6070,7 @@ BEGIN
         END;
         FOR pg := 1 TO pgCount - 1 DO
           IF pgStart[pg] = top + r + 1 THEN
-            FOR i := 1 TO scrCols DO PutUni(i, r + 1, 2500H, TUI.Cyan, cBg) END
+            FOR i := 1 TO scrCols DO PutUni(i, r + 1, 2500H, xCyan, cBg) END
           END
         END
       END
@@ -7979,10 +7991,10 @@ BEGIN
           ELSIF f = 2 THEN AppendInt(keyLin[k], s)
           ELSE AppendInt(keyWrd[k], s)
           END;
-          IF (k = curK) & (f = curF) THEN Text(x + 3 + f * 5, r, s, cBg, cFg) ELSE TextN(x + 3 + f * 5, r, s) END
+          IF (k = curK) & (f = curF) THEN Text(x + 3 + f * 5, r, s, cBlkFg, cBlkBg) ELSE TextN(x + 3 + f * 5, r, s) END
         END
       END
-    ELSIF k = curK THEN Text(x + 3, r, " ", cBg, cFg)
+    ELSIF k = curK THEN Text(x + 3, r, " ", cBlkFg, cBlkBg)
     END
   END
 END DrawSortKeys;
@@ -8915,7 +8927,7 @@ END ModOfRow;
 
 PROCEDURE RowColor(r: INTEGER): INTEGER;
 BEGIN
-  CASE r OF 0: RETURN TUI.BrightRed | 1: RETURN TUI.BrightGreen | 2: RETURN TUI.BrightCyan
+  CASE r OF 0: RETURN xRed | 1: RETURN xGreen | 2: RETURN xCyan
   ELSE RETURN cHi
   END
 END RowColor;
@@ -8925,8 +8937,8 @@ VAR r, c, x, y, fg, bg, w: INTEGER; s: Str;
 BEGIN
   ClearScreen;
   TextB(22, 1, "WordPerfect 4.2 Keyboard Template");
-  Text(4, 2, "Ctrl", TUI.BrightRed, cBg); Text(10, 2, "Shift", TUI.BrightGreen, cBg);
-  Text(17, 2, "Alt", TUI.BrightCyan, cBg); Text(22, 2, "plain key", cHi, cBg);
+  Text(4, 2, "Ctrl", xRed, cBg); Text(10, 2, "Shift", xGreen, cBg);
+  Text(17, 2, "Alt", xCyan, cBg); Text(22, 2, "plain key", cHi, cBg);
   w := 15;
   FOR c := 0 TO 9 DO
     x := 1 + (c MOD 5) * w + 4; y := 4 + (c DIV 5) * 7;
@@ -8935,7 +8947,7 @@ BEGIN
     FOR r := 0 TO 3 DO
       KeyFunction(c + 1, ModOfRow(r), s);
       fg := RowColor(r); bg := cBg;
-      IF (r = selR) & (c = selC) THEN fg := cBg; bg := cFg END;
+      IF (r = selR) & (c = selC) THEN fg := cBlkFg; bg := cBlkBg END;
       Text(x, y + 1 + r, s, fg, bg)
     END
   END;
