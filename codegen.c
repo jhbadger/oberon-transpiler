@@ -3321,7 +3321,8 @@ void codegen(Node *module, FILE *out, int is_main, const char *srcfile) {
         emit(g,"#endif /* OBC_FILES_TYPES_H_ */\n");
         /* Old(name): File */
         emit(g,"static Files_File Files_Old(const char *name) {\n");
-        emit(g,"    FILE *fp=fopen(name,\"rb\"); if(!fp) return NULL;\n");
+        /* read/write as documented; read-only files still open for reading */
+        emit(g,"    FILE *fp=fopen(name,\"r+b\"); if(!fp) fp=fopen(name,\"rb\"); if(!fp) return NULL;\n");
         emit(g,"    Files_File f=(Files_File)malloc(sizeof(_Files_Rec));\n");
         emit(g,"    if(!f){fclose(fp);return NULL;}\n");
         emit(g,"    f->fp=fp; strncpy(f->name,name,511); f->name[511]=0; return f;\n");

@@ -5,7 +5,8 @@ MODULE DBF;
 IMPORT Files, Strings, Math, Time;
 
 CONST
-  MaxFields*  = 32;
+  MaxFields*  = 128;
+  MaxRecLen*  = 4000;
   HeaderBase  = 32;
   FieldDescSz = 32;
 
@@ -13,6 +14,13 @@ CONST
   TypeNumeric* = "N";
   TypeLogical* = "L";
   TypeMemo*    = "M";
+  TypeDate*    = "D";
+  TypeFloat*   = "F";
+
+  MaxNdx*      = 65536;  (* max keys held by one in-memory NDX index *)
+  MaxNdxKey*   = 100;    (* longest character key dBASE III allows *)
+  NdxPage      = 512;
+  MemoBlock    = 512;
 
 TYPE
   Field* = RECORD
@@ -30,6 +38,29 @@ TYPE
     numRecs*:   INTEGER;
     headerLen*: INTEGER;
     fields*:    ARRAY MaxFields OF Field;
+    version*:   INTEGER;  (* header byte 0: 03H plain, 83H with memo file *)
+    year*, month*, day*: INTEGER;  (* date of last update *)
+    touched:    BOOLEAN;  (* header date already refreshed this session *)
+  END;
+
+  (* One key of a dBASE III .NDX index, kept in memory.  Character keys
+     are space-padded to the index key length; numeric and date keys use
+     num (dates as Julian day numbers, as dBASE does). *)
+  NdxEntry*    = POINTER TO NdxEntryRec;
+  NdxEntryRec* = RECORD
+    key*: ARRAY MaxNdxKey + 1 OF CHAR;
+    num*: REAL;
+    rec*: INTEGER;   (* 1-based record number *)
+  END;
+
+  NdxIndex* = POINTER TO NdxRec;
+  NdxRec*   = RECORD
+    expr*:    ARRAY 256 OF CHAR;
+    numeric*: BOOLEAN;
+    keyLen*:  INTEGER;
+    unique*:  BOOLEAN;
+    n*:       INTEGER;
+    e*:       ARRAY MaxNdx OF NdxEntry;
   END;
 
   IndexEntry* = RECORD
@@ -173,13 +204,19 @@ BEGIN
   db.headerLen := hdrLen;
 
   now := Time.Now();
-  Time.Format(now, "%y", tmp); Strings.StrToInt(tmp, yy);
+  Time.Format(now, "%Y", tmp); Strings.StrToInt(tmp, yy);
   Time.Format(now, "%m", tmp); Strings.StrToInt(tmp, mm);
   Time.Format(now, "%d", tmp); Strings.StrToInt(tmp, dd);
+  db.year := yy; db.month := mm; db.day := dd; db.touched := TRUE;
+
+  db.version := 03H;
+  FOR i := 0 TO n - 1 DO
+    IF db.fields[i].type = TypeMemo THEN db.version := 83H END
+  END;
 
   Files.Set(db.r, db.f, 0);
-  Files.Write(db.r, 03H);
-  Files.Write(db.r, yy);
+  Files.Write(db.r, db.version);
+  Files.Write(db.r, yy - 1900);
   Files.Write(db.r, mm);
   Files.Write(db.r, dd);
   WriteDWord(db.r, 0);
@@ -204,29 +241,46 @@ BEGIN
   END;
 
   Files.Write(db.r, 0DH);
+  Files.Write(db.r, 1AH);
   Files.Register(db.f)
 END Create;
 
 PROCEDURE Open*(VAR db: Database; filename: ARRAY OF CHAR);
-VAR i: INTEGER; b: BYTE;
+VAR i, j: INTEGER; b: BYTE;
 BEGIN
   db.f := Files.Old(filename);
   IF db.f = NIL THEN RETURN END;
 
   Files.Set(db.r, db.f, 0);
-  Files.Read(db.r, b);
-  Files.Read(db.r, b); Files.Read(db.r, b); Files.Read(db.r, b);
+  Files.Read(db.r, b); db.version := b;
+  Files.Read(db.r, b); db.year := b + 1900;
+  IF db.year < 1980 THEN INC(db.year, 100) END;
+  Files.Read(db.r, b); db.month := b;
+  Files.Read(db.r, b); db.day := b;
+  db.touched := FALSE;
 
   db.numRecs   := ReadDWord(db.r);
   db.headerLen := ReadWord(db.r);
   db.recordLen := ReadWord(db.r);
 
-  db.numFields := (db.headerLen - HeaderBase - 1) DIV FieldDescSz;
-  IF db.numFields > MaxFields THEN db.numFields := MaxFields END;
+  (* Count descriptors up to the 0DH terminator rather than trusting
+     headerLen, which some writers pad (FoxPro adds a 263-byte backlink). *)
+  db.numFields := 0;
+  LOOP
+    IF (db.numFields >= MaxFields) OR
+       (HeaderBase + (db.numFields + 1) * FieldDescSz > db.headerLen) THEN EXIT END;
+    Files.Set(db.r, db.f, HeaderBase + db.numFields * FieldDescSz);
+    Files.Read(db.r, b);
+    IF (b = 0DH) OR (b = 0) OR db.r.eof THEN EXIT END;
+    INC(db.numFields)
+  END;
 
   FOR i := 0 TO db.numFields - 1 DO
     Files.Set(db.r, db.f, HeaderBase + i * FieldDescSz);
-    Files.ReadString(db.r, db.fields[i].name);
+    FOR j := 0 TO 10 DO
+      Files.Read(db.r, b); db.fields[i].name[j] := CHR(b)
+    END;
+    db.fields[i].name[10] := 0X;
     Files.Set(db.r, db.f, HeaderBase + i * FieldDescSz + 11);
     Files.Read(db.r, b);
     db.fields[i].type := CHR(b);
@@ -502,7 +556,7 @@ PROCEDURE Pack*(VAR db: Database; filename: ARRAY OF CHAR);
 VAR
   tmp: Database;
   tmpname: ARRAY 512 OF CHAR;
-  packed: ARRAY 4096 OF CHAR;
+  buf: ARRAY MaxRecLen + 2 OF CHAR;
   i: INTEGER;
 BEGIN
   Strings.Copy(filename, tmpname);
@@ -512,10 +566,8 @@ BEGIN
   IF tmp.f = NIL THEN RETURN END;
 
   FOR i := 0 TO db.numRecs - 1 DO
-    IF ~IsDeleted(db, i) THEN
-      GetRecord(db, i, packed);
-      AppendFields(tmp, packed)
-    END
+    ReadRec(db, i, buf);
+    IF buf[0] # "*" THEN WriteRec(tmp, tmp.numRecs, buf) END
   END;
 
   Close(tmp);
@@ -721,5 +773,391 @@ BEGIN
     END
   END
 END Validate;
+
+(* ---------------------------------------------------------------
+ * Raw record access
+ *
+ * A raw record buffer holds recordLen bytes: byte 0 is the deletion
+ * flag (" " or "*"), followed by every field's bytes in order.  The
+ * buffer is 0X-terminated after the last byte for convenience.
+ * --------------------------------------------------------------- *)
+
+(** Read record recNum (0-based) into buf.  Past the end, buf is blank. **)
+PROCEDURE ReadRec*(VAR db: Database; recNum: INTEGER; VAR buf: ARRAY OF CHAR);
+VAR i, n: INTEGER; b: BYTE;
+BEGIN
+  n := db.recordLen;
+  IF n >= LEN(buf) THEN n := LEN(buf) - 1 END;
+  IF (recNum < 0) OR (recNum >= db.numRecs) THEN
+    FOR i := 0 TO n - 1 DO buf[i] := " " END
+  ELSE
+    Files.Set(db.r, db.f, db.headerLen + recNum * db.recordLen);
+    FOR i := 0 TO n - 1 DO
+      Files.Read(db.r, b);
+      IF b = 0 THEN buf[i] := " " ELSE buf[i] := CHR(b) END
+    END
+  END;
+  buf[n] := 0X
+END ReadRec;
+
+(* Stamp today's date into the header the first time a file is changed. *)
+PROCEDURE Touch(VAR db: Database);
+VAR tmp: ARRAY 8 OF CHAR; now: LONGINT; yy, mm, dd: INTEGER;
+BEGIN
+  IF ~db.touched THEN
+    now := Time.Now();
+    Time.Format(now, "%Y", tmp); Strings.StrToInt(tmp, yy);
+    Time.Format(now, "%m", tmp); Strings.StrToInt(tmp, mm);
+    Time.Format(now, "%d", tmp); Strings.StrToInt(tmp, dd);
+    db.year := yy; db.month := mm; db.day := dd;
+    Files.Set(db.r, db.f, 1);
+    Files.Write(db.r, yy - 1900); Files.Write(db.r, mm); Files.Write(db.r, dd);
+    db.touched := TRUE
+  END
+END Touch;
+
+(** Write buf as record recNum (0-based).  recNum = numRecs appends. **)
+PROCEDURE WriteRec*(VAR db: Database; recNum: INTEGER; buf: ARRAY OF CHAR);
+VAR i: INTEGER;
+BEGIN
+  IF (recNum < 0) OR (recNum > db.numRecs) THEN RETURN END;
+  Touch(db);
+  Files.Set(db.r, db.f, db.headerLen + recNum * db.recordLen);
+  FOR i := 0 TO db.recordLen - 1 DO
+    IF (i < LEN(buf)) & (buf[i] # 0X) THEN Files.Write(db.r, ORD(buf[i]))
+    ELSE Files.Write(db.r, ORD(" "))
+    END
+  END;
+  IF recNum = db.numRecs THEN
+    Files.Write(db.r, 1AH);
+    INC(db.numRecs);
+    WriteRecCount(db)
+  END;
+  Files.Register(db.f)
+END WriteRec;
+
+(** Byte offset of field fieldIdx inside a raw record buffer. **)
+PROCEDURE FieldPos*(VAR db: Database; fieldIdx: INTEGER): INTEGER;
+BEGIN
+  RETURN FieldOffset(db, fieldIdx)
+END FieldPos;
+
+(** Discard every record (dBASE ZAP). **)
+PROCEDURE Zap*(VAR db: Database; filename: ARRAY OF CHAR);
+VAR flds: ARRAY MaxFields OF Field; i, n: INTEGER;
+BEGIN
+  n := db.numFields;
+  FOR i := 0 TO n - 1 DO flds[i] := db.fields[i] END;
+  Files.Close(db.f);
+  db.f := NIL;
+  Files.Delete(filename);
+  Create(db, filename, flds, n)
+END Zap;
+
+(* ---------------------------------------------------------------
+ * .NDX index files (dBASE III B+-tree format)
+ *
+ * Header block 0: root page (0), page count (4), key length (12),
+ * keys per page (14), key type (16: 0 char, 1 numeric), key record
+ * size (18, 4 bytes), unique flag (23), key expression (24).  Each 512-byte page holds a key count then
+ * key records of (left page, record number, key).  Interior pages carry
+ * one extra trailing page pointer; leaves have left page = 0.
+ * --------------------------------------------------------------- *)
+
+(** Allocate an empty index. **)
+PROCEDURE NdxNew*(): NdxIndex;
+VAR ix: NdxIndex;
+BEGIN
+  NEW(ix);
+  ix.expr[0] := 0X; ix.numeric := FALSE; ix.keyLen := 0;
+  ix.unique := FALSE; ix.n := 0;
+  RETURN ix
+END NdxNew;
+
+PROCEDURE NdxRecSize(ix: NdxIndex): INTEGER;
+VAR kl: INTEGER;
+BEGIN
+  IF ix.numeric THEN kl := 8 ELSE kl := ix.keyLen END;
+  RETURN ((kl + 8 + 3) DIV 4) * 4
+END NdxRecSize;
+
+PROCEDURE PadTo(VAR r: Files.Rider; pos: INTEGER);
+BEGIN
+  WHILE Files.Pos(r) < pos DO Files.Write(r, 0) END
+END PadTo;
+
+PROCEDURE NdxWriteKey(VAR r: Files.Rider; ix: NdxIndex; e: NdxEntry);
+VAR i: INTEGER; done: BOOLEAN;
+BEGIN
+  IF ix.numeric THEN
+    Files.WriteReal(r, e.num)
+  ELSE
+    done := FALSE;
+    FOR i := 0 TO ix.keyLen - 1 DO
+      IF ~done & (e.key[i] = 0X) THEN done := TRUE END;
+      IF done THEN Files.Write(r, ORD(" ")) ELSE Files.Write(r, ORD(e.key[i])) END
+    END
+  END
+END NdxWriteKey;
+
+(** Write ix to filename as a dBASE III .NDX file.  Entries must be sorted. **)
+PROCEDURE NdxWrite*(ix: NdxIndex; filename: ARRAY OF CHAR): BOOLEAN;
+VAR
+  f: Files.File; r: Files.Rider;
+  recSize, maxKeys, page, i, j, k, nLevel, nNext, per, extra, cnt, base: INTEGER;
+  lvlPage, lvlLast, nxtPage, nxtLast: POINTER TO ARRAY OF INTEGER;
+BEGIN
+  f := Files.New(filename);
+  IF f = NIL THEN RETURN FALSE END;
+  recSize := NdxRecSize(ix);
+  maxKeys := (NdxPage - 8) DIV recSize;
+  IF maxKeys < 2 THEN maxKeys := 2 END;
+  NEW(lvlPage, ix.n DIV maxKeys + 2); NEW(lvlLast, ix.n DIV maxKeys + 2);
+  NEW(nxtPage, ix.n DIV maxKeys + 2); NEW(nxtLast, ix.n DIV maxKeys + 2);
+
+  (* Leaf pages, filled evenly *)
+  page := 1; nLevel := 0;
+  IF ix.n = 0 THEN
+    Files.Set(r, f, page * NdxPage);
+    WriteDWord(r, 0);
+    PadTo(r, (page + 1) * NdxPage);
+    lvlPage[0] := page; lvlLast[0] := -1; nLevel := 1; INC(page)
+  ELSE
+    cnt := (ix.n + maxKeys - 1) DIV maxKeys;
+    per := ix.n DIV cnt; extra := ix.n MOD cnt;
+    base := 0;
+    FOR i := 0 TO cnt - 1 DO
+      k := per; IF i < extra THEN INC(k) END;
+      Files.Set(r, f, page * NdxPage);
+      WriteDWord(r, k);
+      FOR j := base TO base + k - 1 DO
+        WriteDWord(r, 0);
+        WriteDWord(r, ix.e[j].rec);
+        NdxWriteKey(r, ix, ix.e[j]);
+        PadTo(r, page * NdxPage + 4 + (j - base + 1) * recSize)
+      END;
+      PadTo(r, (page + 1) * NdxPage);
+      lvlPage[nLevel] := page; lvlLast[nLevel] := base + k - 1;
+      INC(nLevel); INC(page); INC(base, k)
+    END
+  END;
+
+  (* Interior levels until a single root remains *)
+  WHILE nLevel > 1 DO
+    cnt := (nLevel + maxKeys) DIV (maxKeys + 1);
+    per := nLevel DIV cnt; extra := nLevel MOD cnt;
+    base := 0; nNext := 0;
+    FOR i := 0 TO cnt - 1 DO
+      k := per; IF i < extra THEN INC(k) END;   (* k children *)
+      Files.Set(r, f, page * NdxPage);
+      WriteDWord(r, k - 1);
+      FOR j := base TO base + k - 2 DO
+        WriteDWord(r, lvlPage[j]);
+        WriteDWord(r, 0);
+        NdxWriteKey(r, ix, ix.e[lvlLast[j]]);
+        PadTo(r, page * NdxPage + 4 + (j - base + 1) * recSize)
+      END;
+      WriteDWord(r, lvlPage[base + k - 1]);
+      PadTo(r, (page + 1) * NdxPage);
+      nxtPage[nNext] := page; nxtLast[nNext] := lvlLast[base + k - 1];
+      INC(nNext); INC(page); INC(base, k)
+    END;
+    FOR i := 0 TO nNext - 1 DO lvlPage[i] := nxtPage[i]; lvlLast[i] := nxtLast[i] END;
+    nLevel := nNext
+  END;
+
+  (* Header *)
+  Files.Set(r, f, 0);
+  WriteDWord(r, lvlPage[0]);
+  WriteDWord(r, page);
+  WriteDWord(r, 0);
+  IF ix.numeric THEN WriteWord(r, 8) ELSE WriteWord(r, ix.keyLen) END;
+  WriteWord(r, maxKeys);
+  IF ix.numeric THEN WriteWord(r, 1) ELSE WriteWord(r, 0) END;
+  WriteDWord(r, recSize);
+  Files.Write(r, 0);
+  IF ix.unique THEN Files.Write(r, 1) ELSE Files.Write(r, 0) END;
+  i := 0;
+  WHILE (ix.expr[i] # 0X) & (i < 255) DO Files.Write(r, ORD(ix.expr[i])); INC(i) END;
+  Files.Write(r, 0);
+  PadTo(r, NdxPage);
+  Files.Register(f);
+  Files.Close(f);
+  RETURN TRUE
+END NdxWrite;
+
+PROCEDURE NdxReadPage(VAR r: Files.Rider; f: Files.File; ix: NdxIndex;
+                      page, recSize, depth: INTEGER);
+VAR
+  k, i, j, left, rec: INTEGER; b: BYTE;
+  kids: ARRAY 128 OF INTEGER;
+  e: NdxEntry;
+BEGIN
+  IF (depth > 32) OR (page <= 0) THEN RETURN END;
+  Files.Set(r, f, page * NdxPage);
+  k := ReadDWord(r);
+  IF (k < 0) OR (k > 126) THEN RETURN END;
+  Files.Set(r, f, page * NdxPage + 4);
+  left := ReadDWord(r);
+  IF left # 0 THEN
+    (* interior: k keyed children plus the trailing pointer *)
+    FOR i := 0 TO k - 1 DO
+      Files.Set(r, f, page * NdxPage + 4 + i * recSize);
+      kids[i] := ReadDWord(r)
+    END;
+    Files.Set(r, f, page * NdxPage + 4 + k * recSize);
+    kids[k] := ReadDWord(r);
+    FOR i := 0 TO k DO
+      IF kids[i] # 0 THEN NdxReadPage(r, f, ix, kids[i], recSize, depth + 1) END
+    END
+  ELSE
+    FOR i := 0 TO k - 1 DO
+      IF ix.n < MaxNdx THEN
+        Files.Set(r, f, page * NdxPage + 4 + i * recSize + 4);
+        rec := ReadDWord(r);
+        NEW(e); e.rec := rec; e.num := 0.0; e.key[0] := 0X;
+        IF ix.numeric THEN
+          Files.ReadReal(r, e.num)
+        ELSE
+          FOR j := 0 TO ix.keyLen - 1 DO Files.Read(r, b); e.key[j] := CHR(b) END;
+          e.key[ix.keyLen] := 0X
+        END;
+        ix.e[ix.n] := e; INC(ix.n)
+      END
+    END
+  END
+END NdxReadPage;
+
+(** Load a .NDX file into memory.  Returns FALSE if it cannot be read. **)
+PROCEDURE NdxRead*(filename: ARRAY OF CHAR; VAR ix: NdxIndex): BOOLEAN;
+VAR f: Files.File; r: Files.Rider; root, kl, ktype, recSize, i: INTEGER; b: BYTE;
+BEGIN
+  f := Files.Old(filename);
+  IF f = NIL THEN RETURN FALSE END;
+  ix := NdxNew();
+  Files.Set(r, f, 0);
+  root := ReadDWord(r);
+  i := ReadDWord(r); i := ReadDWord(r);
+  kl := ReadWord(r);
+  i := ReadWord(r);
+  ktype := ReadWord(r);
+  recSize := ReadDWord(r);
+  Files.Read(r, b);
+  Files.Read(r, b); ix.unique := b # 0;
+  i := 0;
+  LOOP
+    Files.Read(r, b);
+    IF (b = 0) OR r.eof OR (i >= 255) THEN EXIT END;
+    ix.expr[i] := CHR(b); INC(i)
+  END;
+  ix.expr[i] := 0X;
+  ix.numeric := ktype # 0;
+  IF ix.numeric THEN ix.keyLen := 8 ELSE ix.keyLen := kl END;
+  IF (kl <= 0) OR (kl > MaxNdxKey) OR (recSize < kl + 8) THEN
+    Files.Close(f); RETURN FALSE
+  END;
+  NdxReadPage(r, f, ix, root, recSize, 0);
+  Files.Close(f);
+  RETURN TRUE
+END NdxRead;
+
+(* ---------------------------------------------------------------
+ * .DBT memo files (dBASE III)
+ *
+ * 512-byte blocks; block 0 holds the next free block number.  Each memo
+ * starts on a block boundary and ends with two 1AH bytes.  The memo
+ * field in the .DBF holds the starting block as a 10-digit number.
+ * --------------------------------------------------------------- *)
+
+(** Derive the .DBT name that goes with a .DBF file name. **)
+PROCEDURE MemoName*(dbfName: ARRAY OF CHAR; VAR dbtName: ARRAY OF CHAR);
+VAR i, dot: INTEGER; upper: BOOLEAN;
+BEGIN
+  Strings.Copy(dbfName, dbtName);
+  dot := -1; i := 0;
+  WHILE dbtName[i] # 0X DO
+    IF dbtName[i] = "." THEN dot := i ELSIF dbtName[i] = "/" THEN dot := -1 END;
+    INC(i)
+  END;
+  upper := (dot >= 0) & (dbtName[dot + 1] >= "A") & (dbtName[dot + 1] <= "Z");
+  IF dot >= 0 THEN dbtName[dot] := 0X END;
+  IF upper THEN Strings.Append(".DBT", dbtName) ELSE Strings.Append(".dbt", dbtName) END
+END MemoName;
+
+(** Create an empty memo file. **)
+PROCEDURE MemoCreate*(dbtName: ARRAY OF CHAR);
+VAR f: Files.File; r: Files.Rider; i: INTEGER;
+BEGIN
+  f := Files.New(dbtName);
+  IF f = NIL THEN RETURN END;
+  Files.Set(r, f, 0);
+  WriteDWord(r, 1);
+  FOR i := 4 TO 15 DO Files.Write(r, 0) END;
+  Files.Write(r, 03H);
+  FOR i := 17 TO MemoBlock - 1 DO Files.Write(r, 0) END;
+  Files.Register(f);
+  Files.Close(f)
+END MemoCreate;
+
+(** Read the memo starting at block into text (truncated to fit). **)
+PROCEDURE MemoRead*(dbtName: ARRAY OF CHAR; block: INTEGER; VAR text: ARRAY OF CHAR);
+VAR f: Files.File; r: Files.Rider; i: INTEGER; b: BYTE;
+BEGIN
+  text[0] := 0X;
+  IF block <= 0 THEN RETURN END;
+  f := Files.Old(dbtName);
+  IF f = NIL THEN RETURN END;
+  Files.Set(r, f, block * MemoBlock);
+  i := 0;
+  LOOP
+    Files.Read(r, b);
+    IF r.eof OR (b = 1AH) OR (i >= LEN(text) - 1) THEN EXIT END;
+    IF b # 0 THEN text[i] := CHR(b); INC(i) END
+  END;
+  text[i] := 0X;
+  Files.Close(f)
+END MemoRead;
+
+(** Store text as a memo.  block is the memo's current starting block (0
+    for none); it is rewritten in place when the new text fits in the
+    blocks already used, otherwise appended.  Returns the block used. **)
+PROCEDURE MemoWrite*(dbtName: ARRAY OF CHAR; VAR block: INTEGER; text: ARRAY OF CHAR);
+VAR
+  f: Files.File; r: Files.Rider;
+  i, n, oldLen, next, need, have: INTEGER; b: BYTE;
+BEGIN
+  IF ~Files.Exists(dbtName) THEN MemoCreate(dbtName) END;
+  f := Files.Old(dbtName);
+  IF f = NIL THEN RETURN END;
+  n := Strings.Length(text);
+  IF n = 0 THEN block := 0; Files.Close(f); RETURN END;
+  Files.Set(r, f, 0);
+  next := ReadDWord(r);
+  IF next < 1 THEN next := 1 END;
+  need := (n + 2 + MemoBlock - 1) DIV MemoBlock;
+  have := 0;
+  IF block > 0 THEN
+    Files.Set(r, f, block * MemoBlock);
+    oldLen := 0;
+    LOOP
+      Files.Read(r, b);
+      IF r.eof OR (b = 1AH) THEN EXIT END;
+      INC(oldLen)
+    END;
+    have := (oldLen + 2 + MemoBlock - 1) DIV MemoBlock
+  END;
+  IF (block <= 0) OR (need > have) THEN
+    block := next;
+    next := block + need;
+    Files.Set(r, f, 0);
+    WriteDWord(r, next)
+  END;
+  Files.Set(r, f, block * MemoBlock);
+  FOR i := 0 TO n - 1 DO Files.Write(r, ORD(text[i])) END;
+  Files.Write(r, 1AH); Files.Write(r, 1AH);
+  PadTo(r, (block + need) * MemoBlock);
+  Files.Register(f);
+  Files.Close(f)
+END MemoWrite;
 
 END DBF.

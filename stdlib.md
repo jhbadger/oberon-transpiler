@@ -952,24 +952,32 @@ IMPORT DBF;
 ```
 
 Read and write dBASE III / FoxPro `.dbf` files.  Supports Character (`C`), Numeric
-(`N`), Logical (`L`), and Memo (`M`) field types.
+(`N`), Logical (`L`), Date (`D`) and Memo (`M`) field types, `.DBT` memo files and
+dBASE III `.NDX` B-tree index files.  `examples/obbase.mod` is a full client.
 
 ### Constants
 
 | Constant | Description |
 |----------|-------------|
-| `DBF.MaxFields` | Maximum number of fields per database (32) |
+| `DBF.MaxFields` | Maximum number of fields per database (128) |
+| `DBF.MaxRecLen` | Longest record (4000 bytes) |
+| `DBF.MaxNdx` | Keys an in-memory index can hold (65536) |
+| `DBF.MaxNdxKey` | Longest character index key (100) |
 | `DBF.TypeChar` | Field type character `'C'` |
 | `DBF.TypeNumeric` | Field type character `'N'` |
 | `DBF.TypeLogical` | Field type character `'L'` |
 | `DBF.TypeMemo` | Field type character `'M'` |
+| `DBF.TypeDate` | Field type character `'D'` (stored as `YYYYMMDD`) |
+| `DBF.TypeFloat` | Field type character `'F'` (FoxPro) |
 
 ### Types
 
 | Type | Description |
 |------|-------------|
 | `DBF.Field` | Field descriptor: `name: ARRAY 11 OF CHAR; type: CHAR; len, dec: BYTE` |
-| `DBF.Database` | Open database state: `f: Files.File; numFields, recordLen, numRecs, headerLen: INTEGER; fields: ARRAY MaxFields OF Field` |
+| `DBF.Database` | Open database state: `f: Files.File; numFields, recordLen, numRecs, headerLen: INTEGER; fields: ARRAY MaxFields OF Field; version: INTEGER` (03H, or 83H with memo); `year, month, day: INTEGER` (last update) |
+| `DBF.NdxEntry` | `POINTER TO RECORD key: ARRAY 101 OF CHAR; num: REAL; rec: INTEGER END` — one index key (character keys space-padded; numeric and date keys in `num`; `rec` is 1-based) |
+| `DBF.NdxIndex` | `POINTER TO RECORD expr: ARRAY 256 OF CHAR; numeric, unique: BOOLEAN; keyLen, n: INTEGER; e: ARRAY MaxNdx OF NdxEntry END` — a whole index in memory, entries sorted |
 | `DBF.Index` | In-memory sorted index: `count, fieldIdx: INTEGER` |
 | `DBF.ValidationResult` | Result of `Validate`: `ok: BOOLEAN; recNum, fieldIdx: INTEGER; msg: ARRAY 64 OF CHAR` |
 
@@ -1015,6 +1023,35 @@ Read and write dBASE III / FoxPro `.dbf` files.  Supports Character (`C`), Numer
 | `DBF.UpdateFieldReal(VAR db: Database; recNum, fieldIdx: INTEGER; x: REAL)` | Overwrite a numeric field with real `x`. |
 | `DBF.UpdateFieldBool(VAR db: Database; recNum, fieldIdx: INTEGER; v: BOOLEAN)` | Overwrite a logical field. |
 | `DBF.UpdateRecord(VAR db: Database; recNum: INTEGER; packed: ARRAY OF CHAR)` | Overwrite all fields of record `recNum` from a pipe-delimited string. |
+
+### Raw Records
+
+A raw buffer is `recordLen` bytes: byte 0 is the deletion flag (`" "` or `"*"`),
+then every field's bytes in order.
+
+| Procedure / Function | Description |
+|----------------------|-------------|
+| `DBF.ReadRec(VAR db: Database; recNum: INTEGER; VAR buf: ARRAY OF CHAR)` | Read record `recNum` (0-based) into `buf`; past the end, `buf` is blank. |
+| `DBF.WriteRec(VAR db: Database; recNum: INTEGER; buf: ARRAY OF CHAR)` | Write `buf` as record `recNum`; `recNum = numRecs` appends.  Stamps today's date in the header. |
+| `DBF.FieldPos(VAR db: Database; fieldIdx: INTEGER): INTEGER` | Offset of a field inside a raw buffer. |
+| `DBF.Zap(VAR db: Database; filename: ARRAY OF CHAR)` | Remove every record, keeping the structure. |
+
+### Index Files (.NDX)
+
+| Procedure / Function | Description |
+|----------------------|-------------|
+| `DBF.NdxNew(): NdxIndex` | Allocate an empty index. |
+| `DBF.NdxRead(filename: ARRAY OF CHAR; VAR ix: NdxIndex): BOOLEAN` | Load every key of a dBASE III `.NDX` file (any tree shape) in key order. |
+| `DBF.NdxWrite(ix: NdxIndex; filename: ARRAY OF CHAR): BOOLEAN` | Write sorted entries as a balanced dBASE III `.NDX` B-tree. |
+
+### Memo Files (.DBT)
+
+| Procedure | Description |
+|-----------|-------------|
+| `DBF.MemoName(dbfName: ARRAY OF CHAR; VAR dbtName: ARRAY OF CHAR)` | The `.DBT` name that goes with a `.DBF`. |
+| `DBF.MemoCreate(dbtName: ARRAY OF CHAR)` | Create an empty memo file. |
+| `DBF.MemoRead(dbtName: ARRAY OF CHAR; block: INTEGER; VAR text: ARRAY OF CHAR)` | Read the memo starting at `block` (the number stored in the memo field). |
+| `DBF.MemoWrite(dbtName: ARRAY OF CHAR; VAR block: INTEGER; text: ARRAY OF CHAR)` | Store a memo, in place if it still fits, otherwise appended; `block` returns where it went (0 for empty text). |
 
 ### Delete / Undelete / Pack
 
