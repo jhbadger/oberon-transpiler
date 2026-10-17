@@ -113,6 +113,9 @@ CONST
   Orange*        = 11;  BrightBlue*    = 12;  BrightMagenta* = 13;
   BrightCyan*    = 14;  BrightWhite*   = 15;
 
+  (* Attribute bits: add to a foreground color (e.g. White + AttrUnderline) *)
+  AttrUnderline* = 256;  AttrBlink* = 512;  AttrReverse* = 1024;
+
 (* ── Box-drawing pseudo-characters stored in Cell.ch ───────────────────── *)
 (* Flush maps these byte values to multi-byte UTF-8 sequences.             *)
 
@@ -184,6 +187,7 @@ VAR
   ModalResult*: INTEGER; (* non-zero = close the modal loop  *)
 
   prevCols, prevRows: INTEGER;
+  attrOn: BOOLEAN;   (* SetColor emitted underline/blink/reverse *)
 
 (* ════════════════════════════════════════════════════════════════════════
    Internal helpers
@@ -202,10 +206,22 @@ BEGIN
   END
 END EmitBoxChar;
 
-(* Emit ANSI 16-color sequence; values 0-7 use normal codes, 8-15 use bright *)
+(* Emit ANSI 16-color sequence; values 0-7 use normal codes, 8-15 use bright.
+   A foreground value of 256 or more carries attribute bits above the color
+   (AttrUnderline, AttrBlink, AttrReverse); they are reset with SGR 0 before
+   the next color that lacks them. *)
 PROCEDURE SetColor(fg, bg: INTEGER);
+VAR a: INTEGER;
 BEGIN
   Out.Char(01BX); Out.Char('[');
+  IF attrOn THEN  Out.String("0;");  attrOn := FALSE  END;
+  IF fg >= 256 THEN
+    a := fg DIV 256;  fg := fg MOD 256;
+    IF ODD(a) THEN  Out.String("4;")  END;
+    IF ODD(a DIV 2) THEN  Out.String("5;")  END;
+    IF ODD(a DIV 4) THEN  Out.String("7;")  END;
+    attrOn := TRUE
+  END;
   IF    fg >= 16 THEN Out.String("38;5;"); Out.Int(fg, 0)
   ELSIF fg >= 8  THEN Out.Int(90 + (fg - 8), 0)
   ELSE                Out.Int(30 + fg, 0) END;
@@ -219,7 +235,7 @@ END SetColor;
 (* Reset color *)
 PROCEDURE ResetColor;
 BEGIN
-  Out.Char(01BX); Out.String("[0m")
+  Out.Char(01BX); Out.String("[0m");  attrOn := FALSE
 END ResetColor;
 
 (* ════════════════════════════════════════════════════════════════════════

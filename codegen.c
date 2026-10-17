@@ -1307,6 +1307,8 @@ static void emit_var_arg(CG *g, Node *e) {
     if (e->kind == ND_IDENT) {
         if (is_outer_var(g, e->str)) { emit(g,"_frame->%s", e->str); return; }
         if (sym_is_var(e->str))      { emit(g,"%s", e->str); return; }
+        /* a value open-array parameter is already a pointer to its data */
+        if (is_open_array(sym_type(e->str))) { emit(g,"%s", e->str); return; }
         emit(g,"&%s", e->str); return;
     }
     emit(g,"&("); emit_expr(g,e); emit(g,")");
@@ -1320,6 +1322,7 @@ static void emit_addr_of(CG *g, Node *e) {
             emit(g,"_frame->%s", e->str); return;
         }
         if (sym_is_var(e->str)) { emit(g,"%s",e->str); return; }
+        if (is_open_array(sym_type(e->str))) { emit(g,"%s",e->str); return; }
         { Node *t = sym_type(e->str);
           if (t && t->kind==ND_TNAME) {
               Node *td = find_type_decl(t->str);
@@ -1539,6 +1542,9 @@ static int try_emit_import(CG *g, Node *fa, Node *args) {
         if (!strcmp(proc,"DirCount")){ emit(g,"OS_DirCount()"); return 1; }
         if (!strcmp(proc,"DirName")) { emit(g,"OS_DirName("); emit_expr(g,a0); emit(g,","); emit_expr(g,a1); emit(g,","); emit_open_array_len(g,a1); emit(g,")"); return 1; }
         if (!strcmp(proc,"DirIsDir"))     { emit(g,"OS_DirIsDir("); emit_expr(g,a0); emit(g,")"); return 1; }
+        if (!strcmp(proc,"DirSize"))      { emit(g,"OS_DirSize("); emit_expr(g,a0); emit(g,")"); return 1; }
+        if (!strcmp(proc,"DirTime"))      { emit(g,"OS_DirTime("); emit_expr(g,a0); emit(g,")"); return 1; }
+        if (!strcmp(proc,"FreeSpace"))    { emit(g,"OS_FreeSpace("); emit_as_string(g,a0); emit(g,")"); return 1; }
         if (!strcmp(proc,"ClipWriteFile")){ emit(g,"OS_ClipWriteFile("); emit_as_string(g,a0); emit(g,")"); return 1; }
         if (!strcmp(proc,"ClipPasteCmd")) { emit(g,"OS_ClipPasteCmd("); emit_as_string(g,a0); emit(g,")"); return 1; }
     }
@@ -2677,8 +2683,12 @@ void codegen(Node *module, FILE *out, int is_main, const char *srcfile) {
         emit(g,"static int  _term_mouse_y   = 0;\n");
         emit(g,"static int  _term_mouse_btn = 0;\n");
         emit(g,"static int  _term_mouse_on  = 0;\n");
+        emit(g,"static int  _term_mod       = 0;\n");
+        emit(g,"static char _term_alt       = 0;\n");
         /* _term_restore — also disables mouse reporting if it was on */
+        emit(g,"static int  _term_active    = 0;\n");
         emit(g,"static void _term_restore(void) {\n");
+        emit(g,"    if (!_term_active) return;\n");
         emit(g,"    if (_term_mouse_on) {\n");
         emit(g,"        printf(\"\\033[?1000l\\033[?1006l\"); fflush(stdout);\n");
         emit(g,"    }\n");
@@ -2686,8 +2696,12 @@ void codegen(Node *module, FILE *out, int is_main, const char *srcfile) {
         emit(g,"    printf(\"\\033[0m\\033[?25h\"); fflush(stdout);\n");
         emit(g,"}\n");
         /* _term_init */
+        /* Skipped when stdout is not a terminal, so a Terminal-importing
+         * program can still write plain output to a pipe or file. */
         emit(g,"static void _term_init(void) {\n");
         emit(g,"    struct termios raw;\n");
+        emit(g,"    if (!isatty(STDOUT_FILENO)) return;\n");
+        emit(g,"    _term_active = 1;\n");
         emit(g,"    tcgetattr(STDIN_FILENO, &_term_orig);\n");
         emit(g,"    raw = _term_orig;\n");
         emit(g,"    raw.c_iflag &= ~(unsigned)(ICRNL|IXON);\n");
@@ -2711,6 +2725,7 @@ void codegen(Node *module, FILE *out, int is_main, const char *srcfile) {
         emit(g,"}\n");
 				emit(g,"static void Terminal_Restore(void) { _term_restore(); }\n");
 				emit(g,"static void Terminal_Init(void) {\n");
+				emit(g,"    if (!_term_active) { tcgetattr(STDIN_FILENO,&_term_orig); _term_active=1; atexit(_term_restore); }\n");
 				emit(g,"    struct termios raw = _term_orig;\n");
 				emit(g,"    raw.c_iflag &= ~(unsigned)(ICRNL|IXON);\n");
 				emit(g,"    raw.c_lflag &= ~(unsigned)(ECHO|ICANON|ISIG\n");
@@ -2746,6 +2761,10 @@ void codegen(Node *module, FILE *out, int is_main, const char *srcfile) {
         emit(g,"static int Terminal_MouseX(void)   { return _term_mouse_x; }\n");
         emit(g,"static int Terminal_MouseY(void)   { return _term_mouse_y; }\n");
         emit(g,"static int Terminal_MouseBtn(void) { return _term_mouse_btn; }\n");
+        /* Modifiers(): 1=Shift 2=Alt 4=Ctrl held with the last special key;
+         * AltChar(): the key after ESC when the last key was an Alt chord. */
+        emit(g,"static int Terminal_Modifiers(void) { return _term_mod; }\n");
+        emit(g,"static char Terminal_AltChar(void) { return _term_alt; }\n");
         /* Standard procedures */
         emit(g,"static void Terminal_Goto(int x, int y) {\n");
         emit(g,"    printf(\"\\033[%%d;%%dH\", y, x);\n");
@@ -2788,7 +2807,10 @@ void codegen(Node *module, FILE *out, int is_main, const char *srcfile) {
          *   A4X  Mouse event   (call MouseX/Y/Btn for details)
          *   A5X  Shift+Up      A6X  Shift+Down
          *   A7X  Shift+Left    A8X  Shift+Right
-         *   1BX  Bare ESC
+         *   A9X  Insert
+         *   1BX  Bare ESC (or an Alt+key chord: see Terminal_AltChar)
+         *   F1-F12, arrows, Home/End/PgUp/PgDn/Del also set the modifier
+         *   mask read by Terminal_Modifiers (Shift-Tab = 09X with Shift).
          *   otherwise: the character itself
          *
          * Mouse button values stored in _term_mouse_btn:
@@ -2805,111 +2827,97 @@ void codegen(Node *module, FILE *out, int is_main, const char *srcfile) {
         emit(g,"        read(STDIN_FILENO,&c,1);\n");
         emit(g,"        t.c_cc[VMIN]=0; tcsetattr(STDIN_FILENO,TCSANOW,&t);\n");
         emit(g,"    }\n");
+        emit(g,"    _term_mod = 0; _term_alt = 0;\n");
         emit(g,"    if (c == '\\033') {\n");
         emit(g,"        struct termios t2; tcgetattr(STDIN_FILENO,&t2);\n");
         emit(g,"        t2.c_cc[VMIN]=0; t2.c_cc[VTIME]=1;\n");
         emit(g,"        tcsetattr(STDIN_FILENO,TCSANOW,&t2);\n");
-        emit(g,"        char c2=0, c3=0;\n");
-        emit(g,"        if (read(STDIN_FILENO,&c2,1)==1 && c2=='[') {\n");
-        emit(g,"            if (read(STDIN_FILENO,&c3,1)!=1) c3=0;\n");
-        /* Arrow keys */
-        emit(g,"            if (c3=='A') { t2.c_cc[VTIME]=0; tcsetattr(STDIN_FILENO,TCSANOW,&t2); return (char)0xa0; }\n");
-        emit(g,"            if (c3=='B') { t2.c_cc[VTIME]=0; tcsetattr(STDIN_FILENO,TCSANOW,&t2); return (char)0xa1; }\n");
-        emit(g,"            if (c3=='D') { t2.c_cc[VTIME]=0; tcsetattr(STDIN_FILENO,TCSANOW,&t2); return (char)0xa2; }\n");
-        emit(g,"            if (c3=='C') { t2.c_cc[VTIME]=0; tcsetattr(STDIN_FILENO,TCSANOW,&t2); return (char)0xa3; }\n");
-        /* SGR mouse: \033[<btn;x;yM or \033[<btn;x;ym */
-        emit(g,"            if (c3=='<') {\n");
-        emit(g,"                char buf[32]; int bi=0; char last=0;\n");
-        emit(g,"                while (bi<31) {\n");
-        emit(g,"                    char ch=0;\n");
-        emit(g,"                    if (read(STDIN_FILENO,&ch,1)!=1) break;\n");
-        emit(g,"                    if (ch=='M'||ch=='m') { last=ch; break; }\n");
-        emit(g,"                    buf[bi++]=ch;\n");
-        emit(g,"                }\n");
-        emit(g,"                buf[bi]=0;\n");
+        emit(g,"        char c2=0; char r=(char)0x1b;\n");
+        emit(g,"        if (read(STDIN_FILENO,&c2,1)!=1) c2=0;\n");
+        emit(g,"        if (c2=='[') {\n");
+        emit(g,"            /* CSI: collect parameter bytes up to the final byte */\n");
+        emit(g,"            char buf[40]; int bi=0; char fin=0, ch=0;\n");
+        emit(g,"            while (bi<39) {\n");
+        emit(g,"                if (read(STDIN_FILENO,&ch,1)!=1) break;\n");
+        emit(g,"                if (ch>='@' && ch<='~' && !(bi==0 && ch=='<')) { fin=ch; break; }\n");
+        emit(g,"                buf[bi++]=ch;\n");
+        emit(g,"            }\n");
+        emit(g,"            buf[bi]=0;\n");
+        emit(g,"            if (bi>0 && buf[0]=='<' && (fin=='M'||fin=='m')) {\n");
+        emit(g,"                /* SGR mouse: ESC [ < btn ; x ; y M/m */\n");
         emit(g,"                int btn=0,mx=0,my=0;\n");
-        emit(g,"                sscanf(buf,\"%%d;%%d;%%d\",&btn,&mx,&my);\n");
-        emit(g,"                _term_mouse_x = mx;\n");
-        emit(g,"                _term_mouse_y = my;\n");
-        /* btn: bits 0-1 = button (0=left,1=mid,2=right), bit 5 = motion, bit 6 = wheel.
-         * Release is signalled by the final 'm'.
-         * We expose: 0=L-press 1=M-press 2=R-press 3=release 32=motion 64=whl↑ 65=whl↓ */
-        emit(g,"                if (last=='m')            _term_mouse_btn=3;\n");
+        emit(g,"                sscanf(buf+1,\"%%d;%%d;%%d\",&btn,&mx,&my);\n");
+        emit(g,"                _term_mouse_x = mx; _term_mouse_y = my;\n");
+        emit(g,"                if (fin=='m')             _term_mouse_btn=3;\n");
         emit(g,"                else if (btn & 64)        _term_mouse_btn=(btn&67);\n");
         emit(g,"                else if (btn & 32)        _term_mouse_btn=32;\n");
         emit(g,"                else                      _term_mouse_btn=(btn&3);\n");
-        emit(g,"                t2.c_cc[VTIME]=0; tcsetattr(STDIN_FILENO,TCSANOW,&t2);\n");
-        emit(g,"                return (char)0xa4;\n");
-        emit(g,"            }\n");
-        /* Home / End (ESC [ H / ESC [ F) */
-        emit(g,"            if (c3=='H') { t2.c_cc[VTIME]=0; tcsetattr(STDIN_FILENO,TCSANOW,&t2); return (char)130; }\n");
-        emit(g,"            if (c3=='F') { t2.c_cc[VTIME]=0; tcsetattr(STDIN_FILENO,TCSANOW,&t2); return (char)131; }\n");
-        /* ESC [ digit ~ sequences: PgUp=5, PgDn=6, Del=3, Home=1/7, End=4/8
-         * Also ESC [ 1 ; 5 D/C/H/F for Ctrl+Left/Right/Home/End */
-        emit(g,"            if (c3>='1' && c3<='9') {\n");
-        emit(g,"                char c4=0; read(STDIN_FILENO,&c4,1);\n");
-        emit(g,"                if (c4==';') {\n");
-        emit(g,"                    char c5=0,c6=0;\n");
-        emit(g,"                    read(STDIN_FILENO,&c5,1);\n");
-        emit(g,"                    read(STDIN_FILENO,&c6,1);\n");
-        emit(g,"                    t2.c_cc[VTIME]=0; tcsetattr(STDIN_FILENO,TCSANOW,&t2);\n");
-        emit(g,"                    if (c5=='5') {\n");
-        emit(g,"                        if (c6=='D') return (char)133;\n");
-        emit(g,"                        if (c6=='C') return (char)134;\n");
-        emit(g,"                        if (c6=='H') return (char)135;\n");
-        emit(g,"                        if (c6=='F') return (char)136;\n");
+        emit(g,"                r=(char)0xa4;\n");
+        emit(g,"            } else {\n");
+        emit(g,"                int p1=0,p2=0; sscanf(buf,\"%%d;%%d\",&p1,&p2);\n");
+        emit(g,"                int m = p2>1 ? p2-1 : 0;   /* 1=Shift 2=Alt 4=Ctrl */\n");
+        emit(g,"                _term_mod = m;\n");
+        emit(g,"                switch (fin) {\n");
+        emit(g,"                case 'A': r = (m==1)?(char)0xa5:(char)0xa0; break;\n");
+        emit(g,"                case 'B': r = (m==1)?(char)0xa6:(char)0xa1; break;\n");
+        emit(g,"                case 'D': r = (m==1)?(char)0xa7:(m==4)?(char)133:(char)0xa2; break;\n");
+        emit(g,"                case 'C': r = (m==1)?(char)0xa8:(m==4)?(char)134:(char)0xa3; break;\n");
+        emit(g,"                case 'H': r = (m==4)?(char)135:(char)130; break;\n");
+        emit(g,"                case 'F': r = (m==4)?(char)136:(char)131; break;\n");
+        emit(g,"                case 'P': r=(char)137; break;\n");
+        emit(g,"                case 'Q': r=(char)138; break;\n");
+        emit(g,"                case 'R': r=(char)139; break;\n");
+        emit(g,"                case 'S': r=(char)140; break;\n");
+        emit(g,"                case 'Z': r='\\t'; _term_mod=1; break;\n");
+        emit(g,"                case '~':\n");
+        emit(g,"                    switch (p1) {\n");
+        emit(g,"                    case 1: case 7: r=(char)130; break;\n");
+        emit(g,"                    case 4: case 8: r=(char)131; break;\n");
+        emit(g,"                    case 2: r=(char)0xa9; break;\n");
+        emit(g,"                    case 3: r=(char)132; break;\n");
+        emit(g,"                    case 5: r=(char)128; break;\n");
+        emit(g,"                    case 6: r=(char)129; break;\n");
+        emit(g,"                    case 11: r=(char)137; break; case 12: r=(char)138; break;\n");
+        emit(g,"                    case 13: r=(char)139; break; case 14: r=(char)140; break;\n");
+        emit(g,"                    case 15: r=(char)141; break; case 17: r=(char)142; break;\n");
+        emit(g,"                    case 18: r=(char)143; break; case 19: r=(char)144; break;\n");
+        emit(g,"                    case 20: r=(char)145; break; case 21: r=(char)146; break;\n");
+        emit(g,"                    case 23: r=(char)147; break; case 24: r=(char)148; break;\n");
+        emit(g,"                    /* VT220 F13-F20, sent by some terminals for Shift+F3..F10 */\n");
+        emit(g,"                    case 25: r=(char)139; _term_mod|=1; break;\n");
+        emit(g,"                    case 26: r=(char)140; _term_mod|=1; break;\n");
+        emit(g,"                    case 28: r=(char)141; _term_mod|=1; break;\n");
+        emit(g,"                    case 29: r=(char)142; _term_mod|=1; break;\n");
+        emit(g,"                    case 31: r=(char)143; _term_mod|=1; break;\n");
+        emit(g,"                    case 32: r=(char)144; _term_mod|=1; break;\n");
+        emit(g,"                    case 33: r=(char)145; _term_mod|=1; break;\n");
+        emit(g,"                    case 34: r=(char)146; _term_mod|=1; break;\n");
+        emit(g,"                    default: _term_mod=0; break;\n");
         emit(g,"                    }\n");
-        emit(g,"                    if (c5=='2') {\n");
-        emit(g,"                        if (c6=='A') return (char)0xa5;\n");
-        emit(g,"                        if (c6=='B') return (char)0xa6;\n");
-        emit(g,"                        if (c6=='D') return (char)0xa7;\n");
-        emit(g,"                        if (c6=='C') return (char)0xa8;\n");
-        emit(g,"                    }\n");
-        emit(g,"                    return '\\x1B';\n");
+        emit(g,"                    break;\n");
+        emit(g,"                default: _term_mod=0; break;\n");
         emit(g,"                }\n");
-        /* Two-digit sequences: ESC[11~ = F1 .. ESC[24~ = F12 */
-        emit(g,"                if (c4>='0' && c4<='9') {\n");
-        emit(g,"                    int num=(c3-'0')*10+(c4-'0'); char term=0;\n");
-        emit(g,"                    read(STDIN_FILENO,&term,1);\n");
-        emit(g,"                    t2.c_cc[VTIME]=0; tcsetattr(STDIN_FILENO,TCSANOW,&t2);\n");
-        emit(g,"                    if (term=='~') {\n");
-        emit(g,"                        if (num==11) return (char)137;\n"); /* F1  */
-        emit(g,"                        if (num==12) return (char)138;\n"); /* F2  */
-        emit(g,"                        if (num==13) return (char)139;\n"); /* F3  */
-        emit(g,"                        if (num==14) return (char)140;\n"); /* F4  */
-        emit(g,"                        if (num==15) return (char)141;\n"); /* F5  */
-        emit(g,"                        if (num==17) return (char)142;\n"); /* F6  */
-        emit(g,"                        if (num==18) return (char)143;\n"); /* F7  */
-        emit(g,"                        if (num==19) return (char)144;\n"); /* F8  */
-        emit(g,"                        if (num==20) return (char)145;\n"); /* F9  */
-        emit(g,"                        if (num==21) return (char)146;\n"); /* F10 */
-        emit(g,"                        if (num==23) return (char)147;\n"); /* F11 */
-        emit(g,"                        if (num==24) return (char)148;\n"); /* F12 */
-        emit(g,"                    }\n");
-        emit(g,"                    return '\\x1B';\n");
-        emit(g,"                }\n");
-        emit(g,"                t2.c_cc[VTIME]=0; tcsetattr(STDIN_FILENO,TCSANOW,&t2);\n");
-        emit(g,"                if (c3=='5') return (char)128;\n");
-        emit(g,"                if (c3=='6') return (char)129;\n");
-        emit(g,"                if (c3=='3') return (char)132;\n");
-        emit(g,"                if (c3=='1'||c3=='7') return (char)130;\n");
-        emit(g,"                if (c3=='4'||c3=='8') return (char)131;\n");
-        emit(g,"                return '\\x1B';\n");
         emit(g,"            }\n");
-        emit(g,"        }\n");
-        /* ESC O P/Q/R/S = F1-F4 (xterm application-cursor mode) */
-        emit(g,"        if (c2=='O') {\n");
-        emit(g,"            char co=0; read(STDIN_FILENO,&co,1);\n");
-        emit(g,"            t2.c_cc[VTIME]=0; tcsetattr(STDIN_FILENO,TCSANOW,&t2);\n");
-        emit(g,"            if (co=='P') return (char)137;\n"); /* F1 */
-        emit(g,"            if (co=='Q') return (char)138;\n"); /* F2 */
-        emit(g,"            if (co=='R') return (char)139;\n"); /* F3 */
-        emit(g,"            if (co=='S') return (char)140;\n"); /* F4 */
-        emit(g,"            return '\\x1B';\n");
+        emit(g,"        } else if (c2=='O') {\n");
+        emit(g,"            /* SS3: F1-F4, arrows, Home/End in application mode */\n");
+        emit(g,"            char co=0; if (read(STDIN_FILENO,&co,1)!=1) co=0;\n");
+        emit(g,"            if (co>='2' && co<='8') { _term_mod=co-'1'; if (read(STDIN_FILENO,&co,1)!=1) co=0; }\n");
+        emit(g,"            switch (co) {\n");
+        emit(g,"            case 'P': r=(char)137; break; case 'Q': r=(char)138; break;\n");
+        emit(g,"            case 'R': r=(char)139; break; case 'S': r=(char)140; break;\n");
+        emit(g,"            case 'A': r=(char)0xa0; break; case 'B': r=(char)0xa1; break;\n");
+        emit(g,"            case 'C': r=(char)0xa3; break; case 'D': r=(char)0xa2; break;\n");
+        emit(g,"            case 'H': r=(char)130; break; case 'F': r=(char)131; break;\n");
+        emit(g,"            default: _term_mod=0; break;\n");
+        emit(g,"            }\n");
+        emit(g,"        } else if (c2!=0) {\n");
+        emit(g,"            /* ESC + key: Alt/Meta chord.  Still reported as ESC for\n");
+        emit(g,"               programs that don't ask; Terminal.AltChar() returns the key. */\n");
+        emit(g,"            _term_alt = c2;\n");
         emit(g,"        }\n");
         emit(g,"        t2.c_cc[VMIN]=0; t2.c_cc[VTIME]=0;\n");
         emit(g,"        tcsetattr(STDIN_FILENO,TCSANOW,&t2);\n");
-        emit(g,"        return '\\x1B';\n");
+        emit(g,"        return r;\n");
         emit(g,"    }\n");
         emit(g,"    return c;\n");
         emit(g,"}\n");
@@ -3090,7 +3098,9 @@ void codegen(Node *module, FILE *out, int is_main, const char *srcfile) {
         /* Directory listing — stateful, sorted (dirs first then alpha) */
         emit(g,"#include <dirent.h>\n");
         emit(g,"#define _OS_MAX_DIR 4096\n");
-        emit(g,"typedef struct { char name[256]; int isdir; } _OSDirEntry;\n");
+        emit(g,"#include <sys/stat.h>\n");
+        emit(g,"#include <sys/statvfs.h>\n");
+        emit(g,"typedef struct { char name[256]; int isdir; long size; long mtime; } _OSDirEntry;\n");
         emit(g,"static _OSDirEntry _os_dir[_OS_MAX_DIR];\n");
         emit(g,"static int _os_dir_n = 0;\n");
         emit(g,"static int _os_dir_cmp(const void *a, const void *b) {\n");
@@ -3115,6 +3125,11 @@ void codegen(Node *module, FILE *out, int is_main, const char *srcfile) {
         emit(g,"        strncpy(_os_dir[_os_dir_n].name, e->d_name, 255);\n");
         emit(g,"        _os_dir[_os_dir_n].name[255] = 0;\n");
         emit(g,"        _os_dir[_os_dir_n].isdir = isdir;\n");
+        emit(g,"        { char fp[1280]; struct stat st;\n");
+        emit(g,"          snprintf(fp,sizeof fp,\"%%s/%%s\",path[0]?path:\".\",e->d_name);\n");
+        emit(g,"          if (stat(fp,&st)==0) { _os_dir[_os_dir_n].size=(long)st.st_size; _os_dir[_os_dir_n].mtime=(long)st.st_mtime;\n");
+        emit(g,"            if (S_ISDIR(st.st_mode)) _os_dir[_os_dir_n].isdir=1; }\n");
+        emit(g,"          else { _os_dir[_os_dir_n].size=0; _os_dir[_os_dir_n].mtime=0; } }\n");
         emit(g,"        _os_dir_n++;\n");
         emit(g,"    }\n");
         emit(g,"    closedir(d);\n");
@@ -3124,6 +3139,14 @@ void codegen(Node *module, FILE *out, int is_main, const char *srcfile) {
         emit(g,"static void OS_DirName(int i, char *name, int nlen) {\n");
         emit(g,"    if (i<0||i>=_os_dir_n){name[0]=0;return;}\n");
         emit(g,"    strncpy(name,_os_dir[i].name,nlen-1); name[nlen-1]=0;\n");
+        emit(g,"}\n");
+        /* OS_DirSize(i) / OS_DirTime(i): size in bytes and mtime (seconds since
+         * 1970) of entry i;  OS_FreeSpace(path): bytes free on its file system */
+        emit(g,"static long OS_DirSize(int i) { return (i>=0 && i<_os_dir_n) ? _os_dir[i].size : 0; }\n");
+        emit(g,"static long OS_DirTime(int i) { return (i>=0 && i<_os_dir_n) ? _os_dir[i].mtime : 0; }\n");
+        emit(g,"static long OS_FreeSpace(const char *path) {\n");
+        emit(g,"    struct statvfs v; if (statvfs(path[0]?path:\".\",&v)!=0) return 0;\n");
+        emit(g,"    return (long)v.f_bavail * (long)v.f_frsize;\n");
         emit(g,"}\n");
         emit(g,"static int  OS_DirIsDir(int i) {\n");
         emit(g,"    return (i>=0 && i<_os_dir_n) ? _os_dir[i].isdir : 0;\n");
