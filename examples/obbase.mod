@@ -6625,24 +6625,33 @@ END DoInsert;
    BROWSE
    ==================================================================== *)
 
+PROCEDURE StepMatch(a, dir: INTEGER; forN: Node): BOOLEAN;
+BEGIN
+  LOOP
+    IF ~Step(a, dir) THEN RETURN FALSE END;
+    IF (forN = NIL) OR EvalBool(forN) THEN RETURN TRUE END
+  END
+END StepMatch;
+
 PROCEDURE DoBrowse;
 VAR
   el: ExprList; fr: ARRAY DBF.MaxFields OF FieldRef; nf, i, j, k2, x, y, y0, rows, cw: INTEGER;
   colW: ARRAY DBF.MaxFields OF INTEGER;
   recs: ARRAY MaxSR OF INTEGER; nrec, cr, cc, left, freeze, topRec: INTEGER;
   fe: FieldEd; k: CHAR; done, editing, noAppend, ok: BOOLEAN; t, line: Str;
-  r: INTEGER; n: Node;
+  r: INTEGER; n, forN: Node;
 
 BEGIN
   IF ~NeedDb() THEN RETURN END;
   IF batch THEN Err("Full-screen commands need the interactive mode."); RETURN END;
-  el.n := 0; noAppend := FALSE; freeze := -1;
+  el.n := 0; noAppend := FALSE; freeze := -1; forN := NIL;
   WHILE (tk # tEOF) & ~err DO
     IF IsKw("FIELDS") THEN Next; ParseExprList(el)
     ELSIF IsKw("NOAPPEND") THEN Next; noAppend := TRUE
     ELSIF IsKw("NOFOLLOW") OR IsKw("NOMENU") THEN Next
     ELSIF IsKw("LOCK") OR IsKw("WIDTH") THEN Next; n := Expr()
     ELSIF IsKw("FREEZE") THEN Next; freeze := FieldIdx(cur, tkStr); Next
+    ELSIF IsKw("FOR") THEN Next; forN := Expr()
     ELSE Err("Unrecognized phrase/keyword in command.")
     END
   END;
@@ -6662,6 +6671,7 @@ BEGIN
     IF noAppend THEN Err("End of file encountered."); RETURN END;
     AppendBlank(cur)
   END;
+  IF (forN # NIL) & ~EvalBool(forN) THEN IF ~StepMatch(cur, 1, forN) THEN END END;
   topRec := areas[cur].rec;
   cr := 0; cc := 0; left := 0; done := FALSE; editing := FALSE;
   IF freeze >= 0 THEN cc := freeze END;
@@ -6676,7 +6686,7 @@ BEGIN
     nrec := 0;
     WHILE (nrec < rows) & ~areas[cur].eof DO
       recs[nrec] := areas[cur].rec; INC(nrec);
-      IF ~Step(cur, 1) THEN END
+      IF ~StepMatch(cur, 1, forN) THEN END
     END;
     IF cr >= nrec THEN cr := nrec - 1 END;
     IF cr < 0 THEN cr := 0 END;
@@ -6745,7 +6755,7 @@ BEGIN
         IF cr < nrec - 1 THEN INC(cr)
         ELSE
           SetRec(cur, recs[cr]);
-          IF Step(cur, 1) THEN
+          IF StepMatch(cur, 1, forN) THEN
             topRec := recs[MinI(1, nrec - 1)]; IF nrec = 1 THEN topRec := areas[cur].rec END
           ELSIF ~noAppend THEN
             IF FSAsk("Add new records? (Y/N)") THEN
@@ -6759,7 +6769,7 @@ BEGIN
         IF cr > 0 THEN DEC(cr)
         ELSE
           SetRec(cur, recs[0]);
-          IF Step(cur, -1) THEN topRec := areas[cur].rec END
+          IF StepMatch(cur, -1, forN) THEN topRec := areas[cur].rec END
         END
       ELSIF k2 = feOther THEN
         IF (k = TUI.KEsc) OR (k = KCtrlQ) OR (k = KCtrlW) OR (k = TUI.KCtrlEnd) THEN done := TRUE
@@ -6768,10 +6778,10 @@ BEGIN
         ELSIF (k = TUI.KCtrlLeft) OR (k = KCtrlZ) THEN IF cc > 0 THEN DEC(cc) END
         ELSIF (k = TUI.KPgDn) OR (k = KCtrlC) THEN
           SetRec(cur, recs[nrec - 1]);
-          IF Step(cur, 1) THEN topRec := areas[cur].rec; cr := 0 ELSE cr := nrec - 1 END
+          IF StepMatch(cur, 1, forN) THEN topRec := areas[cur].rec; cr := 0 ELSE cr := nrec - 1 END
         ELSIF (k = TUI.KPgUp) OR (k = KCtrlR) THEN
           SetRec(cur, recs[0]);
-          FOR i := 1 TO rows DO IF ~areas[cur].bof THEN IF Step(cur, -1) THEN END END END;
+          FOR i := 1 TO rows DO IF ~areas[cur].bof THEN IF StepMatch(cur, -1, forN) THEN END END END;
           topRec := areas[cur].rec; cr := 0
         ELSIF k = KCtrlU THEN
           SetRec(cur, recs[cr]); EnsureRec(cur);
@@ -8843,7 +8853,7 @@ BEGIN
   H("APPEND", "APPEND [BLANK]  /  APPEND FROM <file> [FOR <cond>] [SDF | DELIMITED [WITH <c>]]", "Adds records at the end of the database: full screen, a blank record, or copied from another file.  Press Enter on the first field of an empty record to finish.");
   H("ASSIST", "ASSIST", "Starts the menu-driven Assistant.  Esc leaves it for the dot prompt.");
   H("AVERAGE", "AVERAGE [<exp list>] [<scope>] [FOR <cond>] [WHILE <cond>] [TO <memvar list>]", "Computes the arithmetic mean of numeric expressions.");
-  H("BROWSE", "BROWSE [FIELDS <field list>] [FREEZE <field>] [NOAPPEND]", "Full-screen table of records for quick editing.  Ctrl-Left/Right pan, Ctrl-U deletes, Ctrl-W saves.");
+  H("BROWSE", "BROWSE [FIELDS <field list>] [FOR <cond>] [FREEZE <field>] [NOAPPEND]", "Full-screen table of records for quick editing.  FOR limits visible/navigable records.  Ctrl-Left/Right pan, Ctrl-U deletes, Ctrl-W saves.");
   H("CANCEL", "CANCEL", "Stops all command files and returns to the dot prompt.");
   H("CHANGE", "CHANGE [<scope>] [FIELDS <list>]", "Same as EDIT.");
   H("CLEAR", "CLEAR [ALL | GETS | MEMORY | TYPEAHEAD]", "Clears the screen; ALL also closes files and releases memory variables.");
