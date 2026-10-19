@@ -292,6 +292,7 @@ VAR
   inAssist: BOOLEAN;
   editBuf: TextBuf;
 
+
 (* ====================================================================
    String helpers
    ==================================================================== *)
@@ -325,8 +326,11 @@ END Append;
 PROCEDURE AppendCh(c: CHAR; VAR dst: ARRAY OF CHAR);
 VAR i: INTEGER;
 BEGIN
+  IF c = 0X THEN RETURN END;  (* refuse to embed a terminator *)
   i := SLen(dst);
-  IF i < LEN(dst) - 1 THEN dst[i] := c; dst[i + 1] := 0X END
+  IF i < LEN(dst) - 1 THEN
+    dst[i] := c; dst[i + 1] := 0X
+  END
 END AppendCh;
 
 PROCEDURE AppendInt(n: INTEGER; VAR dst: ARRAY OF CHAR);
@@ -1927,10 +1931,22 @@ END EvalBool;
 
 (* Evaluate s as an expression; err is left set on failure *)
 PROCEDURE EvalString(s: ARRAY OF CHAR; VAR v: Value);
-VAR n: Node;
+VAR n: Node; savedErr: BOOLEAN; savedMsg: Str;
 BEGIN
+  (* Save and clear the error state so compilation of a sub-
+     expression doesn't inherit a prior error, and restore it
+     if we succeed (so callers can detect fresh errors). *)
+  savedErr := err; Cpy(errMsg, savedMsg);
+  err := FALSE; errMsg[0] := 0X;
   n := CompileStr(s);
-  IF ~err THEN Eval(n, v) ELSE v.t := TU END
+  IF ~err THEN
+    Eval(n, v);
+    IF ~err THEN
+      (* restore prior error state *)
+      err := savedErr; Cpy(savedMsg, errMsg)
+    END
+  ELSE v.t := TU
+  END
 END EvalString;
 
 (* ---- PICTURE / TRANSFORM ---- *)
@@ -2883,26 +2899,36 @@ BEGIN
 END Skip;
 
 (* ---- opening and closing ---- *)
-
 PROCEDURE OpenIndex(a: INTEGER; name: ARRAY OF CHAR): BOOLEAN;
-VAR path: Str; ix: DBF.NdxIndex; save, k: INTEGER;
+VAR path: Str; ix: DBF.NdxIndex; save, k: INTEGER; priorErr: BOOLEAN;
 BEGIN
-  IF areas[a].nIdx >= MaxIdx THEN Err("Too many indexes."); RETURN FALSE END;
-  IF ~FindFile(name, ".ndx", path) THEN Err("File does not exist."); RETURN FALSE END;
-  IF ~DBF.NdxRead(path, ix) THEN Err("Not a dBASE index file."); RETURN FALSE END;
+  IF areas[a].nIdx >= MaxIdx THEN
+    Err("Too many indexes."); RETURN FALSE
+  END;
+  IF ~FindFile(name, ".ndx", path) THEN
+    Err("File does not exist."); RETURN FALSE
+  END;
+  IF ~DBF.NdxRead(path, ix) THEN
+    Err("Not a dBASE index file."); RETURN FALSE
+  END;
   k := areas[a].nIdx;
   Cpy(path, areas[a].idx[k].fname);
   areas[a].idx[k].ix := ix;
   areas[a].idx[k].dirty := FALSE;
+  (* clear err around CompileStr so we only see fresh errors *)
+  priorErr := err; err := FALSE;
   save := cur; cur := a;
   areas[a].idx[k].key := CompileStr(ix.expr);
   cur := save;
-  IF err THEN Err("Index file does not match database."); RETURN FALSE END;
+  IF err THEN
+    Err("Index file does not match database.");
+    RETURN FALSE
+  END;
+  err := priorErr;  (* restore caller's error state if we succeeded *)
   INC(areas[a].nIdx);
   IF areas[a].order = 0 THEN areas[a].order := 1 END;
   RETURN TRUE
 END OpenIndex;
-
 PROCEDURE CloseIndexes(a: INTEGER);
 BEGIN
   FlushIndexes(a);
@@ -3602,12 +3628,11 @@ END DoCount;
 (* ====================================================================
    Record-changing commands
    ==================================================================== *)
-
 PROCEDURE DoReplace;
 VAR
   c: Clauses; s: Scope; nf, i, cnt, ar: INTEGER;
   fa, ff: ARRAY 32 OF INTEGER; fe: ARRAY 32 OF Node; v: Value;
-  name, fname: Str;
+  name, fname: Str; touchesCur: BOOLEAN;
 BEGIN
   InitClauses(c); nf := 0;
   IF ~NeedDb() THEN RETURN END;
@@ -3624,17 +3649,24 @@ BEGIN
       IF i < 0 THEN Err("Variable not found."); RETURN END;
       IF ~IsKw("WITH") THEN Err("Syntax error."); RETURN END;
       Next;
-      IF nf < 32 THEN fa[nf] := ar; ff[nf] := i; fe[nf] := Expr(); INC(nf) END;
+      IF nf < 32 THEN
+        fa[nf] := ar; ff[nf] := i; fe[nf] := Expr(); INC(nf)
+      END;
       IF tk = tComma THEN Next END
     ELSE Err("Syntax error.")
     END
   END;
   IF err THEN RETURN END;
   IF nf = 0 THEN Err("Syntax error."); RETURN END;
+  (* Does any assignment target the current area? *)
+  touchesCur := FALSE;
+  FOR i := 0 TO nf - 1 DO
+    IF fa[i] = cur THEN touchesCur := TRUE END
+  END;
   ScopeStart(s, c, scNext);
   cnt := 0;
   WHILE ScopeOK(s) DO
-    BeginChange(cur);
+    IF touchesCur THEN BeginChange(cur) END;
     FOR i := 0 TO nf - 1 DO
       Eval(fe[i], v);
       IF ~err THEN
@@ -3644,13 +3676,12 @@ BEGIN
       END
     END;
     IF err THEN EXIT END;
-    EndChange(cur);
+    IF touchesCur THEN EndChange(cur) END;
     INC(cnt);
     ScopeAdvance(s)
   END;
   TalkCount(cnt, "replaced")
 END DoReplace;
-
 PROCEDURE DoDeleteRecall(del: BOOLEAN);
 VAR c: Clauses; s: Scope; cnt: INTEGER;
 BEGIN
@@ -3970,7 +4001,12 @@ BEGIN
   CloseIndexes(cur);
   WHILE (tk # tEOF) & ~err DO
     RawWord(name);
-    IF name[0] # 0X THEN IF OpenIndex(cur, name) THEN END END;
+    IF name[0] # 0X THEN
+      IF ~OpenIndex(cur, name) THEN
+        (* OpenIndex sets err; stop processing further indexes *)
+        RETURN
+      END
+    END;
     IF tk = tComma THEN Next END
   END;
   IF ~err & (areas[cur].nIdx > 0) THEN GoTop(cur) END
@@ -4649,10 +4685,11 @@ BEGIN
 END DoJoin;
 
 (* ---- UPDATE ON key FROM alias REPLACE ... [RANDOM] ---- *)
-
 PROCEDURE DoUpdate;
 VAR
-  from, kf, kfFrom, nf, i, cnt, save: INTEGER; name: Str; random, found: BOOLEAN;
+  from, kf, kfFrom, nf, i, cnt: INTEGER;
+  savedTalk: BOOLEAN;
+  name: Str; random, found: BOOLEAN;
   ff: ARRAY 32 OF INTEGER; fe: ARRAY 32 OF Node; v, kv, tv: Value;
 BEGIN
   IF ~NeedDb() THEN RETURN END;
@@ -4683,12 +4720,15 @@ BEGIN
   END;
   IF err THEN RETURN END;
   cnt := 0;
+  (* Suppress talk ONCE for the whole loop *)
+  savedTalk := setTalk;
+  setTalk := FALSE;
   GoTop(from);
   WHILE ~areas[from].eof & ~err DO
     GetFieldVal(from, kfFrom, kv);
     found := FALSE;
     IF areas[cur].order > 0 THEN
-      save := setTalkSave(); SeekValue(kv); setTalk := save = 1;
+      SeekValue(kv);
       found := areas[cur].found
     ELSE
       GoTop(cur);
@@ -4711,10 +4751,14 @@ BEGIN
     END;
     IF ~Step(from, 1) THEN END
   END;
+  (* Restore talk ONCE at the end, regardless of how we exited *)
+  setTalk := savedTalk;
   TalkCount(cnt, "updated");
   GoTop(cur)
 END DoUpdate;
 
+(* setTalkSave is no longer needed, but leave it in case other
+   code calls it.  It can be safely removed if nothing else uses it. *)
 (* turn TALK off temporarily; returns 1 if it was on *)
 PROCEDURE setTalkSave(): INTEGER;
 VAR r: INTEGER;
@@ -5356,9 +5400,11 @@ BEGIN
       END
     ELSE INC(i)
     END
+  END;
+  IF guard >= 50 THEN
+    Err("Macro substitution recursion limit exceeded.")
   END
 END ExpandMacros;
-
 PROCEDURE ShowError(line: ARRAY OF CHAR);
 VAR t: Str; k: CHAR;
 BEGIN
@@ -5766,7 +5812,7 @@ BEGIN
 END ProgError;
 
 PROCEDURE BindParams(line: ARRAY OF CHAR);
-VAR rest, name: Str; i, k: INTEGER; fr: INTEGER;
+VAR rest, name: Str; i, k, fr: INTEGER;
 BEGIN
   AfterWords(line, 1, rest);
   fr := depth - 1;
@@ -5777,10 +5823,15 @@ BEGIN
       k := NewVar(name);
       IF (k >= 0) & (i < pendN) THEN
         vars[k].v := pendV[i];
-        IF (pendRef[i][0] # 0X) & (frames[fr].nParmRef < 16) THEN
-          Cpy(name, frames[fr].parmName[frames[fr].nParmRef]); Upper(frames[fr].parmName[frames[fr].nParmRef]);
-          Cpy(pendRef[i], frames[fr].parmRef[frames[fr].nParmRef]);
-          INC(frames[fr].nParmRef)
+        IF pendRef[i][0] # 0X THEN
+          IF frames[fr].nParmRef >= 16 THEN
+            Err("Too many reference parameters.")
+          ELSE
+            Cpy(name, frames[fr].parmName[frames[fr].nParmRef]);
+            Upper(frames[fr].parmName[frames[fr].nParmRef]);
+            Cpy(pendRef[i], frames[fr].parmRef[frames[fr].nParmRef]);
+            INC(frames[fr].nParmRef)
+          END
         END
       END
     END;
@@ -5945,10 +5996,12 @@ END DoDo;
 (* ====================================================================
    Dot prompt
    ==================================================================== *)
-
 PROCEDURE RunCommand(s: ARRAY OF CHAR);
 BEGIN
   err := FALSE; errMsg[0] := 0X; interrupted := FALSE;
+  (* Clear per-command state up front so a stale value from a
+     previous command (that errored out) cannot bleed through. *)
+  paging := FALSE; prnActive := FALSE; toActive := FALSE;
   ExecLine(s);
   IF err THEN ShowError(s); err := FALSE END;
   IF interrupted THEN
@@ -5957,10 +6010,14 @@ BEGIN
     interrupted := FALSE
   END;
   IF depth = 0 THEN cancelAll := FALSE END;
+  (* Belt and braces: clear again on exit *)
   paging := FALSE; prnActive := FALSE; toActive := FALSE;
+  (* Make sure any TO FILE rider was closed *)
+  IF toF # NIL THEN
+    Files.Register(toF); Files.Close(toF); toF := NIL
+  END;
   FlushAll
 END RunCommand;
-
 PROCEDURE DotPrompt;
 VAR s: Str;
 BEGIN
@@ -9617,3 +9674,5 @@ END Main;
 BEGIN
   Main
 END obbase.
+
+
