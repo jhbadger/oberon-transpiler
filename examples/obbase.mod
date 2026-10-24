@@ -286,6 +286,7 @@ VAR
   cancelAll, quitting, resumeFlag: BOOLEAN;
   suspendLevel: INTEGER;
   lastKey: INTEGER;            (* READKEY/INKEY support *)
+  readExit: INTEGER;           (* READKEY() code of the last READ *)
   getList: ARRAY MaxGets OF GetDef;
   nGets: INTEGER;
   errNo: INTEGER;
@@ -2234,7 +2235,7 @@ BEGIN
   | fOS: SetStr(v, "Unix")
   | fPCOL: SetInt(v, pcol)
   | fPROW: SetInt(v, prow)
-  | fREADKEY: SetInt(v, KeyCode(CHR(lastKey MOD 256)))
+  | fREADKEY: SetInt(v, readExit)
   | fRECCOUNT: IF areas[cur].used THEN SetInt(v, areas[cur].db.numRecs) ELSE SetInt(v, 0) END
   | fRECNO:
       IF areas[cur].used THEN SetInt(v, areas[cur].rec) ELSE SetInt(v, 0) END
@@ -5578,7 +5579,7 @@ CONST
   vOther = 0; vIF = 1; vELSE = 2; vENDIF = 3; vDOWHILE = 4; vENDDO = 5;
   vDOCASE = 6; vCASE = 7; vOTHERWISE = 8; vENDCASE = 9; vLOOP = 10;
   vEXIT = 11; vRETURN = 12; vPROCEDURE = 13; vTEXT = 14; vENDTEXT = 15;
-  vPARAMETERS = 16; vTEXTLINE = 17; vComment = 18;
+  vPARAMETERS = 16; vTEXTLINE = 17; vComment = 18; vTOOLONG = 19;
   MaxArgs = 16;
 
 VAR
@@ -5623,7 +5624,7 @@ END ClassifyLine;
 PROCEDURE LoadProg(path: ARRAY OF CHAR): Prog;
 VAR
   p: Prog; f: Files.File; r: Files.Rider; line, acc: Str; n, i, top, w: INTEGER;
-  stk: ARRAY 64 OF INTEGER; inText: BOOLEAN;
+  stk: ARRAY 64 OF INTEGER; inText, ovf, more: BOOLEAN; tooLong: ARRAY MaxTxtLn OF BOOLEAN;
 BEGIN
   f := Files.Old(path);
   IF f = NIL THEN RETURN NIL END;
@@ -5639,20 +5640,27 @@ BEGIN
     IF line[0] = 1AX THEN EXIT END;
     IF inText THEN
       IF ClassifyLine(line) = vENDTEXT THEN inText := FALSE END;
-      IF p.n < MaxTxtLn THEN Cpy(line, p.line[p.n]); INC(p.n) END
+      IF p.n < MaxTxtLn THEN Cpy(line, p.line[p.n]); tooLong[p.n] := FALSE; INC(p.n) END
     ELSE
       Cpy(line, acc);
-      RTrim(acc);
-      (* ; at the end continues the command on the next line *)
-      WHILE (SLen(acc) > 0) & (acc[SLen(acc) - 1] = ";") & ~r.eof DO
-        acc[SLen(acc) - 1] := " ";
+      LTrim(acc); RTrim(acc);
+      ovf := FALSE;
+      (* ; at the end continues the command on the next line; once the
+         joined line overflows, the rest of it is still read and dropped *)
+      more := (SLen(acc) > 0) & (acc[SLen(acc) - 1] = ";");
+      WHILE more & ~r.eof DO
+        IF ~ovf THEN acc[SLen(acc) - 1] := " " END;
         Files.ReadLine(r, line);
         n := SLen(line); IF (n > 0) & (line[n - 1] = 0DX) THEN line[n - 1] := 0X END;
-        LTrim(line); Append(line, acc); RTrim(acc);
+        FOR i := 0 TO SLen(line) - 1 DO IF line[i] = 09X THEN line[i] := " " END END;
+        LTrim(line); RTrim(line);
+        more := (SLen(line) > 0) & (line[SLen(line) - 1] = ";");
+        IF ~ovf & (SLen(acc) + SLen(line) >= LEN(acc)) THEN ovf := TRUE END;
+        IF ~ovf THEN Append(line, acc); RTrim(acc) END;
         IF p.n < MaxTxtLn THEN p.line[p.n][0] := 0X END
       END;
       IF ClassifyLine(acc) = vTEXT THEN inText := TRUE END;
-      IF p.n < MaxTxtLn THEN Cpy(acc, p.line[p.n]); INC(p.n) END
+      IF p.n < MaxTxtLn THEN Cpy(acc, p.line[p.n]); tooLong[p.n] := ovf; INC(p.n) END
     END;
     IF r.eof THEN EXIT END
   END;
@@ -5669,6 +5677,7 @@ BEGIN
       END
     ELSE
       w := ClassifyLine(p.line[i]);
+      IF tooLong[i] THEN w := vTOOLONG END;
       p.verb[i] := w;
       CASE w OF
         vIF, vDOWHILE, vDOCASE:
@@ -5923,6 +5932,10 @@ BEGIN
           WHILE (pc < p.n) & (p.verb[pc] = vTEXTLINE) DO Line(p.line[pc]); INC(pc) END;
           INC(pc)
       | vPARAMETERS: BindParams(line); INC(pc)
+      | vTOOLONG:
+          Err("Line exceeds maximum of 254 characters.");
+          IF ProgError(p, pc) THEN cancelAll := TRUE END;
+          INC(pc)
       | vRETURN:
           AfterWords(line, 1, t);
           IF StartsI(t, "TO") THEN cancelAll := FALSE; quitting := FALSE; stop := TRUE; returnMaster := TRUE
@@ -6133,6 +6146,20 @@ BEGIN
       OR (c = "N") OR (c = "!")
 END IsTmplCh;
 
+(* copy a character PICTURE's literals, like the ( ) - of "(999) 999-9999",
+   into text: they are shown in the GET and stored in the value *)
+PROCEDURE PutLiterals(pic: ARRAY OF CHAR; t: CHAR; VAR text: ARRAY OF CHAR);
+VAR fn, tm: Str; i: INTEGER;
+BEGIN
+  IF (t # TC) OR (pic[0] = 0X) THEN RETURN END;
+  SplitPicture(pic, fn, tm);
+  i := 0;
+  WHILE (tm[i] # 0X) & (text[i] # 0X) DO
+    IF ~IsTmplCh(tm[i]) THEN text[i] := tm[i] END;
+    INC(i)
+  END
+END PutLiterals;
+
 (* is position p of the edit field a fixed literal? *)
 PROCEDURE FixedPos(VAR fe: FieldEd; p: INTEGER): BOOLEAN;
 VAR fn, tm: Str;
@@ -6175,7 +6202,7 @@ PROCEDURE FEInit(VAR fe: FieldEd; text: ARRAY OF CHAR; width: INTEGER; t: CHAR; 
 BEGIN
   IF width > 254 THEN width := 254 END;
   IF width < 1 THEN width := 1 END;
-  Cpy(text, fe.text); PadR(fe.text, width);
+  Cpy(text, fe.text); PadR(fe.text, width); PutLiterals(pic, t, fe.text);
   fe.width := width; fe.pos := 0; fe.scroll := 0; fe.t := t;
   Cpy(pic, fe.pic); fe.changed := FALSE;
   WHILE (fe.pos < width - 1) & FixedPos(fe, fe.pos) DO INC(fe.pos) END
@@ -7267,7 +7294,7 @@ BEGIN
     END;
     GetText(g, v);
     SplitPicture(g.pic, s, pic);
-    IF pic[0] # 0X THEN g.width := SLen(pic); PadR(g.text, g.width) END;
+    IF pic[0] # 0X THEN g.width := SLen(pic); PadR(g.text, g.width); PutLiterals(g.pic, g.t, g.text) END;
     IF nGets < MaxGets THEN getList[nGets] := g; INC(nGets) END;
     Cpy(g.text, s); PadR(s, g.width);
     SayAt(g.row, g.col, s, setIntensity)
@@ -7325,16 +7352,24 @@ BEGIN
     IF (r = feNext) OR (r = feRightOut) THEN
       IF GetStore(getList[cg], fe[cg]) THEN
         IF cg < nGets - 1 THEN INC(cg) ELSE done := TRUE END
+      END;
+      IF r = feRightOut THEN readExit := 1
+      ELSIF (k = TUI.KDown) OR (k = KCtrlX) THEN readExit := 5
+      ELSE readExit := 15
       END
     ELSIF (r = fePrev) OR (r = feLeftOut) THEN
       IF GetStore(getList[cg], fe[cg]) & (cg > 0) THEN DEC(cg) END
     ELSIF r = feOther THEN
       IF (k = KCtrlW) OR (k = TUI.KCtrlEnd) OR (k = TUI.KPgDn) OR (k = TUI.KPgUp) THEN
-        IF GetStore(getList[cg], fe[cg]) THEN done := TRUE END
-      ELSIF (k = TUI.KEsc) OR (k = KCtrlQ) THEN done := TRUE; abandon := TRUE
+        IF GetStore(getList[cg], fe[cg]) THEN done := TRUE END;
+        IF k = TUI.KPgDn THEN readExit := 7 ELSIF k = TUI.KPgUp THEN readExit := 6 ELSE readExit := 14 END
+      ELSIF (k = TUI.KEsc) OR (k = KCtrlQ) THEN done := TRUE; abandon := TRUE; readExit := 12
       END
     END
   END;
+  (* dBASE III PLUS READKEY(): the exit key's code, plus 256 if any data changed *)
+  i := 0; WHILE (i < nGets) & ~fe[i].changed DO INC(i) END;
+  IF i < nGets THEN INC(readExit, 256) END;
   (* leave the final values on the console *)
   FOR i := 0 TO nGets - 1 DO
     Cpy(fe[i].text, s); SayAt(getList[i].row, getList[i].col, s, setIntensity)
