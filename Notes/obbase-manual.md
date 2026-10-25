@@ -88,8 +88,9 @@ f`, `TYPE f [TO PRINT]`, `RUN cmd` / `! cmd`.
 `LOCATE [scope] FOR cond` then `CONTINUE`, `SEEK exp`, `FIND literal`.
 
 **Changing data:** `APPEND`, `APPEND BLANK`, `APPEND FROM file [FOR]
-[SDF|DELIMITED [WITH c]]`, `INSERT [BLANK] [BEFORE]`, `EDIT [n]`, `CHANGE`,
-`BROWSE [FIELDS list] [FREEZE f] [NOAPPEND]`, `REPLACE [scope] f WITH exp
+[SDF|DELIMITED [WITH c]]`, `INSERT [BLANK] [BEFORE]`, `EDIT [n] [scope] [FIELDS list] [FOR]
+[WHILE]`, `CHANGE`, `BROWSE [FIELDS list] [LOCK n] [WIDTH n] [FREEZE f]
+[NOAPPEND]`, `REPLACE [scope] f WITH exp
 [, f WITH exp] [FOR] [WHILE]`, `DELETE`, `RECALL`, `PACK`, `ZAP`.
 
 **Ordering:** `SORT ON f1[/A/C/D], f2 ... TO file [scope] [FOR]`, `INDEX
@@ -121,7 +122,7 @@ PRINT|TO FILE f]`, `CREATE|MODIFY LABEL name`, `LABEL FORM name [scope]
 
 **Memory variables:** `STORE exp TO a, b`, `a = exp`, `RELEASE list | ALL
 [LIKE|EXCEPT skel]`, `SAVE TO f [ALL LIKE|EXCEPT skel]`, `RESTORE FROM f
-[ADDITIVE]`, `PUBLIC`, `PRIVATE`.  `&name` macro substitution works in any
+[ADDITIVE]`, `PUBLIC`, `PRIVATE list | ALL [LIKE|EXCEPT skel]`.  `&name` macro substitution works in any
 command.
 
 **Command files:** `MODIFY COMMAND name`, `DO name [WITH params]`,
@@ -131,19 +132,31 @@ CASE/CASE/OTHERWISE/ENDCASE`, `PROCEDURE`, `SET PROCEDURE TO file`,
 ... GET ... [PICTURE] [RANGE]`, `READ`, `CLEAR`, `CANCEL`, `SUSPEND` /
 `RESUME`, `*`/`NOTE`/`&&` comments, `;` to continue a line.  Memory
 variables passed with `DO ... WITH` are passed by reference.  An error in a
-program asks `Cancel, Ignore, or Suspend? (C, I, or S)`.
+program asks `Cancel, Ignore, or Suspend? (C, I, or S)`, unless `ON ERROR
+DO proc` is set: then the procedure runs, `ERROR()` gives the dBASE III
+PLUS error number and `MESSAGE()` its text, `RETURN` resumes after the
+failing line and `RETRY` runs it again.  `ON ESCAPE cmd` replaces the
+Esc interrupt; `ON KEY cmd` runs when a key is pressed (read it with
+`INKEY()`).  Keys typed while a program runs go into a typeahead buffer;
+`CLEAR TYPEAHEAD` empties it.
 
 **Printing:** `TO PRINT`, `SET PRINT ON`, `EJECT`, `SET MARGIN TO n` and
 `SET DEVICE TO PRINT` all write to `obbase.prn` (or the file named by `SET
 PRINTER TO file`).  `SET ALTERNATE TO file` with `SET ALTERNATE ON` also
 copies screen output to a file.
 
-**SET options:** ALTERNATE, BELL, CARRY, CENTURY, CONFIRM, CONSOLE, DATE
-(AMERICAN, ANSI, BRITISH, ITALIAN, FRENCH, GERMAN), DECIMALS, DEFAULT,
-DELETED, DELIMITERS, DEVICE, ECHO, ESCAPE, EXACT, FIELDS, FILTER,
-FUNCTION, HEADINGS, HELP, HISTORY, INDEX, INTENSITY, MARGIN, MEMOWIDTH,
-MENU, ORDER, PATH, PRINT, PRINTER, PROCEDURE, RELATION, SAFETY, STATUS,
-TALK, UNIQUE, VIEW.  `SET` alone is `DISPLAY STATUS`.
+**SET options:** ALTERNATE, BELL, CARRY, CENTURY, COLOR, CONFIRM, CONSOLE,
+DATE (AMERICAN, ANSI, BRITISH, ITALIAN, FRENCH, GERMAN), DECIMALS,
+DEFAULT, DELETED, DELIMITERS, DEVICE, ECHO, ESCAPE, EXACT, FIELDS, FILTER,
+FIXED, FUNCTION, HEADINGS, HELP, HISTORY, INDEX, INTENSITY, MARGIN,
+MEMOWIDTH, MENU, MESSAGE, ORDER, PATH, PRINT, PRINTER, PROCEDURE,
+RELATION, SAFETY, STATUS, TALK, UNIQUE, VIEW.  `SET` alone is `DISPLAY
+STATUS`.  `SET COLOR TO W+/B, N/W` sets the standard and enhanced colors
+(letters N B G BG R RB GR W, `+` for bright; `SET COLOR TO` restores the
+default).  `SET DELIMITERS TO "[]"` (or `TO DEFAULT`) picks the characters
+shown around GET fields when `SET DELIMITERS ON`.  `SET FIXED ON` shows
+calculated numbers with `SET DECIMALS` places.  `SET MESSAGE TO "text"`
+puts your text on the message line.
 
 **Functions:** ABS ASC AT BOF CDOW CHR CMONTH COL CTOD DATE DAY DBF
 DELETED DISKSPACE DOW DTOC EOF ERROR EXP FIELD FILE FKLABEL FKMAX FOUND
@@ -249,7 +262,10 @@ records.  Constants are quoted or wrapped in CTOD() automatically.
 
 * Not available: custom screen forms (CREATE SCREEN, `.FMT`), catalogs,
   IMPORT/EXPORT of PFS files, networking, and the interactive CREATE VIEW
-  screen (use `CREATE VIEW name FROM ENVIRONMENT`).
+  screen (use `CREATE VIEW name FROM ENVIRONMENT`).  `CALL`/`LOAD`
+  (binary modules) give an error; `SET EXCLUSIVE`, `SET ENCRYPTION`,
+  `SET TITLE`, `SET CATALOG`, `SET FORMAT`, `SET STEP`/`DEBUG`
+  are accepted and ignored.
 * `.FRM`, `.LBL`, `.QRY`, `.VUE` and `.MEM` files are text, so they are
   not interchangeable with real dBASE.  `.DBF`, `.DBT` and `.NDX` files
   are.

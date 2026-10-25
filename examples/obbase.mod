@@ -67,10 +67,7 @@ CONST
   (* scope kinds *)
   scDefault = 0; scAll = 1; scNext = 2; scRecord = 3; scRest = 4;
 
-  (* colors *)
-  cFg = TUI.White; cBg = TUI.Black;
-  cRevFg = TUI.Black; cRevBg = TUI.White;
-  cHiFg = TUI.BrightWhite;
+  (* colors (standard and enhanced pairs are variables: SET COLOR TO) *)
   cMenuFg = TUI.BrightWhite; cMenuBg = TUI.Blue;
   cBarFg = TUI.Black; cBarBg = TUI.Cyan;
 
@@ -158,7 +155,9 @@ TYPE
     nParmRef: INTEGER;
     parmName: ARRAY 16 OF Name;   (* callee name -> caller variable *)
     parmRef: ARRAY 16 OF Name;
-    callerArea: INTEGER
+    callerArea: INTEGER;
+    privMode: INTEGER;            (* PRIVATE ALL: 0 none, 1 all, 2 LIKE, 3 EXCEPT *)
+    privSkel: ARRAY 64 OF CHAR
   END;
 
   Clauses = RECORD
@@ -222,6 +221,7 @@ VAR
   setBell, setStatus, setMenu, setPrint, setAlternate, setConsole,
   setCentury, setUnique, setCarry, setIntensity, setHelp, setEscape,
   setFieldsOn, setDevPrint, setDelimiters, setEcho, setFixed: BOOLEAN;
+  delimL, delimR: CHAR;          (* SET DELIMITERS TO *)
   setDecimals, setMargin, setMemoWidth, setHistory, setDateFmt: INTEGER;
   defDrive: CHAR;
   defDir: Str;
@@ -241,7 +241,30 @@ VAR
   (* ---- errors ---- *)
   err: BOOLEAN;
   errMsg: Str;
+  errCode: INTEGER;              (* III PLUS error number of errMsg *)
+  lastErrCode: INTEGER;          (* ERROR() / MESSAGE() *)
+  lastErrMsg: Str;
   interrupted: BOOLEAN;
+
+  (* ---- ON ERROR / ESCAPE / KEY, RETRY ---- *)
+  onErrCmd, onEscCmd, onKeyCmd: Str;
+  inOnErr, inOnEsc, inOnKey: BOOLEAN;
+  retryFlag: BOOLEAN;            (* RETRY: re-execute the caller's current line *)
+
+  (* ---- typeahead buffer ---- *)
+  taBuf: ARRAY 32 OF CHAR;
+  taN: INTEGER;
+  onKeyN: INTEGER;               (* typeahead count when ON KEY last fired *)
+
+  (* ---- colors ---- *)
+  cFg, cBg, cRevFg, cRevBg, cHiFg: INTEGER;
+  userMsg: Str;                  (* SET MESSAGE TO *)
+  batchMid: BOOLEAN;             (* -b: stdout is in the middle of a line *)
+
+  (* ---- EDIT scope: FOR acts as an extra filter while editing ---- *)
+  editArea: INTEGER;             (* -1 when no EDIT scope is active *)
+  editFor, editWhile: Node;
+  editLeft: INTEGER;             (* NEXT n: records left, -1 = no limit *)
 
   (* ---- lexer ---- *)
   src: Str;
@@ -289,7 +312,6 @@ VAR
   readExit: INTEGER;           (* READKEY() code of the last READ *)
   getList: ARRAY MaxGets OF GetDef;
   nGets: INTEGER;
-  errNo: INTEGER;
   inAssist: BOOLEAN;
   editBuf: TextBuf;
 
@@ -800,9 +822,54 @@ BEGIN
   v.t := TD; v.d := j; v.s[0] := 0X
 END SetDate;
 
+(* dBASE III PLUS error number for a message (as kept by FoxBASE) *)
+PROCEDURE ErrCodeOf(msg: ARRAY OF CHAR): INTEGER;
+BEGIN
+  IF Eq(msg, "File does not exist.") THEN RETURN 1
+  ELSIF Eq(msg, "File is already open.") THEN RETURN 3
+  ELSIF Eq(msg, "End of file encountered.") THEN RETURN 4
+  ELSIF Eq(msg, "Record is out of range.") THEN RETURN 5
+  ELSIF Eq(msg, "Too many indexes.") THEN RETURN 6
+  ELSIF Eq(msg, "File already exists.") THEN RETURN 7
+  ELSIF Eq(msg, "Data type mismatch.") THEN RETURN 9
+  ELSIF Eq(msg, "Syntax error.") OR Eq(msg, "Missing expression.") OR Eq(msg, "Unbalanced parenthesis.")
+     OR Eq(msg, "Unterminated string.") THEN RETURN 10
+  ELSIF Eq(msg, "Invalid function argument.") THEN RETURN 11
+  ELSIF Eq(msg, "Variable not found.") THEN RETURN 12
+  ELSIF Eq(msg, "ALIAS not found.") THEN RETURN 13
+  ELSIF Eq(msg, "Not a dBASE database.") THEN RETURN 15
+  ELSIF Eq(msg, "Unrecognized command verb.") THEN RETURN 16
+  ELSIF Eq(msg, "Line exceeds maximum of 254 characters.") THEN RETURN 18
+  ELSIF Eq(msg, "Index file does not match database.") OR Eq(msg, "Not a dBASE index file.") THEN RETURN 19
+  ELSIF Eq(msg, "Out of memory variable slots.") THEN RETURN 22
+  ELSIF Eq(msg, "Invalid index expression.") THEN RETURN 23
+  ELSIF Eq(msg, "ALIAS name already in use.") THEN RETURN 24
+  ELSIF Eq(msg, "Database is not indexed.") THEN RETURN 26
+  ELSIF Eq(msg, "Not a numeric expression.") THEN RETURN 27
+  ELSIF Eq(msg, "Cannot sort on logical or memo fields.") THEN RETURN 34
+  ELSIF Eq(msg, "Unrecognized phrase/keyword in command.") THEN RETURN 36
+  ELSIF Eq(msg, "Not a Logical expression.") THEN RETURN 37
+  ELSIF Eq(msg, "Beginning of file encountered.") THEN RETURN 38
+  ELSIF Eq(msg, "Numeric overflow.") OR Eq(msg, "Division by zero.") THEN RETURN 39
+  ELSIF Eq(msg, "CONTINUE without LOCATE.") THEN RETURN 42
+  ELSIF Eq(msg, "Not a Character expression.") THEN RETURN 45
+  ELSIF Eq(msg, "Not a valid report form.") THEN RETURN 50
+  ELSIF Eq(msg, "No database is in USE.") THEN RETURN 52
+  ELSIF Eq(msg, "Not a valid label form.") THEN RETURN 54
+  ELSIF Eq(msg, "Binary (.BIN) modules are not supported.") THEN RETURN 91
+  ELSIF Eq(msg, "Wrong number of parameters.") THEN RETURN 94
+  ELSIF Eq(msg, "Valid only in programs.") OR Eq(msg, "PARAMETERS is only valid in a program.") THEN RETURN 95
+  ELSIF Eq(msg, "IF without ENDIF.") OR Eq(msg, "DO WHILE without ENDDO.") THEN RETURN 96
+  ELSIF Eq(msg, "Unable to create file.") THEN RETURN 102
+  ELSIF Eq(msg, "Too many nested DO commands.") THEN RETURN 103
+  ELSIF Eq(msg, "Invalid function key.") THEN RETURN 104
+  ELSE RETURN 0
+  END
+END ErrCodeOf;
+
 PROCEDURE Err(msg: ARRAY OF CHAR);
 BEGIN
-  IF ~err THEN err := TRUE; Cpy(msg, errMsg) END
+  IF ~err THEN err := TRUE; Cpy(msg, errMsg); errCode := ErrCodeOf(msg) END
 END Err;
 
 (* display text for a value, as ? shows it *)
@@ -965,10 +1032,25 @@ END MaybeDraw;
 (* ---- keyboard ---- *)
 
 (* Next key; 0X after a resize or mouse event so callers can redraw *)
+PROCEDURE PopTypeahead(): CHAR;
+VAR c: CHAR; i: INTEGER;
+BEGIN
+  c := taBuf[0];
+  FOR i := 1 TO taN - 1 DO taBuf[i - 1] := taBuf[i] END;
+  DEC(taN);
+  RETURN c
+END PopTypeahead;
+
+PROCEDURE PushTypeahead(c: CHAR);
+BEGIN
+  IF taN < LEN(taBuf) THEN taBuf[taN] := c; INC(taN) END
+END PushTypeahead;
+
 PROCEDURE GetKey(): CHAR;
 VAR ev: TUI.Event; c: CHAR;
 BEGIN
   IF batch THEN RETURN KCtrlW END;
+  IF taN > 0 THEN c := PopTypeahead(); lastKey := ORD(c); RETURN c END;
   LOOP
     IF TUI.PollEvent(ev) THEN
       IF ev.kind = TUI.EvKey THEN
@@ -982,14 +1064,17 @@ BEGIN
   END
 END GetKey;
 
-(* Non-blocking: Esc pressed? (also stores INKEY value) *)
+(* Non-blocking: Esc pressed (with SET ESCAPE ON)?  Other keys go to
+   the typeahead buffer for INKEY(), ON KEY and the next input. *)
 PROCEDURE EscPressed(): BOOLEAN;
 VAR ev: TUI.Event;
 BEGIN
-  IF batch OR ~setEscape THEN RETURN FALSE END;
-  IF TUI.PollEvent(ev) & (ev.kind = TUI.EvKey) THEN
-    lastKey := ORD(ev.key);
-    RETURN ev.key = TUI.KEsc
+  IF batch THEN RETURN FALSE END;
+  WHILE TUI.PollEvent(ev) DO
+    IF ev.kind = TUI.EvKey THEN
+      IF (ev.key = TUI.KEsc) & setEscape THEN lastKey := ORD(ev.key); RETURN TRUE END;
+      PushTypeahead(ev.key)
+    END
   END;
   RETURN FALSE
 END EscPressed;
@@ -1043,7 +1128,7 @@ END PrnEject;
 PROCEDURE ConPut(s: ARRAY OF CHAR);
 VAR i: INTEGER;
 BEGIN
-  IF batch THEN Out.String(s); RETURN END;
+  IF batch THEN Out.String(s); IF s[0] # 0X THEN batchMid := TRUE END; RETURN END;
   i := 0;
   WHILE s[i] # 0X DO
     IF ccol >= scrW THEN
@@ -1074,7 +1159,7 @@ END PauseKey;
 
 PROCEDURE ConNL;
 BEGIN
-  IF batch THEN Out.Ln; RETURN END;
+  IF batch THEN Out.Ln; batchMid := FALSE; RETURN END;
   ccol := 0; INC(crow);
   IF crow >= scrH THEN ConScroll; crow := scrH - 1 END;
   IF paging THEN
@@ -1429,13 +1514,48 @@ BEGIN RETURN tk = tEOF END AtEnd;
    Memory variables
    ==================================================================== *)
 
+(* * and ? wildcards, case-insensitive *)
+PROCEDURE WildMatch(p, s: ARRAY OF CHAR; pi, si: INTEGER): BOOLEAN;
+BEGIN
+  LOOP
+    IF p[pi] = 0X THEN RETURN s[si] = 0X END;
+    IF p[pi] = "*" THEN
+      WHILE p[pi] = "*" DO INC(pi) END;
+      IF p[pi] = 0X THEN RETURN TRUE END;
+      WHILE s[si] # 0X DO
+        IF WildMatch(p, s, pi, si) THEN RETURN TRUE END;
+        INC(si)
+      END;
+      RETURN FALSE
+    END;
+    IF s[si] = 0X THEN RETURN FALSE END;
+    IF (p[pi] # "?") & (UpCh(p[pi]) # UpCh(s[si])) THEN RETURN FALSE END;
+    INC(pi); INC(si)
+  END
+END WildMatch;
+
+(* does a PRIVATE ALL at some level above `level` hide this name? *)
+PROCEDURE PrivHidden(name: ARRAY OF CHAR; level: INTEGER): BOOLEAN;
+VAR lv, m: INTEGER;
+BEGIN
+  FOR lv := level + 1 TO depth DO
+    m := frames[lv - 1].privMode;
+    IF (m = 1) OR ((m = 2) & WildMatch(frames[lv - 1].privSkel, name, 0, 0))
+       OR ((m = 3) & ~WildMatch(frames[lv - 1].privSkel, name, 0, 0)) THEN RETURN TRUE END
+  END;
+  RETURN FALSE
+END PrivHidden;
+
 PROCEDURE FindVar(name: ARRAY OF CHAR): INTEGER;
 VAR i: INTEGER; n: Name;
 BEGIN
   Cpy(name, n); Upper(n);
   IF SLen(n) > 10 THEN n[10] := 0X END;
   FOR i := nVars - 1 TO 0 BY -1 DO
-    IF Eq(vars[i].name, n) THEN RETURN i END
+    IF Eq(vars[i].name, n) THEN
+      IF (vars[i].level < depth) & PrivHidden(n, vars[i].level) THEN RETURN -1 END;
+      RETURN i
+    END
   END;
   RETURN -1
 END FindVar;
@@ -2091,7 +2211,7 @@ BEGIN Eval(n.arg[i], r) END ArgOf;
 PROCEDURE CallFunc(n: Node; VAR v: Value);
 VAR
   a, b, c: Value; s, t: Str; i, j, k, y, m, d: INTEGER; x: REAL;
-  ev: TUI.Event; now: LONGINT;
+  ev: TUI.Event; now: LONGINT; ch: CHAR;
 
   PROCEDURE NeedC(VAR r: Value): BOOLEAN;
   BEGIN
@@ -2154,7 +2274,7 @@ BEGIN
         IF a.d = 0 THEN SetInt(v, 0) ELSE SetNum(v, FLT(DayOfWeek(a.d)), 3, 0) END END
   | fDTOC: ArgOf(n, 0, a); IF NeedD(a) THEN DateStr(a.d, s); SetStr(v, s) END
   | fEOF: SetBool(v, ~areas[cur].used OR areas[cur].eof)
-  | fERROR: SetInt(v, errNo)
+  | fERROR: SetInt(v, lastErrCode)
   | fEXP: ArgOf(n, 0, a); IF NeedN(a) THEN SetNum(v, Math.exp(a.n), 10, MaxI(setDecimals, a.dec)) END
   | fFIELD:
       ArgOf(n, 0, a);
@@ -2179,7 +2299,9 @@ BEGIN
       END
   | fINKEY:
       i := 0;
-      IF ~batch & TUI.PollEvent(ev) & (ev.kind = TUI.EvKey) THEN i := KeyCode(ev.key); lastKey := ORD(ev.key) END;
+      IF taN > 0 THEN ch := PopTypeahead(); i := KeyCode(ch); lastKey := ORD(ch)
+      ELSIF ~batch & TUI.PollEvent(ev) & (ev.kind = TUI.EvKey) THEN i := KeyCode(ev.key); lastKey := ORD(ev.key)
+      END;
       SetInt(v, i)
   | fINT: ArgOf(n, 0, a); IF NeedN(a) THEN
         IF a.n >= 0.0 THEN x := Math.floor(a.n) ELSE x := -Math.floor(-a.n) END;
@@ -2213,7 +2335,7 @@ BEGIN
         ELSE Mismatch
         END
       END
-  | fMESSAGE: SetStr(v, errMsg)
+  | fMESSAGE: SetStr(v, lastErrMsg)
   | fMOD:
       ArgOf(n, 0, a); ArgOf(n, 1, b);
       IF NeedN(a) & NeedN(b) THEN
@@ -2741,6 +2863,13 @@ BEGIN
   IF areas[a].filter # NIL THEN
     save := cur; cur := a;
     ok := EvalBool(areas[a].filter);
+    cur := save;
+    IF err THEN RETURN FALSE END;
+    IF ~ok THEN RETURN FALSE END
+  END;
+  IF (a = editArea) & (editFor # NIL) THEN
+    save := cur; cur := a;
+    ok := EvalBool(editFor);
     cur := save;
     IF err THEN RETURN FALSE END;
     RETURN ok
@@ -3467,25 +3596,6 @@ BEGIN
   FOR i := 0 TO nCmdHist - 1 DO Line(cmdHist[i]) END
 END ListHistory;
 
-(* * and ? wildcards, case-insensitive *)
-PROCEDURE WildMatch(p, s: ARRAY OF CHAR; pi, si: INTEGER): BOOLEAN;
-BEGIN
-  LOOP
-    IF p[pi] = 0X THEN RETURN s[si] = 0X END;
-    IF p[pi] = "*" THEN
-      WHILE p[pi] = "*" DO INC(pi) END;
-      IF p[pi] = 0X THEN RETURN TRUE END;
-      WHILE s[si] # 0X DO
-        IF WildMatch(p, s, pi, si) THEN RETURN TRUE END;
-        INC(si)
-      END;
-      RETURN FALSE
-    END;
-    IF s[si] = 0X THEN RETURN FALSE END;
-    IF (p[pi] # "?") & (UpCh(p[pi]) # UpCh(s[si])) THEN RETURN FALSE END;
-    INC(pi); INC(si)
-  END
-END WildMatch;
 
 PROCEDURE FileSize(path: ARRAY OF CHAR): INTEGER;
 VAR f: Files.File; n: INTEGER;
@@ -3551,7 +3661,14 @@ BEGIN
   vars[0] := 0X;
   InitClauses(c); el.n := 0;
   WHILE (tk # tEOF) & ~err DO
-    IF IsKw("TO") THEN Next; RawRest(vars)
+    IF IsKw("TO") THEN
+      Next;
+      LOOP
+        IF tk # tIdent THEN Err("Syntax error."); EXIT END;
+        IF vars[0] # 0X THEN Append(",", vars) END;
+        Append(tkStr, vars); Next;
+        IF tk = tComma THEN Next ELSE EXIT END
+      END
     ELSIF OneClause(c) THEN
     ELSIF el.n = 0 THEN ParseExprList(el)
     ELSE Err("Unrecognized phrase/keyword in command.")
@@ -4773,20 +4890,30 @@ END setTalkSave;
    Miscellaneous commands
    ==================================================================== *)
 
-PROCEDURE DoQuestion(newLine: BOOLEAN);
-VAR n: Node; v: Value; s: Str; first: BOOLEAN;
+(* SET FIXED ON: calculated numbers show SET DECIMALS places *)
+PROCEDURE ApplyFixed(n: Node; VAR v: Value);
 BEGIN
-  IF newLine THEN OutNL END;
-  first := TRUE;
+  IF setFixed & (v.t = TN) & (n.kind # nField) THEN v.dec := setDecimals END
+END ApplyFixed;
+
+PROCEDURE DoQuestion(newLine: BOOLEAN);
+VAR n: Node; v: Value; items: ARRAY MaxExprs OF Str; ni, i: INTEGER;
+BEGIN
+  (* evaluate the whole list first: an error prints nothing *)
+  ni := 0;
   WHILE (tk # tEOF) & ~err DO
     n := Expr();
     IF err THEN RETURN END;
     Eval(n, v);
     IF err THEN RETURN END;
-    ValStr(v, s);
-    IF ~first THEN OutStr(" ") END;
-    OutStr(s); first := FALSE;
-    IF tk = tComma THEN Next ELSIF tk # tEOF THEN Err("Syntax error.") END
+    ApplyFixed(n, v);
+    IF ni < MaxExprs THEN ValStr(v, items[ni]); INC(ni) END;
+    IF tk = tComma THEN Next ELSIF tk # tEOF THEN Err("Syntax error."); RETURN END
+  END;
+  IF newLine THEN OutNL END;
+  FOR i := 0 TO ni - 1 DO
+    IF i > 0 THEN OutStr(" ") END;
+    OutStr(items[i])
   END
 END DoQuestion;
 
@@ -4872,6 +4999,7 @@ PROCEDURE DoRelease;
 VAR i: INTEGER; skel: Str; like, except, all: BOOLEAN;
 BEGIN
   all := FALSE; like := FALSE; except := FALSE; skel[0] := 0X;
+  IF IsKw("MODULE") THEN Next; RawRest(skel); Err("Binary (.BIN) modules are not supported."); RETURN END;
   IF IsKw("ALL") THEN
     Next; all := TRUE;
     IF IsKw("LIKE") THEN Next; like := TRUE; RawWord(skel)
@@ -5088,12 +5216,89 @@ BEGIN
     k := nVars - 1;
     WHILE k >= 0 DO IF (depth = 0) OR (vars[k].level = depth) THEN ReleaseVar(k) END; DEC(k) END
   ELSIF IsKw("GETS") THEN nGets := 0
-  ELSIF IsKw("TYPEAHEAD") THEN
+  ELSIF IsKw("TYPEAHEAD") THEN taN := 0
   ELSE ConClear; nGets := 0
   END
 END DoClear;
 
+(* ---- ON ERROR / ON ESCAPE / ON KEY <command> ---- *)
+
+PROCEDURE DoOn;
+VAR which: INTEGER; t: Str;
+BEGIN
+  IF IsKw("ERROR") THEN which := 0
+  ELSIF IsKw("ESCAPE") THEN which := 1
+  ELSIF IsKw("KEY") THEN which := 2
+  ELSE Err("Syntax error."); RETURN
+  END;
+  Next;
+  (* the rest of the line is the command; no command turns the trap off *)
+  IF tk = tEOF THEN t[0] := 0X ELSE RawRest(t) END;
+  CASE which OF
+    0: Cpy(t, onErrCmd)
+  | 1: Cpy(t, onEscCmd)
+  | 2: Cpy(t, onKeyCmd)
+  END
+END DoOn;
+
 (* ---- SET ---- *)
+
+(* one color letter group (N B G BG R RB GR W, + bright) -> TUI color; -1 if none *)
+PROCEDURE ColorOf(s: ARRAY OF CHAR): INTEGER;
+VAR i, c: INTEGER; bright: BOOLEAN; t: Str;
+BEGIN
+  t[0] := 0X; bright := FALSE;
+  FOR i := 0 TO SLen(s) - 1 DO
+    IF s[i] = "+" THEN bright := TRUE
+    ELSIF IsAlpha(s[i]) THEN AppendCh(UpCh(s[i]), t)
+    END
+  END;
+  IF Eq(t, "N") OR Eq(t, "X") THEN c := TUI.Black
+  ELSIF Eq(t, "B") OR Eq(t, "U") THEN c := TUI.Blue
+  ELSIF Eq(t, "G") THEN c := TUI.Green
+  ELSIF Eq(t, "BG") OR Eq(t, "GB") THEN c := TUI.Cyan
+  ELSIF Eq(t, "R") THEN c := TUI.Red
+  ELSIF Eq(t, "RB") OR Eq(t, "BR") THEN c := TUI.Magenta
+  ELSIF Eq(t, "GR") OR Eq(t, "RG") THEN c := TUI.Yellow
+  ELSIF Eq(t, "W") THEN c := TUI.White
+  ELSIF Eq(t, "I") THEN c := -2   (* inverse *)
+  ELSE RETURN -1
+  END;
+  IF bright & (c >= 0) THEN INC(c, 8) END;
+  RETURN c
+END ColorOf;
+
+(* "fg/bg" -> colors; FALSE if it does not parse *)
+PROCEDURE ColorPair(s: ARRAY OF CHAR; VAR fg, bg: INTEGER): BOOLEAN;
+VAR a, b: Str; k: INTEGER;
+BEGIN
+  Trim(s);
+  IF s[0] = 0X THEN RETURN FALSE END;
+  k := Strings.Pos("/", s, 0);
+  IF k < 0 THEN Cpy(s, a); b[0] := 0X ELSE Sub(s, 0, k, a); Sub(s, k + 1, 255, b) END;
+  fg := ColorOf(a);
+  IF b[0] = 0X THEN bg := cBg ELSE bg := ColorOf(b) END;
+  IF fg = -2 THEN fg := cBg; bg := cFg END;
+  RETURN (fg >= 0) & (bg >= 0)
+END ColorPair;
+
+(* SET COLOR TO [<standard>][,<enhanced>][,<border>]; empty resets *)
+PROCEDURE SetColors(spec: ARRAY OF CHAR);
+VAR part: Str; vp, fg, bg: INTEGER;
+BEGIN
+  IF spec[0] = 0X THEN
+    cFg := TUI.White; cBg := TUI.Black; cRevFg := TUI.Black; cRevBg := TUI.White; cHiFg := TUI.BrightWhite
+  ELSE
+    vp := 0;
+    IF Strings.Split(spec, ",", vp, part) & ColorPair(part, fg, bg) THEN
+      cFg := fg; cBg := bg;
+      IF fg < 8 THEN cHiFg := fg + 8 ELSE cHiFg := fg END
+    END;
+    INC(vp);
+    IF Strings.Split(spec, ",", vp, part) & ColorPair(part, fg, bg) THEN cRevFg := fg; cRevBg := bg END
+  END;
+  IF ~batch THEN TUI.InvalidateFront END
+END SetColors;
 
 PROCEDURE OnOffArg(VAR b: BOOLEAN);
 BEGIN
@@ -5162,13 +5367,34 @@ BEGIN
   ELSIF Kw(opt, "ECHO") THEN OnOffArg(setEcho)
   ELSIF Kw(opt, "FIXED") THEN OnOffArg(setFixed)
   ELSIF Kw(opt, "STEP") OR Kw(opt, "DEBUG") OR Kw(opt, "SCOREBOARD") OR Kw(opt, "DOHISTORY")
-     OR Kw(opt, "COLOR") OR Kw(opt, "FORMAT") OR Kw(opt, "CATALOG") OR Kw(opt, "TYPEAHEAD") THEN
+     OR Kw(opt, "FORMAT") OR Kw(opt, "CATALOG") OR Kw(opt, "TYPEAHEAD")
+     OR Kw(opt, "EXCLUSIVE") OR Kw(opt, "ENCRYPTION") OR Kw(opt, "TITLE") THEN
     RawRest(t)
+  ELSIF Kw(opt, "COLOR") OR Kw(opt, "COLOUR") THEN
+    IF IsKw("TO") THEN Next; RawRest(t); SetColors(t)
+    ELSE OnOffArg(b)
+    END
+  ELSIF Kw(opt, "MESSAGE") THEN
+    IF IsKw("TO") THEN Next END;
+    IF tk = tEOF THEN userMsg[0] := 0X ELSE n := Expr(); EvalStr(n, userMsg) END;
+    IF ~err THEN SetMsg(userMsg) END
   ELSIF Kw(opt, "PRINT") THEN
     OnOffArg(setPrint);
     IF ~setPrint & (prnF # NIL) THEN Files.Register(prnF) END
   ELSIF Kw(opt, "DELIMITERS") THEN
-    IF IsKw("TO") THEN RawRest(t) ELSE OnOffArg(setDelimiters) END
+    IF IsKw("TO") THEN
+      Next;
+      IF IsKw("DEFAULT") THEN Next; delimL := ":"; delimR := ":"
+      ELSE
+        n := Expr(); EvalStr(n, t);
+        IF ~err THEN
+          IF t[0] = 0X THEN delimL := " "; delimR := " "
+          ELSE delimL := t[0]; IF t[1] # 0X THEN delimR := t[1] ELSE delimR := t[0] END
+          END
+        END
+      END
+    ELSE OnOffArg(setDelimiters)
+    END
   ELSIF Kw(opt, "HISTORY") THEN
     IF IsKw("TO") THEN setHistory := NumArg()
     ELSE OnOffArg(b); IF b THEN setHistory := MaxCmdHist ELSE setHistory := 0 END
@@ -5409,8 +5635,9 @@ END ExpandMacros;
 PROCEDURE ShowError(line: ARRAY OF CHAR);
 VAR t: Str; k: CHAR;
 BEGIN
-  INC(errNo);
+  lastErrCode := errCode; Cpy(errMsg, lastErrMsg);
   IF batch THEN
+    IF batchMid THEN Out.Ln; batchMid := FALSE END;
     Out.String(errMsg); Out.Ln; Out.String("?"); Out.Ln; Out.String(line); Out.Ln;
     RETURN
   END;
@@ -5524,6 +5751,10 @@ BEGIN
   ELSIF Kw(word, "ASSIST") THEN DoAssist
   ELSIF Kw(word, "DO") THEN DoDo
   ELSIF Kw(word, "CANCEL") THEN cancelAll := TRUE
+  ELSIF EqI(word, "ON") THEN DoOn
+  ELSIF Kw(word, "RETRY") THEN Err("Valid only in programs.")
+  ELSIF Kw(word, "CALL") OR Kw(word, "LOAD") THEN
+    RawRest(t); Err("Binary (.BIN) modules are not supported.")
   ELSIF Kw(word, "RETURN") THEN
     IF depth = 0 THEN ELSE Err("RETURN outside program.") END
   ELSIF Kw(word, "SUSPEND") THEN
@@ -5549,7 +5780,16 @@ END ExecLine;
 PROCEDURE DoPublicPrivate(public: BOOLEAN);
 VAR k: INTEGER;
 BEGIN
-  IF IsKw("ALL") THEN RawRest(src); RETURN END;
+  IF IsKw("ALL") THEN
+    Next;
+    IF public THEN Err("Syntax error."); RETURN END;
+    IF depth = 0 THEN RawRest(src); RETURN END;
+    frames[depth - 1].privMode := 1; frames[depth - 1].privSkel[0] := 0X;
+    IF IsKw("LIKE") THEN Next; frames[depth - 1].privMode := 2; RawWord(frames[depth - 1].privSkel)
+    ELSIF IsKw("EXCEPT") THEN Next; frames[depth - 1].privMode := 3; RawWord(frames[depth - 1].privSkel)
+    END;
+    RETURN
+  END;
   WHILE tk = tIdent DO
     IF public THEN
       k := FindVar(tkStr);
@@ -5579,7 +5819,7 @@ CONST
   vOther = 0; vIF = 1; vELSE = 2; vENDIF = 3; vDOWHILE = 4; vENDDO = 5;
   vDOCASE = 6; vCASE = 7; vOTHERWISE = 8; vENDCASE = 9; vLOOP = 10;
   vEXIT = 11; vRETURN = 12; vPROCEDURE = 13; vTEXT = 14; vENDTEXT = 15;
-  vPARAMETERS = 16; vTEXTLINE = 17; vComment = 18; vTOOLONG = 19;
+  vPARAMETERS = 16; vTEXTLINE = 17; vComment = 18; vTOOLONG = 19; vRETRY = 20;
   MaxArgs = 16;
 
 VAR
@@ -5616,6 +5856,7 @@ BEGIN
   ELSIF Kw(w1, "TEXT") THEN RETURN vTEXT
   ELSIF Kw(w1, "ENDTEXT") THEN RETURN vENDTEXT
   ELSIF Kw(w1, "PARAMETERS") THEN RETURN vPARAMETERS
+  ELSIF Kw(w1, "RETRY") THEN RETURN vRETRY
   ELSIF Kw(w1, "NOTE") THEN RETURN vComment
   END;
   RETURN vOther
@@ -5800,9 +6041,25 @@ BEGIN
   RETURN b & ~err
 END CondTrue;
 
+(* run an ON ERROR / ESCAPE / KEY command; busy blocks re-entry *)
+PROCEDURE RunHook(cmd: ARRAY OF CHAR; VAR busy: BOOLEAN);
+VAR t: Str;
+BEGIN
+  busy := TRUE; Cpy(cmd, t);
+  err := FALSE; ExecLine(t);
+  IF err THEN ShowError(t); err := FALSE END;
+  busy := FALSE
+END RunHook;
+
 PROCEDURE ProgError(p: Prog; pc: INTEGER): BOOLEAN; (* TRUE = cancel *)
 VAR t, nm: Str; k: CHAR; i: INTEGER;
 BEGIN
+  IF (onErrCmd[0] # 0X) & ~inOnErr THEN
+    (* ON ERROR: run the trap; RETURN resumes after this line, RETRY repeats it *)
+    lastErrCode := errCode; Cpy(errMsg, lastErrMsg);
+    RunHook(onErrCmd, inOnErr);
+    RETURN cancelAll
+  END;
   ShowError(p.line[pc]);
   FOR i := depth - 1 TO 0 BY -1 DO
     ShortName(frames[i].p.name, nm);
@@ -5873,23 +6130,29 @@ BEGIN
 END PopFrame;
 
 PROCEDURE RunProg(p: Prog; start: INTEGER);
-VAR pc, v, k, guard: INTEGER; line, t: Str; stop: BOOLEAN;
+VAR pc, pc0, v, k, guard: INTEGER; line, t: Str; stop, retry: BOOLEAN;
 BEGIN
   IF depth >= MaxDepth THEN Err("Too many nested DO commands."); RETURN END;
   frames[depth].p := p; frames[depth].pc := start; frames[depth].nParmRef := 0;
-  frames[depth].callerArea := cur;
+  frames[depth].callerArea := cur; frames[depth].privMode := 0;
   INC(depth);
   frames[depth - 1].level := depth;
-  pc := start; stop := FALSE; guard := 0;
+  pc := start; stop := FALSE; retry := FALSE; guard := 0;
   WHILE (pc < p.n) & ~stop & ~cancelAll & ~quitting DO
-    frames[depth - 1].pc := pc;
+    frames[depth - 1].pc := pc; pc0 := pc;
     INC(guard);
-    IF (guard MOD 32 = 0) & EscPressed() THEN interrupted := TRUE END;
-    IF interrupted THEN
+    IF ((guard MOD 32 = 0) OR (onKeyCmd[0] # 0X)) & EscPressed() THEN interrupted := TRUE END;
+    IF interrupted & (onEscCmd[0] # 0X) & ~inOnEsc THEN
+      interrupted := FALSE; RunHook(onEscCmd, inOnEsc)
+    ELSIF interrupted THEN
       interrupted := FALSE;
       ConNL; ConPut("*** INTERRUPTED ***");
       cancelAll := TRUE; stop := TRUE
+    ELSIF (taN > onKeyN) & (onKeyCmd[0] # 0X) & ~inOnKey THEN
+      (* the key stays in the typeahead buffer; INKEY() takes it *)
+      RunHook(onKeyCmd, inOnKey); onKeyN := taN
     ELSE
+      IF taN < onKeyN THEN onKeyN := taN END;
       Cpy(p.line[pc], line);
       v := p.verb[pc];
       CASE v OF
@@ -5942,6 +6205,7 @@ BEGIN
           ELSE stop := TRUE
           END
       | vPROCEDURE: stop := TRUE
+      | vRETRY: stop := TRUE; retry := TRUE
       ELSE
         IF setEcho & ~batch THEN ConNL; ConPut(line) END;
         ExecLine(line);
@@ -5951,9 +6215,12 @@ BEGIN
         INC(pc)
       END
     END;
+    (* a RETRY in a called program or ON ERROR trap repeats this line *)
+    IF retryFlag THEN retryFlag := FALSE; pc := pc0 END;
     IF returnMaster & (depth > 1) THEN stop := TRUE END
   END;
   PopFrame;
+  IF retry & (depth > 0) THEN retryFlag := TRUE END;
   IF depth <= 1 THEN returnMaster := FALSE END;
   IF depth = 0 THEN FlushAll END
 END RunProg;
@@ -5988,7 +6255,7 @@ BEGIN
   (* procedure in the SET PROCEDURE file? *)
   Cpy(name, t); Upper(t);
   FOR i := 0 TO nProcs - 1 DO
-    IF Eq(procName[i], t) THEN RunProg(procFile, procLine[i]); RETURN END
+    IF Eq(procName[i], t) THEN RunProg(procFile, procLine[i]); tk := tEOF; RETURN END
   END;
   (* procedure inside the running program's own file *)
   IF depth > 0 THEN
@@ -5996,14 +6263,15 @@ BEGIN
     FOR i := 0 TO p.n - 1 DO
       IF p.verb[i] = vPROCEDURE THEN
         ProcName(p.line[i], t);
-        IF EqI(t, name) THEN RunProg(p, i + 1); RETURN END
+        IF EqI(t, name) THEN RunProg(p, i + 1); tk := tEOF; RETURN END
       END
     END
   END;
   p := GetProg(name);
   IF p = NIL THEN Err("File does not exist."); RETURN END;
   start := 0;
-  RunProg(p, start)
+  RunProg(p, start);
+  tk := tEOF  (* the called program leaves the tokenizer on its last line *)
 END DoDo;
 
 (* ====================================================================
@@ -6015,6 +6283,7 @@ BEGIN
   (* Clear per-command state up front so a stale value from a
      previous command (that errored out) cannot bleed through. *)
   paging := FALSE; prnActive := FALSE; toActive := FALSE;
+  retryFlag := FALSE;
   ExecLine(s);
   IF err THEN ShowError(s); err := FALSE END;
   IF interrupted THEN
@@ -6037,7 +6306,7 @@ BEGIN
   LOOP
     Cpy("Command Line", modeName);
     SetNav("");
-    SetMsg("Enter a dBASE III PLUS command.");
+    IF userMsg[0] # 0X THEN SetMsg(userMsg) ELSE SetMsg("Enter a dBASE III PLUS command.") END;
     IF suspendLevel > 0 THEN SetMsg("Program suspended -- RESUME to continue, CANCEL to stop.") END;
     ConNL;
     s[0] := 0X;
@@ -6306,7 +6575,7 @@ BEGIN
   IF fe.pos >= fe.scroll + w THEN fe.scroll := fe.pos - w + 1 END;
   FOR i := 0 TO w - 1 DO s[i] := fe.text[fe.scroll + i] END;
   s[w] := 0X;
-  IF setDelimiters THEN TUI.PutCell(x - 1, y, ":", cFg, cBg); TUI.PutCell(x + w, y, ":", cFg, cBg) END;
+  IF setDelimiters THEN TUI.PutCell(x - 1, y, delimL, cFg, cBg); TUI.PutCell(x + w, y, delimR, cFg, cBg) END;
   IF setIntensity OR active THEN PutS(x, y, s, TRUE) ELSE PutS(x, y, s, FALSE) END
 END FEDraw;
 
@@ -6577,11 +6846,18 @@ BEGIN
           StartNewRec(cur);
           IF setCarry THEN Cpy(carry, areas[cur].buf); areas[cur].buf[0] := " " END;
           isNew := TRUE; FormLoad; cf := 0; top := 0
+        ELSIF (editArea = cur) & (editLeft >= 0) & (editLeft <= 1) THEN
+          done := TRUE   (* NEXT n used up *)
         ELSE
+          r := areas[cur].rec;
           moved := Step(cur, 1);
-          IF ~moved THEN
+          IF moved & (editArea = cur) & (editWhile # NIL) & ~EvalBool(editWhile) THEN
+            err := FALSE; SetRec(cur, r); done := TRUE
+          ELSIF ~moved THEN
             GoBottom(cur); done := TRUE
-          ELSE FormLoad; cf := 0; top := 0
+          ELSE
+            IF (editArea = cur) & (editLeft > 0) THEN DEC(editLeft) END;
+            FormLoad; cf := 0; top := 0
           END
         END
     | -1:
@@ -6589,7 +6865,12 @@ BEGIN
           GoBottom(cur); isNew := FALSE;
           IF areas[cur].eof THEN done := TRUE ELSE FormLoad; cf := 0 END
         ELSE
+          r := areas[cur].rec;
           moved := Step(cur, -1);
+          IF moved & (editArea = cur) & (editWhile # NIL) & ~EvalBool(editWhile) THEN
+            err := FALSE; SetRec(cur, r)
+          ELSIF moved & (editArea = cur) & (editLeft >= 0) THEN INC(editLeft)
+          END;
           FormLoad; cf := 0; top := 0
         END
     | 2: done := TRUE
@@ -6605,7 +6886,7 @@ BEGIN
 END FormRun;
 
 PROCEDURE DoEdit;
-VAR c: Clauses; el: ExprList; n: Node;
+VAR c: Clauses; el: ExprList; n: Node; s: Scope;
 BEGIN
   IF ~NeedDb() THEN RETURN END;
   IF batch THEN Err("Full-screen commands need the interactive mode."); RETURN END;
@@ -6623,7 +6904,18 @@ BEGIN
     SetRec(cur, c.n)
   END;
   IF areas[cur].db.numRecs = 0 THEN Err("End of file encountered."); RETURN END;
-  FormRun(fmEdit, el)
+  IF (c.forN # NIL) OR (c.whileN # NIL) OR (c.scope = scNext) OR (c.scope = scAll) OR (c.scope = scRest) THEN
+    (* position on the first record in scope, then let FormRun keep to it *)
+    ScopeStart(s, c, scRest);
+    IF err THEN RETURN END;
+    IF ~ScopeOK(s) THEN RETURN END;   (* nothing in scope: back to the prompt *)
+    editArea := cur; editFor := c.forN; editWhile := c.whileN;
+    IF c.scope = scNext THEN editLeft := s.left ELSE editLeft := -1 END;
+    FormRun(fmEdit, el);
+    editArea := -1; editFor := NIL; editWhile := NIL; editLeft := -1
+  ELSE
+    FormRun(fmEdit, el)
+  END
 END DoEdit;
 
 PROCEDURE DoAppend;
@@ -6667,16 +6959,18 @@ VAR
   recs: ARRAY MaxSR OF INTEGER; nrec, cr, cc, left, freeze, topRec: INTEGER;
   fe: FieldEd; k: CHAR; done, editing, noAppend, ok: BOOLEAN; t, line: Str;
   r: INTEGER; n, forN: Node;
+  lock, maxW, lockX, idx: INTEGER;
 
 BEGIN
   IF ~NeedDb() THEN RETURN END;
   IF batch THEN Err("Full-screen commands need the interactive mode."); RETURN END;
-  el.n := 0; noAppend := FALSE; freeze := -1; forN := NIL;
+  el.n := 0; noAppend := FALSE; freeze := -1; forN := NIL; lock := 0; maxW := 0;
   WHILE (tk # tEOF) & ~err DO
     IF IsKw("FIELDS") THEN Next; ParseExprList(el)
     ELSIF IsKw("NOAPPEND") THEN Next; noAppend := TRUE
     ELSIF IsKw("NOFOLLOW") OR IsKw("NOMENU") THEN Next
-    ELSIF IsKw("LOCK") OR IsKw("WIDTH") THEN Next; n := Expr()
+    ELSIF IsKw("LOCK") THEN Next; n := Expr(); lock := MaxI(EvalInt(n), 0)
+    ELSIF IsKw("WIDTH") THEN Next; n := Expr(); maxW := MaxI(EvalInt(n), 0)
     ELSIF IsKw("FREEZE") THEN Next; freeze := FieldIdx(cur, tkStr); Next
     ELSIF IsKw("FOR") THEN Next; forN := Expr()
     ELSE Err("Unrecognized phrase/keyword in command.")
@@ -6688,8 +6982,15 @@ BEGIN
   FOR i := 0 TO nf - 1 DO
     colW[i] := MaxI(FieldEditWidth(fr[i].area, fr[i].fld),
                     SLen(areas[fr[i].area].db.fields[fr[i].fld].name));
-    IF colW[i] > TUI.Cols - 4 THEN colW[i] := TUI.Cols - 4 END
+    IF colW[i] > TUI.Cols - 4 THEN colW[i] := TUI.Cols - 4 END;
+    (* WIDTH n caps the displayed width; the cell scrolls while editing *)
+    IF (maxW > 0) & (colW[i] > maxW) THEN colW[i] := maxW END
   END;
+  (* LOCK n: the first n columns stay put while the rest scroll *)
+  IF lock > nf - 1 THEN lock := nf - 1 END;
+  lockX := 1;
+  FOR i := 0 TO lock - 1 DO INC(lockX, colW[i] + 1) END;
+  IF lockX > TUI.Cols DIV 2 THEN lock := 0; lockX := 1 END;
   IF freeze >= 0 THEN
     FOR i := 0 TO nf - 1 DO IF (fr[i].area = cur) & (fr[i].fld = freeze) THEN freeze := i END END
   END;
@@ -6727,18 +7028,24 @@ BEGIN
         editing := TRUE
       END;
       (* make the current column visible *)
-      IF cc < left THEN left := cc END;
-      LOOP
-        x := 1; i := left;
-        WHILE (i <= cc) & (x + colW[i] <= TUI.Cols) DO INC(x, colW[i] + 1); INC(i) END;
-        IF (i > cc) OR (left >= cc) THEN EXIT END;
-        INC(left)
+      IF left < lock THEN left := lock END;
+      IF (cc >= lock) & (cc < left) THEN left := cc END;
+      IF cc >= lock THEN
+        LOOP
+          x := lockX; i := left;
+          WHILE (i <= cc) & (x + colW[i] <= TUI.Cols) DO INC(x, colW[i] + 1); INC(i) END;
+          IF (i > cc) OR (left >= cc) THEN EXIT END;
+          INC(left)
+        END
       END;
-      (* draw *)
+      (* draw: locked columns, then the scrolled ones from left *)
       FSClear;
       IF DrawEditMenu(TRUE) > 0 THEN END;
-      x := 1; i := left;
-      WHILE (i < nf) & (x <= TUI.Cols) DO
+      x := 1; idx := 0;
+      LOOP
+        IF idx < lock THEN i := idx ELSE i := left + idx - lock END;
+        IF (i >= nf) OR (x > TUI.Cols) THEN EXIT END;
+        INC(idx);
         Cpy(areas[fr[i].area].db.fields[fr[i].fld].name, t);
         IF fr[i].area # cur THEN Cpy(areas[fr[i].area].alias, line); Append("->", line); Append(t, line); Cpy(line, t) END;
         t[colW[i]] := 0X; PadR(t, colW[i]);
@@ -6755,11 +7062,13 @@ BEGIN
           IF x + colW[i] <= TUI.Cols THEN TUI.PutCell(x + colW[i], y0 + 2 + j, TUI.BoxV, cFg, cBg) END
         END;
         IF x + colW[i] <= TUI.Cols THEN TUI.PutCell(x + colW[i], y0 + 1, TUI.BoxV, cFg, cBg) END;
-        INC(x, colW[i] + 1); INC(i)
+        INC(x, colW[i] + 1)
       END;
       SetRec(cur, recs[cr]);
       FSBars("BROWSE");
-      x := 1; FOR i := left TO cc - 1 DO INC(x, colW[i] + 1) END;
+      IF cc < lock THEN x := 1; FOR i := 0 TO cc - 1 DO INC(x, colW[i] + 1) END
+      ELSE x := lockX; FOR i := left TO cc - 1 DO INC(x, colW[i] + 1) END
+      END;
       FSFlush(FECursorX(fe, x), y0 + 2 + cr, TRUE);
       k := GetKey();
       (* commit the cell when leaving it *)
@@ -6775,9 +7084,9 @@ BEGIN
         editing := FALSE
       END;
       IF (k2 = feNext) & (k = TUI.KEnter) OR (k2 = feRightOut) OR (k = TUI.KTab) & (k2 = feNext) THEN
-        IF cc < nf - 1 THEN INC(cc) END
+        IF (cc < nf - 1) & (freeze < 0) THEN INC(cc) END   (* FREEZE keeps to one field *)
       ELSIF k2 = feLeftOut THEN
-        IF cc > 0 THEN DEC(cc) END
+        IF (cc > 0) & (freeze < 0) THEN DEC(cc) END
       ELSIF (k2 = feNext) THEN   (* down *)
         IF cr < nrec - 1 THEN INC(cr)
         ELSE
@@ -6801,8 +7110,8 @@ BEGIN
       ELSIF k2 = feOther THEN
         IF (k = TUI.KEsc) OR (k = KCtrlQ) OR (k = KCtrlW) OR (k = TUI.KCtrlEnd) THEN done := TRUE
         ELSIF k = TUI.KF1 THEN setMenu := ~setMenu
-        ELSIF (k = TUI.KCtrlRight) OR (k = KCtrlB) THEN IF cc < nf - 1 THEN INC(cc) END
-        ELSIF (k = TUI.KCtrlLeft) OR (k = KCtrlZ) THEN IF cc > 0 THEN DEC(cc) END
+        ELSIF (k = TUI.KCtrlRight) OR (k = KCtrlB) THEN IF (cc < nf - 1) & (freeze < 0) THEN INC(cc) END
+        ELSIF (k = TUI.KCtrlLeft) OR (k = KCtrlZ) THEN IF (cc > 0) & (freeze < 0) THEN DEC(cc) END
         ELSIF (k = TUI.KPgDn) OR (k = KCtrlC) THEN
           SetRec(cur, recs[nrec - 1]);
           IF StepMatch(cur, 1, forN) THEN topRec := areas[cur].rec; cr := 0 ELSE cr := nrec - 1 END
@@ -7253,7 +7562,7 @@ BEGIN
     RETURN
   END;
   IF IsKw("SAY") THEN
-    Next; n := Expr(); Eval(n, v);
+    Next; n := Expr(); Eval(n, v); ApplyFixed(n, v);
     pic[0] := 0X;
     IF IsKw("PICTURE") THEN Next; n := Expr(); EvalStr(n, pic) END;
     IF IsKw("FUNCTION") THEN Next; n := Expr(); EvalStr(n, s); Strings.Insert("@", 0, s); Append(" ", s); Append(pic, s); Cpy(s, pic) END;
@@ -8888,7 +9197,7 @@ BEGIN
   H("APPEND", "APPEND [BLANK]  /  APPEND FROM <file> [FOR <cond>] [SDF | DELIMITED [WITH <c>]]", "Adds records at the end of the database: full screen, a blank record, or copied from another file.  Press Enter on the first field of an empty record to finish.");
   H("ASSIST", "ASSIST", "Starts the menu-driven Assistant.  Esc leaves it for the dot prompt.");
   H("AVERAGE", "AVERAGE [<exp list>] [<scope>] [FOR <cond>] [WHILE <cond>] [TO <memvar list>]", "Computes the arithmetic mean of numeric expressions.");
-  H("BROWSE", "BROWSE [FIELDS <field list>] [FOR <cond>] [FREEZE <field>] [NOAPPEND]", "Full-screen table of records for quick editing.  FOR limits visible/navigable records.  Ctrl-Left/Right pan, Ctrl-U deletes, Ctrl-W saves.");
+  H("BROWSE", "BROWSE [FIELDS <field list>] [FOR <cond>] [LOCK <n>] [WIDTH <n>] [FREEZE <field>] [NOAPPEND]", "Full-screen table of records for quick editing.  FOR limits visible/navigable records; LOCK keeps the first n columns in place; WIDTH caps column widths; FREEZE edits one field only.  Ctrl-Left/Right pan, Ctrl-U deletes, Ctrl-W saves.");
   H("CANCEL", "CANCEL", "Stops all command files and returns to the dot prompt.");
   H("CHANGE", "CHANGE [<scope>] [FIELDS <list>]", "Same as EDIT.");
   H("CLEAR", "CLEAR [ALL | GETS | MEMORY | TYPEAHEAD]", "Clears the screen; ALL also closes files and releases memory variables.");
@@ -8903,7 +9212,7 @@ BEGIN
   H("DO", "DO <file | procedure> [WITH <parameter list>]", "Runs a command file (.PRG) or procedure.  Memory variables passed by name are passed by reference.");
   H("DO CASE", "DO CASE / CASE <cond> / ... / [OTHERWISE] / ENDCASE", "Executes the commands after the first true CASE.");
   H("DO WHILE", "DO WHILE <cond> / ... [LOOP] [EXIT] ... / ENDDO", "Repeats the enclosed commands while the condition is true.");
-  H("EDIT", "EDIT [<rec no>] [FIELDS <list>]", "Full-screen editing of records.  PgUp/PgDn move between records, Ctrl-W saves, Esc abandons.");
+  H("EDIT", "EDIT [<rec no>] [<scope>] [FIELDS <list>] [FOR <cond>] [WHILE <cond>]", "Full-screen editing of records; with a scope, FOR or WHILE only those records are shown.  PgUp/PgDn move between records, Ctrl-W saves, Esc abandons.");
   H("EJECT", "EJECT", "Sends a form feed to the printer.");
   H("ERASE", "ERASE <file>", "Deletes a file.");
   H("FIND", "FIND <literal>", "Searches the master index for a key (no quotes needed).");
@@ -8922,7 +9231,9 @@ BEGIN
   H("NOTE", "NOTE <text>   or   * <text>   or   && <text>", "Comments in command files.");
   H("PACK", "PACK", "Removes records marked for deletion and rebuilds open indexes.");
   H("PARAMETERS", "PARAMETERS <memvar list>", "Receives the values passed by DO ... WITH.");
-  H("PRIVATE", "PRIVATE <memvar list>", "Hides variables of the same name from calling programs.");
+  H("PRIVATE", "PRIVATE <memvar list> | ALL [LIKE | EXCEPT <skeleton>]", "Hides variables of the same name from calling programs.");
+  H("ON", "ON ERROR | ESCAPE | KEY [<command>]", "Runs a command (usually DO <procedure>) when an error occurs, Esc is pressed, or any key is pressed in a program.  With no command the trap is turned off.  ON KEY leaves the key for INKEY().");
+  H("RETRY", "RETRY", "Returns from a procedure and runs the calling line again; in an ON ERROR procedure, repeats the line that failed.");
   H("PROCEDURE", "PROCEDURE <name>", "Starts a procedure in a procedure file (SET PROCEDURE TO) or command file.");
   H("PUBLIC", "PUBLIC <memvar list>", "Makes variables global so they survive RETURN.");
   H("QUIT", "QUIT", "Closes all files and leaves obbase.");
@@ -8940,7 +9251,7 @@ BEGIN
   H("SAVE", "SAVE TO <file> [ALL LIKE | EXCEPT <skeleton>]", "Writes memory variables to a .MEM file.");
   H("SEEK", "SEEK <expression>", "Searches the master index for the value of an expression.");
   H("SELECT", "SELECT <work area 1-10 | A-J | alias>", "Chooses the current work area.");
-  H("SET", "SET <option> ON | OFF  /  SET <option> TO <value>", "Options: ALTERNATE BELL CARRY CENTURY CONFIRM CONSOLE DATE DECIMALS DEFAULT DELETED DELIMITERS DEVICE ESCAPE EXACT FIELDS FILTER FUNCTION HEADINGS HELP HISTORY INDEX INTENSITY MARGIN MEMOWIDTH MENU ORDER PATH PRINT PROCEDURE RELATION SAFETY STATUS TALK UNIQUE VIEW");
+  H("SET", "SET <option> ON | OFF  /  SET <option> TO <value>", "Options: ALTERNATE BELL CARRY CENTURY COLOR CONFIRM CONSOLE DATE DECIMALS DEFAULT DELETED DELIMITERS DEVICE ESCAPE EXACT FIELDS FILTER FIXED FUNCTION HEADINGS HELP HISTORY INDEX INTENSITY MARGIN MEMOWIDTH MENU MESSAGE ORDER PATH PRINT PROCEDURE RELATION SAFETY STATUS TALK UNIQUE VIEW");
   H("SET FILTER", "SET FILTER TO [<cond> | FILE <query file>]", "Hides records that do not match.");
   H("SET RELATION", "SET RELATION TO <key exp> INTO <alias>", "Links the current file to another; moving here repositions the other via its index (or record number).");
   H("SKIP", "SKIP [<n>]", "Moves the record pointer forward or (negative) back.");
@@ -9662,6 +9973,12 @@ BEGIN
   setCentury := FALSE; setUnique := FALSE; setCarry := FALSE; setIntensity := TRUE;
   setHelp := TRUE; setEscape := TRUE; setFieldsOn := FALSE; setDevPrint := FALSE;
   setDelimiters := FALSE; setEcho := FALSE; setFixed := FALSE;
+  SetColors(""); userMsg[0] := 0X; taN := 0; onKeyN := 0;
+  onErrCmd[0] := 0X; onEscCmd[0] := 0X; onKeyCmd[0] := 0X;
+  inOnErr := FALSE; inOnEsc := FALSE; inOnKey := FALSE; retryFlag := FALSE;
+  lastErrCode := 0; lastErrMsg[0] := 0X; errCode := 0; batchMid := FALSE;
+  editArea := -1; editFor := NIL; editWhile := NIL; editLeft := -1;
+  delimL := ":"; delimR := ":";
   setDecimals := 2; setMargin := 0; setMemoWidth := 50; setHistory := MaxCmdHist;
   setDateFmt := 0;
   defDrive := "C"; defDir[0] := 0X; pathDirs[0] := 0X;
