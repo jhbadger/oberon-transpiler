@@ -48,7 +48,7 @@ IMPORT TUI, Widgets, FileDialog, Help, Strings, Terminal, ProjectPane, Files, OS
 
 CONST
 ProjPaneW = 28;
-MaxLines = 10000;
+MaxLines = 20000;
 LLEN     = 512;    (* bytes per line — wide enough for UTF-8 *)
 MaxWins  = 8;
 MaxUndo  = 100;    (* undo history depth per editor window *)
@@ -84,7 +84,7 @@ PanelFile = 1;
 PanelProc = 2;
 
 (* ── Procedure panel ── *)
-MaxProcs = 500;
+MaxProcs = 2000;
 
 (* ── Recent files ── *)
 MaxRecent      = 8;
@@ -601,7 +601,7 @@ BEGIN
     END;
     INC(ew.cx, rlen);
     INC(count);
-    IF count > 10000 THEN  EXIT  END  (* safety *)
+    IF count > 10 * MaxLines THEN  EXIT  END  (* safety *)
   END;
   RETURN count
 END DoReplaceAll;
@@ -2112,7 +2112,8 @@ BEGIN
     INC(li);
     IF li >= MaxLines THEN
       li := MaxLines - 1;
-      WHILE ~r.eof DO  Files.Read(r, b)  END
+      WHILE ~r.eof DO  Files.Read(r, b)  END;
+      Strings.Copy("File truncated: more than 20000 lines; saving loses the rest.", statusMsg)
     ELSE
       col := 0;  ew.lines[li][0] := 0X
     END
