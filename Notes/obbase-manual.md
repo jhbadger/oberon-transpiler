@@ -223,7 +223,17 @@ Commands that take a scope open the submenu *Execute the command /
 Specify scope / Construct a field list / Build a search condition / Build
 a scope condition*.  The command being built is shown on the action line,
 just as the book describes, so the Assistant also teaches the dot-prompt
-syntax.  Output ends with `Press any key to continue work in ASSIST.`
+syntax.  Output ends with `Press any key to continue work in ASSIST.`,
+and so does any command that fails, so its error can be read.
+
+Options that need an open database (all of Update, Position, Retrieve and
+Organize; Set Up Query; Create and Modify Query, Report and Label; Modify
+Database file; Tools List structure) are dimmed and skipped until one is
+in USE, and Seek until an index is open.  File lists and file names start
+with a drive menu (A:–D:); every drive is the current directory, and the
+letter is only written into the command (`USE C:PEOPLE.DBF`).  Modify
+picks from the existing view, query, report or label files.  While you
+choose fields, a box shows each field's name, type, width and decimals.
 
 ## Report forms
 

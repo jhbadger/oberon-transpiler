@@ -244,6 +244,7 @@ VAR
   errCode: INTEGER;              (* III PLUS error number of errMsg *)
   lastErrCode: INTEGER;          (* ERROR() / MESSAGE() *)
   lastErrMsg: Str;
+  errShown: INTEGER;             (* errors reported so far (ASSIST pauses after one) *)
   interrupted: BOOLEAN;
 
   (* ---- ON ERROR / ESCAPE / KEY, RETRY ---- *)
@@ -5635,7 +5636,7 @@ END ExpandMacros;
 PROCEDURE ShowError(line: ARRAY OF CHAR);
 VAR t: Str; k: CHAR;
 BEGIN
-  lastErrCode := errCode; Cpy(errMsg, lastErrMsg);
+  lastErrCode := errCode; Cpy(errMsg, lastErrMsg); INC(errShown);
   IF batch THEN
     IF batchMid THEN Out.Ln; batchMid := FALSE END;
     Out.String(errMsg); Out.Ln; Out.String("?"); Out.Ln; Out.String(line); Out.Ln;
@@ -9398,6 +9399,8 @@ VAR
   amDesc: ARRAY nAMenus, 10 OF Str;
   amN: ARRAY nAMenus OF INTEGER;
   asCmd: Str;          (* command being built on the action line *)
+  asPullMenu, asPullItem: INTEGER;  (* pulldown kept on screen under popups; -1 none *)
+  asInfo: BOOLEAN;     (* AsPop is listing field names: show the field box *)
 
 PROCEDURE AI(m: INTEGER; item, desc: ARRAY OF CHAR);
 BEGIN
@@ -9483,12 +9486,65 @@ BEGIN
   RETURN x
 END AsMenuX;
 
-(* draw the Assistant frame: bar, action line, status, nav, message *)
+(* can this item be chosen now?  As in dBASE, items that need an open
+   database (or an index, for Seek) are dimmed and skipped. *)
+PROCEDURE AsAvail(menu, item: INTEGER): BOOLEAN;
+VAR needDb: BOOLEAN;
+BEGIN
+  CASE menu OF
+    0: needDb := item = 2                          (* Query *)
+  | 1: needDb := (item >= 3)                       (* Query, Report, Label *)
+  | 2, 3, 4, 5: needDb := TRUE
+  | 6: needDb := (item = 0) OR (item >= 3)         (* Database file, Query, Report, Label *)
+  | 7: needDb := item = 5                          (* List structure *)
+  ELSE needDb := FALSE
+  END;
+  IF needDb & ~areas[cur].used THEN RETURN FALSE END;
+  IF (menu = 3) & (item = 0) & (areas[cur].order = 0) THEN RETURN FALSE END;
+  RETURN TRUE
+END AsAvail;
+
+(* next available item from item in direction dir (item itself if none) *)
+PROCEDURE AsNextItem(menu, item, dir: INTEGER): INTEGER;
+VAR i, k: INTEGER;
+BEGIN
+  k := item;
+  FOR i := 1 TO amN[menu] DO
+    k := (k + dir + amN[menu]) MOD amN[menu];
+    IF AsAvail(menu, k) THEN RETURN k END
+  END;
+  RETURN item
+END AsNextItem;
+
+PROCEDURE AsPullWidth(menu: INTEGER): INTEGER;
+VAR i, w: INTEGER;
+BEGIN
+  w := 0;
+  FOR i := 0 TO amN[menu] - 1 DO w := MaxI(w, SLen(amItem[menu][i])) END;
+  RETURN w + 4
+END AsPullWidth;
+
+PROCEDURE AsDrawPull(menu, item: INTEGER);
+VAR x, w, i: INTEGER; t: Str;
+BEGIN
+  x := AsMenuX(menu); w := AsPullWidth(menu);
+  IF x + w > TUI.Cols THEN x := TUI.Cols - w END;
+  Box(x - 1, 2, w, amN[menu] + 2);
+  FOR i := 0 TO amN[menu] - 1 DO
+    Cpy(" ", t); Append(amItem[menu][i], t); PadR(t, w - 2);
+    IF ~AsAvail(menu, i) THEN TUI.PutStr(x, 3 + i, t, TUI.BrightBlack, cBg)
+    ELSE PutS(x, 3 + i, t, i = item)
+    END
+  END
+END AsDrawPull;
+
+(* draw the Assistant frame: bar, pulldown, action line, status, nav, message *)
 PROCEDURE AsFrame(menu: INTEGER; msg: ARRAY OF CHAR);
 VAR t: Str;
 BEGIN
   FSClear;
   AsDrawBar(menu);
+  IF asPullMenu >= 0 THEN AsDrawPull(asPullMenu, asPullItem) END;
   ScreenSize;
   Cpy("Command: ", t); Append(asCmd, t);
   PutS(1, scrH, t, FALSE);
@@ -9497,6 +9553,30 @@ BEGIN
   FSBars("ASSIST");
   fsNav[0] := 0X; fsMsg[0] := 0X
 END AsFrame;
+
+(* box describing a field, beside the field list *)
+PROCEDURE AsFieldBox(px, py, pw: INTEGER; name: ARRAY OF CHAR);
+VAR f, x, bw: INTEGER; t, u: Str; ty: CHAR;
+BEGIN
+  f := FieldIdx(cur, name);
+  IF f < 0 THEN RETURN END;
+  bw := 24; x := px + pw + 1;
+  IF x + bw > TUI.Cols THEN x := MaxI(1, px - bw - 1) END;
+  Box(x, py, bw, 6);
+  ty := areas[cur].db.fields[f].type;
+  Cpy("Field name: ", t); Append(areas[cur].db.fields[f].name, t); PutS(x + 1, py + 1, t, FALSE);
+  Cpy("Type:       ", t);
+  CASE ty OF
+    "C": Append("Character", t) | "N", "F": Append("Numeric", t) | "D": Append("Date", t)
+  | "L": Append("Logical", t) | "M": Append("Memo", t)
+  ELSE AppendCh(ty, t)
+  END;
+  PutS(x + 1, py + 2, t, FALSE);
+  Cpy("Width:      ", t); IntStr(areas[cur].db.fields[f].len, u); Append(u, t); PutS(x + 1, py + 3, t, FALSE);
+  Cpy("Decimal:    ", t);
+  IF (ty = "N") OR (ty = "F") THEN IntStr(areas[cur].db.fields[f].dec, u); Append(u, t) END;
+  PutS(x + 1, py + 4, t, FALSE)
+END AsFieldBox;
 
 (* generic popup list; returns index, -1 for Esc/Left, -2 for Right *)
 PROCEDURE AsPop(menu, x, y: INTEGER; VAR items: TextBuf; title, msg: ARRAY OF CHAR;
@@ -9518,6 +9598,7 @@ BEGIN
     AsFrame(menu, msg);
     Box(x, y, w, h + 2);
     IF title[0] # 0X THEN PutHi(x + 2, y, title) END;
+    IF asInfo THEN AsFieldBox(x, y, w, items.l[MaxI(sel, 0)]) END;
     FOR i := 0 TO h - 1 DO
       IF top + i < items.n THEN
         IF (marks # NIL) & (marks.l[top + i][0] = "*") THEN Cpy("> ", t) ELSE Cpy("  ", t) END;
@@ -9589,9 +9670,34 @@ BEGIN
   END
 END AsFiles;
 
-PROCEDURE AsPickFile(menu: INTEGER; ext: ARRAY OF CHAR; VAR name: ARRAY OF CHAR): BOOLEAN;
-VAR tb: TextBuf; sel, r: INTEGER; nomarks: TextBuf; t: Str;
+(* drive menu shown before file lists and names; d gets e.g. "C:" *)
+PROCEDURE AsDrive(menu: INTEGER; VAR d: ARRAY OF CHAR): BOOLEAN;
+VAR tb, nomarks: TextBuf; sel, r: INTEGER;
 BEGIN
+  NEW(tb); tb.n := 4; Cpy("A:", tb.l[0]); Cpy("B:", tb.l[1]); Cpy("C:", tb.l[2]); Cpy("D:", tb.l[3]);
+  sel := ORD(defDrive) - ORD("A"); nomarks := NIL;
+  IF (sel < 0) OR (sel > 3) THEN sel := 2 END;
+  r := AsPop(menu, AsMenuX(menu) + 4, 3, tb, "", "Select a drive.", sel, nomarks);
+  IF r < 0 THEN RETURN FALSE END;
+  Cpy(tb.l[r], d);
+  RETURN TRUE
+END AsDrive;
+
+(* drive, then a file name typed in *)
+PROCEDURE AsPromptFile(menu: INTEGER; prompt: ARRAY OF CHAR; VAR name: ARRAY OF CHAR): BOOLEAN;
+VAR d: Str;
+BEGIN
+  name[0] := 0X;
+  IF ~AsDrive(menu, d) THEN RETURN FALSE END;
+  IF ~AsPrompt(menu, prompt, name) OR (name[0] = 0X) THEN RETURN FALSE END;
+  StripDrive(name); Strings.Insert(d, 0, name);
+  RETURN TRUE
+END AsPromptFile;
+
+PROCEDURE AsPickFile(menu: INTEGER; ext: ARRAY OF CHAR; VAR name: ARRAY OF CHAR): BOOLEAN;
+VAR tb: TextBuf; sel, r: INTEGER; nomarks: TextBuf; t, d: Str;
+BEGIN
+  IF ~AsDrive(menu, d) THEN RETURN FALSE END;
   AsFiles(ext, tb);
   IF tb.n = 0 THEN
     Cpy("There are no ", t); Append(ext, t); Append(" files.", t);
@@ -9600,21 +9706,22 @@ BEGIN
   sel := 0; nomarks := NIL;
   r := AsPop(menu, AsMenuX(menu) + 4, 4, tb, "", "Select a file.", sel, nomarks);
   IF r < 0 THEN RETURN FALSE END;
-  Cpy(tb.l[r], name);
+  Cpy(d, name); Append(tb.l[r], name);
   RETURN TRUE
 END AsPickFile;
 
 (* run a command built by the Assistant and show its output *)
 PROCEDURE AsRun(cmd: ARRAY OF CHAR; wait: BOOLEAN);
-VAR k: CHAR;
+VAR k: CHAR; errs0: INTEGER;
 BEGIN
+  errs0 := errShown;
   Cpy(cmd, asCmd);
   AddHistory(cmd);
   ConClear;
   inAssist := TRUE;
   Cpy("ASSIST", modeName); SetMsg("");
   RunCommand(cmd);
-  IF wait & ~quitting THEN
+  IF (wait OR (errShown # errs0)) & ~quitting THEN   (* always let an error be read *)
     ConNL;
     ConPut("Press any key to continue work in ASSIST.");
     DrawConsole;
@@ -9642,7 +9749,9 @@ BEGIN
   LOOP
     IF multi THEN Cpy("Enter selects a field; Left/Right arrow when done.", info)
     ELSE Cpy("Select a field.", info) END;
+    asInfo := TRUE;
     r := AsPop(menu, AsMenuX(menu) + 4, 4, tb, "Fields", info, sel, marks);
+    asInfo := FALSE;
     IF r = -1 THEN IF ~multi THEN RETURN FALSE END; EXIT END;
     IF r = -2 THEN EXIT END;
     IF ~multi THEN Cpy(tb.l[r], out); RETURN TRUE END;
@@ -9764,7 +9873,8 @@ BEGIN
           Cpy("USE", asCmd);
           IF AsPickFile(menu, ".dbf", name) THEN
             Cpy("USE ", cmd); Append(name, cmd); Cpy(cmd, asCmd);
-            IF AsYN(menu, "Is the file indexed? [Y/N]") THEN
+            AsFiles(".ndx", tb);
+            IF (tb.n > 0) & AsYN(menu, "Is the file indexed? [Y/N]") THEN
               idx[0] := 0X;
               LOOP
                 AsFiles(".ndx", tb);
@@ -9798,7 +9908,13 @@ BEGIN
       | 5: IF menu = 1 THEN Cpy("CREATE LABEL ", cmd) ELSE Cpy("MODIFY LABEL ", cmd) END; x2[0] := 0X
       END;
       Cpy(cmd, asCmd);
-      IF AsPrompt(menu, "Enter the name of the file:", name) & (name[0] # 0X) THEN
+      IF menu = 6 THEN
+        (* Modify picks one of the existing files *)
+        CASE item OF
+          2: Cpy(".vue", t) | 3: Cpy(".qry", t) | 4: Cpy(".frm", t) | 5: Cpy(".lbl", t)
+        END;
+        IF AsPickFile(menu, t, name) THEN Append(name, cmd); AsRun(cmd, FALSE) END
+      ELSIF AsPromptFile(menu, "Enter the name of the file:", name) THEN
         Append(name, cmd); Append(x2, cmd); AsRun(cmd, item = 2)
       END
   | 2:
@@ -9861,8 +9977,7 @@ BEGIN
           Cpy("INDEX ON ", asCmd); t[0] := 0X;
           IF AsPrompt(menu, "Enter an index key expression:", t) & (t[0] # 0X) THEN
             Cpy("INDEX ON ", cmd); Append(t, cmd); Append(" TO ", cmd); Cpy(cmd, asCmd);
-            name[0] := 0X;
-            IF AsPrompt(menu, "Enter the name of the file:", name) & (name[0] # 0X) THEN
+            IF AsPromptFile(menu, "Enter the name of the file:", name) THEN
               Append(name, cmd); AsRun(cmd, TRUE)
             END
           END
@@ -9870,14 +9985,13 @@ BEGIN
           Cpy("SORT ON ", asCmd);
           IF AsFieldList(menu, FALSE, TRUE, t) THEN
             Cpy("SORT ON ", cmd); Append(t, cmd); Append(" TO ", cmd); Cpy(cmd, asCmd);
-            name[0] := 0X;
-            IF AsPrompt(menu, "Enter the name of the file:", name) & (name[0] # 0X) THEN
+            IF AsPromptFile(menu, "Enter the name of the file:", name) THEN
               Append(name, cmd); AsRun(cmd, TRUE)
             END
           END
       | 2:
-          Cpy("COPY TO ", asCmd); name[0] := 0X;
-          IF AsPrompt(menu, "Enter the name of the file:", name) & (name[0] # 0X) THEN
+          Cpy("COPY TO ", asCmd);
+          IF AsPromptFile(menu, "Enter the name of the file:", name) THEN
             Cpy("COPY TO ", cmd); Append(name, cmd); AsOptions(menu, cmd, TRUE, FALSE, TRUE, "")
           END
       END
@@ -9891,7 +10005,7 @@ BEGIN
       | 1:
           IF AsPickFile(menu, "", name) THEN
             Cpy("COPY FILE ", cmd); Append(name, cmd); Append(" TO ", cmd); Cpy(cmd, asCmd); t[0] := 0X;
-            IF AsPrompt(menu, "Enter the name of the new file:", t) & (t[0] # 0X) THEN Append(t, cmd); AsRun(cmd, TRUE) END
+            IF AsPromptFile(menu, "Enter the name of the new file:", t) THEN Append(t, cmd); AsRun(cmd, TRUE) END
           END
       | 2:
           NEW(tb); tb.n := 9;
@@ -9899,15 +10013,18 @@ BEGIN
           Cpy(".lbl Label Forms", tb.l[3]); Cpy(".qry Query Files", tb.l[4]); Cpy(".vue View Files", tb.l[5]);
           Cpy(".prg Command Files", tb.l[6]); Cpy(".txt Text Files", tb.l[7]); Cpy("All Files", tb.l[8]);
           sel := 0;
-          r := AsPop(menu, AsMenuX(menu) + 4, 4, tb, "", "Select a file type.", sel, nomarks);
-          IF r = 0 THEN AsRun("DIR", TRUE)
-          ELSIF r = 8 THEN AsRun("DIR *.*", TRUE)
-          ELSIF r > 0 THEN Cpy("DIR *", cmd); Sub(tb.l[r], 0, 4, t); Append(t, cmd); AsRun(cmd, TRUE)
+          IF AsDrive(menu, x2) THEN
+            r := AsPop(menu, AsMenuX(menu) + 4, 4, tb, "", "Select a file type.", sel, nomarks);
+            Cpy("DIR ", cmd); Append(x2, cmd);
+            IF r = 0 THEN AsRun(cmd, TRUE)
+            ELSIF r = 8 THEN Append("*.*", cmd); AsRun(cmd, TRUE)
+            ELSIF r > 0 THEN Append("*", cmd); Sub(tb.l[r], 0, 4, t); Append(t, cmd); AsRun(cmd, TRUE)
+            END
           END
       | 3:
           IF AsPickFile(menu, "", name) THEN
             Cpy("RENAME ", cmd); Append(name, cmd); Append(" TO ", cmd); Cpy(cmd, asCmd); t[0] := 0X;
-            IF AsPrompt(menu, "Enter the new name of the file:", t) & (t[0] # 0X) THEN Append(t, cmd); AsRun(cmd, TRUE) END
+            IF AsPromptFile(menu, "Enter the new name of the file:", t) THEN Append(t, cmd); AsRun(cmd, TRUE) END
           END
       | 4:
           IF AsPickFile(menu, "", name) THEN
@@ -9925,37 +10042,39 @@ BEGIN
 END AsAction;
 
 PROCEDURE DoAssist;
-VAR menu, item, i, x, w: INTEGER; k: CHAR; t: Str; leave: BOOLEAN;
+VAR menu, item, i: INTEGER; k: CHAR; leave: BOOLEAN;
+
+  PROCEDURE First(m: INTEGER): INTEGER;
+  BEGIN
+    IF AsAvail(m, 0) THEN RETURN 0 END;
+    RETURN AsNextItem(m, 0, 1)
+  END First;
+
 BEGIN
   IF batch THEN Err("ASSIST needs the interactive mode."); RETURN END;
   IF amN[0] = 0 THEN InitAssist END;
-  menu := 0; item := 0; leave := FALSE; asCmd[0] := 0X;
+  menu := 0; item := 0; leave := FALSE; asCmd[0] := 0X; asInfo := FALSE;
   WHILE ~leave & ~quitting DO
+    (* an action may have closed the database: keep the bar on a live item *)
+    IF ~AsAvail(menu, item) THEN item := First(menu) END;
+    asPullMenu := menu; asPullItem := item;
     AsFrame(menu, amDesc[menu][item]);
-    x := AsMenuX(menu);
-    w := 0;
-    FOR i := 0 TO amN[menu] - 1 DO w := MaxI(w, SLen(amItem[menu][i])) END;
-    INC(w, 4);
-    IF x + w > TUI.Cols THEN x := TUI.Cols - w END;
-    Box(x - 1, 2, w, amN[menu] + 2);
-    FOR i := 0 TO amN[menu] - 1 DO
-      Cpy(" ", t); Append(amItem[menu][i], t); PadR(t, w - 2);
-      PutS(x, 3 + i, t, i = item)
-    END;
     FSFlush(1, 1, FALSE);
     k := GetKey();
     IF k = 0X THEN
-    ELSIF (k = TUI.KLeft) OR (k = KCtrlS) THEN menu := (menu + nAMenus - 1) MOD nAMenus; item := 0
-    ELSIF (k = TUI.KRight) OR (k = KCtrlD) THEN menu := (menu + 1) MOD nAMenus; item := 0
-    ELSIF (k = TUI.KUp) OR (k = KCtrlE) THEN item := (item + amN[menu] - 1) MOD amN[menu]
-    ELSIF (k = TUI.KDown) OR (k = KCtrlX) THEN item := (item + 1) MOD amN[menu]
-    ELSIF k = TUI.KEnter THEN AsAction(menu, item)
+    ELSIF (k = TUI.KLeft) OR (k = KCtrlS) THEN menu := (menu + nAMenus - 1) MOD nAMenus; item := First(menu)
+    ELSIF (k = TUI.KRight) OR (k = KCtrlD) THEN menu := (menu + 1) MOD nAMenus; item := First(menu)
+    ELSIF (k = TUI.KUp) OR (k = KCtrlE) THEN item := AsNextItem(menu, item, -1)
+    ELSIF (k = TUI.KDown) OR (k = KCtrlX) THEN item := AsNextItem(menu, item, 1)
+    ELSIF k = TUI.KEnter THEN
+      IF AsAvail(menu, item) THEN AsAction(menu, item) ELSE Bell END
     ELSIF k = TUI.KEsc THEN leave := TRUE
     ELSIF k = TUI.KF1 THEN ShowHelp(amItem[menu][item])
     ELSIF IsAlpha(k) THEN
-      FOR i := 0 TO nAMenus - 1 DO IF UpCh(amTitle[i][0]) = UpCh(k) THEN menu := i; item := 0 END END
+      FOR i := 0 TO nAMenus - 1 DO IF UpCh(amTitle[i][0]) = UpCh(k) THEN menu := i; item := First(i) END END
     END
   END;
+  asPullMenu := -1;
   ConClear;
   TUI.InvalidateFront
 END DoAssist;
@@ -9978,6 +10097,7 @@ BEGIN
   inOnErr := FALSE; inOnEsc := FALSE; inOnKey := FALSE; retryFlag := FALSE;
   lastErrCode := 0; lastErrMsg[0] := 0X; errCode := 0; batchMid := FALSE;
   editArea := -1; editFor := NIL; editWhile := NIL; editLeft := -1;
+  asPullMenu := -1; asPullItem := 0; asInfo := FALSE; errShown := 0;
   delimL := ":"; delimR := ":";
   setDecimals := 2; setMargin := 0; setMemoWidth := 50; setHistory := MaxCmdHist;
   setDateFmt := 0;
