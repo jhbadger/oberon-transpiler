@@ -22,11 +22,15 @@ CLEAR
 @ 11,26 SAY "------------------"
 @ 12,27 SAY "7. Exit"
 
+* With CONFIRM OFF a one-character GET ends the READ as soon as
+* it is filled, so a menu choice needs no Enter.
 choice = 0
+SET CONFIRM OFF
 DO WHILE choice < 1 .OR. choice > 7 .OR. choice = 6
    @ 16,25 SAY "Enter selection (1-7): " GET choice PICTURE "9"
    READ
 ENDDO
+SET CONFIRM ON
 RETURN
 
 *----------------------------------------------------------
@@ -190,8 +194,10 @@ IF READKEY() <> 12 .AND. READKEY() <> 268 .AND. LEN(TRIM(m_search)) > 0
       @ 11,17 SAY "Phone: " + PHONE
 
       m_conf = " "
+      SET CONFIRM OFF
       @ 13,17 SAY "Delete this record? (Y/N): " GET m_conf PICTURE "!"
       READ
+      SET CONFIRM ON
 
       IF m_conf = "Y"
          DELETE
@@ -217,8 +223,10 @@ CLEAR
 @ 10,20 TO 15,60 DOUBLE
 @ 10,33 SAY " Pack Database "
 @ 12,22 SAY "Permanently remove deleted records?"
+SET CONFIRM OFF
 @ 13,22 SAY "Confirm (Y/N): " GET m_conf PICTURE "!"
 READ
+SET CONFIRM ON
 
 IF m_conf = "Y"
    * PACK rebuilds the open indexes as well
