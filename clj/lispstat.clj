@@ -407,7 +407,7 @@
       :else
         (let [q (sqrt (* -2 (log (- 1 p))))
               num (+ (* (+ (* (+ (* (+ (* (+ (* c1 q) c2) q) c3) q) c4) q) c5) q) c6)
-              den (+ (* (+ (* (+ (* (+ (* (+ (* d1 q) d2) q) d3) q) d4) q) 1))]
+              den (+ (* (+ (* (+ (* (+ (* d1 q) d2) q) d3) q) d4) q) 1)]
           (- (/ num den))))))
 
 (defn normal-quant [p] ((vectorize normal-quant-1) p))
