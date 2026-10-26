@@ -1030,7 +1030,7 @@
         p      (count cols)
         w      (if weights (vec (seqable weights)) (make-vec n 1.0))
         yv     (vec (seqable y))
-        coefs  (reg-coefs cols yv weights intercept)
+        coefs  (reg-coefs X yv weights intercept)
         fit    (vec (map (fn [i]
                            (let [row (vec (map (fn [c] (nth c i)) cols))
                                  b   (if intercept
@@ -1152,7 +1152,7 @@
     (loop [weights (make-vec n 1.0)
            last-coefs nil
            iter 0]
-      (let [coefs (reg-coefs cols yv weights intercept)
+      (let [coefs (reg-coefs X yv weights intercept)
             fit (vec (map (fn [i]
                             (let [row (vec (map (fn [c] (nth c i)) cols))
                                   b   (if intercept (vec (rest coefs)) coefs)
@@ -1313,14 +1313,14 @@
 (defn lookup-method [obj sel]
   (let [seen (atom #{})
         q    (atom [obj])]
-    (loop []
+    (loop [_ 0]
       (if (= 0 (count @q)) nil
         (let [o (get @q 0)
               rest-q (vec (map (fn [i] (get @q i))
                                (range 1 (count @q))))]
           (reset! q rest-q)
           (if (contains? @seen o)
-            (recur)
+            (recur _)
             (do
               (swap! seen conj o)
               (let [m (get (get (deref o) :methods) sel)]
@@ -1330,19 +1330,19 @@
                       (when (seq ps)
                         (reset! q (conj @q (first ps)))
                         (recur (rest ps))))
-                    (recur)))))))))))
+                    (recur _)))))))))))
 
 (defn lookup-slot [obj sym]
   (let [seen (atom #{})
         q    (atom [obj])]
-    (loop []
+    (loop [_ 0]
       (if (= 0 (count @q)) [nil false]
         (let [o (get @q 0)
               rest-q (vec (map (fn [i] (get @q i))
                                (range 1 (count @q))))]
           (reset! q rest-q)
           (if (contains? @seen o)
-            (recur)
+            (recur _)
             (do
               (swap! seen conj o)
               (let [slots (get (deref o) :slots)]
@@ -1353,7 +1353,7 @@
                       (when (seq ps)
                         (reset! q (conj @q (first ps)))
                         (recur (rest ps))))
-                    (recur)))))))))))
+                    (recur _)))))))))))
 
 (defn slot [obj sym]
   (first (lookup-slot obj sym)))
