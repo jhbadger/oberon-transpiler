@@ -49,9 +49,13 @@
                 (apply f args)
                 (let [model (first cs)
                       n     (count model)
-                      expand (fn [a] (if (compound? a) (seqable a) (make-vec n a)))
+                      expand (fn [a] (if (compound? a) (vec a) (make-vec n a)))
                       cols   (map expand args)
-                      res    (apply map vf cols)]
+                      ;; Cloj's map takes at most two colls, so index instead
+                      res    (if (< (count args) 3)
+                               (apply map vf cols)
+                               (map (fn [i] (apply vf (map (fn [c] (get c i)) cols)))
+                                    (range n)))]
                   (if (vector? model) (vec res) res)))))]
     vf))
 
@@ -1423,7 +1427,81 @@
       (println (str "  Min, Max   : " (vmin es) " , " (vmax es))))))
 
 ;; ----------------------------------------------------------------------------
-;; 12. Self-test
+;; 12. Vectorized core operators
+;;
+;; As in real Lisp-Stat, the ordinary arithmetic and math functions are
+;; rebound to vectorized versions, so any user-defined function built from
+;; them works elementwise on lists/vectors with no extra effort:
+;;   (defn f [x] (+ (* x x) 1))   (f (list 1 2 3)) => (2 5 10)
+;; Scalar calls take a fast path straight to the original builtin.  The
+;; originals stay available as core+, core-, ... .  = is left alone so that
+;; structural equality still works; max/min reduce over all elements
+;; (use pmax/pmin for elementwise).  Functions whose bodies branch on their
+;; argument (if, cond, ...) still need an explicit (vectorize f).
+;; ----------------------------------------------------------------------------
+
+(defn auto-vec [core vf]
+  (fn ([] (core))
+      ([a] (if (number? a) (core a) (vf a)))
+      ([a b] (if (number? a) (if (number? b) (core a b) (vf a b)) (vf a b)))
+      ([a b & more] (apply vf a b more))))
+
+;; Capture the builtins only on the first load, so reloading this file
+;; doesn't wrap the wrappers.
+(def core+     (if (= (type +) :builtin) + core+))
+(def core-     (if (= (type -) :builtin) - core-))
+(def core*     (if (= (type *) :builtin) * core*))
+(def core-div  (if (= (type /) :builtin) / core-div))
+(def core<     (if (= (type <) :builtin) < core<))
+(def core>     (if (= (type >) :builtin) > core>))
+(def core<=    (if (= (type <=) :builtin) <= core<=))
+(def core>=    (if (= (type >=) :builtin) >= core>=))
+(def core-mod  (if (= (type mod) :builtin) mod core-mod))
+(def core-pow  (if (= (type pow) :builtin) pow core-pow))
+(def core-max  (if (= (type max) :builtin) max core-max))
+(def core-min  (if (= (type min) :builtin) min core-min))
+(def core-sqrt  (if (= (type sqrt) :builtin) sqrt core-sqrt))
+(def core-exp   (if (= (type exp) :builtin) exp core-exp))
+(def core-log   (if (= (type log) :builtin) log core-log))
+(def core-sin   (if (= (type sin) :builtin) sin core-sin))
+(def core-cos   (if (= (type cos) :builtin) cos core-cos))
+(def core-tan   (if (= (type tan) :builtin) tan core-tan))
+(def core-atan  (if (= (type atan) :builtin) atan core-atan))
+(def core-abs   (if (= (type abs) :builtin) abs core-abs))
+(def core-floor (if (= (type floor) :builtin) floor core-floor))
+(def core-ceil  (if (= (type ceil) :builtin) ceil core-ceil))
+(def core-round (if (= (type round) :builtin) round core-round))
+(def core-inc   (if (= (type inc) :builtin) inc core-inc))
+(def core-dec   (if (= (type dec) :builtin) dec core-dec))
+
+(def +  (auto-vec core+    (vectorize core+)))
+(def -  (auto-vec core-    (vectorize core-)))
+(def *  (auto-vec core*    (vectorize core*)))
+(def /  (auto-vec core-div (vectorize core-div)))
+(def <  (auto-vec core<    (vectorize core<)))
+(def >  (auto-vec core>    (vectorize core>)))
+(def <= (auto-vec core<=   (vectorize core<=)))
+(def >= (auto-vec core>=   (vectorize core>=)))
+(def mod (auto-vec core-mod (vectorize core-mod)))
+(def pow (auto-vec core-pow (vectorize core-pow)))
+(def max (auto-vec core-max (fn [& xs] (reduce core-max (flat-elems xs)))))
+(def min (auto-vec core-min (fn [& xs] (reduce core-min (flat-elems xs)))))
+(def sqrt  (auto-vec core-sqrt  (vectorize core-sqrt)))
+(def exp   (auto-vec core-exp   (vectorize core-exp)))
+(def log   (auto-vec core-log   (vectorize core-log)))
+(def sin   (auto-vec core-sin   (vectorize core-sin)))
+(def cos   (auto-vec core-cos   (vectorize core-cos)))
+(def tan   (auto-vec core-tan   (vectorize core-tan)))
+(def atan  (auto-vec core-atan  (vectorize core-atan)))
+(def abs   (auto-vec core-abs   (vectorize core-abs)))
+(def floor (auto-vec core-floor (vectorize core-floor)))
+(def ceil  (auto-vec core-ceil  (vectorize core-ceil)))
+(def round (auto-vec core-round (vectorize core-round)))
+(def inc   (auto-vec core-inc   (vectorize core-inc)))
+(def dec   (auto-vec core-dec   (vectorize core-dec)))
+
+;; ----------------------------------------------------------------------------
+;; 13. Self-test
 ;; ----------------------------------------------------------------------------
 
 (defn approx=
@@ -1513,6 +1591,14 @@
   (send data-set-proto :data (list 1 2 3 4 5 6 7 8 9 10))
   (send data-set-proto :title "my dataset")
   (send data-set-proto :describe)
+
+  (println "--- step 16: auto-vectorized user function ---")
+  (let [f (fn [x] (+ (* x x) 1))]
+    (println (str "f 3         = " (f 3)))
+    (println (str "f (1 2 3)   = " (f (list 1 2 3))))
+    (println (str "f [0.5 2]   = " (f [0.5 2])))
+    (println (str "sqrt [4 9]  = " (sqrt [4 9])))
+    (println (str "max (3 7 2) = " (max (list 3 7 2)))))
 
   (println "=== selftest done ==="))
 
