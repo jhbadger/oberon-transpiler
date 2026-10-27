@@ -86,6 +86,8 @@ VAR
 
   src: ARRAY MaxTok OF CHAR;
   srcLen, srcPos: INTEGER;
+  readGen: INTEGER;   (* bumped whenever src is reloaded; lets LoadFile detect nested reads *)
+  nextStart: INTEGER; (* srcPos where ReadNext's lookahead token began *)
   tok: ARRAY MaxStr OF CHAR;
   tokKind: INTEGER;
 
@@ -767,7 +769,7 @@ VAR i: INTEGER;
 BEGIN
   i := 0;
   WHILE (s[i] # 0X) & (i < MaxTok-1) DO src[i] := s[i]; INC(i) END;
-  srcLen := i; srcPos := 0; err := FALSE;
+  srcLen := i; srcPos := 0; err := FALSE; INC(readGen);
   NextTok;
   IF tokKind = 0 THEN RETURN NilV END;
   RETURN ParseExpr()
@@ -780,7 +782,7 @@ VAR i: INTEGER;
 BEGIN
   i := 0;
   WHILE (s[i] # 0X) & (i < MaxTok-1) DO src[i] := s[i]; INC(i) END;
-  srcLen := i; srcPos := 0; err := FALSE;
+  srcLen := i; srcPos := 0; err := FALSE; INC(readGen);
   NextTok
 END BeginRead;
 
@@ -790,6 +792,7 @@ BEGIN
   IF (tokKind = 0) OR err THEN RETURN NIL END;
   v := ParseExpr();
   IF err THEN RETURN NIL END;
+  nextStart := srcPos;
   NextTok;
   RETURN v
 END ReadNext;
@@ -5211,13 +5214,31 @@ END BReReplace;
 
 (* ---------- File loading ---------- *)
 
+(* Expand a leading "~/" in path to $HOME. *)
+PROCEDURE ExpandHome(path: ARRAY OF CHAR; VAR out: ARRAY OF CHAR);
+VAR home: ARRAY 512 OF CHAR; i, n: INTEGER;
+BEGIN
+  home[0] := 0X;
+  IF (path[0] = '~') & (path[1] = '/') THEN Args.GetEnv("HOME", home) END;
+  IF home[0] # 0X THEN
+    Strings.Copy(home, out);
+    n := Strings.Length(out); i := 1;
+    WHILE (path[i] # 0X) & (n < LEN(out)-1) DO out[n] := path[i]; INC(n); INC(i) END;
+    out[n] := 0X
+  ELSE
+    Strings.Copy(path, out)
+  END
+END ExpandHome;
+
 PROCEDURE LoadFile*(path: ARRAY OF CHAR; verbose: BOOLEAN): BOOLEAN;
 VAR f: Files.File; r: Files.Rider;
   buf: ARRAY MaxTok OF CHAR;
-  ch: CHAR; n: INTEGER;
+  fname: ARRAY 1024 OF CHAR;
+  ch: CHAR; n, gen, resume: INTEGER;
   expr, result: Value;
 BEGIN
-  f := Files.Old(path);
+  ExpandHome(path, fname);
+  f := Files.Old(fname);
   IF f = NIL THEN
     Out.String("load-file: cannot open '"); WriteStr(path); Out.String("'"); Out.Ln;
     RETURN FALSE
@@ -5237,7 +5258,12 @@ BEGIN
   LOOP
     expr := ReadNext();
     IF expr = NIL THEN EXIT END;
+    gen := readGen; resume := nextStart;
     result := Eval(expr, nsEnvs[currentNS]);
+    IF (readGen # gen) & ~err THEN
+      (* a nested load-file/read-string reused the reader: resume our file *)
+      BeginRead(buf); srcPos := resume; NextTok
+    END;
     IF err THEN
       Out.String("error in "); WriteStr(path); Out.String(": ");
       WriteStr(errMsg); Out.Ln;
@@ -5749,7 +5775,6 @@ PROCEDURE REPL*;
 VAR line, buf: ARRAY MaxTok OF CHAR; expr, result: Value; i, n: INTEGER;
 BEGIN
   ClojCompletion.Register();
-  Init;
   Out.String("Clojure-like REPL.  Empty line at => to exit."); Out.Ln;
   Out.String("Try: (+ 1 2 3)   (defn sq [x] (* x x))   (map sq (range 5))"); Out.Ln;
   LOOP
@@ -5787,21 +5812,39 @@ BEGIN
   END
 END REPL;
 
+(* Load the startup file ~/.clojrc if it exists.  It is ordinary Cloj
+   source, so it can (load-file ...) any number of other files. *)
+PROCEDURE LoadRC*;
+VAR home: ARRAY 512 OF CHAR; path: ARRAY 1024 OF CHAR;
+BEGIN
+  Args.GetEnv("HOME", home);
+  IF home[0] # 0X THEN
+    Strings.Copy(home, path);
+    Strings.Append("/.clojrc", path);
+    IF Files.Exists(path) THEN
+      IF ~LoadFile(path, FALSE) THEN END
+    END
+  END
+END LoadRC;
+
 PROCEDURE Main*;
 VAR i, scriptIdx: INTEGER; arg: ARRAY 256 OF CHAR;
-  interactive, ok: BOOLEAN;
+  interactive, norc, ok: BOOLEAN;
   argsV, argsLast, cell: Value;
 BEGIN
   Init;
-  interactive := FALSE; scriptIdx := 0;
+  interactive := FALSE; norc := FALSE; scriptIdx := 0;
   i := 1;
   WHILE i <= Args.Count() DO
     Args.Get(i, arg);
     IF (arg[0] = '-') & (arg[1] = 'i') & (arg[2] = 0X) THEN
       interactive := TRUE
+    ELSIF (arg[0] = '-') & (arg[1] = 'n') & (arg[2] = 0X) THEN
+      norc := TRUE
     ELSIF (arg[0] = '-') & (arg[1] = 'h') & (arg[2] = 0X) THEN
-      Out.String("usage: cloj [-i] [script.clj [args...]]"); Out.Ln;
+      Out.String("usage: cloj [-i] [-n] [script.clj [args...]]"); Out.Ln;
       Out.String("  -i        drop into REPL after running script"); Out.Ln;
+      Out.String("  -n        don't load ~/.clojrc at startup"); Out.Ln;
       Out.String("  no args   start REPL"); Out.Ln;
       Out.String("  *args*    bound to the args after the script name"); Out.Ln;
       RETURN
@@ -5822,6 +5865,7 @@ BEGIN
     END
   END;
   Define(GlobalEnv, "*args*", argsV);
+  IF ~norc THEN LoadRC END;
   IF scriptIdx > 0 THEN
     Args.Get(scriptIdx, arg);
     ok := LoadFile(arg, FALSE);
