@@ -754,7 +754,8 @@ void Raylib_GetMouseRay(int mx, int my, Raylib_Camera cam,
                         double *ox, double *oy, double *oz,
                         double *dx, double *dy, double *dz) {
     if (!cam) { *ox=*oy=*oz=*dx=*dy=*dz=0.0; return; }
-    Ray r = GetMouseRay((Vector2){(float)mx,(float)my}, cam->cam);
+    /* raylib >= 5.5 renamed GetMouseRay() to GetScreenToWorldRay() */
+    Ray r = GetScreenToWorldRay((Vector2){(float)mx,(float)my}, cam->cam);
     *ox = r.position.x;  *oy = r.position.y;  *oz = r.position.z;
     *dx = r.direction.x; *dy = r.direction.y; *dz = r.direction.z;
 }
