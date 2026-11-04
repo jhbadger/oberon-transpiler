@@ -2314,3 +2314,49 @@ Raylib.UnloadImage(img);
 **Color packing note:** Pixel colors are `(a SHL 24) OR (r SHL 16) OR (g SHL 8) OR b`.  For fully-opaque pixels avoid overflow with `pix := -16777216 + r * 65536 + g * 256 + b` (the constant `-16777216` is the signed 32-bit representation of `0xFF000000`).  Extract channels with Oberon floor division: `b := pix MOD 256; g := (pix DIV 256) MOD 256; r := (pix DIV 65536) MOD 256`.
 
 
+
+---
+
+## Tk - Graphical User Interfaces via Tcl/Tk
+
+```
+IMPORT Tk;
+```
+
+Implemented in C via FFI (`Tk.ffi`, `Tk.c`, `OBCTk.h`; documentation stub in `Tk.mod`).  The module runs a `wish` interpreter as a child process and drives it over pipes, so nothing is linked against Tcl/Tk.  You need `wish` (Tk 8.5 or later) installed at run time; set the environment variable `OBC_WISH` to choose a specific one (otherwise Homebrew's tcl-tk, then `wish` on `PATH`, then `/usr/bin/wish` are tried).
+
+Interfaces are built by sending ordinary Tcl/Tk commands.  The interpreter has one extra command, `ev`, which queues its arguments as an event string for the Oberon program: `button .go -text Go -command {ev go}` or `bind .c <Button-1> {ev click %x %y}`.  The program receives the strings with `Tk.Wait`, normally in a loop.  Closing the main window delivers the event `WM_DELETE_WINDOW`.
+
+Output buffers are preceded by an explicit `bufsize` (pass `LEN(buf)`); results are truncated and always NUL-terminated.  Oberon strings are limited to 256 bytes, so use `Call1..3`, `Configure` and `Set` for long or awkward text; they quote every argument.  A one-character string literal such as `"x"` is compiled as a `CHAR`, so it cannot be passed as a string argument: use names of two or more characters (e.g. Tcl variable `px`, not `x`) or a string variable.
+
+| Procedure / Function | Description |
+|----------------------|-------------|
+| `Tk.Open(): INTEGER` | Start wish.  1 on success; 0 on failure (reason available via `Tk.Result`). |
+| `Tk.Alive(): INTEGER` | 1 while wish is running. |
+| `Tk.Close()` | Shut down wish.  Also done automatically at program exit. |
+| `Tk.Eval(script: ARRAY OF CHAR): INTEGER` | Evaluate a Tcl script.  0 = ok, 1 = Tcl error.  The value (or error message) is retained for `Tk.Result*`. |
+| `Tk.Result(bufsize: INTEGER; VAR buf: ARRAY OF CHAR): INTEGER` | Copy the last result into `buf`; returns its full length. |
+| `Tk.ResultInt(): INTEGER` | Last result as an integer. |
+| `Tk.ResultReal(): REAL` | Last result as a real. |
+| `Tk.Call1(cmd, a1)`, `Tk.Call2(cmd, a1, a2)`, `Tk.Call3(cmd, a1, a2, a3): INTEGER` | Evaluate `cmd` followed by the arguments, each safely quoted.  `cmd` may itself be several plain words, e.g. `Tk.Call1(".list insert end", text)`. |
+| `Tk.Configure(widget, option, value: ARRAY OF CHAR): INTEGER` | `widget configure -option value`; the leading `-` on `option` is optional. |
+| `Tk.Set(var, value: ARRAY OF CHAR): INTEGER` | Set a Tcl global variable (handy for `-textvariable`). |
+| `Tk.Get(var: ARRAY OF CHAR; bufsize: INTEGER; VAR buf: ARRAY OF CHAR): INTEGER` | Read a Tcl global variable; 1 if it exists, 0 otherwise. |
+| `Tk.Word(list: ARRAY OF CHAR; n, bufsize: INTEGER; VAR buf: ARRAY OF CHAR): INTEGER` | The `n`-th (0-based) element of a Tcl list; returns its length (0 if absent).  Use it to split events such as `click 10 20`. |
+| `Tk.Quote(s: ARRAY OF CHAR; bufsize: INTEGER; VAR buf: ARRAY OF CHAR): INTEGER` | Quote `s` as one Tcl word for pasting into a script. |
+| `Tk.Wait(ms, bufsize: INTEGER; VAR buf: ARRAY OF CHAR): INTEGER` | Wait up to `ms` milliseconds (negative = forever, 0 = poll) for an event.  1 = event stored in `buf`, 0 = timeout, -1 = wish has exited. |
+| `Tk.Pending(): INTEGER` | Number of queued events. |
+| `Tk.Flush()` | Discard queued events. |
+
+```oberon
+IF Tk.Open() = 1 THEN
+  r := Tk.Eval("button .b -text {Hello} -command {ev hello}");
+  r := Tk.Eval("pack .b");
+  REPEAT
+    r := Tk.Wait(-1, LEN(ev), ev)
+  UNTIL (r < 0) OR (Strings.Compare(ev, "WM_DELETE_WINDOW") = 0);
+  Tk.Close
+END
+```
+
+See `examples/tkdemo.mod` for a complete program (labels, buttons, entry, list box, canvas clicks).
