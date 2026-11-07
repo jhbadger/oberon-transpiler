@@ -8,7 +8,12 @@ MODULE Metro;
  * a card describing the neighborhood and what there is to see and do.
  * From a card you can "ride" the line to the next or previous stop.
  *
- * Keys (map)   arrows move   Enter/click open   R random   Q quit
+ * The full map wants 110 x 37.  On anything smaller, down to 60 x 20
+ * (Termux on a phone is typically 80 x 45), the map scrolls to follow
+ * the selected station; < and > pan it, as do clicks or taps on the
+ * arrow gutters and the mouse wheel or a swipe.
+ *
+ * Keys (map)   arrows move   Enter/click open   R random   < > pan   Q quit
  * Keys (card)  Left/Right ride the line   Up/Down switch line
  *              PgUp/PgDn scroll   R random   Esc back to the map
  *
@@ -20,7 +25,7 @@ IMPORT TUI, Time, Out;
 CONST
   MaxSt = 110;  MaxStops = 40;  NLines = 6;  MaxNb = 8;
   MapW = 108;  MapH = 31;          (* map grid, in cells *)
-  NeedW = 110;  NeedH = 37;        (* smallest usable terminal *)
+  NeedW = 60;  NeedH = 20;         (* smallest usable terminal *)
   MaxRows = 160;                   (* rows in a station card *)
 
   (* 256-colour palette entries *)
@@ -65,7 +70,10 @@ VAR
   rows: ARRAY MaxRows OF Row;
   nRows, scroll: INTEGER;
 
-  ox, oy: INTEGER;                 (* screen position of map cell (1,1) *)
+  ox, oy: INTEGER;                 (* screen position of the map view's top-left cell *)
+  viewW, viewH: INTEGER;           (* how much of the map fits on screen *)
+  panX, panY: INTEGER;             (* map cells scrolled off to the left / top *)
+  followed: INTEGER;               (* station the view last scrolled to; -1 = none *)
   px, py, pw, ph: INTEGER;         (* last drawn card rectangle *)
   sel, curLine, mode: INTEGER;     (* mode 0 = map, 1 = station card *)
   seed: INTEGER;
@@ -756,9 +764,74 @@ BEGIN
   RETURN r
 END FirstLine;
 
+(* ── The map view ─────────────────────────────────────────────────────
+   The map is 108 x 31 cells.  When the terminal is smaller (Termux on a
+   phone, say) only a window of it is shown.  The window scrolls to keep
+   the selected station in view and can be panned by hand. *)
+
+PROCEDURE ClampPan;
+BEGIN
+  IF panX > MapW - viewW THEN panX := MapW - viewW END;
+  IF panY > MapH - viewH THEN panY := MapH - viewH END;
+  IF panX < 0 THEN panX := 0 END;
+  IF panY < 0 THEN panY := 0 END
+END ClampPan;
+
+(* Follow -- scroll just enough to bring the selected station into view,
+   with a margin.  Only runs when the selection changes, so a manual pan
+   stays put until the user picks another station. *)
+PROCEDURE Follow;
+VAR mx, my, x, y: INTEGER;
+BEGIN
+  IF followed # sel THEN
+    mx := viewW DIV 6;  IF mx > 8 THEN mx := 8 END;
+    my := viewH DIV 5;  IF my > 3 THEN my := 3 END;
+    x := st[sel].x;  y := st[sel].y;
+    IF x - panX < 1 + mx THEN panX := x - 1 - mx END;
+    IF x - panX > viewW - mx THEN panX := x - viewW + mx END;
+    IF y - panY < 1 + my THEN panY := y - 1 - my END;
+    IF y - panY > viewH - my THEN panY := y - viewH + my END;
+    ClampPan;
+    followed := sel
+  END
+END Follow;
+
+PROCEDURE Pan(dx, dy: INTEGER);
+BEGIN
+  panX := panX + dx;  panY := panY + dy;  ClampPan
+END Pan;
+
+(* MapCell -- draw one character (a one-code-point string) at map
+   position (x, y), if that position is inside the view. *)
+PROCEDURE MapCell(x, y: INTEGER; s: ARRAY OF CHAR; fg, bg: INTEGER);
+BEGIN
+  IF (x > panX) & (x <= panX + viewW) & (y > panY) & (y <= panY + viewH) THEN
+    TUI.PutStr(ox + x - panX - 1, oy + y - panY - 1, s, fg, bg)
+  END
+END MapCell;
+
+(* MapStr -- draw a UTF-8 string at map position (x, y), clipped to the view. *)
+PROCEDURE MapStr(x, y: INTEGER; s: ARRAY OF CHAR; fg, bg: INTEGER);
+VAR i, k: INTEGER;
+    cp: ARRAY 5 OF CHAR;
+BEGIN
+  i := 0;
+  WHILE (i < LEN(s)) & (s[i] # 0X) DO
+    k := 0;
+    REPEAT
+      IF k < 4 THEN cp[k] := s[i];  INC(k) END;
+      INC(i)
+    UNTIL (i >= LEN(s)) OR (s[i] = 0X) OR (ORD(s[i]) < 128) OR (ORD(s[i]) >= 192);
+    cp[k] := 0X;
+    MapCell(x, y, cp, fg, bg);
+    INC(x)
+  END
+END MapStr;
+
 PROCEDURE DrawLabel(i: INTEGER; side: CHAR; fg, bg: INTEGER; skip: BOOLEAN);
 VAR lx, ly, n, k, mx: INTEGER;
     s: ARRAY 72 OF CHAR;
+    one: ARRAY 2 OF CHAR;
 BEGIN
   s := "";
   IF ~skip THEN Cat(s, " ") END;
@@ -774,48 +847,69 @@ BEGIN
   IF lx + n - 1 > MapW THEN lx := MapW - n + 1 END;
   IF lx < 1 THEN lx := 1 END;
   IF (ly >= 1) & (ly <= MapH) THEN
+    one[1] := 0X;
     FOR k := 0 TO n - 1 DO
       mx := lx + k;
       IF (mx <= MapW) & (~skip OR ((track[ly][mx] = {}) & (stAt[ly][mx] < 0))) THEN
-        TUI.PutCell(ox + mx - 1, oy + ly - 1, s[k], fg, bg)
+        one[0] := s[k];
+        MapCell(mx, ly, one, fg, bg)
       END
     END
   END
 END DrawLabel;
 
 PROCEDURE DrawLegend;
-VAR bx, by, l: INTEGER;
+VAR bx, by, l, k: INTEGER;
     s: ARRAY 24 OF CHAR;
 BEGIN
-  bx := ox + 1;  by := oy + 17;
-  TUI.DrawBox(bx, by, 22, 9, CDim, CBg);
-  TUI.PutStr(bx + 2, by, " LINES ", CHead, CBg);
-  FOR l := 0 TO NLines - 1 DO
-    TUI.PutStr(bx + 2, by + 1 + l, "━━━", lineColor[l], CBg);
-    s := "";  Cat(s, lineName[l]);  Cat(s, " Line");
-    TUI.PutStr(bx + 6, by + 1 + l, s, CText, CBg)
+  bx := 2;  by := 18;                  (* map coordinates *)
+  MapStr(bx, by, "┌", CDim, CBg);  MapStr(bx + 21, by, "┐", CDim, CBg);
+  MapStr(bx, by + 8, "└", CDim, CBg);  MapStr(bx + 21, by + 8, "┘", CDim, CBg);
+  FOR k := 1 TO 20 DO
+    MapStr(bx + k, by, "─", CDim, CBg);  MapStr(bx + k, by + 8, "─", CDim, CBg)
   END;
-  TUI.PutStr(bx + 3, by + 7, GTransfer, CWhite, CBg);
-  TUI.PutStr(bx + 6, by + 7, "transfer", CDim, CBg)
+  FOR k := 1 TO 7 DO
+    MapStr(bx, by + k, "│", CDim, CBg);  MapStr(bx + 21, by + k, "│", CDim, CBg)
+  END;
+  MapStr(bx + 2, by, " LINES ", CHead, CBg);
+  FOR l := 0 TO NLines - 1 DO
+    MapStr(bx + 2, by + 1 + l, "━━━", lineColor[l], CBg);
+    s := "";  Cat(s, lineName[l]);  Cat(s, " Line");
+    MapStr(bx + 6, by + 1 + l, s, CText, CBg)
+  END;
+  MapStr(bx + 3, by + 7, GTransfer, CWhite, CBg);
+  MapStr(bx + 6, by + 7, "transfer", CDim, CBg)
 END DrawLegend;
+
+(* DrawScrollHints -- arrows in the gutter wherever more map lies beyond
+   the view.  Clicking or tapping a gutter pans that way. *)
+PROCEDURE DrawScrollHints;
+VAR my, mx: INTEGER;
+BEGIN
+  my := oy + viewH DIV 2;  mx := ox + viewW DIV 2;
+  IF panX > 0 THEN TUI.PutStr(ox - 1, my, "◀", CHi, CBg) END;
+  IF panX < MapW - viewW THEN TUI.PutStr(ox + viewW, my, "▶", CHi, CBg) END;
+  IF panY > 0 THEN TUI.PutStr(mx, oy - 1, "▲", CHi, CBg) END;
+  IF panY < MapH - viewH THEN TUI.PutStr(mx, oy + viewH, "▼", CHi, CBg) END
+END DrawScrollHints;
 
 PROCEDURE DrawMap;
 VAR x, y, i, c, g: INTEGER;
     side: CHAR;
 BEGIN
-  TUI.PutStr(ox + 1, oy + 2, "WASHINGTON METRORAIL", CWhite, CBg);
-  TUI.PutStr(ox + 1, oy + 3, "explore D.C. by train", CDim, CBg);
+  MapStr(2, 3, "WASHINGTON METRORAIL", CWhite, CBg);
+  MapStr(2, 4, "explore D.C. by train", CDim, CBg);
   DrawLegend;
 
-  FOR y := 1 TO MapH DO
-    FOR x := 1 TO MapW DO
+  FOR y := panY + 1 TO panY + viewH DO
+    FOR x := panX + 1 TO panX + viewW DO
       IF (stAt[y][x] < 0) & (track[y][x] # {}) THEN
         g := glyph[y][x];
         IF g = 2 THEN c := PickColor(track[y][x], y) ELSE c := PickColor(track[y][x], x) END;
-        IF g = 1 THEN TUI.PutStr(ox + x - 1, oy + y - 1, GH, c, CBg)
-        ELSIF g = 2 THEN TUI.PutStr(ox + x - 1, oy + y - 1, GV, c, CBg)
-        ELSIF g = 3 THEN TUI.PutStr(ox + x - 1, oy + y - 1, GDn, c, CBg)
-        ELSE TUI.PutStr(ox + x - 1, oy + y - 1, GUp, c, CBg)
+        IF g = 1 THEN MapCell(x, y, GH, c, CBg)
+        ELSIF g = 2 THEN MapCell(x, y, GV, c, CBg)
+        ELSIF g = 3 THEN MapCell(x, y, GDn, c, CBg)
+        ELSE MapCell(x, y, GUp, c, CBg)
         END
       END
     END
@@ -827,11 +921,11 @@ BEGIN
 
   FOR i := 0 TO nSt - 1 DO
     IF i = sel THEN
-      TUI.PutStr(ox + st[i].x - 1, oy + st[i].y - 1, GTransfer, 16, CHi)
+      MapCell(st[i].x, st[i].y, GTransfer, 16, CHi)
     ELSIF IsTransfer(i) THEN
-      TUI.PutStr(ox + st[i].x - 1, oy + st[i].y - 1, GTransfer, CWhite, CBg)
+      MapCell(st[i].x, st[i].y, GTransfer, CWhite, CBg)
     ELSE
-      TUI.PutStr(ox + st[i].x - 1, oy + st[i].y - 1, GStation, CWhite, CBg)
+      MapCell(st[i].x, st[i].y, GStation, CWhite, CBg)
     END
   END;
 
@@ -839,7 +933,8 @@ BEGIN
   IF side = " " THEN
     IF st[sel].y > 1 THEN side := "A" ELSE side := "B" END
   END;
-  DrawLabel(sel, side, 16, CHi, FALSE)
+  DrawLabel(sel, side, 16, CHi, FALSE);
+  DrawScrollHints
 END DrawMap;
 
 PROCEDURE DrawStatus;
@@ -847,9 +942,9 @@ VAR x, y, l, i: INTEGER;
     teaser: ARRAY 400 OF CHAR;
     done: BOOLEAN;
 BEGIN
-  y := oy + MapH + 1;
+  y := oy + viewH + 1;
   TUI.PutStr(ox, y, GTransfer, CHi, CBg);
-  TUI.PutStr(ox + 2, y, st[sel].name, CWhite, CBg);
+  PutClip(ox + 2, y, st[sel].name, viewW - 2, CWhite, CBg);
   x := ox + 2 + Cells(st[sel].name) + 3;
   FOR l := 0 TO NLines - 1 DO
     IF l IN st[sel].lines THEN
@@ -866,11 +961,11 @@ BEGIN
     IF (st[sel].hood[i] = ".") & (st[sel].hood[i + 1] = " ") & (i > 20) THEN done := TRUE END;
     INC(i)
   END;
-  IF Cells(teaser) > MapW - 2 THEN
-    PutClip(ox + 2, y + 1, teaser, MapW - 3, CDim, CBg);
-    TUI.PutStr(ox + MapW - 1, y + 1, "…", CDim, CBg)
+  IF Cells(teaser) > viewW - 2 THEN
+    PutClip(ox + 2, y + 1, teaser, viewW - 3, CDim, CBg);
+    TUI.PutStr(ox + viewW - 1, y + 1, "…", CDim, CBg)
   ELSE
-    PutClip(ox + 2, y + 1, teaser, MapW - 2, CDim, CBg)
+    PutClip(ox + 2, y + 1, teaser, viewW - 2, CDim, CBg)
   END
 END DrawStatus;
 
@@ -880,12 +975,14 @@ BEGIN
   TUI.FillRect(1, 1, TUI.Cols, 1, " ", CWhite, CTitleBg);
   TUI.PutStr(2, 1, " M ", CWhite, CLogo);
   TUI.PutStr(6, 1, "METRO EXPLORER", CWhite, CTitleBg);
-  TUI.PutStr(21, 1, "· Washington, D.C. by Metrorail", CText, CTitleBg);
-  TUI.PutStr(TUI.Cols - 23, 1, "98 stations · 6 lines", CText, CTitleBg);
+  IF TUI.Cols >= 54 THEN TUI.PutStr(21, 1, "· Washington, D.C. by Metrorail", CText, CTitleBg) END;
+  IF TUI.Cols >= 80 THEN TUI.PutStr(TUI.Cols - 23, 1, "98 stations · 6 lines", CText, CTitleBg) END;
   IF mode = 0 THEN
-    help := "←↑↓→ move   Enter or click: explore station   R random station   Q quit"
+    help := "←↑↓→ move   Enter or click: explore station   R random station   < > pan   Q quit";
+    IF Cells(help) > TUI.Cols THEN help := "←↑↓→ move · Enter/tap open · R random · < > pan · Q quit" END
   ELSE
-    help := "←/→ ride the line   ↑/↓ switch line   PgUp/PgDn scroll   R random   Esc back to map"
+    help := "←/→ ride the line   ↑/↓ switch line   PgUp/PgDn scroll   R random   Esc back to map";
+    IF Cells(help) > TUI.Cols THEN help := "←/→ ride · ↑/↓ line · PgUp/PgDn scroll · R random · Esc map" END
   END;
   PutClip((TUI.Cols - Cells(help)) DIV 2 + 1, TUI.Rows, help, TUI.Cols, CDim, CBg)
 END DrawChrome;
@@ -1028,14 +1125,17 @@ VAR msg: ARRAY 100 OF CHAR;
 BEGIN
   TUI.ClearBack(CText, CBg);
   IF (TUI.Cols < NeedW) OR (TUI.Rows < NeedH) THEN
-    msg := "Please enlarge the terminal to at least 110 x 37";
+    msg := "Please enlarge the terminal to at least 60 x 20";
     PutClip((TUI.Cols - Cells(msg)) DIV 2 + 1, TUI.Rows DIV 2, msg, TUI.Cols, CHi, CBg);
     msg := "(Q quits)";
     PutClip((TUI.Cols - Cells(msg)) DIV 2 + 1, TUI.Rows DIV 2 + 1, msg, TUI.Cols, CDim, CBg);
     n := ""
   ELSE
-    ox := (TUI.Cols - MapW) DIV 2 + 1;
-    oy := 3 + (TUI.Rows - NeedH) DIV 2;
+    viewW := MapW;  IF viewW > TUI.Cols - 2 THEN viewW := TUI.Cols - 2 END;
+    viewH := MapH;  IF viewH > TUI.Rows - 6 THEN viewH := TUI.Rows - 6 END;
+    ox := (TUI.Cols - viewW) DIV 2 + 1;
+    oy := 3 + (TUI.Rows - 6 - viewH) DIV 2;
+    Follow;
     DrawChrome;
     DrawMap;
     DrawStatus;
@@ -1120,6 +1220,8 @@ BEGIN
   ELSIF k = TUI.KRight THEN Move(1, 0)
   ELSIF (k = TUI.KEnter) OR (k = " ") OR (k = 0AX) THEN Open(sel)
   ELSIF (k = "r") OR (k = "R") THEN Open(RandomStation())
+  ELSIF (k = "<") OR (k = ",") THEN Pan(-(viewW DIV 2), 0)
+  ELSIF (k = ">") OR (k = ".") THEN Pan(viewW DIV 2, 0)
   ELSIF (k = "q") OR (k = "Q") OR (k = TUI.KEsc) THEN running := FALSE
   END
 END MapKey;
@@ -1142,10 +1244,26 @@ VAR i: INTEGER;
     inside: BOOLEAN;
 BEGIN
   IF mode = 0 THEN
-    i := Hit(mx - ox + 1, my - oy + 1);
+    inside := (mx >= ox) & (mx < ox + viewW) & (my >= oy) & (my < oy + viewH);
+    IF inside THEN i := Hit(mx - ox + 1 + panX, my - oy + 1 + panY) ELSE i := -1 END;
     IF i >= 0 THEN
       IF mb = 0 THEN Open(i)
-      ELSIF (mb >= 32) & (mb < 64) THEN sel := i
+      ELSIF (mb >= 32) & (mb < 64) THEN sel := i;  followed := sel   (* hovering never scrolls *)
+      END
+    ELSIF mb = 0 THEN
+      (* a click in a gutter pans the map that way *)
+      IF mx < ox THEN Pan(-(viewW DIV 2), 0)
+      ELSIF mx >= ox + viewW THEN Pan(viewW DIV 2, 0)
+      ELSIF my < oy THEN Pan(0, -(viewH DIV 2))
+      ELSIF (my >= oy + viewH) & (my <= oy + viewH + 1) THEN Pan(0, viewH DIV 2)
+      END
+    ELSIF (mb = 64) OR (mb = 65) THEN
+      (* the wheel (or a swipe on Termux) pans: vertically if the map
+         is taller than the view, otherwise sideways *)
+      IF viewH < MapH THEN
+        IF mb = 64 THEN Pan(0, -2) ELSE Pan(0, 2) END
+      ELSIF mb = 64 THEN Pan(-4, 0)
+      ELSE Pan(4, 0)
       END
     END
   ELSE
@@ -1168,7 +1286,7 @@ BEGIN
     WHILE ~TUI.PollEvent(ev) DO Time.Sleep(15) END;
     small := (TUI.Cols < NeedW) OR (TUI.Rows < NeedH);
     IF ev.kind = TUI.EvResize THEN
-      TUI.InvalidateFront
+      TUI.InvalidateFront;  followed := -1
     ELSIF ev.kind = TUI.EvKey THEN
       IF small THEN
         IF (ev.key = "q") OR (ev.key = "Q") OR (ev.key = TUI.KEsc) THEN running := FALSE END
@@ -1195,6 +1313,7 @@ BEGIN
 
   sel := Find("Metro Center");
   curLine := -1;  mode := 0;  scroll := 0;
+  panX := 0;  panY := 0;  followed := -1;
 
   IF ~loadOk THEN
     Out.String("metro: line data names an unknown station: ");
