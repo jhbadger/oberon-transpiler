@@ -232,6 +232,7 @@ Reusable library modules live in `Modules/`. Pass `--mod-path Modules` to use th
 | `examples/ollamachat.mod` | Interactive chat client for a local Ollama server |
 | `examples/obemacs.mod` | Emacs-style editor implementing core GNU Emacs tutorial commands |
 | `examples/newickview.mod` | Terminal phylogenetic tree viewer (cladogram and phylogram) |
+| `examples/metro.mod` | Washington, D.C. Metro explorer — TUI map of all 6 lines and 98 stations, with neighborhood guides |
 
 
 ### Bioinformatics / data science
